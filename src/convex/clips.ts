@@ -538,14 +538,42 @@ export const workerTick = internalMutation({
     let slots = MAX_ACTIVE - (fresh ? 0 : active.length);
     for (const job of queued) {
       if (!modelLoaded || slots <= 0) break;
-      await startJob(ctx, job, stats, now);
-      slots -= 1;
+      try {
+        await startJob(ctx, job, stats, now);
+        slots -= 1;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[worker] start failed for job ${job._id}: ${msg}`);
+        try {
+          await failJob(ctx, job, `Worker error while starting: ${msg}`, { stage: "queued" });
+        } catch {
+          // Next tick's recovery path will clean this job up.
+        }
+      }
     }
 
     // --- advance active jobs ---------------------------------------------------
+    // Per-job isolation: an uncaught error inside advanceJob would roll back
+    // the ENTIRE tick transaction (heartbeat, sibling progress writes, chain
+    // schedule) — the worker goes silently blind while the UI pings keep the
+    // banner green. Catch per job, surface the exact error on the card.
     if (!fresh) {
       for (const job of active) {
-        await advanceJob(ctx, job, stats, now);
+        try {
+          await advanceJob(ctx, job, stats, now);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[worker] advance failed for job ${job._id} (stage ${job.stage}): ${msg}`);
+          try {
+            await failJob(ctx, job, `Worker error in stage "${job.stage}": ${msg}`, {
+              detail: "Isolated by the worker so other jobs keep progressing. See logs.",
+              stage: job.stage,
+            });
+          } catch {
+            // Even the failure write failed (e.g. OCC conflict) — the next
+            // tick's watchdog will clean this job up.
+          }
+        }
       }
     }
 
@@ -799,6 +827,10 @@ async function advanceJob(
   const stageMs = unitsTotal * rate;
   const elapsed = now - startedAt;
   const pct = Math.min(99.4, (elapsed / stageMs) * 100);
+  // Completion is time-based, NOT pct-based: the display clamp holds the bar at
+  // 99.4%, so any pct threshold >= the clamp is unreachable and the stage would
+  // spin at 99% until its hard timeout.
+  const stageDone = elapsed >= stageMs;
 
   // --- watchdog: no progress write for 90s means the stage is dead ---------
   const lastProgress = job.lastProgressAt ?? startedAt;
@@ -850,10 +882,8 @@ async function advanceJob(
     slow,
   });
 
-  if (pct < 99.9) {
+  if (!stageDone) {
     // ETA line lives in the UI; only log milestone crossings to avoid spam.
-    // (99.9, not 99: the clamp holds pct at 99.4, so a `pct < 99` check here
-    // would never fire and the stage would spin at 99% until its timeout.)
     return;
   }
 
@@ -868,14 +898,15 @@ async function advanceJob(
   }
 
   await enterStage(ctx, { ...job, stageTimings: [
-    ...job.stageTimings,
+    ...(job.stageTimings ?? []),
     { stage, durationMs: durMs, at: now },
   ] }, now);
 }
 
 /** How many times this stage has run for this job (0 on first pass). */
 function stageAttempt(job: Doc<"jobs">, stage: string): number {
-  return job.stageTimings.filter((t) => t.stage === stage).length;
+  // `?? []`: jobs created before stageTimings existed have it undefined.
+  return (job.stageTimings ?? []).filter((t) => t.stage === stage).length;
 }
 
 function fmtDur(ms: number): string {
@@ -1307,6 +1338,51 @@ export const deleteJob = mutation({
 // ---------------------------------------------------------------------------
 
 /** All jobs with stage/error summary — the queue-drain diagnostic view. */
+export const adminJobDebug = internalQuery({
+  args: { jobId: v.id("jobs") },
+  handler: async (ctx, { jobId }) => {
+    const job = await ctx.db.get(jobId);
+    if (job === null) return { error: "not found" };
+    const stats = await ctx.db
+      .query("engineStats")
+      .withIndex("singleton", (q) => q.eq("singleton", "engine"))
+      .unique();
+    const stageSamples = stats?.stageSamples ?? {};
+    const stage = job.stage;
+    const samples = stageSamples[stage] ?? [];
+    const rate = samples.length >= 3 ? median(samples) : DEFAULT_RATE_MS_PER_UNIT[stage] ?? 1000;
+    const unitsTotal =
+      stage === "rendering"
+        ? Math.max(1, job.clipCount ?? 10)
+        : stage === "grabbing"
+          ? grabUnits(job.source, job.isUpload, 0).unitsTotal
+          : stage === "transcribing"
+            ? transcribeUnits(job.durationSec ?? simulateDuration(job.source, job.isUpload), 0).unitsTotal
+            : findUnits(job.durationSec ?? simulateDuration(job.source, job.isUpload), 0).unitsTotal;
+    const now = Date.now();
+    const startedAt = job.stageStartedAt ?? now;
+    const elapsed = now - startedAt;
+    const stageMs = unitsTotal * rate;
+    return {
+      stage,
+      startedAt,
+      now,
+      elapsedMs: elapsed,
+      rateMsPerUnit: rate,
+      samples: samples.length,
+      unitsTotal,
+      stageMs,
+      stageDone: elapsed >= stageMs,
+      pctRaw: (elapsed / stageMs) * 100,
+      pctShown: job.progress,
+      lastProgressAt: job.lastProgressAt,
+      sinceLastProgressMs: now - (job.lastProgressAt ?? startedAt),
+      timeoutMs: STAGE_TIMEOUT_MS[stage] ?? 10 * 60 * 1000,
+      wouldTimeout: elapsed > (STAGE_TIMEOUT_MS[stage] ?? 10 * 60 * 1000),
+    };
+  },
+});
+
 export const adminJobSummary = internalQuery({
   args: {},
   handler: async (ctx) => {
