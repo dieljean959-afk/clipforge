@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useQuery, useAction } from "convex/react";
-import { Film, LogOut, RefreshCw, Sparkles } from "lucide-react";
+import { Film, Loader2, LogOut, RefreshCw, Server, ServerOff, Sparkles, Timer } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,23 @@ export default function Dashboard() {
   const { user, signOut } = useAuth();
   const jobs = useQuery(api.clips.listJobs, {});
   const clipsByJob = useQuery(api.clips.recentClips, { limit: 48 });
+  const worker = useQuery(api.clips.getWorkerStatus, {});
+
+  // Re-evaluate worker liveness between heartbeats (tick every 2s).
+  const [nowTs, setNowTs] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTs(Date.now()), 2_000);
+    return () => clearInterval(t);
+  }, []);
+  const workerOnline =
+    (worker?.online ?? false) && nowTs - (worker?.lastHeartbeat ?? 0) < 45_000;
+  // Learned transcribing rate (ms per second of audio) -> "~N min for a 10 min video"
+  const rates = worker?.rates as Record<string, number> | undefined;
+  const trRate = rates?.transcribing;
+  const trHint =
+    trRate && trRate > 0
+      ? Math.max(1, Math.round((600 * trRate) / 60_000))
+      : null;
 
   const [selectedJobId, setSelectedJobId] = useState<JobDoc["_id"] | null>(null);
   const [previewClip, setPreviewClip] = useState<ClipDoc | null>(null);
@@ -118,6 +135,47 @@ export default function Dashboard() {
           </div>
         </div>
       </header>
+
+      {/* worker liveness + warmup (startup self-checks) */}
+      <div className="mx-auto w-full max-w-6xl px-4 pt-6">
+        {!workerOnline ? (
+          <div className="rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3">
+            <p className="flex items-center gap-2 text-sm font-semibold text-destructive">
+              <ServerOff className="size-4" />
+              Render worker offline
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-destructive/80">
+              Jobs are refused until a worker is consuming the queue — start it with:{" "}
+              <code className="font-mono">celery -A app worker --loglevel=info</code>
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border/60 bg-card/60 px-4 py-2.5 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5 font-medium text-primary">
+              <Server className="size-3.5" />
+              Worker online
+            </span>
+            {!worker?.modelLoaded ? (
+              <span className="flex items-center gap-1.5 text-amber-300">
+                <Loader2 className="size-3.5 animate-spin" />
+                Downloading AI model (one-time, ~3GB)…
+                {worker?.warmupDetail && (
+                  <span className="font-mono text-[11px] text-muted-foreground">
+                    {worker.warmupDetail}
+                  </span>
+                )}
+              </span>
+            ) : (
+              trHint !== null && (
+                <span className="flex items-center gap-1.5">
+                  <Timer className="size-3.5 text-primary/70" />
+                  Transcribing usually takes ~{trHint} min for a 10 min video
+                </span>
+              )
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="mx-auto w-full max-w-6xl px-4 py-8">
         {/* header + new job */}

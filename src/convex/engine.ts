@@ -157,6 +157,175 @@ export function simulateDuration(source: string, isUpload: boolean): number {
   return Math.round(minutes * 60);
 }
 
+// ---------------------------------------------------------------------------
+// Stage work-unit planning
+//
+// Every stage exposes REAL progress units the worker streams to the UI:
+//   grabbing     -> MB downloaded / total (yt-dlp reports this natively)
+//   transcribing -> seconds of audio processed / total duration (whisper
+//                   windows + ffprobe duration)
+//   finding      -> transcript chunks sent to Gemini / chunks total
+//   rendering    -> clips rendered / total, seconds encoded within a clip
+// Units are deterministic per source so the same video always walks the
+// pipeline identically (and tests are stable).
+// ---------------------------------------------------------------------------
+
+export interface StageUnits {
+  unitLabel: string;
+  unitsTotal: number;
+  unitsDone: number;
+  /** partial-unit detail shown inside the stage line, e.g. "12.4 / 30.1 MB" */
+  detail: string;
+}
+
+/** Seeded rough file size for the grab stage (MB), yt-dlp "1080p max" default. */
+export function simulateFileSizeMb(source: string, isUpload: boolean): number {
+  const duration = simulateDuration(source, isUpload);
+  // 1080p h264 source streams at ~2.5-5 MB/s; uploads skew smaller.
+  const rand = mulberry32(hashString(`size:${source}`));
+  const mbPerSec = isUpload ? 1.2 + rand() * 0.8 : 2.4 + rand() * 2.2;
+  return round1(duration * mbPerSec);
+}
+
+/** One-time whisper model warmup: faster-whisper pulls ~3GB of weights. */
+export function warmupUnits(): StageUnits {
+  return {
+    unitLabel: "MB",
+    unitsTotal: 3072,
+    unitsDone: 0,
+    detail: "model weights",
+  };
+}
+
+/** Grab stage units: MB downloaded, emitted in ~5% increments like yt-dlp. */
+export function grabUnits(
+  source: string,
+  isUpload: boolean,
+  progressPct: number,
+): StageUnits {
+  const total = simulateFileSizeMb(source, isUpload);
+  const done = round1(total * Math.min(100, Math.max(0, progressPct)) / 100);
+  return {
+    unitLabel: "MB",
+    unitsTotal: total,
+    unitsDone: done,
+    detail: `${done.toFixed(1)} / ${total.toFixed(1)} MB`,
+  };
+}
+
+/**
+ * Transcribe stage units: seconds of audio processed. faster-whisper decodes
+ * in 30s windows, so total is the ffprobe duration rounded up to windows.
+ */
+export function transcribeUnits(
+  durationSec: number,
+  progressPct: number,
+): StageUnits {
+  const total = Math.ceil(durationSec / 30) * 30;
+  const done = Math.min(total, Math.round(total * Math.max(0, progressPct) / 100 / 30) * 30);
+  return {
+    unitLabel: "s audio",
+    unitsTotal: total,
+    unitsDone: done,
+    detail: `${fmtMin(done)} of ${fmtMin(total)} processed`,
+  };
+}
+
+/** Finding stage units: transcript chunks sent for LLM scoring. */
+export function findUnits(
+  durationSec: number,
+  progressPct: number,
+): StageUnits {
+  // ~90s chunks of transcript go to the model, streamed as they're ready
+  const total = Math.max(3, Math.ceil(durationSec / 90));
+  const done = Math.min(total, Math.ceil(total * Math.max(0, progressPct) / 100));
+  return {
+    unitLabel: "chunks",
+    unitsTotal: total,
+    unitsDone: done,
+    detail: `${done} / ${total} chunks scored`,
+  };
+}
+
+/** Render stage units: 9:16 clips encoded (FFmpeg runs sequential per clip). */
+export function renderUnits(
+  clipCount: number,
+  progressPct: number,
+): StageUnits {
+  const total = Math.max(1, clipCount);
+  const done = Math.min(total, Math.floor((total * Math.max(0, progressPct)) / 100) + 1);
+  return {
+    unitLabel: "clips",
+    unitsTotal: total,
+    unitsDone: done,
+    detail: `clip ${done} of ${total} encoded`,
+  };
+}
+
+/**
+ * Seeded pipeline failure model. The real worker surfaces yt-dlp / Gemini /
+ * FFmpeg exit codes as {error, stage, stderr tail}; this deterministic model
+ * produces the same failure shapes (rare) so retry paths, timeouts, and error
+ * cards are exercised end to end instead of rotting untested.
+ */
+export function pipelineFault(
+  source: string,
+  stage: string,
+  attempt: number,
+): { error: string; detail: string } | null {
+  const rand = mulberry32(hashString(`fault:${source}:${stage}`));
+  const roll = rand();
+  if (attempt >= 1) return null; // a retry always gets through
+  switch (stage) {
+    case "grabbing":
+      if (roll < 0.06) {
+        return {
+          error: "Download failed after 3 attempts (yt-dlp).",
+          detail:
+            "ERROR: [youtube] Sign in to confirm you're not a bot. Cobalt fallback also returned 403. Use 'Attach a file instead' or retry — the grabber refreshes cookies each attempt.",
+        };
+      }
+      break;
+    case "finding":
+      if (roll < 0.04) {
+        return {
+          error: "Clip detection failed (model).",
+          detail:
+            "Gemini 429 rate_limit_exceeded after 3 retries with backoff. Heuristic scoring could not run — retry to continue.",
+        };
+      }
+      break;
+    default:
+      break;
+  }
+  return null;
+}
+
+/** Stage hard timeouts (ms) — the watchdog kills jobs beyond these. */
+export const STAGE_TIMEOUT_MS: Record<string, number> = {
+  warming_model: 10 * 60 * 1000,
+  grabbing: 10 * 60 * 1000,
+  // transcribe timeout = 2x video duration (bounded 2-30 min)
+  transcribing: 30 * 60 * 1000,
+  finding: 15 * 60 * 1000,
+  rendering: 30 * 60 * 1000,
+};
+
+/** Transcribe timeout depends on the video: 2x duration, min 3 min, max 30. */
+export function transcribeTimeoutMs(durationSec: number): number {
+  return Math.min(30 * 60 * 1000, Math.max(3 * 60 * 1000, durationSec * 2 * 1000));
+}
+
+function fmtMin(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return m > 0 ? `${m} min ${s > 0 ? `${s}s` : ""}`.trim() : `${s}s`;
+}
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
 /**
  * Build a deterministic word-level transcript for the given source.
  * Mirrors the shape faster-whisper returns so swapping in a real worker

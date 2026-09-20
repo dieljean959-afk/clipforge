@@ -126,6 +126,25 @@ export function fmtClock(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+/**
+ * Human ETA: "~2 min left" / "~45s left". Pairs with the per-stage unit line
+ * ("4 of 11 min processed") in the job card.
+ */
+export function fmtEta(sec: number): string {
+  if (!Number.isFinite(sec) || sec <= 0) return "any moment";
+  if (sec < 90) return `${Math.max(1, Math.round(sec))}s`;
+  return `${Math.round(sec / 60)} min`;
+}
+
+/** Worker stage names as they appear in the per-job log ("View logs"). */
+export const STAGE_LOG_LABEL: Record<string, string> = {
+  warmup: "AI model warmup",
+  grab: "yt-dlp download",
+  transcribe: "faster-whisper",
+  find: "clip detection",
+  render: "FFmpeg render",
+};
+
 /** 00:01:23,500 (SRT timecode) */
 export function fmtSrtTime(sec: number): string {
   const ms = Math.max(0, Math.round(sec * 1000));

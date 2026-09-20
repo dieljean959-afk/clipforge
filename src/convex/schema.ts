@@ -43,11 +43,34 @@ const schema = defineSchema(
       sourceType: v.string(), // "url" | "upload"
       source: v.string(), // video URL or original file name
       isUpload: v.boolean(),
-      // pipeline stages: queued | grabbing | transcribing | finding | rendering | complete | failed
+      // pipeline stages: queued | warming_model | grabbing | transcribing | finding | rendering | complete | failed
       stage: v.string(),
       progress: v.number(), // 0-100 within current stage
       progressDetail: v.optional(v.string()),
-      error: v.optional(v.string()),
+      // real progress units, e.g. "MB" during grab, "min of audio" while transcribing
+      unitLabel: v.optional(v.string()),
+      unitsDone: v.optional(v.number()),
+      unitsTotal: v.optional(v.number()),
+      // ETA seconds for the current stage (null until a rate is measured)
+      stageEtaSec: v.optional(v.number()),
+      // total remaining ETA across all unfinished stages (seconds)
+      totalEtaSec: v.optional(v.number()),
+      // epoch ms of the last worker progress write — the stall watchdog reads this
+      lastProgressAt: v.optional(v.number()),
+      // "slow" heartbeat flag, set by the worker when a stage overruns its median
+      slow: v.optional(v.boolean()),
+      // stage start epoch ms (for per-stage duration logging)
+      stageStartedAt: v.optional(v.number()),
+      // per-stage duration log (ms), written on every stage completion
+      stageTimings: v.array(
+        v.object({
+          stage: v.string(),
+          durationMs: v.number(),
+          at: v.number(),
+        }),
+      ),
+      // append-only worker log, newest last ("View logs" in the UI)
+      logs: v.array(v.string()),      error: v.optional(v.string()),
       errorDetail: v.optional(v.string()),
       durationSec: v.optional(v.number()),
       transcriptWordCount: v.optional(v.number()),
@@ -60,7 +83,8 @@ const schema = defineSchema(
       completedAt: v.optional(v.number()),
     })
       .index("by_user", ["userId"])
-      .index("by_user_stage", ["userId", "stage"]),
+      .index("by_user_stage", ["userId", "stage"])
+      .index("by_stage", ["stage"]),
 
     // one row per rendered 9:16 clip
     clips: defineTable({
@@ -88,6 +112,26 @@ const schema = defineSchema(
     })
       .index("by_job", ["jobId"])
       .index("by_user", ["userId"]),
+
+    // Worker liveness singleton — the "Render worker offline" banner source.
+    // An API that queues jobs nothing consumes is the #1 cause of eternal
+    // spinners, so the worker must heartbeat here to accept work.
+    workerStatus: defineTable({
+      singleton: v.literal("worker"),
+      online: v.boolean(),
+      lastHeartbeat: v.number(),
+      modelLoaded: v.boolean(),
+      warmupDetail: v.optional(v.string()),
+      warmupStartedAt: v.optional(v.number()),
+      // average per-second processing rate per stage, learned across jobs
+      rates: v.optional(v.record(v.string(), v.number())),
+    }).index("singleton", ["singleton"]),
+
+    // Learned stage speeds (3+ runs) used for pre-stage ETA estimates.
+    engineStats: defineTable({
+      singleton: v.literal("engine"),
+      stageSamples: v.record(v.string(), v.array(v.number())), // ms durations
+    }).index("singleton", ["singleton"]),
   },
   {
     schemaValidation: false,

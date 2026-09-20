@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -9,6 +9,7 @@ import {
   Loader2,
   RotateCcw,
   Sparkles,
+  Terminal,
   Trash2,
   AudioWaveform,
   Clapperboard,
@@ -16,12 +17,19 @@ import {
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import {
   STAGES,
   STAGE_LABELS,
-  STAGE_LOADING,
   fmtClock,
+  fmtEta,
   fmtDate,
   sourceLabel,
   type JobDoc,
@@ -37,45 +45,40 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
   failed: AlertTriangle,
 };
 
-/** Drives an active job by ticking the pipeline ~every 800ms. */
-function useJobTicker(job: JobDoc) {
-  const tick = useMutation(api.clips.tickJob);
+/**
+ * Global stall watchdog (requirement 3): if the worker has written no progress
+ * event for this job in 90s while it is in an active stage, the pipeline is
+ * dead — surface it instead of spinning. 2s poll mirrors the progress cadence.
+ */
+function useStalled(job: JobDoc): boolean {
+  const [stalled, setStalled] = useState(false);
   const active =
     job.stage !== "complete" && job.stage !== "failed" && job.stage !== "queued";
-  const stageRef = useRef(job.stage);
-  stageRef.current = job.stage;
-
   useEffect(() => {
-    if (!active) return;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const run = async () => {
-      try {
-        await tick({ jobId: job._id });
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Pipeline step failed.");
-        stopped = true;
-      }
-      if (!stopped && stageRef.current !== "complete" && stageRef.current !== "failed") {
-        timer = setTimeout(run, 800);
-        return;
-      }
+    if (!active) {
+      setStalled(false);
+      return;
+    }
+    const check = () => {
+      const last = job.lastProgressAt ?? job.stageStartedAt ?? job.createdAt;
+      setStalled(Date.now() - last > 90_000);
     };
-    timer = setTimeout(run, 200);
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [active, job._id, tick]);
+    check();
+    const timer = setInterval(check, 2_000);
+    return () => clearInterval(timer);
+  }, [active, job.lastProgressAt, job.stageStartedAt, job.createdAt]);
+  return stalled;
 }
 
 export function JobCard({ job }: { job: JobDoc }) {
-  useJobTicker(job);
   const retry = useMutation(api.clips.retryJob);
   const remove = useMutation(api.clips.deleteJob);
   const failed = job.stage === "failed";
   const complete = job.stage === "complete";
   const activeIdx = STAGES.indexOf(job.stage as (typeof STAGES)[number]);
+  const stalled = useStalled(job);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const logs = useQuery(api.clips.getJobLogs, { jobId: job._id });
 
   return (
     <div
@@ -96,6 +99,15 @@ export function JobCard({ job }: { job: JobDoc }) {
           </p>
         </div>
         <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-8 cursor-pointer gap-1.5 text-xs text-muted-foreground"
+            onClick={() => setLogsOpen(true)}
+          >
+            <Terminal className="size-3.5" />
+            View logs
+          </Button>
           {complete && (
             <Button
               size="sm"
@@ -165,31 +177,49 @@ export function JobCard({ job }: { job: JobDoc }) {
         })}
       </div>
 
-      {/* progress */}
+      {/* live progress with units + ETA */}
       {!complete && !failed && (
         <div className="mt-3">
-          <div className="mb-1.5 flex items-center justify-between text-xs">
-            <span className="flex items-center gap-1.5 text-muted-foreground">
-              <Loader2 className="size-3 animate-spin text-primary" />
-              {job.progressDetail ?? STAGE_LOADING[job.stage] ?? "Working..."}
+          <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
+            <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+              <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
+              <span className="truncate">
+                {job.progressDetail ?? `${STAGE_LABELS[job.stage as ClipStage]}...`}
+              </span>
             </span>
-            <span className="font-mono text-muted-foreground">
+            <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
               {Math.round(job.progress)}%
             </span>
           </div>
           <Progress value={job.progress} className="h-1.5" />
+          <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
+            <span>
+              {job.unitsDone !== undefined && job.unitsTotal !== undefined
+                ? `${fmtUnits(job.unitLabel, job.unitsDone)} of ${fmtUnits(job.unitLabel, job.unitsTotal)}`
+                : "Waiting for worker…"}
+            </span>
+            {job.totalEtaSec !== undefined && job.totalEtaSec > 0 && (
+              <span className="font-mono tabular-nums text-primary/80">
+                ~{fmtEta(job.totalEtaSec)} left
+              </span>
+            )}
+          </div>
+          {stalled && (
+            <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              <span className="font-semibold">Pipeline stalled</span> — no progress
+              from the worker for 90s at stage{" "}
+              <span className="font-mono">{job.stage}</span>. Open the logs, or retry
+              the job.
+            </div>
+          )}
         </div>
       )}
 
       {complete && (
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span className="font-semibold text-primary">
-            {job.clipCount ?? 0} clips
-          </span>
+          <span className="font-semibold text-primary">{job.clipCount ?? 0} clips</span>
           <span>{job.totalClipsSec ?? 0}s total</span>
-          <span>
-            {job.clipSource === "ai" ? "AI-detected" : "Heuristic-detected"}
-          </span>
+          <span>{job.clipSource === "ai" ? "AI-detected" : "Heuristic-detected"}</span>
           {job.downloadSource && <span>via {job.downloadSource}</span>}
           <span>{job.transcriptWordCount ?? 0} words transcribed</span>
         </div>
@@ -205,6 +235,48 @@ export function JobCard({ job }: { job: JobDoc }) {
           )}
         </div>
       )}
+
+      {/* per-job worker log ("View logs") */}
+      <Dialog open={logsOpen} onOpenChange={setLogsOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Job log</DialogTitle>
+            <DialogDescription className="font-mono text-xs">
+              {sourceLabel(job)}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-80 overflow-y-auto rounded-lg border bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            {logs === undefined ? (
+              <p>Loading…</p>
+            ) : logs.length === 0 ? (
+              <p>No worker events logged yet.</p>
+            ) : (
+              logs.map((line, i) => (
+                <p key={i} className="whitespace-pre-wrap">
+                  <span className="text-primary/60">{String(i + 1).padStart(2, "0")}</span>{" "}
+                  {line}
+                </p>
+              ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
+}
+
+type ClipStage = (typeof STAGES)[number];
+
+/** Unit-aware value formatting: "142 MB", "4 min", "chunk 2". */
+function fmtUnits(label: string | undefined, value: number): string {
+  switch (label) {
+    case "MB":
+      return `${Math.round(value)} MB`;
+    case "min":
+      return `${Math.round(value)} min`;
+    case "chunks":
+      return `${value} chunks`;
+    default:
+      return String(value);
+  }
 }

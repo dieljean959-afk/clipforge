@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Paperclip, Sparkles, Youtube } from "lucide-react";
-import { useMutation } from "convex/react";
+import { Loader2, Paperclip, ServerOff, Sparkles, Youtube } from "lucide-react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,9 +21,15 @@ export function NewJobForm({ className }: { className?: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const createJob = useMutation(api.clips.createJob);
 
+  // Startup self-check (requirement 4): refuse to queue jobs when the render
+  // worker is not consuming the queue — that's the #1 cause of eternal spinners.
+  const worker = useQuery(api.clips.getWorkerStatus, {});
+  const workerOffline = !(worker?.online ?? false);
+
   const canSubmit =
     confirmed &&
     !submitting &&
+    !workerOffline &&
     (mode === "url" ? url.trim().length > 0 : fileName.length > 0);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -126,6 +132,13 @@ export function NewJobForm({ className }: { className?: string }) {
           creators&apos; videos may violate platform ToS and copyright.
         </span>
       </label>
+
+      {workerOffline && (
+        <p className="flex items-center gap-1.5 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <ServerOff className="size-3.5 shrink-0" />
+          Render worker offline — jobs are refused until it is consuming the queue.
+        </p>
+      )}
 
       <Button type="submit" size="lg" disabled={!canSubmit} className="cursor-pointer gap-2 font-bold">
         {submitting ? (
