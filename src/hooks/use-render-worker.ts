@@ -44,6 +44,7 @@ export function useRenderWorker(): {
   const reportTranscribeProgress = useMutation(api.clips.reportTranscribeProgress);
   const reportClipRendered = useMutation(api.clips.reportClipRendered);
   const reportClipRenderFailure = useMutation(api.clips.reportClipRenderFailure);
+  const reportRenderClipProgress = useMutation(api.clips.reportRenderClipProgress);
   const generateUploadUrl = useMutation(api.clips.generateUploadUrl);
   const fetchAction = useAction(api.fetch.fetchVideo);
   const envCheck = useAction(api.diagnostics.envCheck);
@@ -195,12 +196,25 @@ export function useRenderWorker(): {
               renderLog(
                 `rendering clip ${clip.order + 1}/${clips.length} (${(clip.end - clip.start).toFixed(1)}s)...`,
               );
+              // real ffmpeg encode progress -> backend (throttled ~1/s);
+              // keeps lastProgressAt fresh during long single-clip encodes
+              let lastReport = 0;
               const out = await renderClip({
                 mediaUrl: src.url,
                 startSec: clip.start,
                 endSec: clip.end,
                 ass: buildAssCues(clip.captionCues),
                 onProgress: (f) => {
+                  const nowMs = performance.now();
+                  if (nowMs - lastReport >= 1000) {
+                    lastReport = nowMs;
+                    void reportRenderClipProgress({
+                      jobId: j._id,
+                      clipOrder: clip.order,
+                      clipCount: clips.length,
+                      fraction: f,
+                    }).catch(() => undefined);
+                  }
                   if (Math.random() < 0.08) {
                     renderLog(`clip ${clip.order + 1} encode ${(f * 100).toFixed(0)}%`);
                   }
@@ -256,6 +270,7 @@ export function useRenderWorker(): {
       reportClipRendered,
       reportFetch,
       reportFetchFailure,
+      reportRenderClipProgress,
       reportTranscribe,
       reportTranscribeFailure,
       reportTranscribeProgress,

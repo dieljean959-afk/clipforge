@@ -204,6 +204,18 @@ export function JobCard({ job }: { job: JobDoc }) {
               </span>
             )}
           </div>
+          {job.stageEtaSec !== undefined && job.stageEtaSec > 0 && (
+            <p className="mt-0.5 text-[11px] text-muted-foreground/70">
+              Stage ETA ~{fmtEta(job.stageEtaSec)}
+            </p>
+          )}
+          {job.slow === true && !stalled && (
+            <p className="mt-1 flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground/80">
+              <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
+              Still working — stage “{STAGE_LABELS[job.stage as ClipStage] ?? job.stage}” is slow,
+              not stuck. Watchdog caps it at 90s of silence.
+            </p>
+          )}
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress

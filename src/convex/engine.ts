@@ -125,6 +125,22 @@ export function transcribeTimeoutMs(durationSec: number): number {
   return Math.max(2 * 60 * 1000, 2 * durationSec * 1000);
 }
 
+/** Pipeline stage order (used for total-ETA estimates after the current one). */
+export const STAGE_ORDER = [
+  "grabbing",
+  "transcribing",
+  "finding",
+  "rendering",
+] as const;
+
+/** Median of a numeric sample list (null when empty) — learned stage speeds. */
+export function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
 function fmtMin(sec: number): string {
   if (sec >= 60) {
     const m = Math.floor(sec / 60);

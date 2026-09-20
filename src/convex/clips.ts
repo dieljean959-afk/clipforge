@@ -16,6 +16,8 @@ import {
   renderUnits,
   transcribeTimeoutMs,
   STAGE_TIMEOUT_MS,
+  STAGE_ORDER,
+  median,
   karaokeCues,
   buildSrt,
   type TranscriptWord,
@@ -49,6 +51,193 @@ const WORKER_STALE_MS = 45_000;
 const WATCHDOG_MS = 90_000;
 /** Log ring size per job. */
 const MAX_LOGS = 80;
+/** Heartbeat: past this without progress, the UI shows "still working" (req 2). */
+const SLOW_STAGE_MS = 30_000;
+/** A stage needs 3+ recorded runs before its learned speed is trusted. */
+const RATE_MIN_SAMPLES = 3;
+/** Samples kept per stage in the engineStats singleton. */
+const RATE_MAX_SAMPLES = 10;
+
+// ---------------------------------------------------------------------------
+// ETA engine — per-stage + total ETAs from measured and learned rates
+// ---------------------------------------------------------------------------
+
+async function loadRates(
+  ctx: MutationCtx,
+): Promise<Record<string, number>> {
+  const row = await ctx.db
+    .query("workerStatus")
+    .withIndex("singleton", (q) => q.eq("singleton", "worker"))
+    .unique();
+  return row?.rates ?? {};
+}
+
+/**
+ * Live measured speed for the running stage (ms per work unit) from the
+ * progress already made, falling back to the learned median when a stage
+ * has too little live data. Returns null when nothing is measurable.
+ */
+async function stageSpeedMsPerUnit(
+  ctx: MutationCtx,
+  stage: string,
+  unitsDone: number,
+  unitsTotal: number,
+  elapsedMs: number,
+): Promise<number | null> {
+  if (unitsTotal <= 0) return null;
+  if (unitsDone >= 1 && elapsedMs > 5_000) {
+    return elapsedMs / Math.min(unitsDone, unitsTotal);
+  }
+  const rates = await loadRates(ctx);
+  const samples = rates[stage];
+  if (Array.isArray(samples) && samples.length >= RATE_MIN_SAMPLES) {
+    return median(samples) ?? null;
+  }
+  return null;
+}
+
+/** Persist the learned per-unit speed for a completed stage (median of N). */
+async function recordStageRate(
+  ctx: MutationCtx,
+  stage: string,
+  durationMs: number,
+  unitsTotal: number,
+): Promise<void> {
+  if (durationMs <= 0 || unitsTotal <= 0) return;
+  const perUnit = durationMs / unitsTotal;
+  const row = await ctx.db
+    .query("workerStatus")
+    .withIndex("singleton", (q) => q.eq("singleton", "worker"))
+    .unique();
+  if (row === null) return;
+  const rates = { ...(row.rates ?? {}) } as Record<string, unknown>;
+  const prev = Array.isArray(rates[stage]) ? (rates[stage] as number[]) : [];
+  const next = [...prev, perUnit].slice(-RATE_MAX_SAMPLES);
+  rates[stage] = next;
+  await ctx.db.patch(row._id, {
+    rates: rates as Record<string, number>,
+  });
+}
+
+/**
+ * Read the engineStats singleton (learned stage durations across jobs, kept
+ * so ETAs survive worker restarts).
+ */
+async function loadStageSamples(
+  ctx: MutationCtx,
+): Promise<Record<string, number[]>> {
+  const row = await ctx.db
+    .query("engineStats")
+    .withIndex("singleton", (q) => q.eq("singleton", "engine"))
+    .unique();
+  return row?.stageSamples ?? {};
+}
+
+/** Append a stage duration sample to the engineStats singleton. */
+async function recordStageSample(
+  ctx: MutationCtx,
+  stage: string,
+  durationMs: number,
+): Promise<void> {
+  if (durationMs <= 0) return;
+  const row = await ctx.db
+    .query("engineStats")
+    .withIndex("singleton", (q) => q.eq("singleton", "engine"))
+    .unique();
+  if (row === null) {
+    await ctx.db.insert("engineStats", {
+      singleton: "engine",
+      stageSamples: { [stage]: [durationMs] },
+    });
+    return;
+  }
+  const samples = { ...(row.stageSamples ?? {}) };
+  const prev = Array.isArray(samples[stage]) ? (samples[stage] as number[]) : [];
+  samples[stage] = [...prev, durationMs].slice(-RATE_MAX_SAMPLES);
+  await ctx.db.patch(row._id, { stageSamples: samples });
+}
+
+/**
+ * ETA for the CURRENT stage: remaining units / measured-or-learned speed.
+ * Live measurement wins once >=1 unit has landed (it reflects this job's
+ * actual machine); the learned median covers the slow first unit.
+ */
+export async function computeStageEta(
+  ctx: MutationCtx,
+  stage: string,
+  unitsDone: number,
+  unitsTotal: number,
+  stageStartedAt: number,
+): Promise<number | null> {
+  if (unitsTotal <= 0) return null;
+  const speed = await stageSpeedMsPerUnit(
+    ctx,
+    stage,
+    unitsDone,
+    unitsTotal,
+    Date.now() - stageStartedAt,
+  );
+  if (speed === null) return null;
+  return Math.max(0, ((unitsTotal - unitsDone) * speed) / 1000);
+}
+
+/**
+ * Total ETA across the remaining pipeline: current stage's remaining time
+ * plus learned-median estimates for every later stage (via engineStats —
+ * "Transcribing usually takes ~3 min for a 10 min video").
+ */
+export async function computeTotalEta(
+  ctx: MutationCtx,
+  stage: string,
+  stageEtaSec: number | null,
+): Promise<number | null> {
+  const idx = STAGE_ORDER.indexOf(stage as (typeof STAGE_ORDER)[number]);
+  if (idx === -1) return stageEtaSec;
+  const samples = await loadStageSamples(ctx);
+  let totalMs = (stageEtaSec ?? 0) * 1000;
+  for (const later of STAGE_ORDER.slice(idx + 1)) {
+    const arr = samples[later];
+    if (Array.isArray(arr) && arr.length >= RATE_MIN_SAMPLES) {
+      totalMs += median(arr) ?? 0;
+    }
+  }
+  return totalMs > 0 ? totalMs / 1000 : null;
+}
+
+/**
+ * Stage-level ETA patch for a job. Wrap every progress write in this so
+ * stageEtaSec/totalEtaSec are always fresh on the row the UI polls.
+ */
+async function etaPatch(
+  ctx: MutationCtx,
+  job: Doc<"jobs">,
+  unitsDone: number,
+  unitsTotal: number,
+): Promise<Partial<Doc<"jobs">>> {
+  const stageEta = await computeStageEta(
+    ctx,
+    job.stage,
+    unitsDone,
+    unitsTotal,
+    job.stageStartedAt ?? Date.now(),
+  );
+  const totalEta = await computeTotalEta(ctx, job.stage, stageEta);
+  return {
+    stageEtaSec: stageEta ?? undefined,
+    totalEtaSec: totalEta ?? undefined,
+  };
+}
+
+/** Record a finished stage's real duration in engineStats + rates. */
+async function recordStageCompletion(
+  ctx: MutationCtx,
+  stage: string,
+  durationMs: number,
+  unitsTotal: number,
+): Promise<void> {
+  await recordStageSample(ctx, stage, durationMs);
+  await recordStageRate(ctx, stage, durationMs, unitsTotal);
+}
 
 /**
  * Queue + broker identity — the deploy-time handshake (kept for parity with
@@ -562,6 +751,7 @@ export const reportFetchProgress = mutation({
       unitsDone: u.unitsDone,
       unitsTotal: u.unitsTotal,
       lastProgressAt: Date.now(),
+      ...(await etaPatch(ctx, job, u.unitsDone, u.unitsTotal)),
     });
   },
 });
@@ -591,6 +781,12 @@ async function doReportFetch(
   }
   const now = Date.now();
   const units = transcribeUnits(args.durationSec, 0);
+  await recordStageCompletion(
+    ctx,
+    "grabbing",
+    now - (job.stageStartedAt ?? now),
+    job.unitsTotal ?? job.sourceBytes ?? 0,
+  );
   await ctx.db.patch(args.jobId, {
     sourceStorageId: args.storageId,
     sourceBytes: args.bytes,
@@ -690,6 +886,7 @@ export const reportFetchProgressInternal = internalMutation({
       unitsDone: u.unitsDone,
       unitsTotal: u.unitsTotal,
       lastProgressAt: Date.now(),
+      ...(await etaPatch(ctx, job, u.unitsDone, u.unitsTotal)),
     });
   },
 });
@@ -774,6 +971,7 @@ export const reportTranscribeProgress = mutation({
       unitsDone: Math.min(u.unitsTotal, processedSec),
       unitsTotal: u.unitsTotal,
       lastProgressAt: Date.now(),
+      ...(await etaPatch(ctx, job, processedSec, u.unitsTotal)),
     });
   },
 });
@@ -799,6 +997,12 @@ export const reportTranscribe = mutation({
     }
     const now = Date.now();
     const units = findUnits(durationSec, 0);
+    await recordStageCompletion(
+      ctx,
+      "transcribing",
+      now - (job.stageStartedAt ?? now),
+      job.unitsTotal ?? Math.max(1, Math.ceil((job.durationSec ?? 0) / 30)),
+    );
     await ctx.db.patch(jobId, {
       transcriptStorageId: storageId,
       transcriptWordCount: wordCount,
@@ -871,7 +1075,40 @@ export const reportFindingProgress = internalMutation({
     if (logLine !== undefined) {
       patch.logs = appendLog(job.logs, logLine);
     }
-    await ctx.db.patch(jobId, patch);
+    const eta = await etaPatch(ctx, job, u.unitsDone, u.unitsTotal);
+    await ctx.db.patch(jobId, { ...patch, ...eta });
+  },
+});
+
+/** Within-clip encode progress from the browser ffmpeg worker (throttled).
+ *  Keeps lastProgressAt fresh during long single-clip encodes so the 90s
+ *  watchdog never kills a job that is genuinely rendering. */
+export const reportRenderClipProgress = mutation({
+  args: {
+    jobId: v.id("jobs"),
+    clipOrder: v.number(),
+    clipCount: v.number(),
+    fraction: v.number(),
+  },
+  handler: async (ctx, { jobId, clipOrder, clipCount, fraction }) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Sign in first.");
+    const job = await ctx.db.get(jobId);
+    if (job === null || job.userId !== userId) throw new Error("Job not found.");
+    if (job.stage !== "rendering") return;
+    const f = Math.max(0, Math.min(1, fraction));
+    const done = clipOrder + f; // whole clips + the live one's fraction
+    const unitsTotal = Math.max(1, clipCount);
+    await ctx.db.patch(jobId, {
+      progress: Math.min(99, (done / unitsTotal) * 100),
+      progressDetail: `Encoding clip ${clipOrder + 1} of ${clipCount} — ${(f * 100).toFixed(0)}%`,
+      unitLabel: "clips",
+      unitsDone: Math.floor(done * 10) / 10,
+      unitsTotal,
+      renderProgress: (done / unitsTotal) * 100,
+      lastProgressAt: Date.now(),
+      ...(await etaPatch(ctx, job, done, unitsTotal)),
+    });
   },
 });
 
@@ -973,6 +1210,7 @@ export const reportClipRendered = mutation({
     const u = renderUnits(doneClips, total);
 
     if (doneClips >= total) {
+      await recordStageCompletion(ctx, "rendering", now - (job.stageStartedAt ?? now), total);
       const captionsTxt = allClips
         .sort((a, b) => a.order - b.order)
         .map(
@@ -1008,6 +1246,7 @@ export const reportClipRendered = mutation({
         ),
       });
     } else {
+      const eta = await etaPatch(ctx, job, doneClips, total);
       await ctx.db.patch(jobId, {
         progress: Math.min(99, (doneClips / total) * 100),
         progressDetail: "Rendering 9:16 clips with burned-in captions...",
@@ -1016,6 +1255,7 @@ export const reportClipRendered = mutation({
         unitsTotal: u.unitsTotal,
         renderProgress: (doneClips / total) * 100,
         lastProgressAt: now,
+        ...eta,
       });
     }
   },
@@ -1096,6 +1336,13 @@ export const workerTick = internalMutation({
           stage === "transcribing"
             ? transcribeTimeoutMs(job.durationSec ?? 600)
             : STAGE_TIMEOUT_MS[stage] ?? 10 * 60 * 1000;
+
+        // slow heartbeat (requirement 2): a stage running longer than 30s
+        // without completing shows "still working, stage X is slow" — never
+        // a frozen bar with no explanation
+        if (!job.slow && now - startedAt > SLOW_STAGE_MS) {
+          await ctx.db.patch(job._id, { slow: true });
+        }
 
         if (now - lastProgress > WATCHDOG_MS) {
           await failWatchdog(ctx, job, stage, now, `Pipeline stalled at stage ${stage}.`,
@@ -1248,6 +1495,12 @@ export const applyDetectedClips = internalMutation({
     }
 
     const units = renderUnits(0, candidates.length);
+    await recordStageCompletion(
+      ctx,
+      "finding",
+      now - (job.stageStartedAt ?? now),
+      job.unitsTotal ?? Math.max(3, Math.ceil((job.durationSec ?? 600) / 90)),
+    );
     const captionsTxt = candidates
       .map((p, i) => `=== Clip ${i + 1}: ${p.title} (score ${p.score}) ===\n(builds after render)`)
       .join("\n");
