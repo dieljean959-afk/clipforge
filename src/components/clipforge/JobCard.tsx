@@ -219,7 +219,11 @@ export function JobCard({ job }: { job: JobDoc }) {
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span className="font-semibold text-primary">{job.clipCount ?? 0} clips</span>
           <span>{job.totalClipsSec ?? 0}s total</span>
-          <span>{job.clipSource === "ai" ? "AI-detected" : "Heuristic-detected"}</span>
+          <span>
+            {job.clipSource === "gemini"
+              ? "AI-detected"
+              : "Detection failed"}
+          </span>
           {job.downloadSource && <span>via {job.downloadSource}</span>}
           <span>{job.transcriptWordCount ?? 0} words transcribed</span>
         </div>

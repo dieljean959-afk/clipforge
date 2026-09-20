@@ -1,6 +1,6 @@
 // Minimal ZIP writer (stored entries, no compression) so "Export all 9:16"
 // works fully client-side without a dependency. Supports CRC-32 over the
-// bundled file payloads.
+// bundled payloads — text AND binary (real MP4s).
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -38,21 +38,17 @@ function dosDateTime(date: Date): { time: number; date: number } {
 }
 
 /**
- * Build a ZIP archive from text entries. Returns a Blob ready for download.
+ * Build a ZIP archive from text and/or binary entries.
  */
 export function buildZip(
-  files: { name: string; text: string }[],
+  files: { name: string; text?: string; bytes?: Uint8Array }[],
   opts: { date?: Date } = {},
 ): Blob {
   const when = dosDateTime(opts.date ?? new Date());
   const enc = new TextEncoder();
-  const toPart = (u8: Uint8Array): BlobPart =>
-    u8.buffer instanceof ArrayBuffer && u8.byteOffset === 0
-      ? new Uint8Array(u8.buffer.slice(0) as ArrayBuffer)
-      : (u8.slice().buffer as ArrayBuffer);
   const entries: ZipEntry[] = files.map((f) => ({
     name: f.name,
-    data: enc.encode(f.text),
+    data: f.bytes !== undefined ? f.bytes : enc.encode(f.text ?? ""),
   }));
 
   const chunks: Uint8Array[] = [];
@@ -114,6 +110,11 @@ export function buildZip(
   const parts: BlobPart[] = [...chunks, ...central, end].map(toPart);
   return new Blob(parts, { type: "application/zip" });
 }
+
+const toPart = (u8: Uint8Array): BlobPart =>
+  u8.buffer instanceof ArrayBuffer && u8.byteOffset === 0
+    ? new Uint8Array(u8.buffer.slice(0) as ArrayBuffer)
+    : (u8.slice().buffer as ArrayBuffer);
 
 /** Trigger a client-side download of a blob under the given filename. */
 export function downloadBlob(blob: Blob, filename: string) {

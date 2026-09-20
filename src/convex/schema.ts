@@ -39,11 +39,39 @@ const schema = defineSchema(
     // one row per user-submitted video (URL or upload)
     jobs: defineTable({
       userId: v.id("users"),
-      // "url" = yt-dlp/cobalt grab, "upload" = manual attach
+      // "url" = cobalt/direct HTTP fetch, "upload" = manual attach
       sourceType: v.string(), // "url" | "upload"
       source: v.string(), // video URL or original file name
       isUpload: v.boolean(),
+      // REAL media (no simulation): the fetched source MP4 lives in Convex
+      // file storage. A job may not advance past "grabbing" without one.
+      sourceStorageId: v.optional(v.id("_storage")),
+      sourceBytes: v.optional(v.number()),
+      sourceDurationSec: v.optional(v.number()),
+      sourceWidth: v.optional(v.number()),
+      sourceHeight: v.optional(v.number()),
+      // how the bytes were actually obtained: "cobalt" | "direct" | "upload"
+      fetchSource: v.optional(v.string()),
+      fetchError: v.optional(v.string()),
+      fetchAttempts: v.array(
+        v.object({
+          method: v.string(),
+          ok: v.boolean(),
+          error: v.optional(v.string()),
+          bytes: v.optional(v.number()),
+          at: v.number(),
+        }),
+      ),
+      // Whisper word-level transcript (real, uploaded by the browser worker)
+      transcriptStorageId: v.optional(v.id("_storage")),
+      transcriptWordCount: v.optional(v.number()),
+      // browser render worker state: "pending" | "running" | "done" | "failed"
+      renderState: v.optional(v.string()),
+      renderError: v.optional(v.string()),
+      renderProgress: v.optional(v.number()),
+      detectedSource: v.optional(v.string()), // "gemini" | "none"
       // pipeline stages: queued | warming_model | grabbing | transcribing | finding | rendering | complete | failed
+      // queued | grabbing | transcribing | finding | rendering | complete | failed
       stage: v.string(),
       progress: v.number(), // 0-100 within current stage
       progressDetail: v.optional(v.string()),
@@ -73,11 +101,10 @@ const schema = defineSchema(
       logs: v.array(v.string()),      error: v.optional(v.string()),
       errorDetail: v.optional(v.string()),
       durationSec: v.optional(v.number()),
-      transcriptWordCount: v.optional(v.number()),
       clipCount: v.optional(v.number()),
       totalClipsSec: v.optional(v.number()),
-      clipSource: v.optional(v.string()), // "ai" | "heuristic"
-      downloadSource: v.optional(v.string()), // "yt-dlp" | "cobalt" | "upload"
+      clipSource: v.optional(v.string()), // "gemini"
+      downloadSource: v.optional(v.string()), // "cobalt" | "direct" | "upload"
       captionsTxt: v.optional(v.string()),
       createdAt: v.number(),
       completedAt: v.optional(v.number()),
@@ -105,10 +132,23 @@ const schema = defineSchema(
           text: v.string(),
         }),
       ),
-      cropBox: v.object({ x: v.number(), y: v.number() }),
-      silenceCuts: v.array(v.object({ start: v.number(), end: v.number() })),
+      // reframe geometry is produced by the real render pass, not fabricated
+      cropBox: v.optional(v.object({ x: v.number(), y: v.number() })),
+      silenceCuts: v.optional(v.array(v.object({ start: v.number(), end: v.number() }))),
       aspect: v.string(), // "9:16"
-      renderMs: v.number(),
+      // REAL rendered files (ffmpeg.wasm in the user's browser). A clip card
+      // with no mediaStorageId shows an honest "not rendered" state — the UI
+      // must never invent frames or labels for a clip that has no video.
+      mediaStorageId: v.optional(v.id("_storage")),
+      thumbStorageId: v.optional(v.id("_storage")),
+      mediaBytes: v.optional(v.number()),
+      mediaWidth: v.optional(v.number()),
+      mediaHeight: v.optional(v.number()),
+      mediaDurationSec: v.optional(v.number()),
+      mediaError: v.optional(v.string()),
+      // per-clip: "pending" | "running" | "done" | "failed"
+      renderState: v.optional(v.string()),
+      renderMs: v.optional(v.number()),
     })
       .index("by_job", ["jobId"])
       .index("by_user", ["userId"]),

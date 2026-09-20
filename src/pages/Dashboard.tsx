@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { useQuery, useAction, useMutation } from "convex/react";
 import { Film, Loader2, LogOut, PlayCircle, RefreshCw, Server, ServerOff, Sparkles, Timer } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
+import { useRenderWorker } from "@/hooks/use-render-worker";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -77,6 +78,10 @@ export default function Dashboard() {
       ? Math.max(1, Math.round((600 * trRate) / 60_000))
       : null;
 
+  // THIS TAB is the render worker: claims queued jobs and drives the real
+  // pipeline (fetch-verify → whisper → Gemini → ffmpeg.wasm renders).
+  const { busy: workerBusy } = useRenderWorker();
+
   const [selectedJobId, setSelectedJobId] = useState<JobDoc["_id"] | null>(null);
   const [previewClip, setPreviewClip] = useState<ClipDoc | null>(null);
   const [redetecting, setRedetecting] = useState<string | null>(null);
@@ -120,10 +125,10 @@ export default function Dashboard() {
     setRedetecting(jobId);
     try {
       const res = await redetect({ jobId });
-      if (res.clipSource === "ai") {
-        toast.success(`AI re-detection complete — ${res.count} clips.`);
+      if (res.detected) {
+        toast.success(`AI re-detection complete — ${res.count ?? 0} clips.`);
       } else {
-        toast.info("AI unavailable — used heuristic scoring instead.");
+        toast.error(res.error ?? "AI detection failed.");
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Re-detection failed.");
@@ -212,7 +217,12 @@ export default function Dashboard() {
               queue: {queueName ?? "clipforge"} · broker:{" "}
               {brokerUrl ?? "convex://clipforge-shared-db"}
             </span>
-            {!worker?.modelLoaded ? (
+            {workerBusy ? (
+              <span className="flex items-center gap-1.5 text-primary">
+                <Loader2 className="size-3.5 animate-spin" />
+                This tab is working a job
+              </span>
+            ) : !worker?.modelLoaded ? (
               <span className="flex items-center gap-1.5 text-amber-300">
                 <Loader2 className="size-3.5 animate-spin" />
                 Downloading AI model (one-time, ~3GB)…
@@ -333,14 +343,14 @@ export default function Dashboard() {
                     {selectedJob.totalClipsSec ?? 0}s of clips
                   </span>
                   <span>
-                    {selectedJob.clipSource === "ai"
+                    {selectedJob.clipSource === "gemini"
                       ? "AI-detected"
-                      : "Heuristic-detected"}
+                      : "Detection failed"}
                   </span>
                   <span>
                     {selectedJob.transcriptWordCount ?? 0} words transcribed
                   </span>
-                  <span>via {selectedJob.downloadSource ?? "yt-dlp"}</span>
+                  <span>via {selectedJob.downloadSource ?? "—"}</span>
                 </div>
               )}
 
@@ -385,7 +395,7 @@ export default function Dashboard() {
                   </span>
                 </DialogDescription>
               </DialogHeader>
-              <ClipPreview clip={previewClip} autoPlay className="w-full" />
+              <ClipPreview clipId={previewClip._id} autoPlay className="w-full" />
               <p className="max-h-24 overflow-auto rounded-lg border border-border bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
                 {previewClip.transcript}
               </p>

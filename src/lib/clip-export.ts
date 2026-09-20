@@ -1,5 +1,6 @@
 // Clip export helpers: per-clip SRT download, caption+hashtag clipboard,
 // captions.txt rendering, and the batch ZIP assembly for "Export all 9:16".
+// The ZIP carries the REAL rendered MP4s — no metadata-only exports.
 
 import { buildZip, downloadBlob, downloadText } from "@/lib/zip";
 import { fmtSrtTime } from "@/lib/clipforge";
@@ -8,10 +9,7 @@ import type { ClipDoc, JobDoc } from "@/lib/clipforge";
 /** Build and download the SRT for one clip. */
 export function buildClipSrt(clip: ClipDoc) {
   const srt = clip.captionCues
-    .map(
-      (c, i) =>
-        `${i + 1}\n${fmtSrtTime(c.start)} --> ${fmtSrtTime(c.end)}\n${c.text}\n`,
-    )
+    .map((c, i) => `${i + 1}\n${fmtSrtTime(c.start)} --> ${fmtSrtTime(c.end)}\n${c.text}\n`)
     .join("\n");
   downloadText(srt, `clip-${clip.order + 1}.srt`);
 }
@@ -56,43 +54,56 @@ export function clipFileStem(clip: ClipDoc): string {
   return `${String(clip.order + 1).padStart(2, "0")}-${safe || "clip"}`;
 }
 
+export function clipFileName(clip: ClipDoc): string {
+  return `${clipFileStem(clip)}.mp4`;
+}
+
 /**
- * Assemble the batch export ZIP: per-clip SRT + captions.txt + README
- * manifest. (Video payloads are produced by the render worker; the hosted
- * build ships the caption sidecars.)
+ * Download one REAL rendered clip. Caller must pass the fetched Blob of the
+ * stored MP4 — a clip without media has nothing to download and we say so.
  */
-export function buildExportZip(job: JobDoc, clips: ClipDoc[]): Blob {
-  const files = [
-    ...clips.map((clip) => ({
-      name: `clips/${clipFileStem(clip)}.srt`,
-      text: clip.captionCues
-        .map(
-          (c, i) =>
-            `${i + 1}\n${fmtSrtTime(c.start)} --> ${fmtSrtTime(c.end)}\n${c.text}\n`,
-        )
-        .join("\n"),
-    })),
-    {
-      name: "captions.txt",
-      text: buildCaptionsTxt(job, clips),
-    },
-    {
-      name: "README.txt",
-      text: [
-        "ClipForge export — 9:16 1080x1920, libx264/AAC",
-        `Source: ${job.source}`,
-        `Clips: ${clips.length}`,
-        "",
-        "Only clip content you own or have permission to use.",
-        "Clipping other creators' videos may violate platform ToS and copyright.",
-        "",
-        "Clip list:",
-        ...clips.map(
-          (c) =>
-            `  ${clipFileStem(c)} — ${c.start.toFixed(1)}s-${c.end.toFixed(1)}s, score ${c.score}, ${c.hashtags.join(" ")}`,
-        ),
-      ].join("\n"),
-    },
-  ];
-  return buildZip(files);
+export function downloadClipMp4(blob: Blob, clip: ClipDoc) {
+  downloadBlob(blob, clipFileName(clip));
+}
+
+/**
+ * Assemble the batch export ZIP: real MP4s (bytes passed in by the caller —
+ * only clips that actually have media are included) + per-clip SRT +
+ * captions.txt + README manifest.
+ */
+export function buildExportZip(
+  job: JobDoc,
+  clips: ClipDoc[],
+  media: { clip: ClipDoc; bytes: Uint8Array }[],
+): { blob: Blob; included: number; skipped: number } {
+  const files: { name: string; text?: string; bytes?: Uint8Array }[] = [];
+  for (const { clip, bytes } of media) {
+    files.push({ name: `clips/${clipFileName(clip)}`, bytes });
+  }
+  files.push({
+    name: "captions.txt",
+    text: buildCaptionsTxt(job, clips),
+  });
+  files.push({
+    name: "README.txt",
+    text: [
+      "ClipForge export — 9:16 1080x1920, H.264/AAC (ffmpeg.wasm)",
+      `Source: ${job.source}`,
+      `Clips included: ${media.length} of ${clips.length}`,
+      "",
+      "Only clip content you own or have permission to use.",
+      "Clipping other creators' videos may violate platform ToS and copyright.",
+      "",
+      "Clip list:",
+      ...clips.map((c) => {
+        const has = media.some((m) => m.clip._id === c._id);
+        return `  ${clipFileStem(c)} — ${c.start.toFixed(1)}s-${c.end.toFixed(1)}s, score ${c.score}${has ? "" : " (no rendered file)"}`;
+      }),
+    ].join("\n"),
+  });
+  return {
+    blob: buildZip(files),
+    included: media.length,
+    skipped: clips.length - media.length,
+  };
 }

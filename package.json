@@ -12,6 +12,9 @@
   },
   "dependencies": {
     "@convex-dev/auth": "^0.0.90",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/types": "^0.12.4",
+    "@ffmpeg/util": "^0.12.2",
     "@hookform/resolvers": "^5.2.2",
     "@jridgewell/trace-mapping": "^0.3.31",
     "@oslojs/crypto": "^1.0.1",
@@ -43,6 +46,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tailwindcss/vite": "^4.1.17",
     "@vly-ai/integrations": "^0.6.13",
+    "@xenova/transformers": "^2.17.2",
     "@zumer/snapdom": "^2.0.1",
     "axios": "^1.13.2",
     "class-variance-authority": "^0.7.1",

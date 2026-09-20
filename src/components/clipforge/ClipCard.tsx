@@ -1,14 +1,20 @@
+import { useState } from "react";
 import { toast } from "sonner";
+import { useQuery } from "convex/react";
 import {
   Copy,
   Download,
   Flame,
+  Loader2,
   Scissors,
   Thermometer,
+  TriangleAlert,
 } from "lucide-react";
+import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import { ClipPreview } from "./ClipPreview";
 import { buildClipSrt, copyClipMeta } from "@/lib/clip-export";
+import { downloadClipMp4 } from "@/lib/clip-export";
 import { scoreBand, fmtDuration } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import type { ClipDoc } from "@/lib/clipforge";
@@ -34,11 +40,36 @@ export function ClipCard({
 }) {
   const score = scoreBand(clip.score);
   const BandIcon = BAND_ICONS[score];
+  const mediaUrl = useQuery(api.clips.getClipMediaUrl, { clipId: clip._id });
+  const [downloading, setDownloading] = useState(false);
+
+  const renderState = clip.renderState ?? "pending";
+  const rendered =
+    clip.mediaStorageId !== undefined && mediaUrl !== null && mediaUrl !== undefined;
+  const failed = renderState === "failed";
+
+  const downloadMp4 = async () => {
+    if (mediaUrl === null || mediaUrl === undefined) {
+      toast.error("No rendered MP4 exists for this clip yet.");
+      return;
+    }
+    setDownloading(true);
+    try {
+      const res = await fetch(mediaUrl);
+      if (!res.ok) throw new Error(`download failed (HTTP ${res.status})`);
+      downloadClipMp4(await res.blob(), clip);
+      toast.success("MP4 downloaded.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Download failed.");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   return (
     <div className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card transition hover:border-primary/40">
       <div className="relative p-2">
-        <ClipPreview clip={clip} className="w-full" />
+        <ClipPreview clipId={clip._id} className="w-full" />
         {/* clickable overlay above the control bar opens the detail dialog */}
         <button
           type="button"
@@ -56,6 +87,19 @@ export function ClipCard({
             <BandIcon className="size-3" />
             {clip.score}
           </span>
+          {/* honest render-state chip — no fake "ready" look for metadata-only clips */}
+          {failed && (
+            <span className="flex items-center gap-1 rounded-full border border-destructive/50 bg-destructive/15 px-2 py-0.5 text-[10px] font-bold text-destructive">
+              <TriangleAlert className="size-3" />
+              render failed
+            </span>
+          )}
+          {!failed && !rendered && (
+            <span className="flex items-center gap-1 rounded-full border border-border bg-black/60 px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              not rendered
+            </span>
+          )}
         </div>
       </div>
       <div className="flex flex-1 flex-col gap-2 px-3 pb-3">
@@ -75,6 +119,8 @@ export function ClipCard({
         <p className="font-mono text-[10px] text-muted-foreground">
           {fmtDuration(clip.start)} → {fmtDuration(clip.end)} ·{" "}
           {fmtDuration(clip.end - clip.start)} · 9:16 1080×1920
+          {clip.mediaBytes !== undefined &&
+            ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`}
         </p>
         <div className="mt-auto flex items-center gap-1.5">
           <Button
@@ -97,12 +143,26 @@ export function ClipCard({
             size="sm"
             variant="outline"
             className="h-7 cursor-pointer gap-1.5 text-xs"
+            disabled={downloading || !rendered}
+            title={rendered ? "Download the rendered MP4" : "No rendered MP4 yet"}
+            onClick={() => void downloadMp4()}
+          >
+            {downloading ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            MP4
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 cursor-pointer gap-1.5 text-xs"
             onClick={() => {
               buildClipSrt(clip);
               toast.success("SRT downloaded.");
             }}
           >
-            <Download className="size-3.5" />
             .srt
           </Button>
         </div>

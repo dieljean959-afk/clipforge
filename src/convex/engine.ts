@@ -1,63 +1,17 @@
-// ClipForge engine — pure functions, no Convex imports.
-//
-// This module is the TypeScript port of the MoneyPrinterTurbo pipeline pieces
-// ClipForge reuses (subtitle -> caption -> clip rendering), adapted from
-// "topic -> stock-footage video" to "existing video -> viral clips":
-//   - word-level transcript (faster-whisper equivalent shape: {t0, t1, word})
-//   - chunked clip detection with 0-100 virality scoring (LLM or heuristic)
-//   - 9:16 render plan (crop box, silence cuts, word-pop caption timing)
-//   - SRT caption export (captions.txt)
-//
-// Transcript + render execution are simulated in this hosted environment;
-// the data shapes and stage ordering match the real yt-dlp / faster-whisper /
-// Gemini / MoviePy pipeline so the UI and storage layer do not change when a
-// real worker is attached.
+// ClipForge engine — pure helpers shared by the Convex backend and the
+// browser pipeline. There is NO simulation here: every unit, cue, and
+// candidate is derived from REAL inputs (actual bytes fetched, actual
+// Whisper word timings, actual LLM output).
 
-export type ClipStage =
-  | "queued"
-  | "grabbing"
-  | "transcribing"
-  | "finding"
-  | "rendering"
-  | "complete"
-  | "failed";
-
-export const STAGE_ORDER: ClipStage[] = [
-  "queued",
-  "grabbing",
-  "transcribing",
-  "finding",
-  "rendering",
-  "complete",
-];
+// ---------------------------------------------------------------------------
+// shared types
+// ---------------------------------------------------------------------------
 
 export interface TranscriptWord {
-  /** word start time, seconds from video start */
+  /** seconds from source start */
   t0: number;
-  /** word end time, seconds */
   t1: number;
-  /** the word itself */
-  word: string;
-}
-
-export interface TranscriptSegment {
-  id: number;
-  start: number;
-  end: number;
   text: string;
-}
-
-export interface ClipPlan {
-  start: number;
-  end: number;
-  score: number;
-  title: string;
-  hookText: string;
-  transcript: string;
-  hashtags: string[];
-  captionCues: CaptionCue[];
-  cropBox: { x: number; y: number };
-  silenceCuts: { start: number; end: number }[];
 }
 
 export interface CaptionCue {
@@ -66,109 +20,16 @@ export interface CaptionCue {
   text: string;
 }
 
-// ---------------------------------------------------------------------------
-// Seeded RNG so the same video always produces the same clips
-// ---------------------------------------------------------------------------
-
-function xmur3(str: string): () => number {
-  let h = 1779033703 ^ str.length;
-  for (let i = 0; i < str.length; i++) {
-    h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
-    h = (h << 13) | (h >>> 19);
-  }
-  return () => {
-    h = Math.imul(h ^ (h >>> 16), 2246822507);
-    h = Math.imul(h ^ (h >>> 13), 3266489909);
-    return (h ^= h >>> 16) >>> 0;
-  };
+export interface ClipCandidateOutput {
+  start: number;
+  end: number;
+  /** 0-100 */
+  score: number;
+  title: string;
+  hookText: string;
+  transcript: string;
+  hashtags: string[];
 }
-
-function mulberry32(seed: number): () => number {
-  let a = seed;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Synthetic word-level transcript (stand-in for faster-whisper output)
-// ---------------------------------------------------------------------------
-
-const OPENERS = [
-  "Here is the part",
-  "Nobody tells you this, but",
-  "The biggest mistake",
-  "What most people miss",
-  "Let me show you exactly how",
-  "This changed everything",
-  "Stop doing",
-  "The truth about",
-  "I tested this for thirty days and",
-  "You are leaving money on the table with",
-];
-
-const MIDS = [
-  "your editing workflow",
-  "the first three seconds",
-  "retention curves",
-  "short form pacing",
-  "your hook structure",
-  "posting cadence",
-  "audience targeting",
-  "the algorithm shift",
-  "caption styling",
-  "framing and reframe",
-  "sound design choices",
-  "topic selection",
-];
-
-const PUNCHES = [
-  "and it instantly doubled watch time",
-  "so the clip lands before the swipe",
-  "which is why the last one hit a million views",
-  "and suddenly the numbers flipped",
-  "that single tweak carried the whole video",
-  "because viewers stay for the payoff",
-  "and the retention graph went flat vertical",
-  "so test it on your next upload",
-  "and the comments exploded overnight",
-  "which nobody talks about",
-];
-
-const FILLER = ["okay", "look", "right", "seriously", "honestly", "now"];
-
-function pick<T>(rand: () => number, arr: T[]): T {
-  return arr[Math.floor(rand() * arr.length)];
-}
-
-function hashString(str: string): number {
-  const seedFn = xmur3(str);
-  return seedFn();
-}
-
-/** Simulated duration for a source video, in seconds. */
-export function simulateDuration(source: string, isUpload: boolean): number {
-  const rand = mulberry32(hashString(`dur:${source}`));
-  const minutes = isUpload ? 3.5 + rand() * 4 : 8.5 + rand() * 6;
-  return Math.round(minutes * 60);
-}
-
-// ---------------------------------------------------------------------------
-// Stage work-unit planning
-//
-// Every stage exposes REAL progress units the worker streams to the UI:
-//   grabbing     -> MB downloaded / total (yt-dlp reports this natively)
-//   transcribing -> seconds of audio processed / total duration (whisper
-//                   windows + ffprobe duration)
-//   finding      -> transcript chunks sent to Gemini / chunks total
-//   rendering    -> clips rendered / total, seconds encoded within a clip
-// Units are deterministic per source so the same video always walks the
-// pipeline identically (and tests are stable).
-// ---------------------------------------------------------------------------
 
 export interface StageUnits {
   unitLabel: string;
@@ -178,44 +39,35 @@ export interface StageUnits {
   detail: string;
 }
 
-/** Seeded rough file size for the grab stage (MB), yt-dlp "1080p max" default. */
-export function simulateFileSizeMb(source: string, isUpload: boolean): number {
-  const duration = simulateDuration(source, isUpload);
-  // 1080p h264 source streams at ~2.5-5 MB/s; uploads skew smaller.
-  const rand = mulberry32(hashString(`size:${source}`));
-  const mbPerSec = isUpload ? 1.2 + rand() * 0.8 : 2.4 + rand() * 2.2;
-  return round1(duration * mbPerSec);
-}
+// ---------------------------------------------------------------------------
+// stage work units (all computed from real values)
+// ---------------------------------------------------------------------------
 
-/** One-time whisper model warmup: faster-whisper pulls ~3GB of weights. */
-export function warmupUnits(): StageUnits {
+/** Fetch stage units: real MB downloaded. Total may be unknown until the
+ *  fetcher reports Content-Length — that's shown honestly. */
+export function fetchUnits(bytesDone: number, bytesTotal: number | null): StageUnits {
+  const doneMb = bytesDone / (1024 * 1024);
+  if (bytesTotal === null || bytesTotal <= 0) {
+    return {
+      unitLabel: "MB",
+      unitsTotal: 0,
+      unitsDone: Math.round(doneMb * 10) / 10,
+      detail: `${doneMb.toFixed(1)} MB downloaded (total size unknown yet)`,
+    };
+  }
+  const totalMb = bytesTotal / (1024 * 1024);
   return {
     unitLabel: "MB",
-    unitsTotal: 3072,
-    unitsDone: 0,
-    detail: "model weights",
-  };
-}
-
-/** Grab stage units: MB downloaded, emitted in ~5% increments like yt-dlp. */
-export function grabUnits(
-  source: string,
-  isUpload: boolean,
-  progressPct: number,
-): StageUnits {
-  const total = simulateFileSizeMb(source, isUpload);
-  const done = round1(total * Math.min(100, Math.max(0, progressPct)) / 100);
-  return {
-    unitLabel: "MB",
-    unitsTotal: total,
-    unitsDone: done,
-    detail: `${done.toFixed(1)} / ${total.toFixed(1)} MB`,
+    unitsTotal: Math.round(totalMb * 10) / 10,
+    unitsDone: Math.round(Math.min(doneMb, totalMb) * 10) / 10,
+    detail: `${doneMb.toFixed(1)} / ${totalMb.toFixed(1)} MB`,
   };
 }
 
 /**
- * Transcribe stage units: seconds of audio processed. faster-whisper decodes
- * in 30s windows, so total is the ffprobe duration rounded up to windows.
+ * Transcribe stage units: seconds of audio processed. Whisper decodes in
+ * 30s windows, so total is the ffprobe/measured duration rounded up to
+ * windows. All inputs are the real source duration measured in the browser.
  */
 export function transcribeUnits(
   durationSec: number,
@@ -231,7 +83,7 @@ export function transcribeUnits(
   };
 }
 
-/** Finding stage units: transcript chunks sent for LLM scoring. */
+/** Finding stage units: transcript chunks sent to the LLM. */
 export function findUnits(
   durationSec: number,
   progressPct: number,
@@ -247,474 +99,240 @@ export function findUnits(
   };
 }
 
-/** Render stage units: 9:16 clips encoded (FFmpeg runs sequential per clip). */
-export function renderUnits(
-  clipCount: number,
-  progressPct: number,
-): StageUnits {
-  const total = Math.max(1, clipCount);
-  const done = Math.min(total, Math.floor((total * Math.max(0, progressPct)) / 100) + 1);
+/** Render stage units: REAL count of finished clips. */
+export function renderUnits(doneCount: number, total: number): StageUnits {
+  const t = Math.max(1, total);
   return {
     unitLabel: "clips",
-    unitsTotal: total,
-    unitsDone: done,
-    detail: `clip ${done} of ${total} encoded`,
+    unitsTotal: t,
+    unitsDone: Math.min(t, doneCount),
+    detail: `${Math.min(t, doneCount)} / ${t} clips encoded`,
   };
 }
 
 /**
- * Seeded pipeline failure model. The real worker surfaces yt-dlp / Gemini /
- * FFmpeg exit codes as {error, stage, stderr tail}; this deterministic model
- * produces the same failure shapes (rare) so retry paths, timeouts, and error
- * cards are exercised end to end instead of rotting untested.
+ * Hard per-stage timeouts. These exist to convert hangs into readable
+ * failures — a job must NEVER sit in a stage past its limit.
  */
-export function pipelineFault(
-  source: string,
-  stage: string,
-  attempt: number,
-): { error: string; detail: string } | null {
-  const rand = mulberry32(hashString(`fault:${source}:${stage}`));
-  const roll = rand();
-  if (attempt >= 1) return null; // a retry always gets through
-  switch (stage) {
-    case "grabbing":
-      if (roll < 0.06) {
-        return {
-          error: "Download failed after 3 attempts (yt-dlp).",
-          detail:
-            "ERROR: [youtube] Sign in to confirm you're not a bot. Cobalt fallback also returned 403. Use 'Attach a file instead' or retry — the grabber refreshes cookies each attempt.",
-        };
-      }
-      break;
-    case "finding":
-      if (roll < 0.04) {
-        return {
-          error: "Clip detection failed (model).",
-          detail:
-            "Gemini 429 rate_limit_exceeded after 3 retries with backoff. Heuristic scoring could not run — retry to continue.",
-        };
-      }
-      break;
-    default:
-      break;
-  }
-  return null;
-}
-
-/** Stage hard timeouts (ms) — the watchdog kills jobs beyond these. */
 export const STAGE_TIMEOUT_MS: Record<string, number> = {
-  warming_model: 10 * 60 * 1000,
-  grabbing: 10 * 60 * 1000,
-  // transcribe timeout = 2x video duration (bounded 2-30 min)
-  transcribing: 30 * 60 * 1000,
-  finding: 15 * 60 * 1000,
-  rendering: 30 * 60 * 1000,
+  grabbing: 10 * 60 * 1000, // download 10 min
+  transcribing: 15 * 60 * 1000, // generous for long videos on CPU whisper
+  finding: 3 * 60 * 1000, // LLM scoring of ~7 chunks
+  rendering: 45 * 60 * 1000, // ffmpeg.wasm across all clips
 };
 
-/** Transcribe timeout depends on the video: 2x duration, min 3 min, max 30. */
 export function transcribeTimeoutMs(durationSec: number): number {
-  return Math.min(30 * 60 * 1000, Math.max(3 * 60 * 1000, durationSec * 2 * 1000));
+  return Math.max(2 * 60 * 1000, 2 * durationSec * 1000);
 }
 
 function fmtMin(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
-  return m > 0 ? `${m} min ${s > 0 ? `${s}s` : ""}`.trim() : `${s}s`;
-}
-
-function round1(n: number): number {
-  return Math.round(n * 10) / 10;
-}
-
-/**
- * Build a deterministic word-level transcript for the given source.
- * Mirrors the shape faster-whisper returns so swapping in a real worker
- * requires no changes downstream.
- */
-export function buildTranscript(
-  source: string,
-  durationSec: number,
-): TranscriptWord[] {
-  const rand = mulberry32(hashString(`words:${source}:${durationSec}`));
-  const words: TranscriptWord[] = [];
-  let t = 0.6 + rand() * 0.8;
-
-  while (t < durationSec - 2) {
-    const sentence: string[] = [];
-    sentence.push(pick(rand, OPENERS));
-    sentence.push(pick(rand, MIDS));
-    if (rand() > 0.35) sentence.push(pick(rand, FILLER));
-    sentence.push(pick(rand, PUNCHES));
-
-    for (const chunk of sentence) {
-      for (const w of chunk.split(" ")) {
-        const dur = 0.24 + rand() * 0.18;
-        words.push({ t0: round2(t), t1: round2(t + dur), word: w });
-        t += dur + 0.02 + rand() * 0.05;
-      }
-    }
-    // natural pause between sentences; occasionally dead air worth cutting
-    t += rand() < 0.22 ? 0.9 + rand() * 1.4 : 0.25 + rand() * 0.5;
+  if (sec >= 60) {
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return s === 0 ? `${m} min` : `${m}m ${s}s`;
   }
-  return words;
+  return `${Math.round(sec)}s`;
 }
 
-export function segmentTranscript(words: TranscriptWord[]): TranscriptSegment[] {
-  const segments: TranscriptSegment[] = [];
+// ---------------------------------------------------------------------------
+// transcript segmentation + AI detection prompt/response
+// ---------------------------------------------------------------------------
+
+/** Group words into ~90s chunks for LLM scoring (the real pipeline shape). */
+export function segmentTranscript(
+  words: TranscriptWord[],
+  targetSec = 90,
+): { start: number; end: number; text: string }[] {
+  const segments: { start: number; end: number; text: string }[] = [];
   let current: TranscriptWord[] = [];
+  let start = words[0]?.t0 ?? 0;
   const flush = () => {
     if (current.length === 0) return;
-    const id = segments.length;
     segments.push({
-      id,
-      start: current[0].t0,
+      start,
       end: current[current.length - 1].t1,
-      text: current.map((w) => w.word).join(" "),
+      text: current.map((w) => w.text).join(" ").slice(0, 1200),
     });
     current = [];
   };
-  for (let i = 0; i < words.length; i++) {
-    current.push(words[i]);
-    const gapToNext = i + 1 < words.length ? words[i + 1].t0 - words[i].t1 : 0;
-    const len = current.length;
-    if (gapToNext > 0.6 || len >= 12 || i === words.length - 1) flush();
+  for (const w of words) {
+    if (current.length > 0 && w.t0 - start >= targetSec) {
+      flush();
+      start = w.t0;
+    }
+    current.push(w);
   }
+  flush();
   return segments;
 }
 
-// ---------------------------------------------------------------------------
-// Clip detection
-// ---------------------------------------------------------------------------
-
-interface DetectOptions {
-  /** target word count for the sliding window */
-  minWords?: number;
-  maxWords?: number;
-  maxClips?: number;
-  seedSalt?: string;
-}
-
-const CURIOSITY = [
-  "nobody",
-  "mistake",
-  "truth",
-  "secret",
-  "why",
-  "how",
-  "tested",
-  "changed",
-  "stop",
-  "miss",
-];
-
-const ENERGY = [
-  "instantly",
-  "doubled",
-  "exploded",
-  "flipped",
-  "million",
-  "vertical",
-  "payoff",
-  "landed",
-  "hit",
-];
-
-function scoreWindow(
-  words: TranscriptWord[],
-  rand: () => number,
-): { score: number; reasons: { hook: number; energy: number } } {
-  const text = words.map((w) => w.word).join(" ");
-  const lower = text.toLowerCase();
-  let hook = 0;
-  for (const c of CURIOSITY) if (lower.includes(c)) hook += 1;
-  let energy = 0;
-  for (const e of ENERGY) if (lower.includes(e)) energy += 1;
-
-  // clip pacing: prefer ~30-45s windows, penalize rambling ones
-  const seconds = words[words.length - 1].t1 - words[0].t0;
-  const pacing =
-    seconds >= 22 && seconds <= 52 ? 1 : seconds < 18 ? 0.5 : 0.65;
-
-  const wordRate = words.length / Math.max(seconds, 1); // speech density
-  const density = wordRate > 2.2 ? 1 : wordRate / 2.2;
-
-  const score = Math.round(
-    Math.min(
-      98,
-      38 + hook * 7 + energy * 5 + pacing * 14 + density * 12 + rand() * 9,
-    ),
-  );
-  return { score, reasons: { hook, energy } };
-}
-
-function titleFrom(words: TranscriptWord[]): string {
-  const stop = new Set([
-    "the",
-    "a",
-    "an",
-    "and",
-    "or",
-    "but",
-    "is",
-    "are",
-    "you",
-    "your",
-    "for",
-    "with",
-    "that",
-    "this",
-    "it",
-    "to",
-    "of",
-    "in",
-    "on",
-    "so",
-  ]);
-  const notable = words
-    .map((w) => w.word.replace(/[^a-zA-Z0-9' ]/g, ""))
-    .filter((w) => w.length > 3 && !stop.has(w.toLowerCase()));
-  const base = notable.slice(0, 5).join(" ") || "Viral moment";
-  return base.charAt(0).toUpperCase() + base.slice(1);
-}
-
-export function buildHashtags(title: string): string[] {
-  const base = ["#clips", "#shorts", "#viral"];
-  const tags = title
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 3)
-    .slice(0, 3)
-    .map((t) => `#${t}`);
-  return [...new Set([...tags, ...base])].slice(0, 6);
-}
-
-/**
- * Heuristic clip detection: slide a sentence-aligned window over the
- * transcript, score each window, dedupe overlaps, keep the top candidates.
- * This is the fallback used when the LLM detection call is unavailable.
- */
-export function heuristicClipDetection(
-  words: TranscriptWord[],
-  opts: DetectOptions = {},
-): ClipCandidateOutput[] {
-  const minWords = opts.minWords ?? 45;
-  const maxWords = opts.maxWords ?? 130;
-  const maxClips = opts.maxClips ?? 12;
-  const rand = mulberry32(hashString(`detect:${opts.seedSalt ?? "default"}`));
-
-  const candidates: ClipCandidateOutput[] = [];
-
-  // Slide a sentence-aligned window over the word stream.
-  let i = 0;
-  while (i < words.length) {
-    let j = i;
-    let count = 0;
-    let endT = words[i].t0;
-    while (j < words.length && count < maxWords) {
-      count++;
-      endT = words[j].t1;
-      j++;
-      if (count >= minWords) {
-        const gap = j < words.length ? words[j].t0 - words[j - 1].t1 : Infinity;
-        if (count >= maxWords || (gap > 0.5 && rand() > 0.35)) break;
-      }
-    }
-
-    const start = words[i].t0;
-    const windowWords = words.slice(i, j);
-    if (count >= minWords * 0.6 && endT - start >= 15) {
-      const { score } = scoreWindow(windowWords, rand);
-
-      // dedupe: skip windows overlapping > 40% with an accepted candidate
-      const overlapsTooMuch = candidates.some((c) => {
-        const overlap = Math.min(c.end, endT) - Math.max(c.start, start);
-        return overlap > 0.4 * Math.min(c.end - c.start, endT - start);
-      });
-      if (!overlapsTooMuch) {
-        const title = titleFrom(windowWords);
-        candidates.push({
-          start: round2(start),
-          end: round2(endT),
-          score,
-          title,
-          hookText: windowWords
-            .slice(0, 14)
-            .map((w) => w.word)
-            .join(" "),
-          transcript: windowWords.map((w) => w.word).join(" "),
-          hashtags: buildHashtags(title),
-        });
-      }
-    }
-
-    if (candidates.length >= maxClips * 3) break;
-    // advance by roughly half a window so overlapping takes can be re-scored
-    i += Math.max(8, Math.floor(count * 0.5));
-  }
-
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates.slice(0, maxClips);
-}
-
-export interface ClipCandidateOutput {
-  start: number;
-  end: number;
-  score: number;
-  title: string;
-  hookText: string;
-  transcript: string;
-  hashtags: string[];
-}
-
-// ---------------------------------------------------------------------------
-// AI clip detection: prompt + response parsing
-// ---------------------------------------------------------------------------
-
-const MAX_PROMPT_CHARS = 14000;
-
+/** Build the clip-detection prompt for the LLM. */
 export function buildClipDetectionPrompt(
-  segments: TranscriptSegment[],
+  segments: { start: number; end: number; text: string }[],
   durationSec: number,
 ): string {
-  const lines: string[] = [];
-  let used = 0;
-  for (const seg of segments) {
-    const line = `[${seg.start.toFixed(1)}-${seg.end.toFixed(1)}] ${seg.text}`;
-    if (used + line.length > MAX_PROMPT_CHARS) break;
-    lines.push(line);
-    used += line.length;
-  }
+  const lines = segments
+    .map((s, i) => `[${s.start.toFixed(1)}s-${s.end.toFixed(1)}s] ${s.text}`)
+    .join("\n");
   return [
-    "You are a short-form video editor. Below is a word-level transcript of a video",
-    `(${Math.round(durationSec)} seconds total) with segment timestamps.`,
+    "You are a short-form video editor. Below is a word-level transcript of a",
+    `${Math.round(durationSec)} second video with timestamps. Pick the 5-12 most`, 
+    "viral-worthy moments for TikTok/Shorts/Reels (strong hook, emotion,",
+    "payoff, quotable lines).",
     "",
-    "Select the 5-12 most viral-worthy clips for TikTok/Reels/Shorts:",
-    "- each clip 20-55 seconds long",
-    "- starts on a hook, ends on a payoff",
-    "- do not cut mid-sentence",
+    "Rules:",
+    "- Each clip must be 15-75 seconds long.",
+    "- start/end are seconds from the beginning of the video, aligned to the",
+    "  timestamps you see.",
+    "- score is your virality estimate 0-100 (be discriminating).",
+    "- title: max 6 words, punchy, no quotes.",
+    "- hook_text: the single most gripping line inside the clip.",
+    "- hashtags: 3-5 lowercase tags without the # symbol.",
     "",
-    'Return ONLY a JSON array: [{"start": number (seconds), "end": number, "score": 0-100, "title": "3-6 word punchy title", "hook_text": "opening line"}]',
+    "Respond with ONLY a JSON array, no markdown fences, no commentary:",
+    '[{"start":12.5,"end":48.0,"score":91,"title":"...","hook_text":"...","hashtags":["x","y"]}]',
     "",
     "TRANSCRIPT:",
-    ...lines,
+    lines,
   ].join("\n");
 }
 
-export function parseClipDetectionResponse(
-  raw: string,
-  words: TranscriptWord[],
-  maxClips: number,
-): ClipCandidateOutput[] {
-  // extract the first JSON array from the response
-  const match = raw.match(/\[[\s\S]*\]/);
-  if (!match) throw new Error("No JSON array found in model response");
-  const parsed: unknown = JSON.parse(match[0]);
-  if (!Array.isArray(parsed)) throw new Error("Response is not an array");
-
-  const out: ClipCandidateOutput[] = [];
-  for (const item of parsed.slice(0, maxClips)) {
-    const rec = item as Record<string, unknown>;
-    const start = Number(rec.start);
-    const end = Number(rec.end);
-    const score = Number(rec.score);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-    if (!Number.isFinite(score)) continue;
-    const startR = Math.max(0, round2(start));
-    const endR = Math.max(startR + 8, round2(end));
-    const inWindow = words.filter((w) => w.t0 >= startR && w.t1 <= endR);
-    const transcript =
-      inWindow.length > 0
-        ? inWindow.map((w) => w.word).join(" ")
-        : String(rec.hook_text ?? "");
-    const title = titleFrom(
-      inWindow.length > 0
-        ? inWindow
-        : String(rec.title ?? "Viral moment")
-            .split(" ")
-            .map((word) => ({ t0: startR, t1: endR, word })),
-    );
-    out.push({
-      start: startR,
-      end: endR,
-      score: Math.max(0, Math.min(100, Math.round(score))),
-      title: title.slice(0, 60),
-      hookText: String(rec.hook_text ?? transcript.slice(0, 90)).slice(0, 120),
-      transcript: transcript.slice(0, 800),
-      hashtags: buildHashtags(title),
-    });
+/** Extract the first JSON array from an LLM response (handles fences/prose). */
+function extractJsonArray(text: string): unknown[] | null {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fenced !== null ? fenced[1] : text;
+  const begin = candidate.indexOf("[");
+  const end = candidate.lastIndexOf("]");
+  if (begin === -1 || end === -1 || end <= begin) return null;
+  try {
+    const parsed: unknown = JSON.parse(candidate.slice(begin, end + 1));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
-  if (out.length === 0) throw new Error("Model returned no usable clips");
-  out.sort((a, b) => b.score - a.score);
-  return out;
 }
 
-// ---------------------------------------------------------------------------
-// 9:16 render plan: silence cuts + face-tracking crop + caption cues
-// ---------------------------------------------------------------------------
-
-/** Simulated Silero-VAD style dead-air cuts: the sentence gaps marked in the transcript. */
-export function detectSilenceCuts(
-  words: TranscriptWord[],
-  clipStart: number,
-  clipEnd: number,
-): { start: number; end: number }[] {
-  const cuts: { start: number; end: number }[] = [];
-  const inClip = words.filter((w) => w.t0 >= clipStart && w.t1 <= clipEnd);
-  for (let i = 1; i < inClip.length; i++) {
-    const gapStart = inClip[i - 1].t1;
-    const gapEnd = inClip[i].t0;
-    if (gapEnd - gapStart > 0.55) {
-      cuts.push({ start: round2(gapStart - clipStart), end: round2(gapEnd - clipStart) });
-    }
-  }
-  return cuts;
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
 }
 
-/** Simulated MediaPipe face-track crop box: x drifts to follow the speaker. */
-export function computeCropBox(
-  source: string,
-  clipStart: number,
-): { x: number; y: number } {
-  const rand = mulberry32(hashString(`face:${source}:${Math.floor(clipStart)}`));
-  return { x: Math.round(rand() * 480), y: 0 };
+function titleFromWords(words: string[]): string {
+  const t = words.slice(0, 6).join(" ").replace(/["']/g, "").trim();
+  return t.length >= 8 ? t : words.slice(0, 9).join(" ").trim() || "Untitled moment";
+}
+
+function hashtagsFrom(text: string): string[] {
+  const stop = new Set([
+    "this","that","with","from","have","just","like","they","them","then",
+    "what","when","your","about","would","could","there","their","going",
+    "really","because","actually","think","know","want","things","gonna",
+  ]);
+  const counts = new Map<string, number>();
+  for (const raw of text.toLowerCase().split(/[^a-z0-9']+/)) {
+    const w = raw.replace(/'/g, "");
+    if (w.length < 4 || stop.has(w)) continue;
+    counts.set(w, (counts.get(w) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([w]) => w);
 }
 
 /**
- * Word-pop caption cues: group 1-3 words per cue (max 1.1s), times relative
- * to clip start — the same timing data the ASS renderer consumes.
+ * Parse the LLM's clip list, snapping windows to real word boundaries so
+ * captions never start mid-word. Returns [] when the output is unusable —
+ * callers must NOT silently fall back to fake scoring.
  */
-export function buildCaptionCues(
+export function parseClipDetectionResponse(
+  text: string,
+  words: TranscriptWord[],
+  maxClips: number,
+): ClipCandidateOutput[] {
+  const arr = extractJsonArray(text);
+  if (arr === null) return [];
+
+  const out: ClipCandidateOutput[] = [];
+  for (const raw of arr) {
+    if (raw === null || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const start = typeof r.start === "number" ? r.start : Number.NaN;
+    const end = typeof r.end === "number" ? r.end : Number.NaN;
+    const score = typeof r.score === "number" ? r.score : Number.NaN;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(score)) continue;
+    if (end - start < 8) continue;
+
+    // snap to word boundaries inside the window
+    const inside = words.filter((w) => w.t1 > start && w.t0 < end);
+    if (inside.length === 0) continue;
+    const wStart = inside[0];
+    const wEnd = inside[inside.length - 1];
+    const clipped: TranscriptWord[] = inside.filter(
+      (w) => w.t1 - wStart.t0 <= 75 && w.t1 <= wEnd.t1,
+    );
+    const span = clipped.length > 0 ? clipped : inside;
+    const transcript = span.map((w) => w.text).join(" ");
+    if (transcript.trim().length < 20) continue;
+
+    const hookRaw = typeof r.hook_text === "string" ? r.hook_text : "";
+    const titleRaw = typeof r.title === "string" ? r.title : "";
+    const tagsRaw = Array.isArray(r.hashtags)
+      ? r.hashtags.filter((t): t is string => typeof t === "string")
+      : [];
+
+    out.push({
+      start: Math.max(0, wStart.t0),
+      end: span[span.length - 1].t1,
+      score: Math.round(clamp(score, 0, 100)),
+      title: titleRaw.trim().slice(0, 60) || titleFromWords(transcript.split(" ")),
+      hookText: hookRaw.trim().slice(0, 160) || transcript.slice(0, 140),
+      transcript,
+      hashtags: (tagsRaw.length >= 2 ? tagsRaw : hashtagsFrom(transcript)).slice(0, 5),
+    });
+  }
+
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, maxClips);
+}
+
+// ---------------------------------------------------------------------------
+// karaoke captions from REAL word timings
+// ---------------------------------------------------------------------------
+
+/**
+ * Build 2-3-word caption cues from Whisper word timings, relative to clip
+ * start (the rendered clip's local timeline). These are the cues the ASS
+ * subtitle burn-in and the SRT export both use — one source of truth.
+ */
+export function karaokeCues(
   words: TranscriptWord[],
   clipStart: number,
   clipEnd: number,
 ): CaptionCue[] {
-  const inClip = words.filter((w) => w.t0 >= clipStart && w.t1 <= clipEnd);
+  const inClip = words.filter((w) => w.t1 > clipStart && w.t0 < clipEnd);
   const cues: CaptionCue[] = [];
-  let current: TranscriptWord[] = [];
+  let group: TranscriptWord[] = [];
   const flush = () => {
-    if (current.length === 0) return;
+    if (group.length === 0) return;
     cues.push({
-      start: round2(current[0].t0 - clipStart),
-      end: round2(current[current.length - 1].t1 - clipStart),
-      text: current.map((w) => w.word).join(" "),
+      start: Math.max(0, group[0].t0 - clipStart),
+      end: Math.max(0.3, group[group.length - 1].t1 - clipStart),
+      text: group.map((w) => w.text).join(" ").toUpperCase(),
     });
-    current = [];
+    group = [];
   };
   for (const w of inClip) {
-    current.push(w);
-    const dur = w.t1 - current[0].t0;
-    if (current.length >= 3 || dur >= 1.1) flush();
+    group.push(w);
+    const gapAheadNeedsBreak = w.t1 - clipStart > 0 && group.length >= 3;
+    if (gapAheadNeedsBreak) flush();
   }
   flush();
   return cues;
 }
 
-// ---------------------------------------------------------------------------
-// SRT export
-// ---------------------------------------------------------------------------
-
-function srtTime(seconds: number): string {
-  const ms = Math.max(0, Math.round(seconds * 1000));
+/** 00:01:23,500 (SRT timecode) */
+export function fmtSrtTime(sec: number): string {
+  const ms = Math.max(0, Math.round(sec * 1000));
   const h = Math.floor(ms / 3600000);
   const m = Math.floor((ms % 3600000) / 60000);
   const s = Math.floor((ms % 60000) / 1000);
@@ -723,44 +341,48 @@ function srtTime(seconds: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(milli, 3)}`;
 }
 
+/** SRT body for a cue list (used by exports and captions.txt). */
 export function buildSrt(cues: CaptionCue[]): string {
   return cues
-    .map((cue, i) => `${i + 1}\n${srtTime(cue.start)} --> ${srtTime(cue.end)}\n${cue.text}\n`)
+    .map((c, i) => `${i + 1}\n${fmtSrtTime(c.start)} --> ${fmtSrtTime(c.end)}\n${c.text}\n`)
     .join("\n");
 }
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
+/**
+ * ASS subtitle content for the ffmpeg burn-in: bold white text, thick
+ * #39FF14 green outline, lower-third position, one cue at a time (karaoke
+ * style). The pop/scale animation is applied by libass \t transforms.
+ */
+export function buildAssCues(
+  cues: CaptionCue[],
+  opts: { playResX: number; playResY: number } = { playResX: 1080, playResY: 1920 },
+): string {
+  const fmt = (t: number) => {
+    const h = Math.floor(t / 3600);
+    const m = Math.floor((t % 3600) / 60);
+    const s = t % 60;
+    return `${h}:${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`;
+  };
+  const events = cues
+    .map((c) => {
+      // pop-in: scale 62 -> 100 over the first 120ms of each cue
+      const fx = `{\\fscx62\\fscy62\\t(0,120,\\fscx100\\fscy100)}`;
+      return `Dialogue: 0,${fmt(c.start)},${fmt(c.end)},Pop,,0,0,0,,${fx}${c.text}`;
+    })
+    .join("\n");
+  return `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${opts.playResX}
+PlayResY: ${opts.playResY}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
 
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Pop,Arial Black,78,&H00FFFFFF,&H00FFFFFF,&H0000FF39,&H96000000,-1,0,0,0,100,100,1,0,1,9,3,2,80,80,320,1
 
-/** Full pipeline: transcript -> candidates -> render plans. */
-export function forgeClips(
-  source: string,
-  isUpload: boolean,
-  candidates: ClipCandidateOutput[],
-  maxClips: number,
-): ClipPlan[] {
-  const duration = simulateDuration(source, isUpload);
-  const words = buildTranscript(source, duration);
-  const top = candidates.slice(0, Math.max(5, Math.min(15, maxClips)));
-  return top.map((c) => {
-    const clipStart = Math.max(0, c.start);
-    const clipEnd = Math.min(duration, Math.max(clipStart + 8, c.end));
-    return {
-      start: clipStart,
-      end: clipEnd,
-      score: c.score,
-      title: c.title,
-      hookText: c.hookText,
-      transcript: c.transcript,
-      hashtags: c.hashtags,
-      captionCues: buildCaptionCues(words, clipStart, clipEnd),
-      cropBox: computeCropBox(source, clipStart),
-      silenceCuts: detectSilenceCuts(words, clipStart, clipEnd),
-    };
-  });
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+${events}
+`;
 }

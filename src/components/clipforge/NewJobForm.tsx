@@ -8,18 +8,22 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 /**
- * New job form: paste a video URL (yt-dlp -> cobalt fallback) or attach a
- * local file (name is used as the source label; the hosted build simulates
- * the transfer). Ownership confirmation is required before submission.
+ * New job form: paste a video URL (server fetch via cobalt → direct) or
+ * attach a local file — the file's REAL bytes are uploaded to storage and
+ * attached to the job before it can advance. Ownership confirmation is
+ * required before submission.
  */
 export function NewJobForm({ className }: { className?: string }) {
   const [mode, setMode] = useState<"url" | "upload">("url");
   const [url, setUrl] = useState("");
   const [fileName, setFileName] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const createJob = useMutation(api.clips.createJob);
+  const attachUpload = useMutation(api.clips.attachUpload);
+  const generateUploadUrl = useMutation(api.clips.generateUploadUrl);
 
   // Startup self-check: only block submitting on POSITIVE evidence the
   // worker chain is dead. `worker === undefined` covers both "still loading"
@@ -33,22 +37,40 @@ export function NewJobForm({ className }: { className?: string }) {
     confirmed &&
     !submitting &&
     !workerOffline &&
-    (mode === "url" ? url.trim().length > 0 : fileName.length > 0);
+    (mode === "url" ? url.trim().length > 0 : file !== null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      await createJob({
+      const jobId = await createJob({
         sourceType: mode,
         source: mode === "url" ? url.trim() : fileName,
       });
+      // Upload jobs: push the REAL bytes to storage and attach them — a job
+      // without a stored source can never advance past grabbing.
+      if (mode === "upload" && file !== null) {
+        const uploadUrl = await generateUploadUrl();
+        const res = await fetch(uploadUrl, {
+          method: "POST",
+          headers: { "Content-Type": file.type || "video/mp4" },
+          body: file,
+        });
+        if (!res.ok) throw new Error(`File upload failed (HTTP ${res.status}).`);
+        const { storageId } = (await res.json()) as { storageId: string };
+        await attachUpload({
+          jobId,
+          storageId: storageId as never,
+          bytes: file.size,
+        });
+      }
       toast.success("Job queued — Clippy is on it.", {
         description: mode === "url" ? url.trim() : fileName,
       });
       setUrl("");
       setFileName("");
+      setFile(null);
       setConfirmed(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
@@ -108,7 +130,8 @@ export function NewJobForm({ className }: { className?: string }) {
             accept="video/mp4,video/quicktime,video/webm"
             className="hidden"
             onChange={(e) => {
-              const f = e.target.files?.[0];
+              const f = e.target.files?.[0] ?? null;
+              setFile(f);
               setFileName(f ? f.name : "");
             }}
           />

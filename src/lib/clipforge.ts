@@ -1,6 +1,6 @@
-// Shared ClipForge client library. Clip data lives in Convex; these helpers
-// generate per-clip preview metadata (scene labels, gradient frames, SRT
-// timecodes) deterministically from the clip id so previews are stable.
+// Shared ClipForge client library. Formatting helpers and stage metadata.
+// NOTE: the old "scene preview" generator (invented labels/gradients) was
+// deleted on purpose — previews are real <video> elements of stored MP4s.
 
 import type { Doc } from "@/convex/_generated/dataModel";
 
@@ -27,9 +27,9 @@ export const STAGES: ClipStage[] = [
 
 export const STAGE_LABELS: Record<ClipStage, string> = {
   queued: "Queued",
-  grabbing: "Grabbing video",
+  grabbing: "Fetching video",
   transcribing: "Transcribing",
-  finding: "Finding clips",
+  finding: "AI clip detection",
   rendering: "Rendering 9:16",
   complete: "Complete",
   failed: "Failed",
@@ -38,74 +38,9 @@ export const STAGE_LABELS: Record<ClipStage, string> = {
 export const STAGE_LOADING: Record<string, string> = {
   grabbing: "Clippy is grabbing the video...",
   transcribing: "Whisper is transcribing word timings...",
-  finding: "Scoring viral moments...",
+  finding: "Gemini is scoring viral moments...",
   rendering: "Rendering 9:16 crops with captions...",
 };
-
-// ---------------------------------------------------------------------------
-// deterministic hashing for stable preview metadata
-// ---------------------------------------------------------------------------
-
-export function hash(str: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-const SCENE_LABELS = [
-  "Face-forward monologue",
-  "Desk setup wide shot",
-  "Screen share overlay",
-  "Two-shot interview",
-  "Camera B close-up",
-  "Whiteboard segment",
-  "Walk-and-talk",
-  "POV hands-on shot",
-];
-
-const SCENE_GRADIENTS = [
-  "from-[#123318] via-[#0b1d10] to-black",
-  "from-[#122b2e] via-[#0a1a1c] to-black",
-  "from-[#1c2a12] via-[#101c0a] to-black",
-  "from-[#241a2a] via-[#120c16] to-black",
-  "from-[#12283a] via-[#0a1622] to-black",
-  "from-[#2a2312] via-[#1a150a] to-black",
-  "from-[#2a1218] via-[#160a0c] to-black",
-  "from-[#132230] via-[#0b141c] to-black",
-];
-
-const SCENE_TINTS = [
-  "#39FF14",
-  "#7CFFB2",
-  "#9BFF6B",
-  "#54E38A",
-  "#C6FF00",
-  "#39FF14",
-  "#B0FF57",
-  "#54E38A",
-];
-
-export interface SceneSpec {
-  label: string;
-  gradient: string;
-  tint: string;
-}
-
-/** 3-4 deterministic scenes per clip for the simulated 9:16 preview. */
-export function clipScenes(clipId: string): SceneSpec[] {
-  const count = 3 + (hash(clipId) % 2);
-  return Array.from({ length: count }, (_, i) => {
-    const h = (hash(clipId + ":" + i) + i) % SCENE_LABELS.length;
-    return {
-      label: SCENE_LABELS[h],
-      gradient: SCENE_GRADIENTS[h],
-      tint: SCENE_TINTS[h],
-    };
-  });
-}
 
 // ---------------------------------------------------------------------------
 // formatting
@@ -135,15 +70,6 @@ export function fmtEta(sec: number): string {
   if (sec < 90) return `${Math.max(1, Math.round(sec))}s`;
   return `${Math.round(sec / 60)} min`;
 }
-
-/** Worker stage names as they appear in the per-job log ("View logs"). */
-export const STAGE_LOG_LABEL: Record<string, string> = {
-  warmup: "AI model warmup",
-  grab: "yt-dlp download",
-  transcribe: "faster-whisper",
-  find: "clip detection",
-  render: "FFmpeg render",
-};
 
 /** 00:01:23,500 (SRT timecode) */
 export function fmtSrtTime(sec: number): string {
