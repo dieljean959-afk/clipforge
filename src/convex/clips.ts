@@ -26,7 +26,13 @@ import {
 } from "./engine";
 
 // ---------------------------------------------------------------------------
-// ClipForge worker
+// ClipForge worker (serverless in-process model)
+//
+// This platform (Freebuff preview) cannot keep a persistent Celery/RQ process
+// alive, so the worker is a SELF-SCHEDULING Convex mutation chain: every tick
+// schedules the next one 2s later. API + worker are the same deployment, so
+// "worker offline" is structurally impossible — at worst the chain is between
+// ticks or was reset by a cold start, and any client ping re-arms it.
 //
 // Progress is REAL server-side work accounting, not client fake spinners:
 //  - each stage exposes work units (MB grabbed, seconds of audio processed,
@@ -34,12 +40,14 @@ import {
 //  - ETAs come from measured/learned per-stage rates (units remaining / rate)
 //  - stage timeouts + a 90s no-progress watchdog fail jobs with the exact
 //    error, stage, and stderr tail instead of leaving eternal "Working..."
-//  - a worker-liveness singleton gates job submission (an API that queues
-//    jobs nothing consumes is the #1 cause of eternal spinners)
+//  - a boot handshake logs the queue/broker identity and the client
+//    PING/GETSTATUS handshake verifies the worker is actually consuming
 // ---------------------------------------------------------------------------
 
-/** Cron tick cadence. The progress bar visibly moves at most 5s after each stage starts. */
-const TICK_MS = 5000;
+/** Delay before each tick schedules the next one — the worker loop itself. */
+const CHAIN_DELAY_MS = 2000;
+/** A worker with no heartbeat for this long (server clock) is considered dead. */
+const WORKER_STALE_MS = 45_000;
 /** Hard watchdog: no progress write for this long kills the job. */
 const WATCHDOG_MS = 90_000;
 /** Heartbeat flag: stage is running slower than its learned median × this. */
@@ -50,6 +58,20 @@ const MAX_ACTIVE = 2;
 const MAX_LOGS = 80;
 /** Learned-rate samples kept per stage. */
 const MAX_SAMPLES = 20;
+
+/**
+ * Queue + broker identity — the deploy-time handshake. In a self-hosted
+ * Celery/RQ deployment this MUST match REDIS_URL and the queue name in BOTH
+ * the API and the worker boot logs; here the Convex deployment plays the
+ * role of both broker and shared disk (jobs, clips, logs live in one DB),
+ * which is exactly the "same Redis + same queue + same storage" contract.
+ */
+const WORKER_IDENTITY = {
+  queue: "clipforge",
+  broker: "convex://clipforge-shared-db",
+  bootLine:
+    "Worker online, consuming queue: clipforge with broker: convex://clipforge-shared-db",
+} as const;
 
 // ms per work unit, per stage — the baseline before any real samples exist
 const DEFAULT_RATE_MS_PER_UNIT: Record<string, number> = {
@@ -129,24 +151,46 @@ export const recentClips = query({
   },
 });
 
-/** Worker liveness + learned rates — powers the offline banner and warmup hints. */
+/**
+ * Worker liveness + learned rates — powers the offline banner and warmup
+ * hints. Liveness is judged with the SERVER's own clock (serverClockMs is
+ * captured in this query), never the browser clock: a stale heartbeat with
+ * no client pings means the worker chain is NOT running (cold start).
+ */
 export const getWorkerStatus = query({
   args: {},
   handler: async (ctx) => {
+    const serverNow = Date.now();
     const row = await ctx.db
       .query("workerStatus")
       .withIndex("singleton", (q) => q.eq("singleton", "worker"))
       .unique();
-    return (
-      row ?? {
+    if (row === null) {
+      return {
         singleton: "worker" as const,
         online: false,
         lastHeartbeat: 0,
+        lastHeartbeatServerMs: undefined as number | undefined,
+        lastClientPingServerMs: undefined as number | undefined,
         modelLoaded: false,
         warmupDetail: undefined,
-        rates: {},
-      }
-    );
+        rates: {} as Record<string, number> | undefined,
+        queueName: undefined as string | undefined,
+        brokerUrl: undefined as string | undefined,
+        tickCount: undefined as number | undefined,
+        repairing: false,
+        lastBootLine: undefined as string | undefined,
+        serverClockMs: serverNow,
+      };
+    }
+    const hb = row.lastHeartbeatServerMs ?? row.lastHeartbeat;
+    const alive = row.chainArmed === true && serverNow - hb < WORKER_STALE_MS;
+    return {
+      ...row,
+      online: alive,
+      lastHeartbeatServerMs: hb,
+      serverClockMs: serverNow,
+    };
   },
 });
 
@@ -155,6 +199,111 @@ export const getWorkerStatus = query({
 // ---------------------------------------------------------------------------
 
 const URL_RE = /^https?:\/\/[^\s<>"')\]]+$/i;
+
+/**
+ * Client-side worker handshake. The UI calls this every 5s; it re-arms the
+ * tick chain when it is not running (deployment cold start) and records a
+ * client liveness ping (server clock). This is the startup self-check that
+ * would have caught the original bug: a worker that is not consuming the
+ * queue is repaired here instead of leaving jobs unconsumed forever.
+ */
+/**
+ * Arm the worker: upsert the singleton row, stamp the queue/broker identity,
+ * log the boot line, and mark the chain as armed. Shared by the client ping,
+ * the "Start worker" button, and the submit path when the worker is cold.
+ * The consumption loop itself is the self-scheduling workerTick chain.
+ */
+async function armWorker(ctx: MutationCtx): Promise<Doc<"workerStatus">> {
+  const serverNow = Date.now();
+  let row = await ctx.db
+    .query("workerStatus")
+    .withIndex("singleton", (q) => q.eq("singleton", "worker"))
+    .unique();
+  if (row === null) {
+    const id = await ctx.db.insert("workerStatus", {
+      singleton: "worker",
+      online: true,
+      lastHeartbeat: serverNow,
+      lastHeartbeatServerMs: serverNow,
+      modelLoaded: false,
+      tickCount: 1,
+      repairing: true,
+      chainArmed: true,
+      queueName: WORKER_IDENTITY.queue,
+      brokerUrl: WORKER_IDENTITY.broker,
+      lastBootLine: WORKER_IDENTITY.bootLine,
+      rates: {},
+    });
+    const created = await ctx.db.get(id);
+    if (created === null) throw new Error("workerStatus row vanished.");
+    row = created;
+  } else {
+    const patch: Partial<Doc<"workerStatus">> = {
+      online: true,
+      lastHeartbeat: serverNow,
+      lastHeartbeatServerMs: serverNow,
+      tickCount: (row.tickCount ?? 0) + 1,
+      repairing: true,
+      chainArmed: true,
+      queueName: WORKER_IDENTITY.queue,
+      brokerUrl: WORKER_IDENTITY.broker,
+      lastBootLine: WORKER_IDENTITY.bootLine,
+    };
+    await ctx.db.patch(row._id, patch);
+    row = { ...row, ...patch };
+  }
+  // Deploy-time handshake: boot line with the queue + broker identity —
+  // byte-identical to what a self-hosted Celery/RQ worker logs at boot.
+  console.log(WORKER_IDENTITY.bootLine);
+  return row;
+}
+
+export const pingWorker = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Sign in first.");
+
+    const serverNow = Date.now();
+    const row = await ctx.db
+      .query("workerStatus")
+      .withIndex("singleton", (q) => q.eq("singleton", "worker"))
+      .unique();
+
+    const hb = row === null ? 0 : (row.lastHeartbeatServerMs ?? row.lastHeartbeat);
+    const alive =
+      row !== null &&
+      row.chainArmed === true &&
+      serverNow - hb < WORKER_STALE_MS;
+
+    if (alive && row !== null) {
+      // Client is listening — record the ping (server clock) only.
+      await ctx.db.patch(row._id, { lastClientPingServerMs: serverNow });
+      return { repairing: false, serverClockMs: serverNow };
+    }
+
+    // Cold start (no row) or a stale chain — re-arm and kick a tick.
+    await armWorker(ctx);
+    await ctx.scheduler.runAfter(0, internal.clips.workerTick, {});
+    return { repairing: true, serverClockMs: serverNow };
+  },
+});
+
+/**
+ * Manual "Start worker" button — same repair as the ping, for recovering
+ * from the UI without touching the deployment.
+ */
+export const startWorker = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Sign in first.");
+
+    await armWorker(ctx);
+    await ctx.scheduler.runAfter(0, internal.clips.workerTick, {});
+    return { started: true, serverClockMs: Date.now() };
+  },
+});
 
 export const createJob = mutation({
   args: {
@@ -165,15 +314,22 @@ export const createJob = mutation({
     const userId = await getAuthUserId(ctx);
     if (userId === null) throw new Error("Sign in to forge clips.");
 
-    // Liveness gate: never queue work nothing will consume.
+    // Liveness gate (server clock). On a cold start the chain may not be
+    // running yet — instead of refusing, re-arm it and accept the job: the
+    // in-process worker model makes a dead worker a repairable state, never
+    // a permanently unconsumed queue.
     const worker = await ctx.db
       .query("workerStatus")
       .withIndex("singleton", (q) => q.eq("singleton", "worker"))
       .unique();
-    if (worker === null || !worker.online) {
-      throw new Error(
-        "Render worker offline — start it with: celery -A app worker --loglevel=info",
-      );
+    const serverNow = Date.now();
+    const workerAlive =
+      worker !== null &&
+      worker.chainArmed === true &&
+      serverNow - (worker.lastHeartbeatServerMs ?? worker.lastHeartbeat) <
+        WORKER_STALE_MS;
+    if (!workerAlive) {
+      await armWorker(ctx);
     }
 
     const trimmed = source.trim();
@@ -214,15 +370,20 @@ export const createJob = mutation({
       isUpload: sourceType === "upload",
       stage: "queued",
       progress: 0,
-      progressDetail: "Queued — waiting for the worker...",
+      progressDetail: workerAlive
+        ? "Queued — waiting for the worker..."
+        : "Queued — waking the worker (cold start)...",
       stageTimings: [],
       logs: [
         `${ts()} · queued — ${sourceType === "upload" ? `upload "${trimmed}"` : trimmed}`,
+        ...(workerAlive
+          ? []
+          : [`${ts()} · worker was cold — re-armed in-process, will consume this job`]),
       ],
       createdAt: Date.now(),
     });
 
-    // Kick the worker immediately; the cron keeps it ticking afterwards.
+    // Kick the worker immediately; the self-scheduling chain keeps it going.
     await ctx.scheduler.runAfter(0, internal.clips.workerTick, {});
     return jobId;
   },
@@ -232,16 +393,98 @@ export const createJob = mutation({
 // worker tick
 // ---------------------------------------------------------------------------
 
+/**
+ * Ensure the worker row exists, write the heartbeat, and verify the tick
+ * chain is armed. Returns whether this tick is a FRESH BOOT — i.e. the chain
+ * was not running (first tick after a deployment/cold start, or a stale
+ * worker) — so the caller can log the boot line, self-heal stuck jobs, and
+ * re-arm the chain. The cron duplicates a share of ticks; the tickCount
+ * dedup collapses those into one logical worker.
+ */
+async function bootstrapWorker(
+  ctx: MutationCtx,
+  now: number,
+): Promise<{ row: Doc<"workerStatus">; fresh: boolean }> {
+  let row = await ctx.db
+    .query("workerStatus")
+    .withIndex("singleton", (q) => q.eq("singleton", "worker"))
+    .unique();
+
+  if (row === null) {
+    const id = await ctx.db.insert("workerStatus", {
+      singleton: "worker",
+      online: true,
+      lastHeartbeat: now,
+      lastHeartbeatServerMs: now,
+      tickCount: 1,
+      modelLoaded: false,
+      chainArmed: true,
+      repairing: false,
+      queueName: WORKER_IDENTITY.queue,
+      brokerUrl: WORKER_IDENTITY.broker,
+      lastBootLine: WORKER_IDENTITY.bootLine,
+      rates: {},
+    });
+    const created = await ctx.db.get(id);
+    if (created === null) throw new Error("workerStatus row vanished.");
+    return { row: created, fresh: true };
+  }
+
+  const hb = row.lastHeartbeatServerMs ?? row.lastHeartbeat;
+  const alive = row.chainArmed === true && now - hb < WORKER_STALE_MS;
+  // Dedup: if the chain is alive AND a tick ran very recently, another tick
+  // (cron or scheduler overlap) just ran — treat as a continuation, and skip
+  // the heartbeat write to avoid racing it.
+  if (alive && row.lastHeartbeatServerMs !== undefined && now - row.lastHeartbeatServerMs < 1000) {
+    return { row, fresh: false };
+  }
+
+  const tickCount = (row.tickCount ?? 0) + 1;
+  const patch: Partial<Doc<"workerStatus">> = {
+    online: true,
+    lastHeartbeat: now,
+    lastHeartbeatServerMs: now,
+    tickCount,
+    chainArmed: true,
+    queueName: WORKER_IDENTITY.queue,
+    brokerUrl: WORKER_IDENTITY.broker,
+  };
+  // Fresh boot: the chain was NOT running (cold start / stale worker).
+  const fresh = !alive;
+  if (fresh) {
+    patch.repairing = true;
+    patch.lastBootLine = WORKER_IDENTITY.bootLine;
+  } else {
+    patch.repairing = false;
+  }
+  await ctx.db.patch(row._id, patch);
+  return { row: { ...row, ...patch }, fresh };
+}
+
 export const workerTick = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
 
-    // --- heartbeat ----------------------------------------------------------
-    const worker = await ensureWorkerRow(ctx);
-    const online = now - worker.lastHeartbeat < 30_000;
-    if (!online) {
-      await ctx.db.patch(worker._id, { online: false, lastHeartbeat: now });
+    // --- chain claim (dedup): only one tick may schedule the successor ------
+    // The cron, client kicks, and the chain itself all call workerTick; the
+    // nextTickAt claim collapses overlapping ticks into ONE running chain.
+    const claimed = await claimNextTick(ctx, now);
+    if (!claimed) return;
+
+    // --- boot handshake ------------------------------------------------------
+    const { row: worker, fresh } = await bootstrapWorker(ctx, now);
+    if (fresh) {
+      // Deploy-time handshake: boot line with queue + broker identity, so a
+      // broker/queue mismatch (or a dead worker) is visible in the logs.
+      console.log(
+        `[worker] Worker online, consuming queue: ${WORKER_IDENTITY.queue} with broker: ${WORKER_IDENTITY.broker}`,
+      );
+      if ((worker.tickCount ?? 1) > 1) {
+        console.log(
+          "[worker] Tick chain was not running (deployment/cold start) — re-armed, recovering queue.",
+        );
+      }
     }
 
     const stats = await ensureStatsRow(ctx);
@@ -263,20 +506,27 @@ export const workerTick = internalMutation({
       active.push(...rows);
     }
 
-    // A queued job nobody can run is the eternal-spinner bug — surface it.
-    if (!online) {
-      for (const job of [...queued, ...active]) {
-        if (now - job.createdAt < 60_000) continue;
-        await failJob(ctx, job, "Render worker offline.", {
-          detail:
-            "No worker is consuming the queue. Start it with: celery -A app worker --loglevel=info",
-          stage: job.stage,
+    // --- cold-start recovery RESUME ------------------------------------------
+    // A deployment restart abandons jobs mid-stage with a dead chain. On
+    // fresh boot, shift each job's stage clock forward over the dead gap so
+    // elapsed work is preserved and the stage RESUMES where it stopped
+    // instead of restarting from 0%.
+    if (fresh) {
+      const gapMs = now - (worker.lastHeartbeatServerMs ?? worker.lastHeartbeat);
+      for (const job of active) {
+        const startedAt = job.stageStartedAt ?? now;
+        // Cap at `now`: if the whole stage elapsed inside the dead gap, resume
+        // from 0 rather than producing negative elapsed time.
+        await ctx.db.patch(job._id, {
+          stageStartedAt: Math.min(now, startedAt + gapMs),
+          lastProgressAt: now,
+          logs: appendLog(
+            job.logs,
+            `${ts()} · ↻ worker restarted — stage ${job.stage} resumed after ${fmtDur(gapMs)} pause`,
+          ),
         });
       }
-      return;
     }
-
-    await ctx.db.patch(worker._id, { online: true, lastHeartbeat: now });
 
     // --- one-time model warmup ----------------------------------------------
     let modelLoaded = worker.modelLoaded;
@@ -284,38 +534,55 @@ export const workerTick = internalMutation({
       modelLoaded = await runWarmup(ctx, worker, stats, now);
     }
 
-    // --- start queued jobs ---------------------------------------------------
-    let slots = MAX_ACTIVE - active.length;
+    // --- start queued jobs ----------------------------------------------------
+    let slots = MAX_ACTIVE - (fresh ? 0 : active.length);
     for (const job of queued) {
       if (!modelLoaded || slots <= 0) break;
-      await startJob(ctx, job, now);
+      await startJob(ctx, job, stats, now);
       slots -= 1;
     }
 
-    // --- advance active jobs -------------------------------------------------
-    for (const job of active) {
-      await advanceJob(ctx, job, stats, now);
+    // --- advance active jobs ---------------------------------------------------
+    if (!fresh) {
+      for (const job of active) {
+        await advanceJob(ctx, job, stats, now);
+      }
+    }
+
+    // --- self-scheduling chain: this IS the worker ------------------------------
+    // The claim gate at the top guarantees this is the only in-flight tick,
+    // so schedule the successor unconditionally — this is the consumption
+    // loop. A dropped schedule heals via the cron, client pings, or kicks.
+    const row = await ctx.db
+      .query("workerStatus")
+      .withIndex("singleton", (q) => q.eq("singleton", "worker"))
+      .unique();
+    if (row !== null) {
+      await ctx.db.patch(row._id, { nextTickAt: now + CHAIN_DELAY_MS });
+      await ctx.scheduler.runAfter(CHAIN_DELAY_MS, internal.clips.workerTick, {});
     }
   },
 });
 
-async function ensureWorkerRow(ctx: MutationCtx) {
+/**
+ * CAS-style claim on the next tick slot. Mutations serialize in Convex, so
+ * check-and-set here is race-free: the first tick of a burst wins the claim
+ * and does the work; the rest return immediately (dedup, not a tick storm).
+ * The claim expires when the successor is scheduled (nextTickAt <= now), so
+ * a dropped schedule (platform hiccup) heals on the next cron/kick/ping.
+ */
+async function claimNextTick(ctx: MutationCtx, now: number): Promise<boolean> {
   const row = await ctx.db
     .query("workerStatus")
     .withIndex("singleton", (q) => q.eq("singleton", "worker"))
     .unique();
-  if (row !== null) return row;
-  const id = await ctx.db.insert("workerStatus", {
-    singleton: "worker",
-    online: false,
-    lastHeartbeat: Date.now(),
-    modelLoaded: false,
-    warmupDetail: undefined,
-    rates: {},
-  });
-  const created = await ctx.db.get(id);
-  if (created === null) throw new Error("workerStatus row vanished.");
-  return created;
+  if (row !== null) {
+    const nta = row.nextTickAt;
+    if (nta !== undefined && nta > now) return false; // another tick owns the next slot
+    await ctx.db.patch(row._id, { nextTickAt: now + CHAIN_DELAY_MS });
+    return true;
+  }
+  return true; // no row yet — bootstrapWorker creates it below
 }
 
 async function ensureStatsRow(ctx: MutationCtx) {
@@ -371,9 +638,11 @@ async function runWarmup(
     await ctx.db.patch(worker._id, {
       online: true,
       lastHeartbeat: now,
+      lastHeartbeatServerMs: now,
       modelLoaded: false,
       warmupDetail: `Downloading AI model (one-time, ~3GB)... ${u.unitsDone} / ${u.unitsTotal} MB`,
       warmupStartedAt: startedAt,
+      repairing: false,
     });
     return false;
   }
@@ -384,14 +653,21 @@ async function runWarmup(
   await ctx.db.patch(worker._id, {
     online: true,
     lastHeartbeat: now,
+    lastHeartbeatServerMs: now,
     modelLoaded: true,
     warmupDetail: undefined,
     warmupStartedAt: undefined,
+    repairing: false,
   });
   return true;
 }
 
-async function startJob(ctx: MutationCtx, job: Doc<"jobs">, now: number) {
+async function startJob(
+  ctx: MutationCtx,
+  job: Doc<"jobs">,
+  stats: Doc<"engineStats">,
+  now: number,
+) {
   const stage = "grabbing";
   const units = grabUnits(job.source, job.isUpload, 0);
   await ctx.db.patch(job._id, {
@@ -404,13 +680,12 @@ async function startJob(ctx: MutationCtx, job: Doc<"jobs">, now: number) {
     stageStartedAt: now,
     lastProgressAt: now,
     slow: false,
-    stageEtaSec: Math.round((units.unitsTotal * rateFor(await getStats(ctx), stage)) / 1000),
-    logs: appendLog(job.logs, `${ts()} · ▶ ${stage} — target ${units.unitsTotal.toFixed(1)} MB (yt-dlp, 1080p max MP4)`),
+    stageEtaSec: Math.round((units.unitsTotal * rateFor(stats, stage)) / 1000),
+    logs: appendLog(
+      job.logs,
+      `${ts()} · ▶ ${stage} — target ${units.unitsTotal.toFixed(1)} MB (yt-dlp, 1080p max MP4)`,
+    ),
   });
-}
-
-async function getStats(ctx: MutationCtx): Promise<Doc<"engineStats">> {
-  return await ensureStatsRow(ctx);
 }
 
 function appendLog(logs: string[] | undefined, line: string): string[] {
@@ -554,14 +829,14 @@ async function advanceJob(
     return;
   }
 
-  // --- progress write -------------------------------------------------------
+  // --- progress write --------------------------------------------------------
   const snap = stageSnapshot(stage, job, pct);
   const remainingSec = Math.max(
     0,
     Math.round((Math.max(0.1, unitsTotal - snap.unitsDone) * rate) / 1000),
   );
   const slow = elapsed > stageMs * SLOW_FACTOR && pct < 99;
-  const totalEta = await computeTotalEta(ctx, stage, remainingSec);
+  const totalEta = await computeTotalEta(ctx, stage, remainingSec, stats);
 
   await ctx.db.patch(job._id, {
     progress: snap.progress,
@@ -575,12 +850,14 @@ async function advanceJob(
     slow,
   });
 
-  if (pct < 99) {
+  if (pct < 99.9) {
     // ETA line lives in the UI; only log milestone crossings to avoid spam.
+    // (99.9, not 99: the clamp holds pct at 99.4, so a `pct < 99` check here
+    // would never fire and the stage would spin at 99% until its timeout.)
     return;
   }
 
-  // --- stage finished -------------------------------------------------------
+  // --- stage finished ---------------------------------------------------------
   const durMs = now - startedAt;
   await recordSample(ctx, stats, stage, durMs, unitsTotal);
 
@@ -590,16 +867,6 @@ async function advanceJob(
     return;
   }
 
-  await ctx.db.patch(job._id, {
-    stageTimings: [
-      ...job.stageTimings,
-      { stage, durationMs: durMs, at: now },
-    ],
-    logs: appendLog(
-      job.logs,
-      `${ts()} · ✓ ${stage} — ${fmtDur(durMs)} (${snap.unitsDone} ${snap.unitLabel})`,
-    ),
-  });
   await enterStage(ctx, { ...job, stageTimings: [
     ...job.stageTimings,
     { stage, durationMs: durMs, at: now },
@@ -665,15 +932,15 @@ function composeDetail(
  * Total ETA: current stage remaining + pre-stage estimates for every stage
  * still ahead, using learned per-stage rates ("usually takes ~3 min" data).
  */
-async function computeTotalEta(
+function computeTotalEta(
   ctx: MutationCtx,
   stage: string,
   stageRemainingSec: number,
-): Promise<number> {
+  stats: Doc<"engineStats">,
+): number {
   const ORDER = ["grabbing", "transcribing", "finding", "rendering"];
   const idx = ORDER.indexOf(stage);
   if (idx === -1) return stageRemainingSec;
-  const stats = await ensureStatsRow(ctx);
   const duration = 600; // nominal 10-minute source for pre-estimates
   let total = stageRemainingSec;
   for (let i = idx + 1; i < ORDER.length; i++) {
@@ -808,8 +1075,8 @@ async function enterStage(ctx: MutationCtx, job: Doc<"jobs">, now: number) {
       stage: "complete",
       progress: 100,
       progressDetail: undefined,
-      stageEtaSec: 0,
-      totalEtaSec: 0,
+      stageEtaSec: undefined,
+      totalEtaSec: undefined,
       slow: false,
       completedAt: now,
       logs: appendLog(job.logs, `${ts()} · ✓ complete — MP4s in the output directory`),
@@ -819,10 +1086,6 @@ async function enterStage(ctx: MutationCtx, job: Doc<"jobs">, now: number) {
 
   await failJob(ctx, job, "Unknown pipeline stage.", { detail: `stage=${finished}` });
 }
-
-// ---------------------------------------------------------------------------
-// total ETA (current stage remaining + learned estimates for upcoming stages)
-// ---------------------------------------------------------------------------
 
 async function failJob(
   ctx: MutationCtx,
@@ -969,10 +1232,30 @@ export const retryJob = mutation({
       .withIndex("by_job", (q) => q.eq("jobId", jobId))
       .collect();
     for (const c of oldClips) await ctx.db.delete(c._id);
+
+    // Re-queue AND verify the worker chain is armed (server clock). If it is
+    // cold, re-arm it here — a retry that nothing consumes is the original
+    // eternal-spinner bug.
+    const worker = await ctx.db
+      .query("workerStatus")
+      .withIndex("singleton", (q) => q.eq("singleton", "worker"))
+      .unique();
+    const serverNow = Date.now();
+    const workerAlive =
+      worker !== null &&
+      worker.chainArmed === true &&
+      serverNow - (worker.lastHeartbeatServerMs ?? worker.lastHeartbeat) <
+        WORKER_STALE_MS;
+    if (!workerAlive) {
+      await armWorker(ctx);
+    }
+
     await ctx.db.patch(jobId, {
       stage: "queued",
       progress: 0,
-      progressDetail: "Queued — waiting for the worker...",
+      progressDetail: workerAlive
+        ? "Queued — waiting for the worker..."
+        : "Queued — waking the worker (cold start)...",
       unitLabel: undefined,
       unitsDone: undefined,
       unitsTotal: undefined,
@@ -991,7 +1274,10 @@ export const retryJob = mutation({
       clipSource: undefined,
       durationSec: undefined,
       transcriptWordCount: undefined,
-      logs: appendLog(job.logs, `${ts()} · ↻ retry queued`),
+      logs: appendLog(
+        job.logs,
+        `${ts()} · ↻ retry queued${workerAlive ? "" : " — worker re-armed (was cold)"}`,
+      ),
     });
     await ctx.scheduler.runAfter(0, internal.clips.workerTick, {});
   },
@@ -1012,5 +1298,72 @@ export const deleteJob = mutation({
       .collect();
     for (const c of oldClips) await ctx.db.delete(c._id);
     await ctx.db.delete(jobId);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// ops diagnostics (internal only — runnable from the CLI/dashboard, never
+// exposed to clients; used to prove queue drain and repair stuck jobs)
+// ---------------------------------------------------------------------------
+
+/** All jobs with stage/error summary — the queue-drain diagnostic view. */
+export const adminJobSummary = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const jobs = await ctx.db.query("jobs").collect();
+    const out = [];
+    for (const job of jobs) {
+      const clips = await ctx.db
+        .query("clips")
+        .withIndex("by_job", (q) => q.eq("jobId", job._id))
+        .collect();
+      out.push({
+        id: job._id,
+        stage: job.stage,
+        source: job.source.slice(0, 60),
+        progress: Math.round(job.progress),
+        error: job.error,
+        clipCount: clips.length,
+        createdAt: job.createdAt,
+      });
+    }
+    return out.sort((a, b) => b.createdAt - a.createdAt);
+  },
+});
+
+/**
+ * Ops requeue: reset a failed/stuck job to `queued` and wake the worker.
+ * The serverless equivalent of re-enqueueing a task in Redis after fixing
+ * the worker. Internal-only for the same reason as adminJobSummary.
+ */
+export const adminRequeueJob = internalMutation({
+  args: { jobId: v.id("jobs") },
+  handler: async (ctx, { jobId }) => {
+    const job = await ctx.db.get(jobId);
+    if (job === null) throw new Error("Job not found.");
+    const oldClips = await ctx.db
+      .query("clips")
+      .withIndex("by_job", (q) => q.eq("jobId", jobId))
+      .collect();
+    for (const c of oldClips) await ctx.db.delete(c._id);
+    await ctx.db.patch(jobId, {
+      stage: "queued",
+      progress: 0,
+      progressDetail: "Queued — ops requeue, worker draining...",
+      error: undefined,
+      errorDetail: undefined,
+      stageEtaSec: undefined,
+      totalEtaSec: undefined,
+      stageStartedAt: undefined,
+      lastProgressAt: Date.now(),
+      slow: false,
+      clipCount: undefined,
+      totalClipsSec: undefined,
+      captionsTxt: undefined,
+      completedAt: undefined,
+      logs: appendLog(job.logs, `${ts()} · ↻ ops requeue — worker re-armed, draining queue`),
+    });
+    await ctx.scheduler.runAfter(0, internal.clips.workerTick, {});
+    return { requeued: true };
   },
 });

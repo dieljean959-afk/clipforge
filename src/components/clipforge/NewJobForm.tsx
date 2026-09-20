@@ -21,10 +21,13 @@ export function NewJobForm({ className }: { className?: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const createJob = useMutation(api.clips.createJob);
 
-  // Startup self-check (requirement 4): refuse to queue jobs when the render
-  // worker is not consuming the queue — that's the #1 cause of eternal spinners.
+  // Startup self-check: only block submitting on POSITIVE evidence the
+  // worker chain is dead. `worker === undefined` covers both "still loading"
+  // and "no row yet" (fresh deployment / cold start) — in that case the
+  // backend arms the worker and queues the job anyway, so we never refuse
+  // work that the in-process worker model can actually consume.
   const worker = useQuery(api.clips.getWorkerStatus, {});
-  const workerOffline = !(worker?.online ?? false);
+  const workerOffline = worker !== undefined && worker.online === false;
 
   const canSubmit =
     confirmed &&

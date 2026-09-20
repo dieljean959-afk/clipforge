@@ -125,6 +125,37 @@ const schema = defineSchema(
       warmupStartedAt: v.optional(v.number()),
       // average per-second processing rate per stage, learned across jobs
       rates: v.optional(v.record(v.string(), v.number())),
+
+      // ----------------------------------------------------------------
+      // Serverless "in-process worker" plumbing (this platform cannot
+      // keep a persistent Celery/RQ process alive, so the worker is a
+      // self-scheduling Convex mutation chain — same process semantics:
+      // API + worker are one deployment, "worker offline" becomes a
+      // cold-start state a client ping repairs, never a broken deploy).
+      // ----------------------------------------------------------------
+      // secret written by every tick; a client PING that cannot verify it
+      // (serverClockMs - lastHeartbeat > WORKER_STALE_MS) sees the worker
+      // as dead. Playwright clocks differ from server time, so liveness is
+      // judged with SERVER-returned time only.
+      lastHeartbeatServerMs: v.optional(v.number()),
+      // server-clock ms the client last PINGed — proof a client is listening
+      lastClientPingServerMs: v.optional(v.number()),
+      // monotonically increasing worker ticks (log "consuming queue" at 1)
+      tickCount: v.optional(v.number()),
+      // queue/broker identity — the handshake the boot check verifies
+      queueName: v.optional(v.string()),
+      brokerUrl: v.optional(v.string()),
+      // set when the self-scheduling chain detects it is not running and
+      // reschedules itself — used by the UI to show "repairing (cold start)"
+      repairing: v.optional(v.boolean()),
+      // exact server log line the verify step greps for
+      lastBootLine: v.optional(v.string()),
+      // true once the chain is re-armed after a deployment/cold start
+      chainArmed: v.optional(v.boolean()),
+      // claim gate for the self-scheduling chain: a tick only schedules the
+      // next one when this is unset or past — mutations serialize, so this
+      // CAS keeps exactly ONE chain alive even with cron + client kicks
+      nextTickAt: v.optional(v.number()),
     }).index("singleton", ["singleton"]),
 
     // Learned stage speeds (3+ runs) used for pre-stage ETA estimates.

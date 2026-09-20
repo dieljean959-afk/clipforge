@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { useQuery, useAction } from "convex/react";
-import { Film, Loader2, LogOut, RefreshCw, Server, ServerOff, Sparkles, Timer } from "lucide-react";
+import { useQuery, useAction, useMutation } from "convex/react";
+import { Film, Loader2, LogOut, PlayCircle, RefreshCw, Server, ServerOff, Sparkles, Timer } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
@@ -35,15 +35,40 @@ export default function Dashboard() {
   const jobs = useQuery(api.clips.listJobs, {});
   const clipsByJob = useQuery(api.clips.recentClips, { limit: 48 });
   const worker = useQuery(api.clips.getWorkerStatus, {});
+  const pingWorker = useMutation(api.clips.pingWorker);
+  const startWorker = useMutation(api.clips.startWorker);
+  const [starting, setStarting] = useState(false);
 
-  // Re-evaluate worker liveness between heartbeats (tick every 2s).
-  const [nowTs, setNowTs] = useState(Date.now());
+  // Handshake loop (startup self-check): PING the worker every 5s. The
+  // SERVER judges liveness (it returns its own serverClockMs), so the
+  // browser clock never corrupts the check. The ping also re-arms the tick
+  // chain after a cold start and records lastClientPingServerMs.
   useEffect(() => {
-    const t = setInterval(() => setNowTs(Date.now()), 2_000);
-    return () => clearInterval(t);
-  }, []);
-  const workerOnline =
-    (worker?.online ?? false) && nowTs - (worker?.lastHeartbeat ?? 0) < 45_000;
+    let cancelled = false;
+    const ping = async () => {
+      try {
+        await pingWorker({});
+      } catch {
+        // signed out or transient — liveness falls back to the query below
+      }
+    };
+    void ping();
+    const t = setInterval(() => {
+      if (!cancelled) void ping();
+    }, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [pingWorker]);
+
+  // Server-judged liveness: the query compares the worker's heartbeat with
+  // ITS OWN clock. No client clock math — a stale heartbeat means the
+  // worker chain is genuinely not consuming.
+  const workerOnline = worker?.online ?? false;
+  const workerRepairing = worker?.repairing === true && workerOnline;
+  const queueName = worker?.queueName;
+  const brokerUrl = worker?.brokerUrl;
   // Learned transcribing rate (ms per second of audio) -> "~N min for a 10 min video"
   const rates = worker?.rates as Record<string, number> | undefined;
   const trRate = rates?.transcribing;
@@ -145,15 +170,47 @@ export default function Dashboard() {
               Render worker offline
             </p>
             <p className="mt-1 text-xs leading-relaxed text-destructive/80">
-              Jobs are refused until a worker is consuming the queue — start it with:{" "}
-              <code className="font-mono">celery -A app worker --loglevel=info</code>
+              Jobs are refused until a worker is consuming the queue. Recovery
+              is one click — the in-process worker re-arms and drains the
+              queue. (Self-hosted equivalent:{" "}
+              <code className="font-mono">celery -A app worker --loglevel=info</code>)
             </p>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={starting}
+              className="mt-2 cursor-pointer gap-1.5 border-destructive/50 text-destructive hover:bg-destructive/15"
+              onClick={async () => {
+                setStarting(true);
+                try {
+                  await startWorker({});
+                  toast.success("Worker starting — draining the queue...");
+                } catch (err) {
+                  toast.error(
+                    err instanceof Error ? err.message : "Could not start worker.",
+                  );
+                } finally {
+                  setStarting(false);
+                }
+              }}
+            >
+              {starting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <PlayCircle className="size-3.5" />
+              )}
+              Start worker
+            </Button>
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border/60 bg-card/60 px-4 py-2.5 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5 font-medium text-primary">
               <Server className="size-3.5" />
-              Worker online
+              {workerRepairing ? "Worker starting…" : "Worker online"}
+            </span>
+            <span className="font-mono text-[11px]">
+              queue: {queueName ?? "clipforge"} · broker:{" "}
+              {brokerUrl ?? "convex://clipforge-shared-db"}
             </span>
             {!worker?.modelLoaded ? (
               <span className="flex items-center gap-1.5 text-amber-300">
