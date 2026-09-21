@@ -50,8 +50,11 @@ const schema = defineSchema(
       sourceDurationSec: v.optional(v.number()),
       sourceWidth: v.optional(v.number()),
       sourceHeight: v.optional(v.number()),
-      // how the bytes were actually obtained: "cobalt" | "direct" | "upload"
+      // how the bytes were actually obtained: "yt-dlp" | "direct" | "upload"
       fetchSource: v.optional(v.string()),
+      // VM worker (Oracle Cloud) claim: the VM fetches URL jobs while awake.
+      vmClaimedAt: v.optional(v.number()),
+      vmAttempts: v.optional(v.number()),
       fetchError: v.optional(v.string()),
       fetchAttempts: v.array(
         v.object({
@@ -202,6 +205,25 @@ const schema = defineSchema(
     engineStats: defineTable({
       singleton: v.literal("engine"),
       stageSamples: v.record(v.string(), v.array(v.number())), // ms durations
+    }).index("singleton", ["singleton"]),
+
+    // Oracle Cloud worker-VM control plane (see vm.ts): cached REAL OCI
+    // lifecycle state + checked-at, worker heartbeat freshness, and a
+    // deferred STOP intent that waits until the VM drains its jobs. The
+    // dashboard ON/OFF switch renders from THIS truth — never last-click.
+    workerVm: defineTable({
+      singleton: v.literal("vm"),
+      // "RUNNING" | "STOPPED" | "STARTING" | "STOPPING" | ... (OCI verbatim)
+      ociState: v.optional(v.union(v.string(), v.null())),
+      ociError: v.optional(v.union(v.string(), v.null())),
+      ociCheckedAt: v.number(),
+      // worker VM heartbeat (fresh within 75s = worker reachable)
+      workerOk: v.optional(v.boolean()),
+      workerLastSeenAt: v.optional(v.number()),
+      workerLastSeenServerMs: v.optional(v.number()),
+      modelLoaded: v.optional(v.boolean()),
+      // deferred power action (STOP waits for the worker to go idle)
+      pendingAction: v.optional(v.union(v.literal("START"), v.literal("STOP"))),
     }).index("singleton", ["singleton"]),
   },
   {

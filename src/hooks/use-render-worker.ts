@@ -121,11 +121,21 @@ export function useRenderWorker(): {
             renderLog(`fetching ${j.source}`);
             const res = await fetchAction({ jobId: j._id });
             if (!res.fetched) {
+              // The VM path keeps the job in "grabbing" while it works — a
+              // "fetched: false" result here means the chain is exhausted.
               throw new Error(res.error ?? "all fetchers failed");
+            }
+            if (res.via === "yt-dlp") {
+              // The VM worker stored the bytes; the reactive job update
+              // re-enters this stage with sourceStorageId set for verification.
+              renderLog("yt-dlp fetch stored — verifying in browser...");
+              return;
             }
             // storage id lands via reportFetchStored; the reactive job update
             // re-enters this stage with sourceStorageId set
-            renderLog(`fetched ${(res.bytes / (1024 * 1024)).toFixed(1)} MB via ${res.via}`);
+            renderLog(
+              `fetched ${((res.bytes ?? 0) / (1024 * 1024)).toFixed(1)} MB via ${res.via}`,
+            );
             return;
           }
           // URL may still be resolving (query catch-up) — retry on re-entry
@@ -140,7 +150,7 @@ export function useRenderWorker(): {
             durationSec: meta.durationSec,
             width: meta.width,
             height: meta.height,
-            fetchSource: j.fetchSource ?? (j.isUpload ? "upload" : "cobalt"),
+            fetchSource: j.fetchSource ?? (j.isUpload ? "upload" : "yt-dlp"),
           });
           renderLog(
             `source verified: ${meta.durationSec.toFixed(1)}s ${meta.width}x${meta.height}`,
@@ -330,10 +340,10 @@ export function useRenderWorker(): {
   useEffect(() => {
     if (bootedRef.current) return;
     bootedRef.current = true;
-    void envCheck({})
-      .then((r) => renderLog(r.bootLine))
+    void envCheck({})      .then((r) => renderLog(r.bootLine))
       .catch(() => undefined);
   }, [envCheck]);
 
   return { busy, claimedJobId };
 }
+

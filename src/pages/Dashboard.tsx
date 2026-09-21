@@ -15,6 +15,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { LogoWordmark } from "@/components/clipforge/LogoMark";
+import { WorkerPowerSwitch } from "@/components/clipforge/WorkerPowerSwitch";
 import { RightsNotice } from "@/components/clipforge/RightsNotice";
 import { NewJobForm } from "@/components/clipforge/NewJobForm";
 import { JobCard } from "@/components/clipforge/JobCard";
@@ -168,6 +169,10 @@ export default function Dashboard() {
 
       {/* worker liveness + warmup (startup self-checks) */}
       <div className="mx-auto w-full max-w-6xl px-4 pt-6">
+        {/* VM power switch — the ON/OFF control for the Oracle Cloud worker */}
+        <div className="flex justify-end">
+          <WorkerPowerSwitch />
+        </div>
         {!workerOnline ? (
           <div className="rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3">
             <p className="flex items-center gap-2 text-sm font-semibold text-destructive">

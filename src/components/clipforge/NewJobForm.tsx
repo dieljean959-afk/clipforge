@@ -32,6 +32,9 @@ export function NewJobForm({ className }: { className?: string }) {
   // work that the in-process worker model can actually consume.
   const worker = useQuery(api.clips.getWorkerStatus, {});
   const workerOffline = worker !== undefined && worker.online === false;
+  // The VM's heartbeat is the real fetch capability — show the honest hint
+  // under the URL field depending on whether the worker VM is awake.
+  const vm = useQuery(api.clips.getWorkerVmPublic, {});
 
   const canSubmit =
     confirmed &&
@@ -163,6 +166,12 @@ export function NewJobForm({ className }: { className?: string }) {
         <p className="flex items-center gap-1.5 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <ServerOff className="size-3.5 shrink-0" />
           Render worker offline — jobs are refused until it is consuming the queue.
+        </p>
+      )}
+      {!workerOffline && mode === "url" && vm !== undefined && vm.vmUp === false && (
+        <p className="flex items-center gap-1.5 rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+          <ServerOff className="size-3.5 shrink-0" />
+          Worker asleep — flip the ON switch (top of page) to fetch URLs. Uploads and direct MP4 links still work.
         </p>
       )}
 

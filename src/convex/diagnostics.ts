@@ -10,6 +10,13 @@ import { action } from "./_generated/server";
 /** Env var names the pipeline understands. Only names are surfaced. */
 const RELEVANT_ENV_NAMES = [
   "GEMINI_API_KEY",
+  "CLIPFORGE_WORKER_TOKEN",
+  "OCI_TENANCY_OCID",
+  "OCI_USER_OCID",
+  "OCI_FINGERPRINT",
+  "OCI_PRIVATE_KEY",
+  "OCI_INSTANCE_OCID",
+  "OCI_REGION",
   "VLY_INTEGRATION_KEY",
   "VLY_APP_NAME",
   "NODE_ENV",
@@ -57,11 +64,12 @@ export const envCheck = action({
       envNames: RELEVANT_ENV_NAMES.filter((n) => process.env[n] !== undefined),
       llm: llmKeyState(),
       // NOTE on ffmpeg/yt-dlp: this runtime is serverless (Convex) — no
-      // subprocess, no filesystem, no yt-dlp/ffmpeg binaries. The render
-      // pipeline therefore runs ffmpeg.wasm IN THE USER'S BROWSER and the
-      // download path uses the cobalt.tools HTTP API — both real, both
-      // verified end-to-end, no subprocess needed.
-      runtime: "serverless-node (no subprocess/filesystem)",
+      // subprocess, no filesystem, no yt-dlp/ffmpeg binaries here. URL
+      // fetching therefore runs on the worker VM (Oracle Cloud Always Free,
+      // yt-dlp Python API — see vm/README.md) and ffmpeg.wasm renders run in
+      // the user's browser. cobalt was removed permanently: the public v7 API
+      // is shut down and cobalt v10+ dropped YouTube support.
+      runtime: "serverless-node (fetch: worker-VM yt-dlp / render: browser ffmpeg.wasm)",
     };
   },
 });

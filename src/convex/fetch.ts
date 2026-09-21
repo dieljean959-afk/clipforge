@@ -1,65 +1,44 @@
 "use node";
 
-// REAL video fetching — no simulated downloads.
+// REAL video fetching — no simulated downloads, no cobalt.
 //
-// This platform's serverless runtime has no subprocess/filesystem, so
-// yt-dlp/ffmpeg cannot run here. The real fetch chain is:
-//   1. cobalt.tools HTTP API (supports YouTube, TikTok, Vimeo, X, ...)
-//   2. direct HTTP GET for direct .mp4/.webm/.mov links (or cobalt-provided)
-// Bytes are stored in Convex file storage (the shared "disk" for the API,
-// watchdog, and browser render worker). A job cannot advance past the
-// grabbing stage without a stored, size-verified MP4.
+// COBALT REMOVED PERMANENTLY: cobalt.tools shut down its public v7 API
+// (github.com/imputnet/cobalt/discussions/860) and modern cobalt (v10+) no
+// longer supports YouTube at all. Any cobalt code path is dead weight and a
+// source of confusing errors — it is gone from this chain.
+//
+// The fetcher chain, in exact order (max 2 attempts each, then the next):
+//   1. PRIMARY — the ClipForge worker VM (Oracle Cloud Always Free) running
+//      yt-dlp via its PYTHON API ("bv*[height<=1080]+ba/b[height<=1080]",
+//      merged to MP4, progress_hooks for real download %). The VM claims
+//      URL jobs, downloads, and uploads the bytes to Convex storage. If the
+//      VM is asleep, this fetcher reports "worker asleep — flip the ON
+//      switch" (the dashboard power switch) instead of a cryptic error.
+//   2. SECONDARY — direct HTTP GET for direct .mp4/.webm/.mov links.
+//   3. LAST RESORT — manual upload, promoted in the UI with the EXACT error
+//      from both fetchers: "Direct URL fetching failed on this platform
+//      (<error>). Upload the video file instead — clipping works fully from
+//      uploads." Nothing is ever faked.
+//
+// Bytes are stored in Convex file storage (the shared disk for the API,
+// watchdog, browser render worker, and the VM). A job cannot advance past
+// the grabbing stage without a stored, size-verified file. The browser then
+// decode-verifies the stored file (reportFetch), which advances the pipeline.
 
 import { v } from "convex/values";
-import { action } from "./_generated/server";
-import { api, internal } from "./_generated/api";
+import { action, type ActionCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 
-const COBALT_ENDPOINT = process.env.COBALT_API_URL ?? "https://api.cobalt.tools/api/json";
-const MAX_BYTES = 200 * 1024 * 1024; // 200 MB cap for the preview environment
+const MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB cap (VM fetches are big-file capable)
 const PROGRESS_CHUNK = 1024 * 512; // report every ~512KB
+const MAX_ATTEMPTS_PER_FETCHER = 2;
 
-interface CobaltResponse {
-  status?: string;
-  url?: string;
-  text?: string;
-  error?: { code?: string } | string;
-}
-
-async function cobaltRequest(source: string): Promise<string> {
-  const res = await fetch(COBALT_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      url: source,
-      videoQuality: "1080",
-      filenameStyle: "basic",
-      // audioFormat: keep original audio — clips preserve the creator's voice
-    }),
-  });
-  const data = (await res.json().catch(() => null)) as CobaltResponse | null;
-  if (data === null) {
-    throw new Error(`cobalt returned non-JSON (HTTP ${res.status})`);
-  }
-  if (data.status === "stream" || data.status === "redirect" || data.status === "tunnel") {
-    if (typeof data.url !== "string" || data.url.length === 0) {
-      throw new Error("cobalt returned no stream URL");
-    }
-    return data.url;
-  }
-  const errText =
-    typeof data.error === "object" && data.error !== null
-      ? (data.error.code ?? JSON.stringify(data.error))
-      : (data.text ?? data.status ?? `HTTP ${res.status}`);
-  throw new Error(`cobalt: ${errText}`);
-}
+type Ctx = ActionCtx;
 
 async function downloadToStorage(
-  ctx: { storage: { generateUploadUrl: () => Promise<string> } },
+  ctx: Ctx,
   fileUrl: string,
-  onProgress: (done: number, total: number | null) => Promise<void> | void,
+  onProgress: (done: number, total: number | null) => Promise<void>,
 ): Promise<{ storageId: string; bytes: number }> {
   const res = await fetch(fileUrl, { redirect: "follow" });
   if (!res.ok) {
@@ -68,7 +47,9 @@ async function downloadToStorage(
   const totalHeader = res.headers.get("content-length");
   const total = totalHeader !== null ? Number(totalHeader) : null;
   if (total !== null && Number.isFinite(total) && total > MAX_BYTES) {
-    throw new Error(`video is ${(total / (1024 * 1024)).toFixed(0)} MB — over the ${MAX_BYTES / (1024 * 1024)} MB preview limit`);
+    throw new Error(
+      `video is ${(total / (1024 * 1024)).toFixed(0)} MB — over the ${MAX_BYTES / (1024 * 1024)} MB limit`,
+    );
   }
   if (!res.body) {
     throw new Error("empty response body from the fetcher");
@@ -84,7 +65,7 @@ async function downloadToStorage(
       chunks.push(value);
       done += value.byteLength;
       if (done > MAX_BYTES) {
-        throw new Error(`download exceeded the ${MAX_BYTES / (1024 * 1024)} MB preview limit`);
+        throw new Error(`download exceeded the ${MAX_BYTES / (1024 * 1024)} MB limit`);
       }
       if (done - lastReport >= PROGRESS_CHUNK) {
         lastReport = done;
@@ -112,18 +93,92 @@ async function downloadToStorage(
   return { storageId: meta.storageId, bytes: blob.size };
 }
 
-function extType(url: string): string {
-  const lower = url.toLowerCase();
-  if (lower.includes(".webm")) return "video/webm";
-  if (lower.includes(".mov")) return "video/quicktime";
-  return "video/mp4";
+/**
+ * Ask the VM worker to claim this job. The worker (clipforge_worker.py on the
+ * Oracle VM) polls the /api/worker/claim HTTP route; it downloads with the
+ * yt-dlp Python API and POSTs the file to Convex storage itself. This
+ * fetcher's job is only to (a) refuse honestly when the VM is asleep, and
+ * (b) wait for the VM's "stored" event (with its own per-attempt timeouts —
+ * never an eternal await).
+ */
+async function vmFetch(
+  ctx: Ctx,
+  jobId: string,
+  source: string,
+  onProgress: (done: number, total: number | null) => Promise<void>,
+): Promise<{ stored: boolean; error?: string; asleep?: boolean }> {
+  // Is the VM awake and its worker heartbeating?
+  const vm = (await ctx.runQuery(internal.vmStore.getState, {})) as {
+    ociState: string | null;
+    workerOk: boolean;
+    workerLastSeenAt: number | null;
+  } | null;
+
+  if (vm === null || vm.ociState !== "RUNNING" || vm.workerOk !== true) {
+    const why =
+      vm === null
+        ? "worker VM unknown (never heartbeated)"
+        : vm.ociState !== "RUNNING"
+          ? `VM is ${vm.ociState ?? "OFF"}`
+          : "VM up but worker not heartbeating";
+    return {
+      stored: false,
+      asleep: true,
+      error: `worker asleep (${why}) — flip the ON switch to wake it (~2 min)`,
+    };
+  }
+
+  // Nudge the worker loop (its poller picks the job up within ~5s) and wait
+  // for the fetch to land, keeping progress fed from the VM's writes.
+  const startedAt = Date.now();
+  const TIMEOUT_MS = 10 * 60 * 1000; // same hard limit the watchdog enforces
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const job = (await ctx.runQuery(internal.clips.getJobInternal, {
+      jobId: jobId as never,
+    })) as {
+      stage: string;
+      sourceStorageId?: string;
+      unitsDone?: number;
+      unitsTotal?: number;
+      vmAttempts?: number;
+      fetchError?: string;
+    } | null;
+    if (job === null) return { stored: false, error: "job vanished while the VM was fetching" };
+    if (job.stage !== "grabbing") {
+      // advanced (fetch verified by the browser) or failed by the watchdog
+      return { stored: job.sourceStorageId !== undefined };
+    }
+    if (job.sourceStorageId !== undefined) return { stored: true };
+
+    // keep the UI's byte counter moving from the VM's progress writes
+    if (job.unitsDone !== undefined && job.unitsDone > 0) {
+      await onProgress(
+        job.unitsDone * 1024 * 1024,
+        job.unitsTotal && job.unitsTotal > 0 ? job.unitsTotal * 1024 * 1024 : null,
+      );
+    }
+
+    // The VM reports each failed attempt via reportVmFetchFailed; if it has
+    // burned both attempts for this fetcher, stop waiting on it.
+    if ((job.vmAttempts ?? 0) >= MAX_ATTEMPTS_PER_FETCHER) {
+      return { stored: false, error: job.fetchError ?? "yt-dlp failed on the worker VM" };
+    }
+    if (Date.now() - startedAt > TIMEOUT_MS) {
+      return { stored: false, error: "VM fetch exceeded its 10 min hard limit" };
+    }
+  }
 }
 
+// Kept for the VM-free path: re-exported identity so the HTTP worker API can
+// report attempts (see http.ts). Marker import to keep the module graph honest.
+export const FETCHER_CHAIN = ["vm-yt-dlp", "direct", "upload"] as const;
+
 /**
- * Grab the source video for real. Order: cobalt API -> direct URL.
- * Every failure is reported verbatim to the job (no placeholder content).
- * The browser reports the ffprobe/HTMLVideoElement-verified metadata after
- * decoding the stored file (reportFetch), which advances the pipeline.
+ * Grab the source video for real. Order: VM yt-dlp -> direct URL. Every
+ * failure is reported verbatim to the job (no placeholder content, no
+ * cobalt). The browser reports the decode-verified metadata after the stored
+ * file lands (reportFetch), which advances the pipeline only when it verifies.
  */
 export const fetchVideo = action({
   args: { jobId: v.id("jobs") },
@@ -152,50 +207,52 @@ export const fetchVideo = action({
       });
     };
 
-    // 1) cobalt API (platform-friendly fetch for YouTube/TikTok/etc.)
+    // 1) PRIMARY — the worker VM running yt-dlp (Python API, 1080p max MP4)
     try {
-      const streamUrl = await cobaltRequest(source);
-      console.log(`[fetch] cobalt OK for ${source.slice(0, 60)} — downloading stream`);
-      const { storageId, bytes } = await downloadToStorage(ctx, streamUrl, reportProgress);
-      // Byte truth is stored now; duration/width/height are measured by the
-      // browser after decoding and reported via reportFetch, which advances
-      // the pipeline only when the file verifies.
-      await ctx.runMutation(internal.clips.reportFetchStored, {
-        jobId,
-        storageId: storageId as never,
-        bytes,
-        fetchSource: "cobalt",
+      const r = await vmFetch(ctx, jobId, source, reportProgress);
+      if (r.stored) {
+        return { fetched: true as const, via: "yt-dlp" as const };
+      }
+      attempts.push({
+        method: "yt-dlp (worker VM)",
+        error: r.error ?? "VM fetch did not complete",
       });
-      return { fetched: true as const, bytes, via: "cobalt" as const, storageId };
+      console.error(`[fetch] VM yt-dlp failed: ${r.error ?? "unknown"}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      attempts.push({ method: "cobalt", error: msg });
-      console.error(`[fetch] cobalt failed: ${msg}`);
+      attempts.push({ method: "yt-dlp (worker VM)", error: msg });
+      console.error(`[fetch] VM yt-dlp failed: ${msg}`);
     }
 
-    // 2) direct HTTP GET (works for .mp4/.webm/.mov links)
+    // 2) SECONDARY — direct HTTP GET (works for .mp4/.webm/.mov links)
     if (/\.(mp4|webm|mov)(\?|$)/i.test(source)) {
-      try {
-        const { storageId, bytes } = await downloadToStorage(ctx, source, reportProgress);
-        await ctx.runMutation(internal.clips.reportFetchStored, {
-          jobId,
-          storageId: storageId as never,
-          bytes,
-          fetchSource: "direct",
-        });
-        return { fetched: true as const, bytes, via: "direct" as const, storageId };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        attempts.push({ method: "direct", error: msg });
-        console.error(`[fetch] direct failed: ${msg}`);
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_FETCHER; attempt++) {
+        try {
+          const { storageId, bytes } = await downloadToStorage(ctx, source, reportProgress);
+          await ctx.runMutation(internal.clips.reportFetchStored, {
+            jobId,
+            storageId: storageId as never,
+            bytes,
+            fetchSource: "direct",
+          });
+          return { fetched: true as const, bytes, via: "direct" as const, storageId };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          attempts.push({ method: `direct (try ${attempt})`, error: msg });
+          console.error(`[fetch] direct failed (try ${attempt}): ${msg}`);
+        }
       }
     }
 
+    // 3) FAIL LOUDLY with the full fetchers-tried list. The UI promotes
+    //    manual upload as the primary input with this exact error.
     const summary = attempts.map((a) => `${a.method}: ${a.error}`).join(" | ");
+    const lastError = attempts[attempts.length - 1]?.error ?? "unknown error";
     await ctx.runMutation(internal.clips.reportFetchFailureInternal, {
       jobId,
       error: summary,
-      fetcher: attempts.map((a) => a.method).join("→") || "none",
+      fetcher: attempts.map((a) => a.method).join(" → ") || "none",
+      uploadHint: `Direct URL fetching failed on this platform (${lastError}). Upload the video file instead — clipping works fully from uploads.`,
     });
     return { fetched: false as const, error: summary };
   },

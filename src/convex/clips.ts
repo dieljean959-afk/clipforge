@@ -57,6 +57,32 @@ const SLOW_STAGE_MS = 30_000;
 const RATE_MIN_SAMPLES = 3;
 /** Samples kept per stage in the engineStats singleton. */
 const RATE_MAX_SAMPLES = 10;
+/** Worker-VM heartbeat freshness window (matches vm.ts). */
+const VM_FRESH_MS = 75_000;
+
+/**
+ * VM worker claim: the Oracle Cloud worker calls this over HTTP (token via
+ * http.ts). Marks the job VM-claimed so the server fetcher waits on the VM
+ * instead of double-fetching. Returns the job's source URL.
+ */
+export const vmClaimJob = internalMutation({
+  args: { jobId: v.id("jobs") },
+  handler: async (ctx, { jobId }) => {
+    const job = await ctx.db.get(jobId);
+    if (job === null || job.stage !== "grabbing") return null;
+    const now = Date.now();
+    await ctx.db.patch(jobId, {
+      vmClaimedAt: now,
+      vmAttempts: job.vmAttempts ?? 0,
+      lastProgressAt: now,
+      logs: appendLog(
+        job.logs,
+        `${ts()} · ▶ yt-dlp claimed on the worker VM (Python API, 1080p max MP4)`,
+      ),
+    });
+    return { source: job.source };
+  },
+});
 
 // ---------------------------------------------------------------------------
 // ETA engine — per-stage + total ETAs from measured and learned rates
@@ -409,6 +435,25 @@ export const getSourceMediaUrl = query({
   },
 });
 
+/**
+ * Public VM truth for the new-job form: is the worker VM awake enough to
+ * fetch URLs right now? (Cheap read of the cached vmStore row — no OCI call.)
+ */
+export const getWorkerVmPublic = query({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query("workerVm")
+      .withIndex("singleton", (q) => q.eq("singleton", "vm"))
+      .unique();
+    const vmUp =
+      row?.ociState === "RUNNING" &&
+      row.workerOk === true &&
+      Date.now() - (row.workerLastSeenAt ?? 0) < VM_FRESH_MS;
+    return { vmUp, ociState: row?.ociState ?? null };
+  },
+});
+
 // ---------------------------------------------------------------------------
 // mutations (lifecycle)
 // ---------------------------------------------------------------------------
@@ -505,6 +550,15 @@ export const createJob = mutation({
     if (!workerAlive) {
       await armWorker(ctx);
     }
+    // VM truth for honest queue messaging (never "a browser will pick it up").
+    const vmRow = await ctx.db
+      .query("workerVm")
+      .withIndex("singleton", (q) => q.eq("singleton", "vm"))
+      .unique();
+    const vmUp =
+      vmRow?.ociState === "RUNNING" &&
+      vmRow.workerOk === true &&
+      serverNow - (vmRow.workerLastSeenAt ?? 0) < VM_FRESH_MS;
 
     const trimmed = source.trim();
     if (trimmed.length === 0) {
@@ -544,9 +598,13 @@ export const createJob = mutation({
       isUpload: sourceType === "upload",
       stage: "queued",
       progress: 0,
-      progressDetail: workerAlive
-        ? "Queued — a browser render worker will pick it up..."
-        : "Queued — waking the worker (cold start)...",
+      // HONEST messaging (req 5): browsers cannot run FFmpeg — the message
+      // must reflect the real worker situation, not a polite lie.
+      progressDetail: vmUp
+        ? "Queued — worker online, fetching with yt-dlp..."
+        : workerAlive
+          ? "Queued — worker asleep, flip the ON switch (dashboard header)"
+          : "Queued — waking the watchdog (cold start)...",
       stageTimings: [],
       fetchAttempts: [],
       logs: [
@@ -620,11 +678,24 @@ export const retryJob = mutation({
     if (!workerAlive) {
       await armWorker(ctx);
     }
+    // VM truth for the honest retry message (same as createJob).
+    const vmRow = await ctx.db
+      .query("workerVm")
+      .withIndex("singleton", (q) => q.eq("singleton", "vm"))
+      .unique();
+    const vmUp =
+      vmRow?.ociState === "RUNNING" &&
+      vmRow.workerOk === true &&
+      serverNow - (vmRow.workerLastSeenAt ?? 0) < VM_FRESH_MS;
 
     await ctx.db.patch(jobId, {
       stage: "queued",
       progress: 0,
-      progressDetail: "Queued — a browser render worker will pick it up...",
+      progressDetail: vmUp
+        ? "Queued — worker online, fetching with yt-dlp..."
+        : workerAlive
+          ? "Queued — worker asleep, flip the ON switch (dashboard header)"
+          : "Queued — waking the watchdog (cold start)...",
       unitLabel: undefined,
       unitsDone: undefined,
       unitsTotal: undefined,
@@ -693,6 +764,14 @@ export const generateUploadUrl = mutation({
   },
 });
 
+/** Same, for the worker VM (called from the token-gated HTTP route). */
+export const generateUploadUrlInternal = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    return await ctx.storage.generateUploadUrl();
+  },
+});
+
 /** Claim the oldest queued job for this user. Returns it, or null. */
 export const clientClaimJob = mutation({
   args: {},
@@ -722,7 +801,7 @@ export const clientClaimJob = mutation({
       renderProgress: undefined,
       logs: appendLog(
         job.logs,
-        `${ts()} · ▶ grabbing — cobalt fetch (1080p max MP4), fallback: direct download`,
+        `${ts()} · ▶ grabbing — yt-dlp (worker VM) → direct URL, 1080p max MP4`,
       ),
     });
     return job;
@@ -893,8 +972,14 @@ export const reportFetchProgressInternal = internalMutation({
 
 /** The REAL download failed: exact fetcher error, no retry theater (internal). */
 export const reportFetchFailureInternal = internalMutation({
-  args: { jobId: v.id("jobs"), error: v.string(), fetcher: v.string() },
-  handler: async (ctx, { jobId, error, fetcher }) => {
+  args: {
+    jobId: v.id("jobs"),
+    error: v.string(),
+    fetcher: v.string(),
+    // exact copy surfaced by the UI to promote manual upload
+    uploadHint: v.optional(v.string()),
+  },
+  handler: async (ctx, { jobId, error, fetcher, uploadHint }) => {
     const job = await ctx.db.get(jobId);
     if (job === null) return;
     const now = Date.now();
@@ -907,6 +992,7 @@ export const reportFetchFailureInternal = internalMutation({
       stage: "failed",
       error: `Could not fetch video via ${fetcher}: ${error}`,
       errorDetail:
+        uploadHint ??
         "Try the Retry button (fetchers are retried in order), or attach the file directly.",
       progressDetail: undefined,
       stageEtaSec: undefined,
@@ -923,8 +1009,14 @@ export const reportFetchFailureInternal = internalMutation({
 
 /** The REAL download failed: exact fetcher error, no retry theater. */
 export const reportFetchFailure = mutation({
-  args: { jobId: v.id("jobs"), error: v.string(), fetcher: v.string() },
-  handler: async (ctx, { jobId, error, fetcher }) => {
+  args: {
+    jobId: v.id("jobs"),
+    error: v.string(),
+    fetcher: v.string(),
+    // exact copy surfaced by the UI to promote manual upload
+    uploadHint: v.optional(v.string()),
+  },
+  handler: async (ctx, { jobId, error, fetcher, uploadHint }) => {
     const userId = await getAuthUserId(ctx);
     if (userId === null) throw new Error("Sign in first.");
     const job = await ctx.db.get(jobId);
@@ -939,6 +1031,7 @@ export const reportFetchFailure = mutation({
       stage: "failed",
       error: `Could not fetch video via ${fetcher}: ${error}`,
       errorDetail:
+        uploadHint ??
         "Try the Retry button (fetchers are retried in order), or attach the file directly.",
       progressDetail: undefined,
       stageEtaSec: undefined,
@@ -1419,6 +1512,47 @@ export const getJobInternal = internalQuery({
   args: { jobId: v.id("jobs") },
   handler: async (ctx, { jobId }) => {
     return await ctx.db.get(jobId);
+  },
+});
+
+/**
+ * VM worker claim lookup (HTTP API): oldest queued URL job, any user. The
+ * caller marks it claimed via vmClaimJob right after this.
+ */
+export const findQueuedUrlJob = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const queued = await ctx.db
+      .query("jobs")
+      .withIndex("by_stage", (q) => q.eq("stage", "queued"))
+      .order("asc")
+      .take(10);
+    const job = queued.find((j) => !j.isUpload);
+    return job === undefined
+      ? null
+      : { jobId: job._id, source: job.source, createdAt: job.createdAt };
+  },
+});
+
+/**
+ * VM fetcher attempt failed: the yt-dlp run on the worker VM errored. Both
+ * attempts are recorded before the chain moves on to the next fetcher.
+ */
+export const reportVmFetchFailed = internalMutation({
+  args: { jobId: v.id("jobs"), error: v.string() },
+  handler: async (ctx, { jobId, error }) => {
+    const job = await ctx.db.get(jobId);
+    if (job === null || job.stage !== "grabbing") return;
+    const attempts = (job.vmAttempts ?? 0) + 1;
+    await ctx.db.patch(jobId, {
+      vmAttempts: attempts,
+      fetchError: error,
+      lastProgressAt: Date.now(),
+      logs: appendLog(
+        job.logs,
+        `${ts()} · ↯ yt-dlp attempt ${attempts} failed on the VM: ${error}`,
+      ),
+    });
   },
 });
 
