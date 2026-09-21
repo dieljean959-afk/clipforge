@@ -5,6 +5,9 @@
 //     switch re-queries OCI instead of trusting the last click)
 //   - the worker VM's heartbeat (freshness = worker online)
 //   - a pending STOP intent deferred until the worker drains its queue
+//
+// The vmConfig singleton stores the OCI setup wizard's credentials
+// server-side; the browser never reads the secrets back after save.
 
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
@@ -53,10 +56,9 @@ export const cacheOciState = internalMutation({
     const base = {
       singleton: "vm" as const,
       ociState,
-      ociError,
       ociCheckedAt,
       // a successful OCI read clears any stale error from before
-      ...(ociState !== null ? { ociError: null } : {}),
+      ociError: ociState !== null ? null : ociError,
     };
     if (row === null) {
       await ctx.db.insert("workerVm", base);
@@ -125,5 +127,113 @@ export const cacheIntent = internalMutation({
     await ctx.db.patch(row._id, {
       pendingAction: action === "STOP" ? "STOP" : undefined,
     });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// OCI setup wizard (vmConfig singleton — server-side secrets, see schema.ts)
+// ---------------------------------------------------------------------------
+
+/** Raw wizard row for request signing. Internal only — NEVER sent to a client. */
+export const getVmConfigForSigning = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query("vmConfig")
+      .withIndex("singleton", (q) => q.eq("singleton", "vm-config"))
+      .unique();
+    if (row === null || row.skipped === true) return null;
+    if (
+      row.tenancyOcid.length === 0 ||
+      row.userOcid.length === 0 ||
+      row.fingerprint.length === 0 ||
+      row.privateKeyPem.length === 0 ||
+      row.instanceOcid.length === 0 ||
+      row.region.length === 0
+    ) {
+      return null;
+    }
+    return {
+      tenancyOcid: row.tenancyOcid,
+      userOcid: row.userOcid,
+      fingerprint: row.fingerprint,
+      privateKeyPem: row.privateKeyPem,
+      instanceOcid: row.instanceOcid,
+      region: row.region,
+    };
+  },
+});
+
+/** Save wizard credentials (server-side only; never read back by the browser). */
+export const saveVmConfig = internalMutation({
+  args: {
+    tenancyOcid: v.string(),
+    userOcid: v.string(),
+    fingerprint: v.string(),
+    privateKeyPem: v.string(),
+    instanceOcid: v.string(),
+    region: v.string(),
+  },
+  handler: async (ctx, vals) => {
+    const row = await ctx.db
+      .query("vmConfig")
+      .withIndex("singleton", (q) => q.eq("singleton", "vm-config"))
+      .unique();
+    const base = { ...vals, savedAt: Date.now(), skipped: false };
+    if (row === null) {
+      await ctx.db.insert("vmConfig", { singleton: "vm-config" as const, ...base });
+      return;
+    }
+    await ctx.db.patch(row._id, base);
+  },
+});
+
+/** "Skip for now" — the wizard hides but the switch stays "not configured". */
+export const skipVmWizard = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query("vmConfig")
+      .withIndex("singleton", (q) => q.eq("singleton", "vm-config"))
+      .unique();
+    if (row === null) {
+      await ctx.db.insert("vmConfig", {
+        singleton: "vm-config" as const,
+        tenancyOcid: "",
+        userOcid: "",
+        fingerprint: "",
+        privateKeyPem: "",
+        instanceOcid: "",
+        region: "",
+        savedAt: Date.now(),
+        skipped: true,
+      });
+      return;
+    }
+    await ctx.db.patch(row._id, { skipped: true });
+  },
+});
+
+/** Wizard state for the UI: configured / skipped / needs-setup. No secrets. */
+export const vmWizardState = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query("vmConfig")
+      .withIndex("singleton", (q) => q.eq("singleton", "vm-config"))
+      .unique();
+    if (row === null) return { configured: false, skipped: false, savedAt: null };
+    const configured =
+      row.tenancyOcid.length > 0 &&
+      row.userOcid.length > 0 &&
+      row.fingerprint.length > 0 &&
+      row.privateKeyPem.length > 0 &&
+      row.instanceOcid.length > 0 &&
+      row.region.length > 0;
+    return {
+      configured,
+      skipped: row.skipped === true,
+      savedAt: row.savedAt,
+    };
   },
 });

@@ -11,9 +11,11 @@
 //   - stop:   POST /20160918/instances/{ocid} {"action":"STOP","force":false}
 //             (SOFT stop — the VM flushes and shuts down cleanly)
 //
-// Credentials come from env only (never hardcoded):
+// Credentials come from env OR the setup wizard (server-side storage):
 //   OCI_TENANCY_OCID, OCI_USER_OCID, OCI_FINGERPRINT, OCI_PRIVATE_KEY (PEM
-//   contents), OCI_INSTANCE_OCID, OCI_REGION.
+//   contents), OCI_INSTANCE_OCID, OCI_REGION. Env wins; the wizard table
+//   (vmConfig) is the fallback so the dashboard can be connected without a
+//   redeploy. Values are never returned to the browser after save.
 //
 // Signing follows Oracle's request-signing spec:
 //   keyId   = "<tenancy ocid>/<user ocid>/<fingerprint>"
@@ -48,20 +50,20 @@ function normalizePem(raw: string): string {
   return pem.trim() + "\n";
 }
 
-export function ociConfig(): OciConfig | { error: string } {
-  const missing = [
-    "OCI_TENANCY_OCID",
-    "OCI_USER_OCID",
-    "OCI_FINGERPRINT",
-    "OCI_PRIVATE_KEY",
-    "OCI_INSTANCE_OCID",
-    "OCI_REGION",
-  ].filter((n) => !process.env[n] || (process.env[n] as string).length < 4);
-  if (missing.length > 0) {
-    return {
-      error: `VM control is not configured — missing env vars: ${missing.join(", ")}`,
-    };
-  }
+export const OCI_ENV_NAMES = [
+  "OCI_TENANCY_OCID",
+  "OCI_USER_OCID",
+  "OCI_FINGERPRINT",
+  "OCI_PRIVATE_KEY",
+  "OCI_INSTANCE_OCID",
+  "OCI_REGION",
+] as const;
+
+function envConfig(): OciConfig | null {
+  const missing = OCI_ENV_NAMES.filter(
+    (n) => !process.env[n] || (process.env[n] as string).length < 4,
+  );
+  if (missing.length > 0) return null;
   return {
     tenancy: process.env.OCI_TENANCY_OCID as string,
     user: process.env.OCI_USER_OCID as string,
@@ -71,6 +73,72 @@ export function ociConfig(): OciConfig | { error: string } {
     region: process.env.OCI_REGION as string,
   };
 }
+
+function wizardConfig(w: {
+  tenancyOcid: string;
+  userOcid: string;
+  fingerprint: string;
+  privateKeyPem: string;
+  instanceOcid: string;
+  region: string;
+}): OciConfig {
+  return {
+    tenancy: w.tenancyOcid,
+    user: w.userOcid,
+    fingerprint: w.fingerprint,
+    privateKeyPem: normalizePem(w.privateKeyPem),
+    instanceOcid: w.instanceOcid,
+    region: w.region,
+  };
+}
+
+function missingMessage(): string {
+  const missing = OCI_ENV_NAMES.filter((n) => !process.env[n]);
+  return `VM control is not configured — missing env vars: ${missing.join(
+    ", ",
+  )} (or connect via the dashboard setup wizard)`;
+}
+
+/**
+ * Resolve OCI credentials: env vars first, then the setup wizard table.
+ * Only env-backed config is reachable from this sync helper; wizard-backed
+ * callers go through ociConfigFromCtx().
+ */
+export function ociConfig(): OciConfig | { error: string } {
+  const env = envConfig();
+  if (env !== null) return env;
+  return { error: missingMessage() };
+}
+
+/** Env-or-wizard resolution for action handlers (has ctx for the DB read). */
+async function ociConfigFromCtx(ctx: ActionCtx): Promise<OciConfig | { error: string }> {
+  const env = envConfig();
+  if (env !== null) return env;
+  // Wizard fallback: only when the stored row is complete.
+  const row = await ctx.runQuery(internal.vmStore.getVmConfigForSigning, {});
+  if (row !== null) return wizardConfig(row);
+  return { error: missingMessage() };
+}
+
+/**
+ * Boot self-check line: "OCI configured: YES/NO — missing: <names>". Greppable
+ * target for the acceptance test ("boot log says OCI configured: NO").
+ */
+export function ociBootLine(): string {
+  const missing = OCI_ENV_NAMES.filter((n) => !process.env[n]);
+  const yes = missing.length === 0;
+  return `OCI configured: ${yes ? "YES" : "NO"}${yes ? "" : ` — missing: ${missing.join(", ")}`}`;
+}
+
+let booted = false;
+/** Log the boot self-check once per isolate (called by vmStatus). */
+function logBootOnce(): void {
+  if (booted) return;
+  booted = true;
+  console.log(`[vm] ${ociBootLine()}`);
+}
+
+
 
 // ---------------------------------------------------------------------------
 // OCI request signing + HTTPS
@@ -174,7 +242,7 @@ async function runOciGet(ctx: ActionCtx): Promise<{
   ociError: string | null;
   ociCheckedAt: number;
 }> {
-  const cfg = ociConfig();
+  const cfg = await ociConfigFromCtx(ctx);
   if ("error" in cfg) return { ociState: null, ociError: cfg.error, ociCheckedAt: Date.now() };
   const res = await ociRequest(cfg, "GET", instancePath(cfg), "");
   if (!res.ok) {
@@ -255,11 +323,19 @@ async function vmTruth(
 export const vmStatus = action({
   args: { force: v.optional(v.boolean()) },
   handler: async (ctx, args) => {
-    const cfg = ociConfig();
+    logBootOnce();
+    const cfg = await ociConfigFromCtx(ctx);
     if ("error" in cfg) {
+      // Explicit type: without it the runQuery return type loops back through
+      // the generated `internal` API (which includes this module) and TS
+      // reports vmStatus as self-referential.
+      const wizard: { configured: boolean; skipped: boolean; savedAt: number | null } =
+        await ctx.runQuery(internal.vmStore.vmWizardState, {});
       return {
         configured: false as const,
         configureError: cfg.error,
+        // "Skip for now" hides the setup wizard behind a tap-to-open bar.
+        wizardSkipped: wizard.skipped,
         ociState: null,
         ociError: null,
         ociCheckedAt: Date.now(),
@@ -270,7 +346,7 @@ export const vmStatus = action({
       };
     }
     const truth = await vmTruth(ctx, args.force === true);
-    return { configured: true as const, configureError: null, ...truth };
+    return { configured: true as const, configureError: null, wizardSkipped: false, ...truth };
   },
 });
 
@@ -284,7 +360,8 @@ export const vmSetPower = action({
     confirmBusy: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const cfg = ociConfig();
+    logBootOnce();
+    const cfg = await ociConfigFromCtx(ctx);
     if ("error" in cfg) {
       throw new Error(`Cannot ${args.action === "START" ? "start" : "stop"} the worker VM — ${cfg.error}`);
     }
@@ -321,11 +398,12 @@ export const vmSetPower = action({
 export const vmWorkerHeartbeatPublic = action({
   args: { modelLoaded: v.boolean(), pendingJobs: v.number() },
   handler: async (ctx, { modelLoaded, pendingJobs }) => {
+    logBootOnce();
     await ctx.runMutation(internal.vmStore.cacheHeartbeat, { modelLoaded });
     // A queued STOP waits until the VM reports it is idle.
     const row = await ctx.runQuery(internal.vmStore.getState, {});
     if (row?.pendingAction === "STOP" && pendingJobs <= 0) {
-      const cfg = ociConfig();
+      const cfg = await ociConfigFromCtx(ctx);
       if (!("error" in cfg)) {
         const res = await ociRequest(
           cfg,
@@ -341,5 +419,114 @@ export const vmWorkerHeartbeatPublic = action({
       }
     }
     return { ok: true, stopped: false };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// OCI setup wizard — Test / Save / Skip (see OciSetupWizard.tsx)
+// ---------------------------------------------------------------------------
+
+/**
+ * Try a real OCI GetInstance with the PROVIDED values (pre-save). Returns the
+ * true lifecycle state on success, or the exact OCI error — never a guess.
+ */
+export const vmTestConnection = action({
+  args: {
+    tenancyOcid: v.string(),
+    userOcid: v.string(),
+    fingerprint: v.string(),
+    privateKeyPem: v.string(),
+    instanceOcid: v.string(),
+    region: v.string(),
+  },
+  handler: async (_ctx, vals) => {
+    const cfg = wizardConfig({
+      tenancyOcid: vals.tenancyOcid.trim(),
+      userOcid: vals.userOcid.trim(),
+      fingerprint: vals.fingerprint.trim(),
+      privateKeyPem: vals.privateKeyPem,
+      instanceOcid: vals.instanceOcid.trim(),
+      region: vals.region.trim(),
+    });
+    const friendly: Record<keyof OciConfig, string> = {
+      tenancy: "Tenancy OCID",
+      user: "User OCID",
+      fingerprint: "API key fingerprint",
+      privateKeyPem: "Private key",
+      instanceOcid: "Instance OCID",
+      region: "Region",
+    };
+    for (const [k, v2] of Object.entries(cfg) as [keyof OciConfig, string][]) {
+      if (k !== "privateKeyPem" && v2.length < 4) {
+        return {
+          ok: false as const,
+          state: null,
+          error: `${friendly[k]} looks too short — check the pasted value.`,
+        };
+      }
+    }
+    if (!cfg.privateKeyPem.includes("PRIVATE KEY")) {
+      return {
+        ok: false as const,
+        state: null,
+        error: "The private key does not look like a PEM — paste the full contents including BEGIN/END lines.",
+      };
+    }
+    const res = await ociRequest(cfg, "GET", instancePath(cfg), "");
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const parsed = JSON.parse(res.body) as { message?: string; code?: string };
+        if (parsed.message) detail = `${parsed.code ?? "OCI"}: ${parsed.message}`;
+      } catch {
+        /* keep HTTP status detail */
+      }
+      return { ok: false as const, state: null, error: `OCI API error (${detail})` };
+    }
+    try {
+      const parsed = JSON.parse(res.body) as { lifecycleState?: string };
+      const state = parsed.lifecycleState ?? "UNKNOWN";
+      return { ok: true as const, state, error: null };
+    } catch {
+      return { ok: false as const, state: null, error: "OCI returned an unreadable response." };
+    }
+  },
+});
+
+/** Persist the wizard's 6 values server-side (secrets never reach the browser again). */
+export const vmSaveConfig = action({
+  args: {
+    tenancyOcid: v.string(),
+    userOcid: v.string(),
+    fingerprint: v.string(),
+    privateKeyPem: v.string(),
+    instanceOcid: v.string(),
+    region: v.string(),
+  },
+  handler: async (ctx, vals) => {
+    // Refuse to save values that cannot possibly sign a request.
+    const probe = wizardConfig(vals);
+    if (!probe.privateKeyPem.includes("PRIVATE KEY")) {
+      throw new Error("Private key is not a valid PEM — nothing was saved.");
+    }
+    await ctx.runMutation(internal.vmStore.saveVmConfig, {
+      tenancyOcid: vals.tenancyOcid.trim(),
+      userOcid: vals.userOcid.trim(),
+      fingerprint: vals.fingerprint.trim(),
+      privateKeyPem: vals.privateKeyPem.trim(),
+      instanceOcid: vals.instanceOcid.trim(),
+      region: vals.region.trim(),
+    });
+    console.log(`[vm] OCI credentials saved from the setup wizard (region ${vals.region.trim()})`);
+    return { saved: true as const };
+  },
+});
+
+/** "Skip for now" — hides the wizard; the switch stays "not configured". */
+export const vmSkipWizard = action({
+  args: {},
+  handler: async (ctx) => {
+    await ctx.runMutation(internal.vmStore.skipVmWizard, {});
+    return { skipped: true as const };
   },
 });

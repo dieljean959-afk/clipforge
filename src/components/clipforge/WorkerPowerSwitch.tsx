@@ -7,19 +7,25 @@
 //            between the click and a fresh worker heartbeat
 //   ON     — glowing green, only when OCI says RUNNING *and* the worker's
 //            heartbeat is fresh
-//   UNKNOWN— striped/hatched, shown only when the OCI API call fails (or is
-//            not configured). The switch NEVER lies about state.
+//   UNKNOWN— striped/hatched, shown only when the OCI API call fails. The
+//            switch NEVER lies about state — the exact OCI error is shown.
+//
+// Setup: when OCI is not configured the switch is replaced by the first-run
+// setup wizard (OciSetupWizard). "Skip for now" collapses it to a slim
+// tap-to-set-up bar; a gear on the configured card reopens it for edits.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAction } from "convex/react";
-import { Loader2, Moon, Power, Zap } from "lucide-react";
+import { Loader2, Moon, Power, Settings2, Zap } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import { cn } from "@/lib/utils";
+import { OciSetupWizard } from "@/components/clipforge/OciSetupWizard";
 
 type VmStatus = {
   configured: boolean;
   configureError: string | null;
+  wizardSkipped?: boolean;
   ociState: string | null;
   ociError: string | null;
   ociCheckedAt: number;
@@ -64,8 +70,10 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
   const vmSetPower = useAction(api.vm.vmSetPower);
   const [vm, setVm] = useState<VmStatus | undefined>(undefined);
   const [pending, setPending] = useState<"START" | "STOP" | null>(null);
-  const [busyDialog, setBusyDialog] = useState<{ activeJobs: number } | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
+  // forceWizard = the gear was tapped on a configured card. When NOT
+  // configured the wizard shows by default (unless previously skipped).
+  const [forceWizard, setForceWizard] = useState(false);
 
   const refresh = useCallback(
     async (force = false) => {
@@ -86,6 +94,9 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
     return () => clearInterval(t);
   }, [refresh]);
 
+  const wizardOpen =
+    forceWizard || (vm !== undefined && !vm.configured && vm.wizardSkipped !== true);
+
   const state = deriveState(vm, pending);
 
   const flip = async (action: "START" | "STOP") => {
@@ -93,7 +104,7 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
     try {
       const res = (await vmSetPower({ action })) as { busy?: boolean; activeJobs?: number };
       if (res.busy) {
-        setBusyDialog({ activeJobs: res.activeJobs ?? 1 });
+        setConfirmStop(true);
         setPending(null);
         return;
       }
@@ -110,6 +121,36 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
       toast.error(err instanceof Error ? err.message : "VM power action failed.");
     }
   };
+
+  // ---- setup wizard (first run, skipped-resume, or gear edit) ----
+  if (wizardOpen) {
+    return (
+      <OciSetupWizard
+        className={className}
+        onDone={() => {
+          setForceWizard(false);
+          void refresh(true);
+        }}
+      />
+    );
+  }
+
+  // ---- not configured + skipped: slim tap-to-set-up bar (never a fake state) ----
+  if (vm !== undefined && !vm.configured) {
+    return (
+      <button
+        type="button"
+        onClick={() => setForceWizard(true)}
+        className={cn(
+          "flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-border bg-card px-3 py-2 text-xs text-muted-foreground hover:border-primary/50 hover:text-foreground",
+          className,
+        )}
+      >
+        <Power className="size-3.5" />
+        Worker VM not configured — tap to set up
+      </button>
+    );
+  }
 
   const label =
     state === "on"
@@ -133,16 +174,16 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
           : "Waking the worker — this takes ~2 min"
         : state === "off"
           ? "Worker asleep — flip the switch to wake it (~2 min)."
-          : vm !== undefined && !vm.configured
-            ? "VM control not configured — add the OCI_* env vars in the Keys tab"
-            : vm?.ociError
+          : vm === undefined
+            ? "Checking instance state…"
+            : vm.ociError
               ? `Instance state unknown — ${vm.ociError}`
               : "Instance state unknown";
 
   return (
     <div
       className={cn(
-        "flex items-center gap-3 rounded-xl border px-3 py-2",
+        "relative flex items-center gap-3 rounded-xl border px-3 py-2",
         state === "on"
           ? "border-primary/50 bg-primary/10 neon-glow-sm"
           : state === "waking"
@@ -201,14 +242,6 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
             <Power className="size-3" />
           )}
         </span>
-        <span
-          className={cn(
-            "pointer-events-none absolute inset-y-0 flex items-center text-[9px] font-black tracking-widest",
-            state === "on" ? "left-2 text-primary" : "right-2 text-muted-foreground",
-          )}
-        >
-          {state === "on" ? "" : ""}
-        </span>
       </button>
 
       <div className="min-w-0">
@@ -232,15 +265,26 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
         </p>
       </div>
 
+      {/* settings gear — reopen the wizard to edit credentials */}
+      <button
+        type="button"
+        aria-label="Edit VM connection"
+        title="Edit VM connection"
+        onClick={() => setForceWizard(true)}
+        className="ml-auto cursor-pointer rounded-md p-1.5 text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
+      >
+        <Settings2 className="size-3.5" />
+      </button>
+
       {/* busy — stop after current job? */}
       {confirmStop && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-sm rounded-xl border border-border bg-card p-5">
             <p className="text-sm font-bold">Busy — stop after the current job?</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {busyDialog?.activeJobs ?? 1} job(s) are rendering right now. A hard
-              stop would kill the encode; choose “Stop after current job” and the
-              VM shuts down cleanly once the worker drains its queue.
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              {vm?.activeJobs ?? 1} job(s) are rendering right now. A hard stop
+              would kill the encode; choose “Stop after current job” and the VM
+              shuts down cleanly once the worker drains its queue.
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button

@@ -44,6 +44,11 @@ curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up
 
 ## Env vars (app side — Keys/API keys tab)
 
+No-code alternative: the dashboard's power switch shows a **setup wizard** the
+first time it is used (6 copy-paste fields + "Test connection", which makes a
+real OCI GetInstance call and shows the exact error on failure). Saved values
+live server-side only and take effect immediately — env vars still win if set.
+
 | Var | Purpose |
 |---|---|
 | `OCI_TENANCY_OCID` | tenancy OCID for the control plane |

@@ -225,6 +225,21 @@ const schema = defineSchema(
       // deferred power action (STOP waits for the worker to go idle)
       pendingAction: v.optional(v.union(v.literal("START"), v.literal("STOP"))),
     }).index("singleton", ["singleton"]),
+
+    // OCI setup wizard storage (server-side only — the browser never reads
+    // these back after save; vm.ts resolves env first, then this table).
+    // PRIVATE_KEY holds the raw PEM contents, never returned to the client.
+    vmConfig: defineTable({
+      singleton: v.literal("vm-config"),
+      tenancyOcid: v.string(),
+      userOcid: v.string(),
+      fingerprint: v.string(),
+      privateKeyPem: v.string(),
+      instanceOcid: v.string(),
+      region: v.string(),
+      savedAt: v.number(),
+      skipped: v.optional(v.boolean()), // "Skip for now" hides the wizard
+    }).index("singleton", ["singleton"]),
   },
   {
     schemaValidation: false,
