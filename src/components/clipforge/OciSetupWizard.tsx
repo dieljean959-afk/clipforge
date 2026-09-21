@@ -241,6 +241,24 @@ export function OciSetupWizard({
             <b>Region</b> is on the instance details page, e.g.{" "}
             <code className="font-mono">us-phoenix-1</code>.
           </li>
+          <li>
+            Give this app permission to manage <b>only your worker VM</b>:
+            Identity → <b>Policies</b> → Create Policy (create it in the{" "}
+            <b>compartment that contains the VM</b>) and paste this minimal
+            policy:
+            <pre className="mt-2 overflow-x-auto rounded-md border border-border bg-background/80 p-2.5 font-mono text-[10px] leading-relaxed">
+{`Allow group clipforge-workers to manage instance in compartment <compartment-name>
+  where request.instance.id = '<instance-ocid>'`}
+            </pre>
+            <span className="mt-1.5 block">
+              Create the <code className="font-mono">clipforge-workers</code>{" "}
+              group and add your API-key user to it. That single statement
+              grants START/STOP/read on this one instance — nothing else in
+              the tenancy. If “Test connection” fails with{" "}
+              <code className="font-mono">NotAuthorizedOrNotFound</code>, the
+              policy is missing or was created in the wrong compartment.
+            </span>
+          </li>
         </ol>
       )}
 
