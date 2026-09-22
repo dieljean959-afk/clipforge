@@ -450,6 +450,14 @@ export const vmSetPower = action({
     if (args.action === "STOP" && truth.activeJobs > 0 && args.confirmBusy !== true) {
       return { busy: true as const, activeJobs: truth.activeJobs };
     }
+    if (args.action === "STOP" && truth.activeJobs > 0) {
+      // Confirmed "stop after current job": arm the deferred stop WITHOUT
+      // calling OCI now. The worker's next idle heartbeat executes the real
+      // STOP (see vmWorkerHeartbeatPublic) — the running encode is not killed.
+      await ctx.runMutation(internal.vmStore.cacheIntent, { action: "STOP" });
+      console.log("[vm] deferred STOP armed — executes when the worker reports idle");
+      return { busy: false as const, deferred: true as const };
+    }
 
     const body =
       args.action === "STOP" ? JSON.stringify({ action: "STOP", force: false }) : JSON.stringify({ action: "START" });

@@ -99,19 +99,25 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
 
   const state = deriveState(vm, pending);
 
-  const flip = async (action: "START" | "STOP") => {
+  const flip = async (action: "START" | "STOP", opts?: { confirmBusy?: boolean }) => {
     setPending(action);
     try {
-      const res = (await vmSetPower({ action })) as { busy?: boolean; activeJobs?: number };
+      const res = (await vmSetPower({ action, confirmBusy: opts?.confirmBusy })) as {
+        busy?: boolean;
+        activeJobs?: number;
+        deferred?: boolean;
+      };
       if (res.busy) {
         setConfirmStop(true);
         setPending(null);
         return;
       }
       toast.success(
-        action === "START"
-          ? "Starting the worker VM (~2 min)..."
-          : "Stopping the worker VM — queued jobs stay safe in the queue.",
+        res.deferred === true
+          ? "Stopping after the current job — the running encode is not interrupted."
+          : action === "START"
+            ? "Starting the worker VM (~2 min)..."
+            : "Stopping the worker VM — queued jobs stay safe in the queue.",
       );
       // poll faster right after a power action
       setTimeout(() => void refresh(true), 3_000);
@@ -299,7 +305,7 @@ export function WorkerPowerSwitch({ className }: { className?: string }) {
                 className="cursor-pointer rounded-md border border-amber-400/50 bg-amber-400/10 px-3 py-1.5 text-xs font-semibold text-amber-200"
                 onClick={() => {
                   setConfirmStop(false);
-                  void flip("STOP");
+                  void flip("STOP", { confirmBusy: true });
                 }}
               >
                 Stop after current job
