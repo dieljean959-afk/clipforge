@@ -1,0 +1,70 @@
+# ClipForge — local pipeline configuration (MoneyPrinterTurbo heritage, pruned).
+# Everything here is safe defaults for a personal machine. Secrets live in .env
+# (GEMINI_API_KEY), never in this file.
+
+[app]
+host = "127.0.0.1"
+port = 8000
+# Local working folders — created on boot next to the repo.
+downloads_dir = "downloads"
+outputs_dir = "outputs"
+data_dir = "data"
+
+[whisper]
+# small (~500MB, fast, decent accuracy — default)
+# medium (~1.5GB, better accuracy)
+# large-v3 (~3GB, best, needs 8GB+ free RAM)
+model = "small"
+# auto | cpu | cuda  (auto picks CUDA when torch/ctranslate2 sees a GPU)
+device = "auto"
+# auto -> int8 on CPU, float16 on GPU. Override only if you know why.
+compute_type = "auto"
+# Whisper language hint: "auto" detects, or force e.g. "en"
+language = "auto"
+
+[gemini]
+# Free-tier friendly flash model. GEMINI_API_KEY comes from .env.
+model = "gemini-2.0-flash"
+min_clip_sec = 15
+max_clip_sec = 60
+# Auto-select the top N clips by score (5-15).
+max_clips = 10
+# 429 backoff retries before giving up (free tier = 15 RPM).
+max_retries = 3
+
+[subtitle]
+# ASS style: bold white with thick neon-green outline, word pop-in.
+font = "Arial Black"
+# Fallback list when the primary font is not installed (Linux etc.)
+font_fallbacks = ["DejaVu Sans", "Arial", "Liberation Sans", "Verdana"]
+# Font size in ASS PlayRes units (PlayResY = 1920). ~60-80 reads well on phone.
+font_size = 68
+# Neon green outline, matching the reference style.
+outline_color = "#39FF14"
+outline_width = 5
+# Words visible at once (2-3 per the reference style).
+words_per_cue = 2
+# Vertical anchor as a fraction of frame height (lower third).
+position_y = 0.78
+# Pop/scale animation on each word group.
+pop_animation = true
+
+[video]
+width = 1080
+height = 1920
+fps = 30
+# x264 quality (lower = better). 20 is visually clean for clips.
+crf = 20
+preset = "veryfast"
+# Follow the active speaker with MediaPipe when installed; center crop otherwise.
+reframe = true
+# Trim dead air with Silero VAD when installed; keep original pacing otherwise.
+silence_trim = true
+
+[download]
+max_height = 1080
+# Leave "" for none. Set to "chrome"/"firefox"/"edge"/"brave"/"safari" to borrow
+# that browser's cookies for age-restricted videos you can access.
+cookies_from_browser = ""
+# Auto `pip install -U yt-dlp` once on failure before the retry.
+auto_update = true

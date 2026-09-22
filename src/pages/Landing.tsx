@@ -11,7 +11,8 @@ import {
   Sparkles,
   Type as TypeIcon,
 } from "lucide-react";
-import { useAuth } from "@/hooks/use-auth";
+import { useEffect, useState } from "react";
+import { useHealth } from "@/hooks/use-poll";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { LogoWordmark } from "@/components/clipforge/LogoMark";
@@ -137,7 +138,14 @@ function HeroPhone({ className }: { className?: string }) {
 }
 
 export default function Landing() {
-  const { isLoading, isAuthenticated } = useAuth();
+  // Local app: "signed in" simply means the local API is reachable.
+  const { health, error } = useHealth(10_000);
+  const [checked, setChecked] = useState(false);
+  useEffect(() => {
+    if (health !== undefined || error !== null) setChecked(true);
+  }, [health, error]);
+  const isLoading = !checked;
+  const isAuthenticated = health?.ok === true;
 
   return (
     <motion.div
@@ -182,16 +190,17 @@ export default function Landing() {
           <div className="max-w-xl flex-1">
             <Badge variant="outline" className="mb-5 gap-1.5 border-primary/40 bg-primary/10 text-primary">
               <Flame className="size-3" />
-              MoneyPrinterTurbo fork · MIT
+              MoneyPrinterTurbo fork · MIT · 100% local
             </Badge>
             <h1 className="text-4xl font-black leading-[1.05] tracking-tight sm:text-5xl md:text-6xl">
               Turn one long video into{" "}
               <span className="text-primary neon-text">ten viral clips</span>.
             </h1>
             <p className="mt-5 text-base leading-relaxed text-muted-foreground sm:text-lg">
-              ClipForge grabs your video, transcribes every word with Whisper
-              timings, finds the hooks worth posting, and renders vertical
-              9:16 cuts with animated green-outline captions — automatically.
+              ClipForge runs entirely on your machine: yt-dlp grabs the video,
+              Whisper transcribes every word with timings, Gemini finds the
+              hooks worth posting, and FFmpeg renders vertical 9:16 cuts with
+              animated green-outline captions — nothing leaves your computer.
             </p>
             <div className="mt-7 flex flex-wrap items-center gap-3">
               <Button asChild size="lg" className="cursor-pointer gap-2 font-bold neon-glow">
@@ -228,7 +237,7 @@ export default function Landing() {
               icon={Download}
               step="01 — Grab"
               title="Clippy is grabbing the video..."
-              body="Paste a YouTube, Vimeo, TikTok or X link. yt-dlp pulls 1080p MP4, with a cobalt.tools fallback and manual upload as the last resort — plus a one-click retry when YouTube breaks things."
+              body="Paste a YouTube, Vimeo, TikTok or X link — yt-dlp pulls 1080p MP4 straight to your machine, self-updates when YouTube changes, and can borrow your browser cookies for age-gated videos. Manual upload always works as the fallback."
             />
             <PipelineStep
               icon={AudioWaveform}
@@ -314,7 +323,7 @@ export default function Landing() {
               <span className="text-primary neon-text">in your last upload</span>.
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-              Paste a link, confirm you own the content, and let the forge run.
+              One command to start: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">./start.sh</code>. Paste a link, confirm you own the content, and let the forge run.
             </p>
             <Button asChild size="lg" className="mt-7 cursor-pointer gap-2 font-bold neon-glow">
               <a href={isAuthenticated ? "/dashboard" : "/auth?returnTo=%2Fdashboard"}>
@@ -328,8 +337,8 @@ export default function Landing() {
 
       <footer className="border-t border-border/60">
         <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-3 px-4 py-8 text-xs text-muted-foreground sm:flex-row">
-          <p>ClipForge — forked from MoneyPrinterTurbo, MIT licensed.</p>
-          <p className="font-mono">yt-dlp · faster-whisper · MoviePy · FFmpeg</p>
+          <p>ClipForge — forked from MoneyPrinterTurbo, MIT licensed, runs locally.</p>
+          <p className="font-mono">yt-dlp · faster-whisper · Gemini · FFmpeg</p>
         </div>
       </footer>
     </motion.div>

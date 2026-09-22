@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { toast } from "sonner";
-import { useQuery } from "convex/react";
 import {
   Copy,
   Download,
@@ -10,14 +9,12 @@ import {
   Thermometer,
   TriangleAlert,
 } from "lucide-react";
-import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import { ClipPreview } from "./ClipPreview";
-import { buildClipSrt, copyClipMeta } from "@/lib/clip-export";
-import { downloadClipMp4 } from "@/lib/clip-export";
+import { buildClipSrt, copyClipMeta, downloadClipMp4 } from "@/lib/clip-export";
 import { scoreBand, fmtDuration } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
-import type { ClipDoc } from "@/lib/clipforge";
+import type { ClipDto } from "@/lib/api";
 
 const BAND_STYLES: Record<string, string> = {
   hot: "border-primary/60 bg-primary/15 text-primary",
@@ -35,29 +32,24 @@ export function ClipCard({
   clip,
   onOpen,
 }: {
-  clip: ClipDoc;
-  onOpen?: (clip: ClipDoc) => void;
+  clip: ClipDto;
+  onOpen?: (clip: ClipDto) => void;
 }) {
   const score = scoreBand(clip.score);
   const BandIcon = BAND_ICONS[score];
-  const mediaUrl = useQuery(api.clips.getClipMediaUrl, { clipId: clip._id });
   const [downloading, setDownloading] = useState(false);
 
-  const renderState = clip.renderState ?? "pending";
-  const rendered =
-    clip.mediaStorageId !== undefined && mediaUrl !== null && mediaUrl !== undefined;
-  const failed = renderState === "failed";
+  const rendered = clip.renderState === "done" && clip.videoPath !== null;
+  const failed = clip.renderState === "failed";
 
   const downloadMp4 = async () => {
-    if (mediaUrl === null || mediaUrl === undefined) {
+    if (!rendered) {
       toast.error("No rendered MP4 exists for this clip yet.");
       return;
     }
     setDownloading(true);
     try {
-      const res = await fetch(mediaUrl);
-      if (!res.ok) throw new Error(`download failed (HTTP ${res.status})`);
-      downloadClipMp4(await res.blob(), clip);
+      await downloadClipMp4(clip);
       toast.success("MP4 downloaded.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Download failed.");
@@ -69,7 +61,7 @@ export function ClipCard({
   return (
     <div className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card transition hover:border-primary/40">
       <div className="relative p-2">
-        <ClipPreview clipId={clip._id} className="w-full" />
+        <ClipPreview clip={clip} className="w-full" />
         {/* clickable overlay above the control bar opens the detail dialog */}
         <button
           type="button"
@@ -97,7 +89,7 @@ export function ClipCard({
           {!failed && !rendered && (
             <span className="flex items-center gap-1 rounded-full border border-border bg-black/60 px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
               <Loader2 className="size-3 animate-spin" />
-              not rendered
+              {clip.renderState === "running" ? "rendering" : "not rendered"}
             </span>
           )}
         </div>
@@ -119,7 +111,7 @@ export function ClipCard({
         <p className="font-mono text-[10px] text-muted-foreground">
           {fmtDuration(clip.start)} → {fmtDuration(clip.end)} ·{" "}
           {fmtDuration(clip.end - clip.start)} · 9:16 1080×1920
-          {clip.mediaBytes !== undefined &&
+          {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
             ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`}
         </p>
         <div className="mt-auto flex items-center gap-1.5">

@@ -1,10 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { useQuery, useAction, useMutation } from "convex/react";
-import { Film, Loader2, LogOut, PlayCircle, RefreshCw, Server, ServerOff, Sparkles, Timer } from "lucide-react";
-import { useAuth } from "@/hooks/use-auth";
-import { useRenderWorker } from "@/hooks/use-render-worker";
-import { api } from "@/convex/_generated/api";
+import { Film, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,10 +8,9 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { LogoWordmark } from "@/components/clipforge/LogoMark";
-import { WorkerPowerSwitch } from "@/components/clipforge/WorkerPowerSwitch";
+import { LocalWorkerCard } from "@/components/clipforge/LocalWorkerCard";
 import { RightsNotice } from "@/components/clipforge/RightsNotice";
 import { NewJobForm } from "@/components/clipforge/NewJobForm";
 import { JobCard } from "@/components/clipforge/JobCard";
@@ -23,114 +18,53 @@ import { ClipCard, ScoreBadge } from "@/components/clipforge/ClipCard";
 import { ClipPreview } from "@/components/clipforge/ClipPreview";
 import { ExportDialog } from "@/components/clipforge/ExportDialog";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
-import {
-  fmtClock,
-  fmtDate,
-  sourceLabel,
-  type ClipDoc,
-  type JobDoc,
-} from "@/lib/clipforge";
+import { useJobs, useClips } from "@/hooks/use-poll";
+import { fmtClock, fmtDate, sourceLabel } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
+import type { ClipDto } from "@/lib/api";
 
 export default function Dashboard() {
-  const { user, signOut } = useAuth();
-  const jobs = useQuery(api.clips.listJobs, {});
-  const clipsByJob = useQuery(api.clips.recentClips, { limit: 48 });
-  const worker = useQuery(api.clips.getWorkerStatus, {});
-  const pingWorker = useMutation(api.clips.pingWorker);
-  const startWorker = useMutation(api.clips.startWorker);
-  const [starting, setStarting] = useState(false);
-
-  // Handshake loop (startup self-check): PING the worker every 5s. The
-  // SERVER judges liveness (it returns its own serverClockMs), so the
-  // browser clock never corrupts the check. The ping also re-arms the tick
-  // chain after a cold start and records lastClientPingServerMs.
-  useEffect(() => {
-    let cancelled = false;
-    const ping = async () => {
-      try {
-        await pingWorker({});
-      } catch {
-        // signed out or transient — liveness falls back to the query below
-      }
-    };
-    void ping();
-    const t = setInterval(() => {
-      if (!cancelled) void ping();
-    }, 5_000);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-  }, [pingWorker]);
-
-  // Server-judged liveness: the query compares the worker's heartbeat with
-  // ITS OWN clock. No client clock math — a stale heartbeat means the
-  // worker chain is genuinely not consuming.
-  const workerOnline = worker?.online ?? false;
-  const workerRepairing = worker?.repairing === true && workerOnline;
-  const queueName = worker?.queueName;
-  const brokerUrl = worker?.brokerUrl;
-  // Learned transcribing rate (ms per second of audio) -> "~N min for a 10 min video"
-  const rates = worker?.rates as Record<string, number> | undefined;
-  const trRate = rates?.transcribing;
-  const trHint =
-    trRate && trRate > 0
-      ? Math.max(1, Math.round((600 * trRate) / 60_000))
-      : null;
-
-  // THIS TAB is the render worker: claims queued jobs and drives the real
-  // pipeline (fetch-verify → whisper → Gemini → ffmpeg.wasm renders).
-  const { busy: workerBusy } = useRenderWorker();
-
-  const [selectedJobId, setSelectedJobId] = useState<JobDoc["_id"] | null>(null);
-  const [previewClip, setPreviewClip] = useState<ClipDoc | null>(null);
+  const { jobs, error: apiError, refresh: refreshJobs } = useJobs(2000);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const { clips } = useClips(selectedJobId, 2000);
+  const [previewClip, setPreviewClip] = useState<ClipDto | null>(null);
   const [redetecting, setRedetecting] = useState<string | null>(null);
-  const redetect = useAction(api.detection.redetectClips);
 
-  // Group clips by their job, memoized to avoid re-sorting every render.
-  const clipsGrouped = useMemo(() => {
-    const map = new Map<string, ClipDoc[]>();
-    for (const c of clipsByJob ?? []) {
-      const list = map.get(c.jobId) ?? [];
-      list.push(c);
-      map.set(c.jobId, list);
-    }
-    for (const list of map.values()) {
-      list.sort((a, b) => a.order - b.order);
-    }
-    return map;
-  }, [clipsByJob]);
-
-  const activeJobs = (jobs ?? []).filter(
+  const allJobs = jobs ?? [];
+  const activeJobs = allJobs.filter(
     (j) => j.stage !== "complete" && j.stage !== "failed",
   );
-  const doneJobs = (jobs ?? []).filter((j) => j.stage === "complete");
-  const failedJobs = (jobs ?? []).filter((j) => j.stage === "failed");
+  const doneJobs = allJobs.filter((j) => j.stage === "complete");
+  const failedJobs = allJobs.filter((j) => j.stage === "failed");
 
   // auto-select the newest completed job (or recover after a delete)
   useEffect(() => {
-    if (doneJobs.length === 0) return;
+    if (doneJobs.length === 0) {
+      if (selectedJobId !== null && !allJobs.some((j) => j._id === selectedJobId)) {
+        setSelectedJobId(null);
+      }
+      return;
+    }
     const stillThere = doneJobs.some((j) => j._id === selectedJobId);
     if (selectedJobId === null || !stillThere) {
       setSelectedJobId(doneJobs[0]._id);
     }
-  }, [doneJobs, selectedJobId]);
+  }, [doneJobs, allJobs, selectedJobId]);
 
   const selectedJob = doneJobs.find((j) => j._id === selectedJobId) ?? null;
-  const selectedClips = selectedJob
-    ? clipsGrouped.get(selectedJob._id) ?? []
-    : [];
 
-  const runRedetect = async (jobId: JobDoc["_id"]) => {
+  // keep the preview dialog's clip object fresh as renders complete
+  const freshPreview = useMemo(
+    () => (previewClip ? clips.find((c) => c._id === previewClip._id) ?? previewClip : null),
+    [previewClip, clips],
+  );
+
+  const runRedetect = async (jobId: string) => {
     setRedetecting(jobId);
     try {
-      const res = await redetect({ jobId });
-      if (res.detected) {
-        toast.success(`AI re-detection complete — ${res.count ?? 0} clips.`);
-      } else {
-        toast.error(res.error ?? "AI detection failed.");
-      }
+      await fetch(`/api/jobs/${jobId}/redetect`, { method: "POST" });
+      toast.info("Re-detection queued — Gemini is re-scoring this batch.");
+      void refreshJobs();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Re-detection failed.");
     } finally {
@@ -143,7 +77,7 @@ export default function Dashboard() {
       {/* top bar */}
       <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4">
-          <a href="/dashboard" className="cursor-pointer">
+          <a href="/" className="cursor-pointer">
             <LogoWordmark />
           </a>
           <div className="flex items-center gap-2">
@@ -152,99 +86,22 @@ export default function Dashboard() {
                 Landing
               </a>
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer gap-1.5 text-xs"
-              onClick={async () => {
-                await signOut();
-              }}
-            >
-              <LogOut className="size-3.5" />
-              Sign out
-            </Button>
           </div>
         </div>
       </header>
 
-      {/* worker liveness + warmup (startup self-checks) */}
+      {/* local worker status (CPU/RAM/queue/warmup) */}
       <div className="mx-auto w-full max-w-6xl px-4 pt-6">
-        {/* VM power switch — the ON/OFF control for the Oracle Cloud worker */}
-        <div className="flex justify-end">
-          <WorkerPowerSwitch />
-        </div>
-        {!workerOnline ? (
-          <div className="rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3">
-            <p className="flex items-center gap-2 text-sm font-semibold text-destructive">
-              <ServerOff className="size-4" />
-              Render worker offline
+        <LocalWorkerCard />
+        {apiError && (
+          <div className="mt-3 rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3">
+            <p className="text-sm font-semibold text-destructive">
+              Cannot reach the local API ({apiError})
             </p>
             <p className="mt-1 text-xs leading-relaxed text-destructive/80">
-              Jobs are refused until a worker is consuming the queue. Recovery
-              is one click — the in-process worker re-arms and drains the
-              queue. (Self-hosted equivalent:{" "}
-              <code className="font-mono">celery -A app worker --loglevel=info</code>)
+              Start it with <code className="font-mono">./start.sh</code> — the API and
+              the worker are one process, so a running server means a working worker.
             </p>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={starting}
-              className="mt-2 cursor-pointer gap-1.5 border-destructive/50 text-destructive hover:bg-destructive/15"
-              onClick={async () => {
-                setStarting(true);
-                try {
-                  await startWorker({});
-                  toast.success("Worker starting — draining the queue...");
-                } catch (err) {
-                  toast.error(
-                    err instanceof Error ? err.message : "Could not start worker.",
-                  );
-                } finally {
-                  setStarting(false);
-                }
-              }}
-            >
-              {starting ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <PlayCircle className="size-3.5" />
-              )}
-              Start worker
-            </Button>
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border/60 bg-card/60 px-4 py-2.5 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1.5 font-medium text-primary">
-              <Server className="size-3.5" />
-              {workerRepairing ? "Worker starting…" : "Worker online"}
-            </span>
-            <span className="font-mono text-[11px]">
-              queue: {queueName ?? "clipforge"} · broker:{" "}
-              {brokerUrl ?? "convex://clipforge-shared-db"}
-            </span>
-            {workerBusy ? (
-              <span className="flex items-center gap-1.5 text-primary">
-                <Loader2 className="size-3.5 animate-spin" />
-                This tab is working a job
-              </span>
-            ) : !worker?.modelLoaded ? (
-              <span className="flex items-center gap-1.5 text-amber-300">
-                <Loader2 className="size-3.5 animate-spin" />
-                Downloading AI model (one-time, ~3GB)…
-                {worker?.warmupDetail && (
-                  <span className="font-mono text-[11px] text-muted-foreground">
-                    {worker.warmupDetail}
-                  </span>
-                )}
-              </span>
-            ) : (
-              trHint !== null && (
-                <span className="flex items-center gap-1.5">
-                  <Timer className="size-3.5 text-primary/70" />
-                  Transcribing usually takes ~{trHint} min for a 10 min video
-                </span>
-              )
-            )}
           </div>
         )}
       </div>
@@ -254,7 +111,7 @@ export default function Dashboard() {
         <section className="grid gap-6 lg:grid-cols-[1fr_380px]">
           <div>
             <p className="text-sm text-muted-foreground">
-              Welcome back{user?.name ? `, ${user.name}` : ""}
+              Running 100% locally — your videos never leave this machine
             </p>
             <h1 className="mt-1 text-3xl font-black tracking-tight">
               The forge
@@ -280,7 +137,7 @@ export default function Dashboard() {
             <h2 className="text-lg font-bold tracking-tight">In the forge</h2>
             <div className="mt-3 grid gap-3">
               {[...activeJobs, ...failedJobs].map((job) => (
-                <JobCard key={job._id} job={job} />
+                <JobCard key={job._id} job={job} onDeleted={refreshJobs} />
               ))}
             </div>
           </section>
@@ -297,7 +154,7 @@ export default function Dashboard() {
                   variant="outline"
                   className="cursor-pointer gap-1.5 text-xs"
                   disabled={redetecting !== null}
-                  onClick={() => runRedetect(selectedJob._id)}
+                  onClick={() => void runRedetect(selectedJob._id)}
                 >
                   {redetecting === selectedJob._id ? (
                     <RefreshCw className="size-3.5 animate-spin" />
@@ -306,7 +163,7 @@ export default function Dashboard() {
                   )}
                   Re-detect with AI
                 </Button>
-                <ExportDialog job={selectedJob} clips={selectedClips} />
+                <ExportDialog job={selectedJob} clips={clips} />
               </div>
             )}
           </div>
@@ -343,25 +200,29 @@ export default function Dashboard() {
               {selectedJob && (
                 <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-1 rounded-xl border border-border bg-card px-4 py-3 text-xs text-muted-foreground">
                   <span className="font-mono">{fmtDate(selectedJob.createdAt)}</span>
+                  {selectedJob.durationSec != null && (
+                    <span>
+                      {fmtClock(selectedJob.durationSec)} source ·{" "}
+                      {selectedJob.totalClipsSec ?? 0}s of clips
+                    </span>
+                  )}
                   <span>
-                    {fmtClock(selectedJob.durationSec ?? 0)} source ·{" "}
-                    {selectedJob.totalClipsSec ?? 0}s of clips
-                  </span>
-                  <span>
-                    {selectedJob.clipSource === "gemini"
+                    {selectedJob.detectedSource === "gemini"
                       ? "AI-detected"
                       : "Detection failed"}
                   </span>
-                  <span>
-                    {selectedJob.transcriptWordCount ?? 0} words transcribed
-                  </span>
-                  <span>via {selectedJob.downloadSource ?? "—"}</span>
+                  {selectedJob.transcriptWordCount != null && (
+                    <span>{selectedJob.transcriptWordCount} words transcribed</span>
+                  )}
+                  {selectedJob.downloadSource && (
+                    <span>via {selectedJob.downloadSource}</span>
+                  )}
                 </div>
               )}
 
               {/* clip grid */}
               <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-                {selectedClips.map((clip) => (
+                {clips.map((clip) => (
                   <ClipCard
                     key={clip._id}
                     clip={clip}
@@ -369,7 +230,7 @@ export default function Dashboard() {
                   />
                 ))}
               </div>
-              {selectedClips.length === 0 && (
+              {clips.length === 0 && (
                 <p className="mt-3 text-sm text-muted-foreground">
                   Clips are loading...
                 </p>
@@ -387,29 +248,29 @@ export default function Dashboard() {
         }}
       >
         <DialogContent className="sm:max-w-md">
-          {previewClip && (
+          {freshPreview && (
             <>
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2 pr-6">
-                  {previewClip.title}
+                  {freshPreview.title}
                 </DialogTitle>
                 <DialogDescription className="flex items-center gap-2">
-                  <ScoreBadge score={previewClip.score} />
+                  <ScoreBadge score={freshPreview.score} />
                   <span className="font-mono text-[10px]">
-                    {fmtClock(previewClip.start)} → {fmtClock(previewClip.end)}
+                    {fmtClock(freshPreview.start)} → {fmtClock(freshPreview.end)}
                   </span>
                 </DialogDescription>
               </DialogHeader>
-              <ClipPreview clipId={previewClip._id} autoPlay className="w-full" />
+              <ClipPreview clip={freshPreview} autoPlay className="w-full" />
               <p className="max-h-24 overflow-auto rounded-lg border border-border bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
-                {previewClip.transcript}
+                {freshPreview.transcript}
               </p>
               <div className="flex gap-2">
                 <Button
                   className="flex-1 cursor-pointer gap-1.5"
                   onClick={async () => {
                     try {
-                      await copyClipMeta(previewClip);
+                      await copyClipMeta(freshPreview);
                       toast.success("Caption + hashtags copied.");
                     } catch {
                       toast.error("Clipboard unavailable.");
@@ -421,7 +282,7 @@ export default function Dashboard() {
                 <Button
                   variant="outline"
                   className="cursor-pointer gap-1.5"
-                  onClick={() => buildClipSrt(previewClip)}
+                  onClick={() => buildClipSrt(freshPreview)}
                 >
                   .srt
                 </Button>

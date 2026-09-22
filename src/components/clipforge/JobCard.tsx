@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useMutation, useQuery } from "convex/react";
 import {
   AlertTriangle,
+  AudioWaveform,
   CheckCircle2,
   Clock,
   Download,
@@ -11,10 +11,8 @@ import {
   Sparkles,
   Terminal,
   Trash2,
-  AudioWaveform,
   Clapperboard,
 } from "lucide-react";
-import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -24,6 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   STAGES,
@@ -32,6 +31,7 @@ import {
   fmtEta,
   fmtDate,
   sourceLabel,
+  type ClipStage,
   type JobDoc,
 } from "@/lib/clipforge";
 
@@ -46,9 +46,9 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
 };
 
 /**
- * Global stall watchdog (requirement 3): if the worker has written no progress
- * event for this job in 90s while it is in an active stage, the pipeline is
- * dead — surface it instead of spinning. 2s poll mirrors the progress cadence.
+ * Global stall watchdog: if the worker has written no progress event for this
+ * job in 90s while it is in an active stage, the pipeline is dead — surface it
+ * instead of spinning. 2s poll mirrors the progress cadence.
  */
 function useStalled(job: JobDoc): boolean {
   const [stalled, setStalled] = useState(false);
@@ -70,15 +70,41 @@ function useStalled(job: JobDoc): boolean {
   return stalled;
 }
 
-export function JobCard({ job }: { job: JobDoc }) {
-  const retry = useMutation(api.clips.retryJob);
-  const remove = useMutation(api.clips.deleteJob);
+export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => void }) {
   const failed = job.stage === "failed";
   const complete = job.stage === "complete";
   const activeIdx = STAGES.indexOf(job.stage as (typeof STAGES)[number]);
   const stalled = useStalled(job);
   const [logsOpen, setLogsOpen] = useState(false);
-  const logs = useQuery(api.clips.getJobLogs, { jobId: job._id });
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const openLogs = async () => {
+    setLogsOpen(true);
+    try {
+      setLogs(await api.jobLogs(job._id));
+    } catch {
+      setLogs(["(could not load logs)"]);
+    }
+  };
+
+  const removeJob = async () => {
+    try {
+      await api.deleteJob(job._id);
+      toast.success("Job deleted.");
+      onDeleted?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Delete failed.");
+    }
+  };
+
+  const retryJob = async () => {
+    try {
+      await api.retryJob(job._id);
+      toast.info("Retrying — Clippy is grabbing the video...");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Retry failed.");
+    }
+  };
 
   return (
     <div
@@ -95,7 +121,7 @@ export function JobCard({ job }: { job: JobDoc }) {
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {job.isUpload ? "Uploaded file" : "Video URL"} · {fmtDate(job.createdAt)}
-            {job.durationSec !== undefined && ` · ${fmtClock(job.durationSec)} source`}
+            {job.durationSec !== undefined && job.durationSec !== null && ` · ${fmtClock(job.durationSec)} source`}
           </p>
         </div>
         <div className="flex items-center gap-1.5">
@@ -103,7 +129,7 @@ export function JobCard({ job }: { job: JobDoc }) {
             size="sm"
             variant="ghost"
             className="h-8 cursor-pointer gap-1.5 text-xs text-muted-foreground"
-            onClick={() => setLogsOpen(true)}
+            onClick={() => void openLogs()}
           >
             <Terminal className="size-3.5" />
             View logs
@@ -113,14 +139,7 @@ export function JobCard({ job }: { job: JobDoc }) {
               size="sm"
               variant="ghost"
               className="h-8 cursor-pointer gap-1.5 text-xs text-muted-foreground hover:text-destructive"
-              onClick={async () => {
-                try {
-                  await remove({ jobId: job._id });
-                  toast.success("Job deleted.");
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Delete failed.");
-                }
-              }}
+              onClick={() => void removeJob()}
             >
               <Trash2 className="size-3.5" />
               Delete
@@ -131,14 +150,7 @@ export function JobCard({ job }: { job: JobDoc }) {
               size="sm"
               variant="outline"
               className="h-8 cursor-pointer gap-1.5 text-xs"
-              onClick={async () => {
-                try {
-                  await retry({ jobId: job._id });
-                  toast.info("Retrying — Clippy is grabbing the video...");
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Retry failed.");
-                }
-              }}
+              onClick={() => void retryJob()}
             >
               <RotateCcw className="size-3.5" />
               Retry
@@ -194,28 +206,12 @@ export function JobCard({ job }: { job: JobDoc }) {
           <Progress value={job.progress} className="h-1.5" />
           <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
             <span>
-              {job.unitsDone !== undefined && job.unitsTotal !== undefined
-                ? `${fmtUnits(job.unitLabel, job.unitsDone)} of ${fmtUnits(job.unitLabel, job.unitsTotal)}`
+              {job.unitsDone !== undefined && job.unitsDone !== null &&
+              job.unitsTotal !== undefined && job.unitsTotal !== null
+                ? `${fmtUnits(job.unitLabel ?? undefined, job.unitsDone)} of ${fmtUnits(job.unitLabel ?? undefined, job.unitsTotal)}`
                 : "Waiting for worker…"}
             </span>
-            {job.totalEtaSec !== undefined && job.totalEtaSec > 0 && (
-              <span className="font-mono tabular-nums text-primary/80">
-                ~{fmtEta(job.totalEtaSec)} left
-              </span>
-            )}
           </div>
-          {job.stageEtaSec !== undefined && job.stageEtaSec > 0 && (
-            <p className="mt-0.5 text-[11px] text-muted-foreground/70">
-              Stage ETA ~{fmtEta(job.stageEtaSec)}
-            </p>
-          )}
-          {job.slow === true && !stalled && (
-            <p className="mt-1 flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground/80">
-              <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
-              Still working — stage “{STAGE_LABELS[job.stage as ClipStage] ?? job.stage}” is slow,
-              not stuck. Watchdog caps it at 90s of silence.
-            </p>
-          )}
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress
@@ -230,14 +226,16 @@ export function JobCard({ job }: { job: JobDoc }) {
       {complete && (
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span className="font-semibold text-primary">{job.clipCount ?? 0} clips</span>
-          <span>{job.totalClipsSec ?? 0}s total</span>
+          {job.totalClipsSec !== undefined && job.totalClipsSec !== null && (
+            <span>{job.totalClipsSec}s total</span>
+          )}
           <span>
-            {job.clipSource === "gemini"
-              ? "AI-detected"
-              : "Detection failed"}
+            {job.detectedSource === "gemini" ? "AI-detected" : "Detection failed"}
           </span>
           {job.downloadSource && <span>via {job.downloadSource}</span>}
-          <span>{job.transcriptWordCount ?? 0} words transcribed</span>
+          {job.transcriptWordCount !== undefined && job.transcriptWordCount !== null && (
+            <span>{job.transcriptWordCount} words transcribed</span>
+          )}
         </div>
       )}
 
@@ -262,9 +260,7 @@ export function JobCard({ job }: { job: JobDoc }) {
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-80 overflow-y-auto rounded-lg border bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-            {logs === undefined ? (
-              <p>Loading…</p>
-            ) : logs.length === 0 ? (
+            {logs.length === 0 ? (
               <p>No worker events logged yet.</p>
             ) : (
               logs.map((line, i) => (
@@ -281,8 +277,6 @@ export function JobCard({ job }: { job: JobDoc }) {
   );
 }
 
-type ClipStage = (typeof STAGES)[number];
-
 /** Unit-aware value formatting: "142 MB", "4 min", "chunk 2". */
 function fmtUnits(label: string | undefined, value: number): string {
   switch (label) {
@@ -290,8 +284,8 @@ function fmtUnits(label: string | undefined, value: number): string {
       return `${Math.round(value)} MB`;
     case "min":
       return `${Math.round(value)} min`;
-    case "chunks":
-      return `${value} chunks`;
+    case "clips":
+      return `${Math.round(value)} clips`;
     default:
       return String(value);
   }

@@ -1,11 +1,11 @@
 // Shared ClipForge client library. Formatting helpers and stage metadata.
 // NOTE: the old "scene preview" generator (invented labels/gradients) was
-// deleted on purpose — previews are real <video> elements of stored MP4s.
+// deleted on purpose — previews are real <video> elements of rendered MP4s.
 
-import type { Doc } from "@/convex/_generated/dataModel";
+import type { ClipDto, JobDto } from "@/lib/api";
 
-export type JobDoc = Doc<"jobs">;
-export type ClipDoc = Doc<"clips">;
+export type JobDoc = JobDto;
+export type ClipDoc = ClipDto;
 
 export type ClipStage =
   | "queued"

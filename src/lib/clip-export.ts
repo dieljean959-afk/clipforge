@@ -4,10 +4,10 @@
 
 import { buildZip, downloadBlob, downloadText } from "@/lib/zip";
 import { fmtSrtTime } from "@/lib/clipforge";
-import type { ClipDoc, JobDoc } from "@/lib/clipforge";
+import type { ClipDto, JobDto } from "@/lib/api";
 
 /** Build and download the SRT for one clip. */
-export function buildClipSrt(clip: ClipDoc) {
+export function buildClipSrt(clip: ClipDto) {
   const srt = clip.captionCues
     .map((c, i) => `${i + 1}\n${fmtSrtTime(c.start)} --> ${fmtSrtTime(c.end)}\n${c.text}\n`)
     .join("\n");
@@ -15,7 +15,7 @@ export function buildClipSrt(clip: ClipDoc) {
 }
 
 /** Copy "title + hook + transcript + hashtags" metadata to the clipboard. */
-export async function copyClipMeta(clip: ClipDoc) {
+export async function copyClipMeta(clip: ClipDto) {
   const text = [
     clip.title,
     "",
@@ -29,7 +29,7 @@ export async function copyClipMeta(clip: ClipDoc) {
 }
 
 /** Render the whole job's captions.txt (one SRT block per clip). */
-export function buildCaptionsTxt(job: JobDoc, clips: ClipDoc[]): string {
+export function buildCaptionsTxt(job: JobDto, clips: ClipDto[]): string {
   return clips
     .map(
       (clip, i) =>
@@ -45,7 +45,7 @@ export function buildCaptionsTxt(job: JobDoc, clips: ClipDoc[]): string {
 }
 
 /** Filename stem for a clip inside export archives. */
-export function clipFileStem(clip: ClipDoc): string {
+export function clipFileStem(clip: ClipDto): string {
   const safe = clip.title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -54,56 +54,22 @@ export function clipFileStem(clip: ClipDoc): string {
   return `${String(clip.order + 1).padStart(2, "0")}-${safe || "clip"}`;
 }
 
-export function clipFileName(clip: ClipDoc): string {
+export function clipFileName(clip: ClipDto): string {
   return `${clipFileStem(clip)}.mp4`;
 }
 
 /**
- * Download one REAL rendered clip. Caller must pass the fetched Blob of the
- * stored MP4 — a clip without media has nothing to download and we say so.
+ * Download one REAL rendered clip via the backend streaming endpoint
+ * (Content-Disposition: attachment). A clip without media has nothing to
+ * download and we say so.
  */
-export function downloadClipMp4(blob: Blob, clip: ClipDoc) {
-  downloadBlob(blob, clipFileName(clip));
-}
-
-/**
- * Assemble the batch export ZIP: real MP4s (bytes passed in by the caller —
- * only clips that actually have media are included) + per-clip SRT +
- * captions.txt + README manifest.
- */
-export function buildExportZip(
-  job: JobDoc,
-  clips: ClipDoc[],
-  media: { clip: ClipDoc; bytes: Uint8Array }[],
-): { blob: Blob; included: number; skipped: number } {
-  const files: { name: string; text?: string; bytes?: Uint8Array }[] = [];
-  for (const { clip, bytes } of media) {
-    files.push({ name: `clips/${clipFileName(clip)}`, bytes });
+export async function downloadClipMp4(clip: ClipDto): Promise<void> {
+  if (!clip.videoPath) {
+    throw new Error("No rendered MP4 exists for this clip yet.");
   }
-  files.push({
-    name: "captions.txt",
-    text: buildCaptionsTxt(job, clips),
-  });
-  files.push({
-    name: "README.txt",
-    text: [
-      "ClipForge export — 9:16 1080x1920, H.264/AAC (ffmpeg.wasm)",
-      `Source: ${job.source}`,
-      `Clips included: ${media.length} of ${clips.length}`,
-      "",
-      "Only clip content you own or have permission to use.",
-      "Clipping other creators' videos may violate platform ToS and copyright.",
-      "",
-      "Clip list:",
-      ...clips.map((c) => {
-        const has = media.some((m) => m.clip._id === c._id);
-        return `  ${clipFileStem(c)} — ${c.start.toFixed(1)}s-${c.end.toFixed(1)}s, score ${c.score}${has ? "" : " (no rendered file)"}`;
-      }),
-    ].join("\n"),
-  });
-  return {
-    blob: buildZip(files),
-    included: media.length,
-    skipped: clips.length - media.length,
-  };
+  const url = `/api/clips/${clip._id}/download`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download failed (HTTP ${res.status})`);
+  const blob = await res.blob();
+  downloadBlob(blob, clipFileName(clip));
 }

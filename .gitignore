@@ -1,4 +1,21 @@
+# environment / secrets
+.env
 .env.local
+
+# node
 node_modules
 dist
+
+# local pipeline state (never commit your videos or clips)
+downloads/
+outputs/
+data/
+webui/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# stale generated folder from the removed Convex layer
 src/convex/_generated

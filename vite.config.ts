@@ -26,7 +26,6 @@ export default defineConfig({
         manualChunks: {
           // Vendor chunks for large libraries
           'react-vendor': ['react', 'react-dom', 'react-router'],
-          'convex-vendor': ['convex'],
           // Large UI library chunks
           'radix-ui': [
             '@radix-ui/react-accordion',
@@ -83,7 +82,6 @@ export default defineConfig({
       'react-dom',
       'react-dom/client',
       'react-router',
-      '@convex-dev/auth/react',
       'framer-motion',
     ],
   },
@@ -95,6 +93,11 @@ export default defineConfig({
     // Keep HMR on, but disable full-screen error overlay
     hmr: {
       overlay: false,
+    },
+    proxy: {
+      // local pipeline API + rendered media
+      "/api": "http://127.0.0.1:8000",
+      "/clips": "http://127.0.0.1:8000",
     },
   },
 });

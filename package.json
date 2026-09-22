@@ -1,7 +1,7 @@
 {
-  "name": "vite-template",
+  "name": "clipforge",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,13 +11,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@convex-dev/auth": "^0.0.90",
-    "@ffmpeg/ffmpeg": "^0.12.15",
-    "@ffmpeg/types": "^0.12.4",
-    "@ffmpeg/util": "^0.12.2",
     "@hookform/resolvers": "^5.2.2",
     "@jridgewell/trace-mapping": "^0.3.31",
-    "@oslojs/crypto": "^1.0.1",
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-aspect-ratio": "^1.1.8",
@@ -46,13 +41,10 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tailwindcss/vite": "^4.1.17",
     "@vly-ai/integrations": "^0.6.14",
-    "@xenova/transformers": "^2.17.2",
     "@zumer/snapdom": "^2.0.1",
-    "axios": "^1.13.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
-    "convex": "^1.30.0",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
     "framer-motion": "^12.23.25",

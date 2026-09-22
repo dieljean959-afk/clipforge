@@ -1,8 +1,6 @@
 import { useState } from "react";
 import { toast } from "sonner";
-import { useQueries } from "convex/react";
 import { FileArchive, FileText, Loader2, Package } from "lucide-react";
-import { api } from "@/convex/_generated/api";
 import {
   Dialog,
   DialogContent,
@@ -14,37 +12,25 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { buildExportZip, buildCaptionsTxt } from "@/lib/clip-export";
+import { buildCaptionsTxt } from "@/lib/clip-export";
 import { downloadBlob, downloadText } from "@/lib/zip";
-import type { JobDoc, ClipDoc } from "@/lib/clipforge";
+import { api } from "@/lib/api";
+import type { JobDto, ClipDto } from "@/lib/api";
 
 export function ExportDialog({
   job,
   clips,
   trigger,
 }: {
-  job: JobDoc;
-  clips: ClipDoc[];
+  job: JobDto;
+  clips: ClipDto[];
   trigger?: React.ReactNode;
 }) {
   const [busy, setBusy] = useState(false);
   const [activeMode, setActiveMode] = useState<"zip" | "captions" | null>(null);
   const [zipProgress, setZipProgress] = useState(0);
-  const rendered = clips.filter((c) => c.mediaStorageId !== undefined);
+  const rendered = clips.filter((c) => c.videoPath !== null);
   const ready = job.stage === "complete" && rendered.length > 0;
-
-  // One hook call for all rendered clips' signed URLs (dynamic list — useQueries).
-  const mediaUrls = useQueries(
-    Object.fromEntries(
-      rendered.map((c) => [
-        c._id,
-        {
-          query: api.clips.getStorageUrl,
-          args: { storageId: c.mediaStorageId! },
-        } as const,
-      ]),
-    ),
-  );
 
   const doExport = async (mode: "zip" | "captions") => {
     if (!ready) return;
@@ -57,26 +43,14 @@ export function ExportDialog({
         toast.success("captions.txt downloaded.");
         return;
       }
-      // ZIP: fetch every rendered clip's REAL bytes from storage — no metadata
-      // exports. Clips without a rendered file are skipped and reported.
-      const media: { clip: ClipDoc; bytes: Uint8Array }[] = [];
-      for (let i = 0; i < rendered.length; i++) {
-        const clip = rendered[i];
-        if (clip.mediaStorageId === undefined) continue;
-        const url = mediaUrls[clip._id];
-        if (typeof url !== "string") {
-          throw new Error(`storage URL unavailable for clip ${clip.order + 1}`);
-        }
-        media.push({ clip, bytes: await fetchClipBytes(url) });
-        setZipProgress(Math.round(((i + 1) / rendered.length) * 100));
-      }
-      const { blob, included, skipped } = buildExportZip(job, clips, media);
-      downloadBlob(blob, `clipforge-${job._id.slice(-8)}.zip`);
-      toast.success(`Export ZIP downloaded — ${included} real MP4${included === 1 ? "" : "s"}.`, {
-        description:
-          skipped > 0
-            ? `${skipped} clip${skipped === 1 ? " was" : "s were"} skipped (no rendered file) — nothing was faked.`
-            : "9:16 1080×1920 · H.264/AAC",
+      // ZIP: the backend zips the REAL rendered MP4s from ./outputs — no
+      // metadata-only exports. Clips without a rendered file are skipped.
+      setZipProgress(50);
+      const blob = await api.exportZip(rendered.map((c) => c._id));
+      setZipProgress(100);
+      downloadBlob(blob, `clipforge-${job._id}.zip`);
+      toast.success(`Export ZIP downloaded — ${rendered.length} real MP4${rendered.length === 1 ? "" : "s"}.`, {
+        description: "9:16 1080×1920 · H.264/AAC · captions.txt included",
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Export failed.");
@@ -112,7 +86,7 @@ export function ExportDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          {busy && activeMode === "zip" && zipProgress > 0 && (
+          {busy && activeMode === "zip" && (
             <Progress value={zipProgress} className="h-1.5" />
           )}
           <button
@@ -160,13 +134,4 @@ export function ExportDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-/** Fetch a clip's rendered MP4 bytes from its signed storage URL. */
-async function fetchClipBytes(url: string): Promise<Uint8Array> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`storage fetch failed (HTTP ${res.status}) — clip file missing?`);
-  }
-  return new Uint8Array(await res.arrayBuffer());
 }
