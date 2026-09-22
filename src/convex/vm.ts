@@ -50,6 +50,66 @@ function normalizePem(raw: string): string {
   return pem.trim() + "\n";
 }
 
+// ---------------------------------------------------------------------------
+// credential shape validation
+//
+// Deployments may ship descriptive PLACEHOLDER values in env (e.g.
+// OCI_FINGERPRINT="fingerprint of the API signing key"). Those pass naive
+// length checks, make the app believe OCI is configured, and then every real
+// call fails — leaving a dead "unknown" toggle with no wizard. Every value is
+// therefore format-checked; anything that cannot possibly sign a request is
+// treated as unconfigured so the setup wizard takes over with readable
+// per-field reasons.
+// ---------------------------------------------------------------------------
+
+export interface OciValues {
+  tenancyOcid: string;
+  userOcid: string;
+  fingerprint: string;
+  privateKeyPem: string;
+  instanceOcid: string;
+  region: string;
+}
+
+/** Per-field problems; empty object = all values look structurally valid. */
+export function ociValueProblems(
+  vals: OciValues,
+): Partial<Record<keyof OciValues, string>> {
+  const p: Partial<Record<keyof OciValues, string>> = {};
+  const empty = (v: string) => v.trim().length === 0;
+  if (empty(vals.tenancyOcid)) p.tenancyOcid = "is empty";
+  else if (!vals.tenancyOcid.startsWith("ocid1.tenancy."))
+    p.tenancyOcid = 'should start with "ocid1.tenancy.oc1.."';
+  if (empty(vals.userOcid)) p.userOcid = "is empty";
+  else if (!vals.userOcid.startsWith("ocid1.user."))
+    p.userOcid = 'should start with "ocid1.user.oc1.."';
+  if (empty(vals.instanceOcid)) p.instanceOcid = "is empty";
+  else if (!vals.instanceOcid.startsWith("ocid1.instance."))
+    p.instanceOcid = 'should start with "ocid1.instance.oc1"';
+  if (empty(vals.fingerprint)) p.fingerprint = "is empty";
+  else if (!/^[0-9a-f]{2}(:[0-9a-f]{2}){15}$/i.test(vals.fingerprint.trim()))
+    p.fingerprint = "should look like aa:bb:cc:… (16 hex pairs, colon-separated)";
+  if (empty(vals.privateKeyPem)) p.privateKeyPem = "is empty";
+  else if (!vals.privateKeyPem.includes("PRIVATE KEY"))
+    p.privateKeyPem =
+      "should be the full PEM including the -----BEGIN PRIVATE KEY----- line";
+  if (empty(vals.region)) p.region = "is empty";
+  else if (!/^[a-z]{2}-[a-z]+-[0-9]+$/i.test(vals.region.trim()))
+    p.region = "should look like us-ashburn-1";
+  return p;
+}
+
+function envValues(): OciValues {
+  return {
+    tenancyOcid: (process.env.OCI_TENANCY_OCID ?? "").trim(),
+    userOcid: (process.env.OCI_USER_OCID ?? "").trim(),
+    fingerprint: (process.env.OCI_FINGERPRINT ?? "").trim(),
+    privateKeyPem: process.env.OCI_PRIVATE_KEY ?? "",
+    instanceOcid: (process.env.OCI_INSTANCE_OCID ?? "").trim(),
+    region: (process.env.OCI_REGION ?? "").trim(),
+  };
+}
+
 export const OCI_ENV_NAMES = [
   "OCI_TENANCY_OCID",
   "OCI_USER_OCID",
@@ -59,18 +119,18 @@ export const OCI_ENV_NAMES = [
   "OCI_REGION",
 ] as const;
 
+/** Env-backed config — null when vars are missing OR structurally invalid. */
 function envConfig(): OciConfig | null {
-  const missing = OCI_ENV_NAMES.filter(
-    (n) => !process.env[n] || (process.env[n] as string).length < 4,
-  );
-  if (missing.length > 0) return null;
+  const vals = envValues();
+  if (Object.values(vals).some((v) => v.trim().length < 4)) return null;
+  if (Object.keys(ociValueProblems(vals)).length > 0) return null;
   return {
-    tenancy: process.env.OCI_TENANCY_OCID as string,
-    user: process.env.OCI_USER_OCID as string,
-    fingerprint: process.env.OCI_FINGERPRINT as string,
-    privateKeyPem: normalizePem(process.env.OCI_PRIVATE_KEY as string),
-    instanceOcid: process.env.OCI_INSTANCE_OCID as string,
-    region: process.env.OCI_REGION as string,
+    tenancy: vals.tenancyOcid,
+    user: vals.userOcid,
+    fingerprint: vals.fingerprint,
+    privateKeyPem: normalizePem(vals.privateKeyPem),
+    instanceOcid: vals.instanceOcid,
+    region: vals.region,
   };
 }
 
@@ -92,11 +152,30 @@ function wizardConfig(w: {
   };
 }
 
+/** Missing/invalid env summary, e.g. "missing: X — fingerprint (should look like aa:bb:…)". */
+function envDiagnostics(): string {
+  const vals = envValues();
+  const missing = OCI_ENV_NAMES.filter(
+    (n) => !(process.env[n] ?? "").trim(),
+  );
+  const parts: string[] = [];
+  if (missing.length > 0) parts.push(`missing env vars: ${missing.join(", ")}`);
+  const problems = Object.entries(ociValueProblems(vals));
+  if (problems.length > 0) {
+    parts.push(
+      `present but not real credentials: ${problems
+        .map(([k, why]) => `${k} (${why})`)
+        .join("; ")}`,
+    );
+  }
+  return parts.join(" — ");
+}
+
 function missingMessage(): string {
-  const missing = OCI_ENV_NAMES.filter((n) => !process.env[n]);
-  return `VM control is not configured — missing env vars: ${missing.join(
-    ", ",
-  )} (or connect via the dashboard setup wizard)`;
+  const diag = envDiagnostics();
+  return `VM control is not configured — ${
+    diag.length > 0 ? diag : "no OCI env vars set"
+  }. Paste real values in the dashboard setup wizard (or the deployment env).`;
 }
 
 /**
@@ -125,9 +204,9 @@ async function ociConfigFromCtx(ctx: ActionCtx): Promise<OciConfig | { error: st
  * target for the acceptance test ("boot log says OCI configured: NO").
  */
 export function ociBootLine(): string {
-  const missing = OCI_ENV_NAMES.filter((n) => !process.env[n]);
-  const yes = missing.length === 0;
-  return `OCI configured: ${yes ? "YES" : "NO"}${yes ? "" : ` — missing: ${missing.join(", ")}`}`;
+  const diag = envDiagnostics();
+  const yes = diag.length === 0;
+  return `OCI configured: ${yes ? "YES" : `NO — ${diag}`}`;
 }
 
 let booted = false;
@@ -448,28 +527,24 @@ export const vmTestConnection = action({
       instanceOcid: vals.instanceOcid.trim(),
       region: vals.region.trim(),
     });
-    const friendly: Record<keyof OciConfig, string> = {
-      tenancy: "Tenancy OCID",
-      user: "User OCID",
-      fingerprint: "API key fingerprint",
-      privateKeyPem: "Private key",
-      instanceOcid: "Instance OCID",
-      region: "Region",
-    };
-    for (const [k, v2] of Object.entries(cfg) as [keyof OciConfig, string][]) {
-      if (k !== "privateKeyPem" && v2.length < 4) {
-        return {
-          ok: false as const,
-          state: null,
-          error: `${friendly[k]} looks too short — check the pasted value.`,
-        };
-      }
-    }
-    if (!cfg.privateKeyPem.includes("PRIVATE KEY")) {
+    // Shape-check BEFORE the network call: a placeholder can never sign a
+    // request, so say exactly which field is wrong instead of surfacing an
+    // opaque OCI 401.
+    const problems = ociValueProblems(vals);
+    const firstProblem = Object.entries(problems)[0];
+    if (firstProblem !== undefined) {
+      const friendly: Record<keyof OciValues, string> = {
+        tenancyOcid: "Tenancy OCID",
+        userOcid: "User OCID",
+        fingerprint: "API key fingerprint",
+        privateKeyPem: "Private key",
+        instanceOcid: "Instance OCID",
+        region: "Region",
+      };
       return {
         ok: false as const,
         state: null,
-        error: "The private key does not look like a PEM — paste the full contents including BEGIN/END lines.",
+        error: `${friendly[firstProblem[0] as keyof OciValues]} ${firstProblem[1]}.`,
       };
     }
     const res = await ociRequest(cfg, "GET", instancePath(cfg), "");
@@ -505,9 +580,20 @@ export const vmSaveConfig = action({
   },
   handler: async (ctx, vals) => {
     // Refuse to save values that cannot possibly sign a request.
-    const probe = wizardConfig(vals);
-    if (!probe.privateKeyPem.includes("PRIVATE KEY")) {
-      throw new Error("Private key is not a valid PEM — nothing was saved.");
+    const problems = ociValueProblems(vals);
+    const firstProblem = Object.entries(problems)[0];
+    if (firstProblem !== undefined) {
+      const friendly: Record<keyof OciValues, string> = {
+        tenancyOcid: "Tenancy OCID",
+        userOcid: "User OCID",
+        fingerprint: "API key fingerprint",
+        privateKeyPem: "Private key",
+        instanceOcid: "Instance OCID",
+        region: "Region",
+      };
+      throw new Error(
+        `${friendly[firstProblem[0] as keyof OciValues]} ${firstProblem[1]} — nothing was saved.`,
+      );
     }
     await ctx.runMutation(internal.vmStore.saveVmConfig, {
       tenancyOcid: vals.tenancyOcid.trim(),
