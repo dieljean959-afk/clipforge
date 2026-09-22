@@ -110,7 +110,6 @@ def predownload_model(settings: Settings, on_progress=None, on_log=None) -> Tran
 
 
 def _load_model(settings: Settings):
-    from faster_whisper import WhisperModel
 
     device, compute = _resolve_device(settings)
     key = (settings.whisper.model, device, compute)

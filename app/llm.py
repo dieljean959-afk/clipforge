@@ -44,18 +44,23 @@ def build_prompt(chunk: list[dict], cfg: GeminiConfig) -> str:
     lines = ["TRANSCRIPT (word-level, seconds):"]
     for w in chunk:
         lines.append(f'{w["start"]:.2f}-{w["end"]:.2f} {w["word"]}')
+    transcript_text = "\n".join(lines)
     return f"""
 You select the most viral short-form clips from a video transcript.
 Timing window: clips must be {cfg.min_clip_sec}-{cfg.max_clip_sec} seconds long.
 Pick {cfg.max_clips} best candidates max — fewer is fine. Do NOT invent times
 that are not backed by the transcript. Score 0-100 for hook strength, pacing
-and emotional energy. 2-3 word hook_text that would work as the opening caption.
+and emotional energy. hook_text is a short punchy phrase that would work as the
+opening caption. transcript must quote the words actually spoken inside the
+window (trimmed to ~300 chars). hashtags: 3-6 short tags for the platform.
 
 Return ONLY a JSON array (no prose, no markdown fences):
 [{{"start": 12.5, "end": 48.2, "score": 92, "title": "Short punchy title",
-   "hook_text": "WAIT FOR IT"}}]
+   "hook_text": "WAIT FOR IT",
+   "transcript": "exact words spoken in this window...",
+   "hashtags": ["#viral", "#podcast"]}}]
 
-TRANSCRIPT (word-level, seconds):
+{transcript_text}
 """.strip()
 
 
@@ -87,6 +92,10 @@ def parse_candidates(text: str) -> list[dict[str, Any]]:
                 "score": max(0.0, min(100.0, score)),
                 "title": str(item.get("title", "Untitled clip")),
                 "hook_text": str(item.get("hook_text", "")),
+                "transcript": str(item.get("transcript", ""))[:500],
+                "hashtags": [
+                    str(h) for h in (item.get("hashtags") or []) if str(h).strip()
+                ][:8],
             }
         )
     return out

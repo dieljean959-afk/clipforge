@@ -96,6 +96,7 @@ The UI asks you to confirm this before every job.
 ```bash
 python3 tools/compile_check.py   # compile-check every backend module
 curl localhost:8000/api/health   # worker/warmup/LLM status
+curl "localhost:8000/api/dev/verify-clips?jobId=<id>"   # ffprobe every rendered clip
 ```
 
 Then submit a video in the dashboard and watch the four stages report real

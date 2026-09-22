@@ -15,7 +15,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.config import Paths, load_config
+from app.config import Paths
 
 
 class LocalStore:

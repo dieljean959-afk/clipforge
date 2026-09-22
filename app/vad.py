@@ -16,8 +16,8 @@ def _load_silero():
     if _SILERO_AVAILABLE is False:
         return None
     try:
-        from silero_vad import load_silero_vad, get_speech_timestamps  # type: ignore
         import torch  # noqa: F401
+        from silero_vad import get_speech_timestamps, load_silero_vad  # type: ignore
         model = load_silero_vad()
         _SILERO_AVAILABLE = True
         return model, get_speech_timestamps
@@ -33,8 +33,9 @@ def detect_speech_windows(wav_path, settings) -> list[dict]:
     if loaded is None:
         return []
     model, get_speech_timestamps = loaded
-    import numpy as np
     import wave
+
+    import numpy as np
 
     with wave.open(str(wav_path), "rb") as wav:
         sr = wav.getframerate()

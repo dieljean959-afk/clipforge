@@ -7,7 +7,6 @@ pre-download (explicit, with progress) → worker thread starts.
 
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
 from pathlib import Path
@@ -16,9 +15,8 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from app import subtitle as subtitle_svc
 from app import video as video_svc
@@ -127,6 +125,44 @@ class CreateJobIn(BaseModel):
 
 class RequeueIn(BaseModel):
     jobId: str
+
+
+# ---------------------------------------------------------------------------
+# dev/diagnostics: verify every clip on disk with ffprobe — honest pass/fail
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/dev/verify-clips")
+def verify_clips(jobId: str | None = None) -> dict:
+    """ffprobe every rendered clip and report valid/invalid with reasons."""
+    clips = store.list_clips(jobId) if jobId else store.list_all_clips(limit=512)
+    results = []
+    for clip in clips:
+        entry: dict = {"clipId": clip["_id"], "order": clip.get("order"), "title": clip.get("title")}
+        vp = clip.get("videoPath")
+        if not vp:
+            entry.update({"valid": False, "reason": "no rendered file"})
+        elif not Path(vp).exists():
+            entry.update({"valid": False, "reason": f"file missing on disk: {Path(vp).name}"})
+        else:
+            try:
+                meta = video_svc.probe(Path(vp))
+                if meta["duration"] <= 0:
+                    entry.update({"valid": False, "reason": "ffprobe reports 0s duration"})
+                else:
+                    entry.update({
+                        "valid": True,
+                        "reason": "ok",
+                        "durationSec": meta["duration"],
+                        "width": meta["width"],
+                        "height": meta["height"],
+                        "bytes": Path(vp).stat().st_size,
+                    })
+            except Exception as exc:
+                entry.update({"valid": False, "reason": f"ffprobe failed: {exc}"})
+        results.append(entry)
+    valid = sum(1 for r in results if r["valid"])
+    return {"total": len(results), "valid": valid, "invalid": len(results) - valid, "clips": results}
 
 
 # --------------------------------------------------------------------------- #
@@ -249,7 +285,6 @@ def retry_job(job_id: str) -> dict:
 @app.post("/api/jobs/{job_id}/redetect")
 def redetect_job(job_id: str) -> dict:
     """Re-run Gemini detection on an existing job and re-render the clips."""
-    from app.task import Pipeline
 
     job = store.get_job(job_id)
     if job is None:
@@ -292,17 +327,23 @@ def list_clips(jobId: str | None = None, limit: int = 96) -> list[dict]:
 
 @app.get("/api/clips/{clip_id}/video")
 def clip_video(clip_id: str) -> FileResponse:
+    """Stream the rendered clip for <video> playback.
+
+    Content-Disposition stays inline — 'attachment' makes browsers refuse to
+    play the stream. Downloads go through /download instead.
+    """
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
     p = Path(clip["videoPath"])
     if not p.exists():
         raise HTTPException(404, f"clip file missing on disk: {p.name}")
-    return FileResponse(p, media_type="video/mp4", filename=p.name)
+    return FileResponse(p, media_type="video/mp4")
 
 
 @app.get("/api/clips/{clip_id}/thumb")
 def clip_thumb(clip_id: str) -> FileResponse:
+    """Real first frame of the rendered clip — inline image, no generated art."""
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("thumbPath"):
         raise HTTPException(404, "thumbnail not available")
@@ -379,7 +420,8 @@ def export_zip(body: ZipRequest) -> Response:
                 continue
             zf.write(p, f"clips/{clip['order'] + 1:02d}-{clip.get('title', 'clip')[:40] or 'clip'}.mp4")
             included += 1
-        job_id = store.get_clip(body.clipIds[0])["jobId"] if body.clipIds else None
+        first_clip = store.get_clip(body.clipIds[0]) if body.clipIds else None
+        job_id = first_clip["jobId"] if first_clip else None
         job = store.get_job(job_id) if job_id else None
         zf.writestr("captions.txt", (job or {}).get("captionsTxt") or "")
         zf.writestr(
@@ -390,7 +432,7 @@ def export_zip(body: ZipRequest) -> Response:
     if included == 0:
         raise HTTPException(404, "no rendered clips to export")
     return Response(
-        buf.getvalue(),
+        content=buf.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="clipforge-export.zip"'},
     )
@@ -411,3 +453,15 @@ else:
             "docs": "/docs",
             "ui": "run `bun run build` and restart to serve the built dashboard here",
         }
+
+
+def main() -> None:
+    """Entry point for the `clipforge` console script (pyproject.toml)."""
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.app.host,
+        port=settings.app.port,
+        log_level="info",
+    )

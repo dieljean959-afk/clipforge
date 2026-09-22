@@ -139,11 +139,14 @@ def render_clip(
     out_w, out_h = settings.video.width, settings.video.height
     clip_dur = end - start
 
-    # 1) cut segment (re-encode, frame-accurate) into an intermediate
+    # 1) cut segment (re-encode, frame-accurate) into an intermediate.
+    # Input-seeking with an explicit -t duration: unambiguous across ffmpeg
+    # versions (with -ss before -i, -to counts from the seek point on some
+    # builds, which would silently shorten the cut).
     tmp = dest.with_suffix(".tmp.mp4")
     _run([
         ffmpeg_bin(), "-y",
-        "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(src),
+        "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{clip_dur:.3f}",
         "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
         "-c:a", "aac", "-b:a", "160k",
         str(tmp),

@@ -17,7 +17,7 @@ os.environ.setdefault("CLIPFORGE_SMOKE", "1")
 
 def main() -> int:
     print("== 1. config load + boot banner")
-    from app.config import ConfigError, boot_banner, load_config
+    from app.config import boot_banner, load_config
 
     settings = load_config()
     boot_banner(settings)
@@ -85,9 +85,75 @@ def main() -> int:
         logs = client.get(f"/api/jobs/{job_id}/logs").json()
         print(f"   job log lines: {len(logs)}")
 
+        # -- 3b. new/changed endpoints ---------------------------------
+        # verify-clips on an empty store
+        r = client.get("/api/dev/verify-clips")
+        body = r.json() if r.status_code == 200 else {}
+        if r.status_code != 200 or body.get("total") != 0:
+            print(f"   FAIL: verify-clips empty store: {r.status_code} {body}")
+            return 1
+        print("   verify-clips empty store: OK")
+
+        # redetect on a missing job -> readable 404, not a crash
+        r = client.post("/api/jobs/doesnotexist/redetect")
+        if r.status_code != 404 or "not found" not in r.json().get("detail", ""):
+            print(f"   FAIL: redetect missing job: {r.status_code} {r.text[:120]}")
+            return 1
+        print("   redetect missing job: OK")
+
+        # export/zip with an unknown clip id -> readable 404 (regression:
+        # this used to raise TypeError on a None clip)
+        r = client.post("/api/export/zip", json={"clipIds": ["fake-id"]})
+        detail = r.json().get("detail", "") if r.status_code == 404 else ""
+        if r.status_code != 404 or "no rendered clips" not in detail:
+            print(f"   FAIL: export zip empty: {r.status_code} {detail}")
+            return 1
+        print("   export zip empty: OK")
+
+        # video/download endpoints: inline for <video>, attachment for MP4 DL
+        import subprocess
+        import tempfile
+
+        from app.config import ffmpeg_bin
+
+        tmp = Path(tempfile.mkdtemp(prefix="cf-smoke-"))
+        fake_mp4 = tmp / "clip.mp4"
+        subprocess.run(
+            [ffmpeg_bin(), "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=1",
+             "-c:v", "libx264", "-preset", "ultrafast", str(fake_mp4)],
+            check=True, capture_output=True,
+        )
+        main_mod.store.write_clip({
+            "_id": "smokeclip1", "jobId": "smokejob1", "order": 0,
+            "start": 0.0, "end": 1.0, "score": 90, "title": "Smoke test clip",
+            "hookText": "", "transcript": "", "hashtags": [], "captionCues": [],
+            "aspect": "9:16", "videoPath": str(fake_mp4), "thumbPath": None,
+            "renderState": "done",
+        })
+        r = client.get("/api/clips/smokeclip1/video")
+        if r.status_code != 200 or "attachment" in r.headers.get("content-disposition", ""):
+            print(f"   FAIL: video endpoint should stream inline: {r.status_code}")
+            return 1
+        r = client.get("/api/clips/smokeclip1/download")
+        if r.status_code != 200 or "attachment" not in r.headers.get("content-disposition", ""):
+            print(f"   FAIL: download endpoint should be attachment: {r.status_code}")
+            return 1
+        r = client.get("/api/dev/verify-clips?jobId=smokejob1")
+        entry = (r.json().get("clips") or [{}])[0]
+        if r.status_code != 200 or entry.get("valid") is not True:
+            print(f"   FAIL: verify-clips on real file: {r.status_code} {entry}")
+            return 1
+        print("   video inline / download attachment / verify real file: OK")
+        Path("data", "clips", "smokeclip1.json").unlink(missing_ok=True)
+
     # cleanup the throwaway job
     main_mod.store.delete_job(job_id)
-    Path("downloads", job_id).exists() and print("   note: downloads dir left for inspection")
+    if Path("downloads", job_id).exists():
+        print("   note: downloads dir left for inspection")
+
+    # The worker thread is a daemon; TestClient teardown can otherwise race it
+    # and abort the interpreter ("terminate called without an active exception").
+    main_mod.worker.stop(timeout=5)
 
     print("== 4. llm guard: detection without key raises LlmNotConfigured")
     from app import llm as llm_mod
@@ -119,4 +185,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    rc = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Hard-exit: daemon threads (worker, anyio pool) can race interpreter
+    # teardown and abort the C runtime AFTER all checks passed. os._exit skips
+    # that teardown, so the exit code always reflects the real test result.
+    os._exit(rc)

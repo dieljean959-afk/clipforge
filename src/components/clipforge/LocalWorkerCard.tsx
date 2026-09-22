@@ -18,16 +18,14 @@ function useSystemStats(intervalMs = 3000): ProcStat | null {
   const [stats, setStats] = useState<ProcStat | null>(null);
   useEffect(() => {
     let cancelled = false;
+    const initial = setTimeout(() => void read(), 0);
     const read = async () => {
       try {
-        const [stat, meminfo, loadavg] = await Promise.all([
-          fetch("/proc/stat").then((r) => r.text()),
+        const [meminfo, loadavg] = await Promise.all([
           fetch("/proc/meminfo").then((r) => r.text()),
           fetch("/proc/loadavg").then((r) => r.text()),
         ]);
         if (cancelled) return;
-        const cpuLine = stat.split("\n").find((l) => l.startsWith("cpu ")) ?? "";
-        const cols = cpuLine.split(/\s+/).slice(1).map(Number);
         const cores = navigator.hardwareConcurrency || 4;
         const load1 = Number.parseFloat(loadavg.split(" ")[0] ?? "0");
         const memTotal = Number(/MemTotal:\s+(\d+)/.exec(meminfo)?.[1] ?? 0) * 1024;
@@ -37,10 +35,10 @@ function useSystemStats(intervalMs = 3000): ProcStat | null {
         // /proc not available (macOS/Windows) — the card hides these lines
       }
     };
-    void read();
     const t = setInterval(() => void read(), intervalMs);
     return () => {
       cancelled = true;
+      clearTimeout(initial);
       clearInterval(t);
     };
   }, [intervalMs]);

@@ -2,7 +2,7 @@
 // captions.txt rendering, and the batch ZIP assembly for "Export all 9:16".
 // The ZIP carries the REAL rendered MP4s — no metadata-only exports.
 
-import { buildZip, downloadBlob, downloadText } from "@/lib/zip";
+import { downloadBlob, downloadText } from "@/lib/zip";
 import { fmtSrtTime } from "@/lib/clipforge";
 import type { ClipDto, JobDto } from "@/lib/api";
 

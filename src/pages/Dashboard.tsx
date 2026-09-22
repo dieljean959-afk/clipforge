@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Film, RefreshCw, Sparkles } from "lucide-react";
+import { BadgeCheck, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,6 +19,7 @@ import { ClipPreview } from "@/components/clipforge/ClipPreview";
 import { ExportDialog } from "@/components/clipforge/ExportDialog";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips } from "@/hooks/use-poll";
+import { api, type VerifyClipsDto } from "@/lib/api";
 import { fmtClock, fmtDate, sourceLabel } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
@@ -26,32 +27,27 @@ import type { ClipDto } from "@/lib/api";
 export default function Dashboard() {
   const { jobs, error: apiError, refresh: refreshJobs } = useJobs(2000);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const { clips } = useClips(selectedJobId, 2000);
   const [previewClip, setPreviewClip] = useState<ClipDto | null>(null);
   const [redetecting, setRedetecting] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<VerifyClipsDto | null>(null);
 
-  const allJobs = jobs ?? [];
+  const allJobs = useMemo(() => jobs ?? [], [jobs]);
   const activeJobs = allJobs.filter(
     (j) => j.stage !== "complete" && j.stage !== "failed",
   );
   const doneJobs = allJobs.filter((j) => j.stage === "complete");
   const failedJobs = allJobs.filter((j) => j.stage === "failed");
 
-  // auto-select the newest completed job (or recover after a delete)
-  useEffect(() => {
-    if (doneJobs.length === 0) {
-      if (selectedJobId !== null && !allJobs.some((j) => j._id === selectedJobId)) {
-        setSelectedJobId(null);
-      }
-      return;
-    }
-    const stillThere = doneJobs.some((j) => j._id === selectedJobId);
-    if (selectedJobId === null || !stillThere) {
-      setSelectedJobId(doneJobs[0]._id);
-    }
-  }, [doneJobs, allJobs, selectedJobId]);
-
-  const selectedJob = doneJobs.find((j) => j._id === selectedJobId) ?? null;
+  // Auto-select the newest completed job without a setState-in-effect:
+  // the effective selection is derived, and the user's explicit pick is kept
+  // when still valid.
+  const effectiveJobId =
+    selectedJobId !== null && doneJobs.some((j) => j._id === selectedJobId)
+      ? selectedJobId
+      : (doneJobs[0]?._id ?? null);
+  const selectedJob = doneJobs.find((j) => j._id === effectiveJobId) ?? null;
+  const { clips } = useClips(effectiveJobId, 2000);
 
   // keep the preview dialog's clip object fresh as renders complete
   const freshPreview = useMemo(
@@ -62,13 +58,33 @@ export default function Dashboard() {
   const runRedetect = async (jobId: string) => {
     setRedetecting(jobId);
     try {
-      await fetch(`/api/jobs/${jobId}/redetect`, { method: "POST" });
+      await api.redetect(jobId);
       toast.info("Re-detection queued — Gemini is re-scoring this batch.");
       void refreshJobs();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Re-detection failed.");
     } finally {
       setRedetecting(null);
+    }
+  };
+
+  // dev endpoint: ffprobe every rendered clip — honest valid/invalid report
+  const runVerify = async (jobId: string) => {
+    setVerifying(true);
+    try {
+      const result = await api.verifyClips(jobId);
+      setVerifyResult(result);
+      if (result.invalid === 0) {
+        toast.success(`All ${result.valid} rendered clips verified with ffprobe.`);
+      } else {
+        toast.error(
+          `${result.invalid} of ${result.total} clips failed verification — see the report.`,
+        );
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Verification failed.");
+    } finally {
+      setVerifying(false);
     }
   };
 
@@ -153,6 +169,20 @@ export default function Dashboard() {
                   size="sm"
                   variant="outline"
                   className="cursor-pointer gap-1.5 text-xs"
+                  disabled={verifying || redetecting !== null}
+                  onClick={() => void runVerify(selectedJob._id)}
+                >
+                  {verifying ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <BadgeCheck className="size-3.5 text-primary" />
+                  )}
+                  Verify
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="cursor-pointer gap-1.5 text-xs"
                   disabled={redetecting !== null}
                   onClick={() => void runRedetect(selectedJob._id)}
                 >
@@ -186,7 +216,7 @@ export default function Dashboard() {
                     onClick={() => setSelectedJobId(job._id)}
                     className={cn(
                       "cursor-pointer rounded-full border px-3 py-1.5 text-xs font-medium transition",
-                      selectedJobId === job._id
+                      effectiveJobId === job._id
                         ? "border-primary/60 bg-primary/10 text-primary"
                         : "border-border text-muted-foreground hover:text-foreground",
                     )}
@@ -234,6 +264,47 @@ export default function Dashboard() {
                 <p className="mt-3 text-sm text-muted-foreground">
                   Clips are loading...
                 </p>
+              )}
+
+              {/* verify-clips report (dev endpoint results) */}
+              {verifyResult && (
+                <div className="mt-4 rounded-xl border border-border bg-card p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold">
+                      ffprobe verification — {verifyResult.valid}/{verifyResult.total} valid
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 cursor-pointer text-xs text-muted-foreground"
+                      onClick={() => setVerifyResult(null)}
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
+                  <div className="mt-2 max-h-56 overflow-y-auto">
+                    {verifyResult.clips.map((r) => (
+                      <div
+                        key={r.clipId}
+                        className="flex items-center justify-between gap-3 border-t border-border/60 py-1.5 text-xs first:border-t-0"
+                      >
+                        <span className="min-w-0 truncate text-muted-foreground">
+                          #{(r.order ?? 0) + 1} {r.title}
+                        </span>
+                        <span
+                          className={cn(
+                            "shrink-0 font-mono text-[10px]",
+                            r.valid ? "text-primary" : "text-destructive",
+                          )}
+                        >
+                          {r.valid
+                            ? `ok · ${r.width}×${r.height} · ${r.durationSec?.toFixed(1)}s · ${((r.bytes ?? 0) / (1024 * 1024)).toFixed(1)} MB`
+                            : r.reason}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
             </>
           )}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertTriangle,
@@ -28,7 +28,6 @@ import {
   STAGES,
   STAGE_LABELS,
   fmtClock,
-  fmtEta,
   fmtDate,
   sourceLabel,
   type ClipStage,
@@ -54,20 +53,26 @@ function useStalled(job: JobDoc): boolean {
   const [stalled, setStalled] = useState(false);
   const active =
     job.stage !== "complete" && job.stage !== "failed" && job.stage !== "queued";
+  const jobRef = useRef(job);
   useEffect(() => {
-    if (!active) {
-      setStalled(false);
-      return;
-    }
+    jobRef.current = job;
+  }, [job]);
+  useEffect(() => {
+    if (!active) return;
     const check = () => {
-      const last = job.lastProgressAt ?? job.stageStartedAt ?? job.createdAt;
+      const j = jobRef.current;
+      const last = j.lastProgressAt ?? j.stageStartedAt ?? j.createdAt;
       setStalled(Date.now() - last > 90_000);
     };
-    check();
+    // first evaluation deferred a tick — no synchronous setState on mount
+    const initial = setTimeout(check, 0);
     const timer = setInterval(check, 2_000);
-    return () => clearInterval(timer);
-  }, [active, job.lastProgressAt, job.stageStartedAt, job.createdAt]);
-  return stalled;
+    return () => {
+      clearTimeout(initial);
+      clearInterval(timer);
+    };
+  }, [active]);
+  return active && stalled;
 }
 
 export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => void }) {

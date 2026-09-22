@@ -16,8 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config import ffmpeg_bin, load_config
 from app import subtitle, video
+from app.config import ffmpeg_bin, load_config
 
 
 def make_source(dest: Path, seconds: int = 12) -> Path:

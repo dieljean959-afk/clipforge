@@ -11,7 +11,6 @@ import {
   Sparkles,
   Type as TypeIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
 import { useHealth } from "@/hooks/use-poll";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -138,14 +137,9 @@ function HeroPhone({ className }: { className?: string }) {
 }
 
 export default function Landing() {
-  // Local app: "signed in" simply means the local API is reachable.
+  // Local app: "ready" simply means the local API is reachable.
   const { health, error } = useHealth(10_000);
-  const [checked, setChecked] = useState(false);
-  useEffect(() => {
-    if (health !== undefined || error !== null) setChecked(true);
-  }, [health, error]);
-  const isLoading = !checked;
-  const isAuthenticated = health?.ok === true;
+  const apiReady = health?.ok === true;
 
   return (
     <motion.div
@@ -164,18 +158,12 @@ export default function Landing() {
             <a href="#rights" className="transition hover:text-foreground">Rights</a>
           </nav>
           <div className="flex items-center gap-2">
-            {isLoading ? (
+            {health === undefined && error === null ? (
               <div className="h-9 w-20 animate-pulse rounded-md bg-muted" />
-            ) : isAuthenticated ? (
-              <Button asChild size="sm" className="cursor-pointer gap-1.5 font-bold">
-                <a href="/dashboard">
-                  Dashboard <ArrowRight className="size-3.5" />
-                </a>
-              </Button>
             ) : (
               <Button asChild size="sm" className="cursor-pointer gap-1.5 font-bold">
-                <a href="/auth?returnTo=%2Fdashboard">
-                  Start clipping <ArrowRight className="size-3.5" />
+                <a href="/dashboard">
+                  {apiReady ? "Dashboard" : "Open ClipForge"} <ArrowRight className="size-3.5" />
                 </a>
               </Button>
             )}
@@ -204,8 +192,8 @@ export default function Landing() {
             </p>
             <div className="mt-7 flex flex-wrap items-center gap-3">
               <Button asChild size="lg" className="cursor-pointer gap-2 font-bold neon-glow">
-                <a href={isAuthenticated ? "/dashboard" : "/auth?returnTo=%2Fdashboard"}>
-                  {isAuthenticated ? "Open dashboard" : "Start clipping — free"}
+                <a href="/dashboard">
+                  Start clipping — free
                   <ArrowRight className="size-4" />
                 </a>
               </Button>
@@ -326,8 +314,8 @@ export default function Landing() {
               One command to start: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">./start.sh</code>. Paste a link, confirm you own the content, and let the forge run.
             </p>
             <Button asChild size="lg" className="mt-7 cursor-pointer gap-2 font-bold neon-glow">
-              <a href={isAuthenticated ? "/dashboard" : "/auth?returnTo=%2Fdashboard"}>
-                {isAuthenticated ? "Open dashboard" : "Start clipping — free"}
+              <a href="/dashboard">
+                Open dashboard
                 <ArrowRight className="size-4" />
               </a>
             </Button>

@@ -124,10 +124,25 @@ def _load_toml(path: Path) -> dict:
         raise ConfigError(f"config.toml is not valid TOML: {exc}") from exc
 
 
+def _load_env_files(root: Path) -> list[str]:
+    """Load .env plus platform-injected env files, without clobbering real env.
+
+    dotenv does not override variables that are already set in the process
+    environment, so OS-provided secrets always win over file contents.
+    """
+    loaded: list[str] = []
+    for name in (".env", ".env.local", ".env.keys"):
+        p = root / name
+        if p.exists():
+            load_dotenv(p, override=False)
+            loaded.append(name)
+    return loaded
+
+
 def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     """Load and validate all settings. Raises ConfigError with readable text."""
     raw = _load_toml(root / "config.toml")
-    load_dotenv(root / ".env")
+    _load_env_files(root)
 
     errors: list[str] = []
 
@@ -265,6 +280,8 @@ def boot_banner(settings: Settings) -> None:
     print(f"[boot] LLM: gemini | key loaded: {'YES' if key_loaded else 'NO'}")
     if not key_loaded:
         print("[boot] AI detection offline — add GEMINI_API_KEY to .env")
+    env_files = _load_env_files(ROOT)
+    print(f"[boot] env files loaded: {', '.join(env_files) if env_files else 'none found'}")
     print(f"[boot] Whisper model: {settings.whisper.model} ({settings.whisper.resolved_compute})")
     print(f"[boot] Output: {settings.video.width}x{settings.video.height} @ {settings.video.fps}fps CRF {settings.video.crf}")
     print(f"[boot] Folders: {settings.app.paths.downloads_dir} / {settings.app.paths.outputs_dir} / {settings.app.paths.data_dir}")

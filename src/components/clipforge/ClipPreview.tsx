@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Clapperboard, Film, Loader2, Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { useRef, useState } from "react";
+import { Clapperboard, Film, Pause, Play, Volume2, VolumeX } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fmtClock } from "@/lib/clipforge";
 import { api } from "@/lib/api";
@@ -29,13 +29,10 @@ export function ClipPreview({
   const [duration, setDuration] = useState<number | null>(null);
   const [videoFailed, setVideoFailed] = useState(false);
 
-  // reset playback state when switching clips
-  useEffect(() => {
-    setPlaying(autoPlay);
-    setTime(0);
-    setDuration(null);
-    setVideoFailed(false);
-  }, [clip._id, autoPlay]);
+  // Playback state self-heals via DOM/media events; switching clips remounts
+  // the media element through the key on the container below, so no effect-
+  // based state resets are needed.
+  const resetKey = `${clip._id}:${autoPlay ? "1" : "0"}`;
 
   const hasMedia = videoUrl !== null;
   const togglePlay = () => {
@@ -55,7 +52,7 @@ export function ClipPreview({
         className,
       )}
     >
-      <div className="relative aspect-9/16 w-full">
+      <div className="relative aspect-9/16 w-full" key={resetKey}>
         {hasMedia && !videoFailed ? (
           <video
             ref={videoRef}

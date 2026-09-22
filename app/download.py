@@ -65,11 +65,12 @@ def download_url(
     settings: Settings,
     on_progress: Callable[[float, float | None], None] | None = None,
     on_log: Callable[[str], None] | None = None,
-    already_retried: bool = False,
 ) -> Path:
     """Download a video into dest_dir via the yt-dlp Python API.
 
-    Raises DownloadError with the exact error after one self-update retry.
+    On failure the rot policy kicks in: `pip install -U yt-dlp`, reload, and
+    retry ONCE. Raises DownloadError with the exact error when both attempts
+    fail (or when the first failure happens with auto-update disabled).
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     ydl_opts: dict[str, Any] = {
@@ -117,14 +118,17 @@ def download_url(
                 logger.info(f"[download] saved {cand.name} ({cand.stat().st_size} bytes)")
                 return cand
         raise DownloadError("yt-dlp reported success but no media file was found")
+    except DownloadError:
+        raise
     except Exception as exc:
         last_error = str(exc)
         logger.warning(f"[download] attempt failed: {last_error[:300]}")
 
-    if already_retried or not settings.download.auto_update:
+    if not settings.download.auto_update:
         raise DownloadError(f"yt-dlp failed: {last_error}")
 
-    # rot policy: self-update then retry once
+    # rot policy: self-update then retry exactly once (in-process, same call
+    # frame — no recursion, so the retry can never re-trigger itself)
     if on_log:
         on_log("yt-dlp failed — auto-updating and retrying once...")
     _pip_self_update()
@@ -135,14 +139,22 @@ def download_url(
     except Exception as exc:
         logger.warning(f"[download] reload failed ({exc}); continuing with fresh process import")
 
-    return download_url(
-        url,
-        dest_dir,
-        settings,
-        on_progress=on_progress,
-        on_log=on_log,
-        already_retried=True,
-    )
+    try:
+        logger.info(f"[download] retrying with updated yt-dlp: {url}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = (info or {}).get("title") or "video"
+        for cand in sorted(dest_dir.glob("source.*")):
+            if cand.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
+                if on_log:
+                    on_log(f"yt-dlp finished after self-update retry: {title}")
+                logger.info(f"[download] saved {cand.name} ({cand.stat().st_size} bytes)")
+                return cand
+        raise DownloadError("yt-dlp reported success but no media file was found")
+    except Exception as exc:
+        raise DownloadError(
+            f"yt-dlp failed after auto-update retry. Tried: yt-dlp (attempt 1: {last_error[:200]}) → yt-dlp-updated (attempt 2: {str(exc)[:200]}). Manual upload always works — 'Attach file' on the dashboard."
+        ) from exc
 
 
 def save_upload(src: Path, dest_dir: Path) -> Path:

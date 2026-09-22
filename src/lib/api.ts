@@ -68,6 +68,25 @@ export interface HealthDto {
   whisper: { model: string; compute: string };
 }
 
+export interface VerifyClipResult {
+  clipId: string;
+  order?: number;
+  title?: string;
+  valid: boolean;
+  reason: string;
+  durationSec?: number;
+  width?: number;
+  height?: number;
+  bytes?: number;
+}
+
+export interface VerifyClipsDto {
+  total: number;
+  valid: number;
+  invalid: number;
+  clips: VerifyClipResult[];
+}
+
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -83,6 +102,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(detail);
   }
   return (await res.json()) as T;
+}
+
+/** Request that returns a raw Blob (file downloads). */
+async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
+  const res = await fetch(`${BASE}${path}`, init);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      // keep default
+    }
+    throw new Error(detail);
+  }
+  return await res.blob();
 }
 
 export const api = {
@@ -107,10 +142,14 @@ export const api = {
     request<{ deleted: boolean }>(`/api/jobs/${jobId}`, { method: "DELETE" }),
   retryJob: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/retry`, { method: "POST" }),
+  redetect: (jobId: string) =>
+    request<{ queued: boolean }>(`/api/jobs/${jobId}/redetect`, { method: "POST" }),
+  verifyClips: (jobId: string) =>
+    request<VerifyClipsDto>(`/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`),
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),
   listClips: (jobId: string) => request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>
-    request<Blob>("/api/export/zip", {
+    requestBlob("/api/export/zip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ clipIds }),

@@ -6,16 +6,14 @@ writes go through the store so the dashboard shows real per-stage progress.
 
 from __future__ import annotations
 
-import shutil
 import time
-import wave
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from app import download, llm, reframe, subtitle, vad, video
-from app.config import Settings, ffmpeg_bin
+from app.config import Settings
 from app.store import LocalStore
 
 
@@ -56,6 +54,15 @@ class Pipeline:
     def _log(self, job_id: str, line: str) -> None:
         logger.info(f"[job {job_id}] {line}")
         self.store.append_job_log(job_id, line)
+
+    @staticmethod
+    def _srt_time(sec: float) -> str:
+        """Proper SRT timecode: 00:00:01,250 (cues are clip-relative)."""
+        ms = max(0, round(sec * 1000))
+        h, rem = divmod(ms, 3_600_000)
+        m, rem = divmod(rem, 60_000)
+        s, ms = divmod(rem, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     # ------------------------------------------------------------------
     # stages
@@ -106,18 +113,11 @@ class Pipeline:
                 self._progress(
                     job_id, "grabbing", frac,
                     "Clippy is grabbing the video...",
-                    unit_label="MB",
-                    units_done=round(frac * 100, 1),  # placeholder replaced below
                 )
-
-            # real byte-level progress: wrap the yt-dlp hook units
-            def on_progress_mb(frac: float, _eta: float | None) -> None:
-                # yt-dlp hook gives fractions; estimate MB via total file size when known
-                self._progress(job_id, "grabbing", frac, "Clippy is grabbing the video...")
 
             src = download.download_url(
                 job["source"], dest_dir, self.settings,
-                on_progress=on_progress_mb,
+                on_progress=on_progress,
                 on_log=lambda line: self._log(job_id, line),
             )
         video.verify_source(src)
@@ -214,7 +214,6 @@ class Pipeline:
             )
             clip_doc["renderState"] = "running"
             self.store.write_clip(clip_doc)
-            t0 = time.time()
 
             # caption cues from word timings inside this window
             cue_words = [w for w in words if w["end"] > c0 and w["start"] < c1]
@@ -277,7 +276,8 @@ class Pipeline:
                 captions_txt_parts.append(f"=== Clip {idx + 1}: {clip_doc['title']} (score {clip_doc['score']:.0f}) ===")
                 for i, cue in enumerate(cues, 1):
                     captions_txt_parts.append(
-                        f"{i}\n00:00:{cue['start']:05.2f},000 --> 00:00:{cue['end']:05.2f},000\n{cue['text']}\n"
+                        f"{i}\n{self._srt_time(cue['start'])} --> "
+                        f"{self._srt_time(cue['end'])}\n{cue['text']}\n"
                     )
             except video.RenderError as exc:
                 clip_doc.update({"renderState": "failed", "mediaError": str(exc)})
