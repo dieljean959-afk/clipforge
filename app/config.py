@@ -179,6 +179,11 @@ def _fresh_env_snapshot(root: Path) -> tuple[str, dict[str, str]]:
                     continue
                 key, _, value = line.partition("=")
                 merged.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    # Decrypt dotenvx-encrypted values in the snapshot itself (.env.keys
+    # private keys are part of the merge). Without this, the file fallback
+    # would misreport a decryptable platform-saved key as "unusable
+    # (encrypted)" even though _load_env_files decrypts it into os.environ.
+    _decrypt_encrypted_values(merged)
     return "|".join(parts), merged
 
 
@@ -371,6 +376,32 @@ def write_env_var(name: str, value: str) -> None:
     tmp = ENV_LOCAL.with_suffix(".local.tmp")
     tmp.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
     tmp.replace(ENV_LOCAL)
+
+
+def sync_gemini_env_after_save(value: str) -> None:
+    """Mirror a freshly written GEMINI_API_KEY into the process env.
+
+    The live resolver prefers OS env, so without this a stale copy loaded
+    earlier from an older .env.local would shadow the just-saved value — the
+    "I replaced the key but it still reports the old one" bug.
+    """
+    os.environ["GEMINI_API_KEY"] = value
+
+
+def sync_gemini_env_for_delete() -> list[str]:
+    """Drop Gemini key aliases from the process env before a file delete.
+
+    Only GEMINI_API_KEY itself and aliases the env files currently define are
+    popped — those are the copies _load_env_files injected. Platform secrets
+    injected as real OS env (never via files) are left alone.
+    """
+    _fingerprint, file_values = _fresh_env_snapshot(ROOT)
+    dropped: list[str] = []
+    for name in GEMINI_KEY_ALIASES:
+        if name == "GEMINI_API_KEY" or name in file_values:
+            if os.environ.pop(name, None) is not None:
+                dropped.append(name)
+    return dropped
 
 
 def delete_env_var(name: str) -> int:

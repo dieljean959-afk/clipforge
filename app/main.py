@@ -30,6 +30,8 @@ from app.config import (
     ffprobe_bin,
     live_gemini_key,
     load_config,
+    sync_gemini_env_after_save,
+    sync_gemini_env_for_delete,
     write_env_var,
 )
 from app.download import probe_url
@@ -320,6 +322,9 @@ def set_gemini_key(body: SetKeyIn) -> dict:
     if " " in raw:
         raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
     write_env_var("GEMINI_API_KEY", raw)
+    # Mirror into the process env: the live resolver prefers OS env, so a stale
+    # copy from an older .env.local would otherwise shadow the new value.
+    sync_gemini_env_after_save(raw)
     live = live_gemini_key()
     live.refresh(force=True)
     status = live.status()
@@ -334,11 +339,18 @@ def set_gemini_key(body: SetKeyIn) -> dict:
 @app.delete("/api/settings/gemini-key")
 def remove_gemini_key() -> dict:
     """Delete GEMINI_API_KEY from .env.local (the missing Delete button)."""
+    # Purge the process-env copies FIRST — the live resolver prefers OS env,
+    # so a leftover injected value would keep keyLoaded=True after the file
+    # line was removed.
+    dropped = sync_gemini_env_for_delete()
     removed = delete_env_var("GEMINI_API_KEY")
     live = live_gemini_key()
     live.refresh(force=True)
-    logger.info(f"[config] GEMINI_API_KEY deleted via dashboard ({removed} line(s) removed)")
-    return {**live.status(), "linesRemoved": removed}
+    logger.info(
+        f"[config] GEMINI_API_KEY deleted via dashboard "
+        f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
+    )
+    return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
 
 
 # --------------------------------------------------------------------------- #
