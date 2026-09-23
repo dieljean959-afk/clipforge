@@ -25,10 +25,12 @@ from app.config import (
     ConfigError,
     Settings,
     boot_banner,
+    delete_env_var,
     ffmpeg_bin,
     ffprobe_bin,
     live_gemini_key,
     load_config,
+    write_env_var,
 )
 from app.download import probe_url
 from app.hosting import RetentionCleaner
@@ -300,6 +302,43 @@ def reload_secrets() -> dict:
     status = live.status()
     logger.info(f"[config] secrets re-checked — key loaded: {status['keyLoaded']} ({status['source']})")
     return status
+
+
+class SetKeyIn(BaseModel):
+    key: str = Field(min_length=20, max_length=300)
+
+
+@app.post("/api/settings/gemini-key")
+def set_gemini_key(body: SetKeyIn) -> dict:
+    """Save/replace GEMINI_API_KEY in .env.local (the platform Keys UI has no
+    edit for existing vars — this is the missing Edit, exposed in-app).
+    Takes the raw key; stores it; returns the same status shape as Re-check
+    plus a verification shape (first 6 / last 4 chars only — never the key)."""
+    raw = body.key.strip()
+    if raw.lower().startswith("encrypted:"):
+        raise HTTPException(400, "That looks like an encrypted blob — paste the raw AIza... key.")
+    if " " in raw:
+        raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
+    write_env_var("GEMINI_API_KEY", raw)
+    live = live_gemini_key()
+    live.refresh(force=True)
+    status = live.status()
+    logger.info("[config] GEMINI_API_KEY updated via dashboard — verification: "
+                f"{raw[:6]}…{raw[-4:]} ({len(raw)} chars)")
+    return {
+        **status,
+        "storedShape": {"first6": raw[:6], "last4": raw[-4:], "length": len(raw)},
+    }
+
+
+@app.delete("/api/settings/gemini-key")
+def remove_gemini_key() -> dict:
+    """Delete GEMINI_API_KEY from .env.local (the missing Delete button)."""
+    removed = delete_env_var("GEMINI_API_KEY")
+    live = live_gemini_key()
+    live.refresh(force=True)
+    logger.info(f"[config] GEMINI_API_KEY deleted via dashboard ({removed} line(s) removed)")
+    return {**live.status(), "linesRemoved": removed}
 
 
 # --------------------------------------------------------------------------- #

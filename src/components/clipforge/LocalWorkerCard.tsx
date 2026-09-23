@@ -2,23 +2,40 @@
 // API online/offline (precise reason), server CPU/RAM via psutil on the
 // server, tailnet IP when Tailscale is enabled, queue depth, warmup, and
 // limits. All fields are null-safe: unknown never renders as NaN.
+//
+// Includes an in-app Gemini key manager (Set key / Remove) — the platform's
+// Keys/API keys page has no Edit/Delete for existing variables, so the app
+// writes .env.local directly through the backend. Works on mobile widths.
 
 import { useState } from "react";
 import { toast } from "sonner";
 import {
   Cpu,
+  Eye,
+  EyeOff,
   HardDrive,
   KeyRound,
   Loader2,
   MemoryStick,
+  Pencil,
   RefreshCw,
   ServerCog,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 import { useHealth } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { fmtBytes } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 function StatLine({
   icon: Icon,
@@ -40,6 +57,11 @@ function StatLine({
 export function LocalWorkerCard({ className }: { className?: string }) {
   const { health, error, refresh: refreshHealth } = useHealth(5000);
   const [rechecking, setRechecking] = useState(false);
+  const [keyDialogOpen, setKeyDialogOpen] = useState(false);
+  const [keyInput, setKeyInput] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [savingKey, setSavingKey] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const workerOnline = health?.worker.online === true;
   const warmup = health?.warmup;
@@ -66,9 +88,8 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const retentionH = typeof health?.limits?.retentionHours === "number" ? health.limits.retentionHours : null;
 
   // Live Gemini-key state from the server: where it found the key, or exactly
-  // why a present-but-unusable value was rejected (encrypted blob, placeholder,
-  // malformed). "Re-check" forces the server to re-read the env files now —
-  // the natural action right after saving a key in the Keys/API keys tab.
+  // why a present-but-unusable value was rejected (empty save, encrypted blob,
+  // placeholder, malformed).
   const llm = health?.llm;
   const llmProblem = llm?.problem ?? null;
   const llmSource = typeof llm?.source === "string" ? llm.source : "";
@@ -82,15 +103,55 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       } else if (status.problem) {
         toast.error(status.problem);
       } else {
-        toast.error(
-          "No key found. Add GEMINI_API_KEY in the Keys/API keys tab (Backend section), then Re-check again.",
-        );
+        toast.error("No key found — use 'Set key' to save one right here.");
       }
       void refreshHealth();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Re-check failed — is the API up?");
     } finally {
       setRechecking(false);
+    }
+  };
+
+  const openKeyDialog = () => {
+    setKeyInput("");
+    setShowKey(false);
+    setConfirmDelete(false);
+    setKeyDialogOpen(true);
+  };
+
+  const saveKey = async () => {
+    const raw = keyInput.trim();
+    if (raw.length < 20) {
+      toast.error("That looks too short for a Google API key (they start with AIza and are ~39 chars).");
+      return;
+    }
+    setSavingKey(true);
+    try {
+      const status = await api.setGeminiKey(raw);
+      toast.success(
+        `Key saved and live. Verify it: starts ${status.storedShape.first6}, ends ${status.storedShape.last4} (${status.storedShape.length} chars).`,
+      );
+      setKeyDialogOpen(false);
+      void refreshHealth();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save the key.");
+    } finally {
+      setSavingKey(false);
+    }
+  };
+
+  const removeKey = async () => {
+    setSavingKey(true);
+    try {
+      const status = await api.deleteGeminiKey();
+      toast.info(`Key removed (${status.linesRemoved} line(s) cleaned). AI detection is offline until a new key is set.`);
+      setKeyDialogOpen(false);
+      void refreshHealth();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not delete the key.");
+    } finally {
+      setSavingKey(false);
     }
   };
 
@@ -172,13 +233,28 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               title={
                 llmOk
                   ? `Gemini key loaded on the server (${llmSource})`
-                  : llmProblem ?? "Add GEMINI_API_KEY in the Keys/API keys tab (Backend section) for AI detection"
+                  : llmProblem ?? "No GEMINI_API_KEY on the server yet"
               }
             >
               {llmOk ? <HardDrive className="size-3" /> : <KeyRound className="size-3" />}
-              {llmOk ? "AI detection ready" : llmProblem ? "AI detection blocked" : "AI detection offline — add GEMINI_API_KEY"}
+              {llmOk ? "AI detection ready" : llmProblem ? "AI detection blocked" : "AI detection offline — no key"}
             </span>
-            {!llmOk && health && (
+            {/* key manager: Set key / Re-check — always tappable, no hover-only UI */}
+            <button
+              type="button"
+              onClick={openKeyDialog}
+              className={cn(
+                "flex cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold transition",
+                llmOk
+                  ? "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                  : "border-amber-400/50 text-amber-300 hover:bg-amber-400/15",
+              )}
+              title="Set or replace the Gemini API key — saved directly into the server's env"
+            >
+              <Pencil className="size-3" />
+              {llmOk ? "Replace key" : "Set key"}
+            </button>
+            {!llmOk && (
               <button
                 type="button"
                 onClick={() => void runRecheck()}
@@ -187,7 +263,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                   "flex cursor-pointer items-center gap-1 rounded-full border border-amber-400/50 px-2 py-0.5 text-[10px] font-bold text-amber-300 transition hover:bg-amber-400/15",
                   rechecking && "cursor-wait opacity-60",
                 )}
-                title="Re-read the server's env files right now — press this after saving a key"
+                title="Re-read the server's env files right now"
               >
                 {rechecking ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
                 Re-check
@@ -226,18 +302,108 @@ export function LocalWorkerCard({ className }: { className?: string }) {
         <p className="mt-2 max-w-3xl text-[11px] leading-relaxed text-amber-300/90">
           {llmProblem ? (
             <>
-              <span className="font-semibold">Why: </span>{llmProblem}
+              <span className="font-semibold">Why: </span>{llmProblem}{" "}
+              Use <span className="font-semibold">Set key</span> to replace it right
+              here — no Keys tab needed.
             </>
           ) : (
             <>
-              Save <span className="font-mono">GEMINI_API_KEY</span> in the Keys/API keys
-              tab (Backend section) or the project <span className="font-mono">.env</span>,
-              then press <span className="font-semibold">Re-check</span> — no restart
-              needed. Searched: {llmSource}.
+              Click <span className="font-semibold">Set key</span> above to paste your
+              Gemini API key (get one free at aistudio.google.com/apikey) — it is saved
+              directly on the server and AI detection turns on instantly.
             </>
           )}
         </p>
       )}
+
+      {/* Gemini key manager dialog */}
+      <Dialog open={keyDialogOpen} onOpenChange={setKeyDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="size-4 text-primary" />
+              Gemini API key
+            </DialogTitle>
+            <DialogDescription>
+              {llmOk
+                ? `A key is active (source: ${llmSource}). Saving replaces it; removing takes AI detection offline.`
+                : llmProblem
+                  ? `Current state: ${llmProblem}`
+                  : "No key saved yet. Paste one below — it starts with AIza."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="relative">
+            <input
+              type={showKey ? "text" : "password"}
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder="AIza…"
+              autoComplete="off"
+              spellCheck={false}
+              className="h-11 w-full rounded-md border border-input bg-background px-3 pr-10 font-mono text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => setShowKey((v) => !v)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer rounded p-1.5 text-muted-foreground transition hover:text-foreground"
+              title={showKey ? "Hide" : "Show"}
+            >
+              {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+            </button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Saved directly into the server's env (no restart needed). Free key:{" "}
+            <a
+              href="https://aistudio.google.com/apikey"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline"
+            >
+              aistudio.google.com/apikey
+            </a>
+          </p>
+
+          <DialogFooter className="flex-row flex-wrap items-center gap-2">
+            <Button
+              className="cursor-pointer gap-1.5"
+              disabled={savingKey || keyInput.trim().length < 20}
+              onClick={() => void saveKey()}
+            >
+              {savingKey ? <Loader2 className="size-4 animate-spin" /> : <Pencil className="size-4" />}
+              Save key
+            </Button>
+            <Button
+              variant="outline"
+              className="cursor-pointer gap-1.5"
+              disabled={savingKey}
+              onClick={() => void runRecheck()}
+            >
+              <RefreshCw className="size-4" />
+              Re-check
+            </Button>
+            <Button
+              variant="destructive"
+              className="cursor-pointer gap-1.5"
+              disabled={savingKey || !confirmDelete}
+              onClick={() => void removeKey()}
+            >
+              <Trash2 className="size-4" />
+              {confirmDelete ? "Confirm delete" : "Delete"}
+            </Button>
+            {!confirmDelete && (
+              <Button
+                variant="ghost"
+                className="cursor-pointer text-xs text-muted-foreground"
+                disabled={savingKey}
+                onClick={() => setConfirmDelete(true)}
+              >
+                I want to delete the key
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

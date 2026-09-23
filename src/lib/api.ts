@@ -176,6 +176,19 @@ export const api = {
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),
   /** Force the server to re-read env files and re-resolve the Gemini key. */
   reloadSecrets: () => request<KeyStatusDto>("/api/settings/reload-secrets", { method: "POST" }),
+  /** Save/replace GEMINI_API_KEY in the backend's env file (missing Edit button). */
+  setGeminiKey: (key: string) =>
+    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+      "/api/settings/gemini-key",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      },
+    ),
+  /** Delete GEMINI_API_KEY from the backend's env file (missing Delete button). */
+  deleteGeminiKey: () =>
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/gemini-key", { method: "DELETE" }),
   listClips: (jobId: string) => request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>
     requestBlob("/api/export/zip", {

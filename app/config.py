@@ -294,11 +294,18 @@ class _LiveKeyState:
             # real OS env), then decrypt any platform-encrypted values.
             _load_env_files(self._root)
 
-            # OS env wins first (freshly injected keys), then file contents —
-            # which covers values the platform added after this process started.
+            # Resolution order: a USABLE OS-env key wins (platform-injected
+            # secrets). If OS env has a value but it is UNUSABLE (stale
+            # encrypted blob, placeholder, malformed), fall through to the
+            # env-file contents — the file is fresher than the process env
+            # (e.g. after the app itself rewrites .env.local).
             key, source, problem = _resolve_gemini_key(os.environ)
-            if key is None and problem is None:
-                key, source, problem = _resolve_gemini_key(file_values)
+            if key is None:
+                fkey, fsource, fproblem = _resolve_gemini_key(file_values)
+                if fkey is not None:
+                    key, source, problem = fkey, f"{fsource} (.env.local)", None
+                elif problem is None and fproblem is not None:
+                    key, source, problem = None, fsource, fproblem
             self.key = key
             self.source = source or "not found in env files or OS env"
             self.problem = problem
@@ -328,6 +335,62 @@ def live_gemini_key() -> _LiveKeyState:
     if _live_key is None:
         _live_key = _LiveKeyState(ROOT)
     return _live_key
+
+
+# --------------------------------------------------------------------------- #
+# env-file management (the platform Keys UI has no edit/delete — the app
+# provides it for GEMINI_API_KEY by rewriting .env.local directly)
+# --------------------------------------------------------------------------- #
+
+ENV_LOCAL = ROOT / ".env.local"
+
+
+def write_env_var(name: str, value: str) -> None:
+    """Add or replace a variable in .env.local (atomic tmp+rename)."""
+    import re as _re
+
+    if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError(f"invalid variable name: {name!r}")
+    lines: list[str] = []
+    if ENV_LOCAL.exists():
+        lines = ENV_LOCAL.read_text(encoding="utf-8", errors="replace").splitlines()
+    out: list[str] = []
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            existing = stripped.split("=", 1)[0].strip()
+            if existing == name:
+                if not replaced:
+                    out.append(f"{name}={value}")
+                    replaced = True
+                continue  # drop duplicate definitions
+        out.append(line)
+    if not replaced:
+        out.append(f"{name}={value}")
+    tmp = ENV_LOCAL.with_suffix(".local.tmp")
+    tmp.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+    tmp.replace(ENV_LOCAL)
+
+
+def delete_env_var(name: str) -> int:
+    """Remove every definition of `name` from .env.local. Returns lines removed."""
+    if not ENV_LOCAL.exists():
+        return 0
+    out: list[str] = []
+    removed = 0
+    for line in ENV_LOCAL.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            if stripped.split("=", 1)[0].strip() == name:
+                removed += 1
+                continue
+        out.append(line)
+    if removed:
+        tmp = ENV_LOCAL.with_suffix(".local.tmp")
+        tmp.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+        tmp.replace(ENV_LOCAL)
+    return removed
 
 
 @dataclass
