@@ -1,5 +1,5 @@
-// Typed REST client for the ClipForge LOCAL backend (FastAPI, same machine).
-// Every call goes to the local API process — no cloud, no broker.
+// Typed REST client for the ClipForge backend (FastAPI, same origin).
+// Every call uses relative /api URLs — same origin, no localhost, no IPs.
 
 import type { ClipStage } from "@/lib/clipforge";
 
@@ -59,6 +59,15 @@ export interface ClipDto {
   renderMs?: number | null;
 }
 
+export interface SystemStatsDto {
+  cpuPercent: number | null;
+  cores: number | null;
+  memTotalBytes: number | null;
+  memUsedBytes: number | null;
+  load1: number | null;
+  pid: number | null;
+}
+
 export interface HealthDto {
   ok: boolean;
   version: string;
@@ -66,6 +75,16 @@ export interface HealthDto {
   warmup: { stage: string; detail: string; startedAt: number | null };
   llm: { provider: string; keyLoaded: boolean };
   whisper: { model: string; compute: string };
+  system: SystemStatsDto;
+  tailnetIp: string | null;
+  limits: { maxSourceMin: number; retentionHours: number };
+  dispatch:
+    | { enabled: false }
+    | {
+        enabled: true;
+        workerUrl: string;
+        remote: { online: boolean; detail: string; queueDepth?: number } | null;
+      };
 }
 
 export interface VerifyClipResult {

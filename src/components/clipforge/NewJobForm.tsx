@@ -7,8 +7,8 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
- * New job form: paste a video URL (fetched locally with yt-dlp) or attach a
- * local file. Ownership confirmation is required before submission. Uploads
+ * New job form: paste a video URL (fetched server-side with yt-dlp) or attach
+ * a file. Ownership confirmation is required before submission. Uploads
  * always work — URL fetching can fail (bot checks), and we say so honestly.
  */
 export function NewJobForm({ className }: { className?: string }) {

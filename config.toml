@@ -68,3 +68,27 @@ max_height = 1080
 cookies_from_browser = ""
 # Auto `pip install -U yt-dlp` once on failure before the retry.
 auto_update = true
+
+[hosted]
+# Hosted-deployment guardrails. Env overrides: CLIPFORGE_MAX_SOURCE_MIN,
+# CLIPFORGE_RETENTION_HOURS, WORKER_URL, WORKER_TOKEN, TAILSCALE_ONLY.
+
+# Sources longer than this are REJECTED at submit time (413) — the hosted
+# sandbox cannot finish hour-long renders before a restart.
+max_source_min = 30
+
+# Finished downloads/outputs are deleted this long after a job completes.
+retention_hours = 24
+
+# Remote worker dispatch (Tailscale mode B): when set, e.g.
+#   WORKER_URL = "http://100.101.102.103:8765"
+# the server uploads the source to your home worker-agent and the heavy
+# pipeline runs on your machine. Empty = pipeline runs on the server.
+worker_url = ""
+
+# Shared secret the worker-agent must present on /api/internal/* endpoints.
+worker_token = ""
+
+# Tailscale mode A: when true, the API answers ONLY tailnet/loopback clients
+# (401 for the public internet). Use with `tailscale serve` on the host.
+tailscale_only = false

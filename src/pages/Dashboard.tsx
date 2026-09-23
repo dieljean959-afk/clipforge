@@ -112,11 +112,11 @@ export default function Dashboard() {
         {apiError && (
           <div className="mt-3 rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3">
             <p className="text-sm font-semibold text-destructive">
-              Cannot reach the local API ({apiError})
+              API unreachable: {apiError}
             </p>
             <p className="mt-1 text-xs leading-relaxed text-destructive/80">
-              Start it with <code className="font-mono">./start.sh</code> — the API and
-              the worker are one process, so a running server means a working worker.
+              The pipeline server did not answer /api/health. If this persists,
+              the deployment is restarting — try again in a minute.
             </p>
           </div>
         )}
@@ -127,7 +127,7 @@ export default function Dashboard() {
         <section className="grid gap-6 lg:grid-cols-[1fr_380px]">
           <div>
             <p className="text-sm text-muted-foreground">
-              Running 100% locally — your videos never leave this machine
+              Processed on ClipForge's server — videos are deleted after you download them
             </p>
             <h1 className="mt-1 text-3xl font-black tracking-tight">
               The forge

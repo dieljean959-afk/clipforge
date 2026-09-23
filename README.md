@@ -1,8 +1,9 @@
 # ClipForge
 
-**Local video → viral clips.** Paste a link to a video you own (or attach the
+**Hosted video → viral clips.** Paste a link to a video you own (or attach the
 file), and ClipForge finds the most viral moments and renders them as vertical
-9:16 clips with animated, burned-in captions — 100% on your machine.
+9:16 clips with animated, burned-in captions — processed on ClipForge's
+server, with files deleted after you download them.
 
 Forked from [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo)
 (MIT) and repurposed from "topic → stock-footage video" to "existing video →
@@ -10,9 +11,9 @@ viral clips". See [LICENSE](LICENSE).
 
 ## How it works
 
-1. **Grabs** it — yt-dlp (Python API) pulls up to 1080p MP4 into `./downloads/`,
-   self-updates on failure, and can borrow your browser cookies for age-gated
-   videos. Manual file upload always works as the fallback.
+1. **Grabs** it — the server pulls up to 1080p MP4 via yt-dlp (Python API,
+   self-updates on failure, borrows your browser cookies for age-gated
+   videos). Manual file upload always works as the fallback.
 2. **Transcribes** it — faster-whisper produces **word-level timestamps**
    (model size configurable: `small` default / `medium` / `large-v3`,
    pre-downloaded at boot so jobs never wait on a silent download).
@@ -28,62 +29,113 @@ viral clips". See [LICENSE](LICENSE).
 Thumbnails are real first frames, previews stream the real files, downloads
 serve real MP4s, and "Export all" zips the real renders with `captions.txt`.
 
-## Quick start
+## Deployment: how the backend is hosted
 
-Requirements: **Python 3.11+** and **ffmpeg/ffprobe** on PATH
-(`brew install ffmpeg` / `sudo apt install ffmpeg` / `winget install Gyan.FFmpeg`).
+There is **no local setup** for the hosted app. The platform runs one managed
+web process — the Vite dev server — and the `clipforgeBackend()` Vite plugin
+(`vite-plugin-clipforge-backend.ts`) spawns and supervises FastAPI **as a
+child of that web process**:
+
+```
+platform web process (Vite, managed by Freebuff)
+  └── vite-plugin-clipforge-backend
+        └── uvicorn app.main:app  (127.0.0.1:8000, respawned if it dies)
+              └── InProcessWorker thread (API + worker = one process)
+                    └── yt-dlp / faster-whisper / ffmpeg run HERE, on the host
+```
+
+The browser calls same-origin relative `/api/...` URLs; the Vite proxy
+forwards them to the backend. No localhost from the browser, no hardcoded
+IPs, no CORS in play. Boot log shows: `[boot] API up on http://127.0.0.1:8000
+(worker: local in-process)` and `backend is UP on 127.0.0.1:8000 — /api proxy
+is live (same-origin)`.
+
+### Subprocess support
+
+The pipeline uses `subprocess` **inside the backend process** (ffmpeg/ffprobe
+invocations and `pip install -U yt-dlp` for rot-recovery). yt-dlp itself runs
+via its **Python API** (`import yt_dlp`) — no shell-outs for fetching. On
+platforms that forbid subprocesses entirely, the app fails honestly at boot
+(`ffmpeg not found on PATH` / clear ConfigError) rather than pretending to
+render; there is no pure-Python ffmpeg fallback in the codebase
+(imageio-ffmpeg/moviepy are not wired in — deliberately, after benchmarking
+showed the ffmpeg binary path is the reliable one).
+
+### Persistent disk
+
+`downloads/`, `outputs/` and `data/` live inside the deployment sandbox and
+survive between requests. They are **not** guaranteed across platform
+redeploys — the retention cleaner also deletes finished job artifacts 24h
+after completion (`[hosted] retention_hours`), so treat the hosted storage as
+temporary: download your clips.
+
+### Plan limits
+
+Sources longer than `max_source_min` (default **30 min**) are rejected at
+submit time with a readable 413 — never a mid-render failure. The limit comes
+from `/api/health` (`limits.maxSourceMin`) and is shown on the status card.
+
+## Tailscale modes
+
+### Mode A — private API (`TAILSCALE_ONLY=true`)
+
+The pipeline API answers only tailnet/loopback clients; the public internet
+gets `401 ClipForge API is tailnet-only`. Run `tailscale serve` on the host
+(or connect directly from a tailnet device to the container's 100.x.y.z
+address). Boot log prints `[boot] tailnet IP: 100.x.x.x` when tailscaled is
+reachable, and the dashboard status card shows the tailnet IP.
 
 ```bash
-# 1. create .env with your Gemini key (free: aistudio.google.com/apikey):
-#      GEMINI_API_KEY=your-key-here
-#    optional:
-#      YT_DLP_COOKIES_FROM_BROWSER=chrome
-# 2. one command to run everything:
-./start.sh                    # venv → deps → UI build → launch (API + worker, one process)
-# optional extras (face tracking + silence trim):
-./start.sh --with-extras
+# on the host (sidecar or same netns):
+tailscale up --authkey $TAILSCALE_AUTHKEY --ephemeral
+tailscale serve --bg 8000      # proxies tailnet → 127.0.0.1:8000
 ```
 
-Open **http://127.0.0.1:8000**. First boot downloads the Whisper model
-(~500 MB–3 GB) with a visible progress stage, then prints:
+### Mode B — dashboard here, rendering at home (`WORKER_URL`)
 
-```
-[boot] Whisper model loaded: small from ~/.cache/huggingface in 42.0s
-[boot] LLM: gemini | key loaded: YES
-In-process worker online, consuming queue: clipforge-local
-```
+If the hosted sandbox is too weak for long renders, dispatch the heavy work
+to your own machine over the tailnet:
 
-The web UI is served by the API itself from `webui/` — `./start.sh` builds it
-for you the first time (bun or npm). For UI development, `bun run dev` proxies
-`/api` to the local backend.
+1. On your home machine: install this repo, ffmpeg, python3.11+, and run
 
-## Architecture
+   ```bash
+   WORKER_TOKEN=<shared-secret> python3 tools/worker_agent.py \
+       --server https://<your-clipforge-host> \
+       --listen 0.0.0.0:8765 \
+       --register --public-url http://<your-tailnet-ip>:8765
+   ```
 
-```
-FastAPI (app/main.py)  ── serves REST API + built UI
-   └── InProcessWorker (app/worker.py)  ── daemon thread, same process
-         └── Pipeline (app/task.py)
-               ├── download.py   yt-dlp fetcher (Python API, self-updating)
-               ├── subtitle.py   faster-whisper + ASS captions (Pillow fallback)
-               ├── llm.py        Gemini clip detection (429 backoff, no heuristics)
-               ├── vad.py        Silero VAD silence windows      (optional)
-               ├── reframe.py    MediaPipe face-tracked crops    (optional)
-               └── video.py      FFmpeg render 1080x1920 libx264/AAC
-```
+   (self-registration needs `CLIPFORGE_ALLOW_SELF_REGISTER=true` on the
+   server; otherwise set `WORKER_URL`/`WORKER_TOKEN` in the platform env.)
 
-- **API and worker are one process** — "worker offline" is structurally
-  impossible. Jobs queue in memory and re-queue on restart.
-- State lives in `./data/` (JSON), videos in `./downloads/`, clips in
-  `./outputs/` — nothing leaves your machine.
-- `config.toml` holds the pipeline settings (MPT heritage, pruned);
-  secrets live only in `.env`.
+2. On the server: `WORKER_URL=http://<your-tailnet-ip>:8765`,
+   `WORKER_TOKEN=<shared-secret>`.
+
+The agent polls for dispatched uploads at `POST /agent/jobs`, runs the full
+pipeline locally (its own Whisper model), and reports progress back through
+`/api/internal/jobs/{id}/progress|logs|failed|complete` (Bearer
+`WORKER_TOKEN`). The dashboard shows "home worker online/unreachable" from
+`GET /agent/ping` probes. Note: rendered MP4s stay on the home machine in
+dispatch mode — pull them from `GET /agent/output/{jobId}/{clip}.mp4`.
 
 ## Configuration
 
 | Where | What |
 |---|---|
-| `config.toml` | Whisper model/precision, Gemini limits, subtitle style (font, size, outline color/width, words per cue, position), output size/quality, reframe & silence trim toggles, yt-dlp settings |
-| `.env` | `GEMINI_API_KEY`, `YT_DLP_COOKIES_FROM_BROWSER` (e.g. `chrome`), optional `FFMPEG_PATH` / `FFPROBE_PATH` / `GEMINI_MODEL` |
+| `config.toml` | Whisper model/precision, Gemini limits, subtitle style (font, size, outline color/width, words per cue, position), output size/quality, reframe & silence trim toggles, yt-dlp settings, `[hosted]` limits + dispatch |
+| Platform env (Keys/API keys) | `GEMINI_API_KEY`, `YT_DLP_COOKIES_FROM_BROWSER`, `WORKER_URL`, `WORKER_TOKEN`, `TAILSCALE_ONLY`, `TAILSCALE_AUTHKEY`, `CLIPFORGE_MAX_SOURCE_MIN`, `CLIPFORGE_RETENTION_HOURS`, optional `FFMPEG_PATH` / `FFPROBE_PATH` |
+
+## Running it yourself (dev)
+
+Requirements: **Python 3.11+** and **ffmpeg/ffprobe** on PATH.
+
+```bash
+./start.sh                    # venv → deps → UI build → launch (API + worker, one process)
+# optional extras (face tracking + silence trim):
+./start.sh --with-extras
+```
+
+This path is for **local development** — the hosted app does not need it.
 
 ## Rights & fairness
 
@@ -95,15 +147,13 @@ The UI asks you to confirm this before every job.
 
 ```bash
 python3 tools/compile_check.py   # compile-check every backend module
-curl localhost:8000/api/health   # worker/warmup/LLM status
+curl localhost:8000/api/health   # worker/warmup/LLM/system status
 curl "localhost:8000/api/dev/verify-clips?jobId=<id>"   # ffprobe every rendered clip
+python3 tools/smoke_test.py      # API + worker + honest failure paths
+python3 tools/e2e_render_test.py # real ffmpeg: cut → crop → captions → thumbnail
 ```
-
-Then submit a video in the dashboard and watch the four stages report real
-progress (yt-dlp %, whisper minutes processed, clip N/M rendering). Every
-failure path surfaces the exact error — nothing fakes success.
 
 ## Removed in this fork
 
 TTS/voice services, stock-footage (Pexels/Pixabay), MPT's script-generation
-flow, and all cloud worker/VM machinery. Clips keep the original audio.
+flow, and all cloud VM/OCI machinery. Clips keep the original audio.

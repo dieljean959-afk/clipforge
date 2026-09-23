@@ -137,7 +137,7 @@ function HeroPhone({ className }: { className?: string }) {
 }
 
 export default function Landing() {
-  // Local app: "ready" simply means the local API is reachable.
+  // Hosted app: "ready" simply means the backend answered /api/health.
   const { health, error } = useHealth(10_000);
   const apiReady = health?.ok === true;
 
@@ -185,10 +185,11 @@ export default function Landing() {
               <span className="text-primary neon-text">ten viral clips</span>.
             </h1>
             <p className="mt-5 text-base leading-relaxed text-muted-foreground sm:text-lg">
-              ClipForge runs entirely on your machine: yt-dlp grabs the video,
-              Whisper transcribes every word with timings, Gemini finds the
-              hooks worth posting, and FFmpeg renders vertical 9:16 cuts with
-              animated green-outline captions — nothing leaves your computer.
+              ClipForge is a hosted pipeline: yt-dlp grabs the video on the
+              server, Whisper transcribes every word with timings, Gemini finds
+              the hooks worth posting, and FFmpeg renders vertical 9:16 cuts
+              with animated green-outline captions. Files are deleted after you
+              download them.
             </p>
             <div className="mt-7 flex flex-wrap items-center gap-3">
               <Button asChild size="lg" className="cursor-pointer gap-2 font-bold neon-glow">
@@ -225,7 +226,7 @@ export default function Landing() {
               icon={Download}
               step="01 — Grab"
               title="Clippy is grabbing the video..."
-              body="Paste a YouTube, Vimeo, TikTok or X link — yt-dlp pulls 1080p MP4 straight to your machine, self-updates when YouTube changes, and can borrow your browser cookies for age-gated videos. Manual upload always works as the fallback."
+              body="Paste a YouTube, Vimeo, TikTok or X link — the server pulls 1080p MP4 via yt-dlp, self-updates when YouTube changes, and can borrow your browser cookies for age-gated videos. Manual upload always works as the fallback."
             />
             <PipelineStep
               icon={AudioWaveform}
@@ -285,11 +286,10 @@ export default function Landing() {
               icon={Download}
               title="One-click batch export"
               body="Grab all clips as a ZIP with captions.txt, per-clip SRTs and a manifest — plus hashtags copied to your clipboard."
-            />
-            <FeatureCard
+            />            <FeatureCard
               icon={Github}
               title="Forked, not from scratch"
-              body="ClipForge forked MoneyPrinterTurbo (MIT) and repurposed its subtitle + MoviePy pipeline for clip extraction."
+              body="ClipForge forked MoneyPrinterTurbo (MIT) and repurposed its subtitle + ffmpeg pipeline for clip extraction — hosted, with files auto-deleted after download."
             />
           </div>
         </div>
@@ -304,14 +304,14 @@ export default function Landing() {
 
       {/* final CTA */}
       <section className="border-t border-border/60 bg-grid">
-        <div className="mx-auto flex w-full max-w-6xl flex-col items-center px-4 py-20 text-center">
-          <motion.div variants={fadeUp} initial="initial" whileInView="whileInView" viewport={{ once: true }}>
+        <div className="mx-auto flex w-full max-w-6xl flex-col items-center px-4 py-20 text-center">            <motion.div variants={fadeUp} initial="initial" whileInView="whileInView" viewport={{ once: true }}>
             <h2 className="max-w-2xl text-3xl font-black tracking-tight sm:text-4xl">
               Your next ten posts are already{" "}
               <span className="text-primary neon-text">in your last upload</span>.
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-              One command to start: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">./start.sh</code>. Paste a link, confirm you own the content, and let the forge run.
+              Zero setup: open the dashboard, paste a link, confirm you own the
+              content, and let the forge run on ClipForge's server.
             </p>
             <Button asChild size="lg" className="mt-7 cursor-pointer gap-2 font-bold neon-glow">
               <a href="/dashboard">
@@ -325,7 +325,7 @@ export default function Landing() {
 
       <footer className="border-t border-border/60">
         <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-3 px-4 py-8 text-xs text-muted-foreground sm:flex-row">
-          <p>ClipForge — forked from MoneyPrinterTurbo, MIT licensed, runs locally.</p>
+          <p>ClipForge — forked from MoneyPrinterTurbo, MIT licensed, hosted pipeline.</p>
           <p className="font-mono">yt-dlp · faster-whisper · Gemini · FFmpeg</p>
         </div>
       </footer>

@@ -11,13 +11,14 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app import hosting
 from app import subtitle as subtitle_svc
 from app import video as video_svc
 from app.config import (
@@ -29,6 +30,7 @@ from app.config import (
     load_config,
 )
 from app.download import probe_url
+from app.hosting import RetentionCleaner
 from app.store import LocalStore
 from app.worker import InProcessWorker
 
@@ -39,11 +41,19 @@ from app.worker import InProcessWorker
 settings: Settings
 store: LocalStore
 worker: InProcessWorker
+retention: RetentionCleaner | None = None
 warmup: dict = {"stage": "pending", "detail": "", "startedAt": None}
 
 
 def _do_warmup() -> None:
     """Pre-download / load the Whisper model once, with honest progress."""
+    if settings.hosted.worker_url:
+        # dispatch mode: rendering happens on the home machine — do not burn
+        # sandbox RAM/disk on a model this process will never use.
+        warmup["stage"] = "skipped"
+        warmup["detail"] = "dispatch mode — the remote worker loads its own model"
+        logger.info("[boot] Whisper warmup skipped (remote worker dispatch mode)")
+        return
     warmup["startedAt"] = time.time()
     warmup["stage"] = "loading_model"
     t0 = time.time()
@@ -63,7 +73,7 @@ def _do_warmup() -> None:
 
 
 def _boot() -> None:
-    global settings, store, worker
+    global settings, store, worker, retention
     try:
         settings = load_config()
     except ConfigError as exc:
@@ -77,6 +87,7 @@ def _boot() -> None:
 
     store = LocalStore(settings.app.paths)
     worker = InProcessWorker(settings, store)
+    retention = RetentionCleaner(settings, store)
 
     # Re-queue any jobs left mid-flight by a previous run (crash recovery).
     for job in store.list_jobs():
@@ -92,23 +103,63 @@ def _boot() -> None:
 _boot()
 
 app = FastAPI(
-    title="ClipForge Local",
-    version="1.0.0",
-    description="Local video → viral clips pipeline (MoneyPrinterTurbo heritage).",
+    title="ClipForge",
+    version="1.1.0",
+    description="Hosted video → viral clips pipeline (MoneyPrinterTurbo heritage).",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # local app; the UI may be served from a different port in dev
+    allow_origins=["*"],  # same-origin UI; permissive for local API tooling
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+# --------------------------------------------------------------------------- #
+# tailscale-only gate (opt-in): the pipeline API is private to the tailnet
+# --------------------------------------------------------------------------- #
+
+
+def _is_tailnet_ip(ip: str) -> bool:
+    parts = ip.split(".")
+    if len(parts) != 4 or parts[0] != "100":
+        return False
+    try:
+        return 64 <= int(parts[1]) <= 127
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def _tailscale_gate(request: Request, call_next):
+    if settings.hosted.tailscale_only:
+        client = request.client.host if request.client else ""
+        # loopback covers `tailscale serve` / local reverse proxies;
+        # 100.64/10 covers direct tailnet connections.
+        allowed = client in {"127.0.0.1", "::1", "localhost", "testclient"} or _is_tailnet_ip(client)
+        if not allowed:
+            logger.warning(f"[gate] rejected non-tailnet request from {client} {request.url.path}")
+            return JSONResponse(
+                {"detail": "ClipForge API is tailnet-only (TAILSCALE_ONLY=true) — connect over Tailscale."},
+                status_code=401,
+            )
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def _start_worker() -> None:
     worker.start()
-    logger.info("[boot] in-process worker online, consuming queue: clipforge-local")
+    retention.start()
+    tailnet = hosting.tailnet_ip()
+    logger.info(
+        f"[boot] API up on http://{settings.app.host}:{settings.app.port} "
+        f"(worker: {'remote dispatch' if settings.hosted.worker_url else 'local in-process'})"
+    )
+    if tailnet:
+        logger.info(f"[boot] tailnet IP: {tailnet}")
+    elif settings.hosted.tailscale_only or settings.hosted.worker_url:
+        logger.info("[boot] tailnet IP: not detected (tailscaled not reachable from this process)")
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +176,40 @@ class CreateJobIn(BaseModel):
 
 class RequeueIn(BaseModel):
     jobId: str
+
+
+class InternalProgressIn(BaseModel):
+    stage: str
+    progress: float = Field(ge=0, le=100)
+    progressDetail: str | None = None
+    unitLabel: str | None = None
+    unitsDone: float | None = None
+    unitsTotal: float | None = None
+
+
+class InternalLogIn(BaseModel):
+    lines: list[str] = Field(max_length=50)
+
+
+class InternalFailedIn(BaseModel):
+    error: str
+    detail: str | None = None
+
+
+class InternalCompleteIn(BaseModel):
+    clipCount: int = Field(ge=0)
+    totalClipsSec: float = Field(ge=0)
+    captionsTxt: str | None = None
+
+
+def _require_worker_token(request: Request) -> None:
+    expected = settings.hosted.worker_token
+    if not expected:
+        raise HTTPException(503, "worker token not configured — set WORKER_TOKEN to accept remote updates")
+    got = request.headers.get("authorization", "")
+    # constant-time-ish compare; token leakage is not a realism concern here
+    if not got.startswith("Bearer ") or got[7:] != expected:
+        raise HTTPException(401, "invalid worker token")
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +256,10 @@ def verify_clips(jobId: str | None = None) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
+    remote = hosting.remote_probe(settings) if settings.hosted.worker_url else None
     return {
         "ok": True,
-        "version": "1.0.0",
+        "version": "1.1.0",
         "worker": worker.status(),
         "warmup": warmup,
         "llm": {
@@ -184,6 +270,17 @@ def health() -> dict:
             "model": settings.whisper.model,
             "compute": settings.whisper.resolved_compute,
         },
+        "system": hosting.system_stats(),
+        "tailnetIp": hosting.tailnet_ip(),
+        "limits": {
+            "maxSourceMin": settings.hosted.max_source_min,
+            "retentionHours": settings.hosted.retention_hours,
+        },
+        "dispatch": (
+            {"enabled": True, "workerUrl": settings.hosted.worker_url, "remote": remote}
+            if settings.hosted.worker_url
+            else {"enabled": False}
+        ),
     }
 
 
@@ -205,6 +302,15 @@ def create_job(body: CreateJobIn) -> dict:
         if info:
             title = info.get("title")
             duration = info.get("duration")
+    if (
+        duration is not None
+        and duration > settings.hosted.max_source_min * 60
+    ):
+        raise HTTPException(
+            413,
+            f"Video is {duration / 60:.0f} min — this plan processes at most "
+            f"{settings.hosted.max_source_min} min. Trim the source or run ClipForge on your own machine.",
+        )
     job = store.create_job(
         source_type=body.sourceType,
         source=body.source,
@@ -280,6 +386,100 @@ def retry_job(job_id: str) -> dict:
     except KeyError:
         raise HTTPException(404, "job not found") from None
     return {"queued": True, "queueDepth": depth}
+
+
+# --------------------------------------------------------------------------- #
+# internal worker API — the remote worker-agent (over Tailscale) reports back
+# --------------------------------------------------------------------------- #
+
+
+@app.post("/api/internal/jobs/{job_id}/progress")
+def internal_progress(job_id: str, body: InternalProgressIn, request: Request) -> dict:
+    _require_worker_token(request)
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    job.update({
+        "stage": body.stage,
+        "progress": body.progress,
+        "progressDetail": body.progressDetail or job.get("progressDetail"),
+        "unitLabel": body.unitLabel,
+        "unitsDone": body.unitsDone,
+        "unitsTotal": body.unitsTotal,
+        "lastProgressAt": int(time.time() * 1000),
+    })
+    store.write_job(job)
+    return {"ok": True}
+
+
+@app.post("/api/internal/jobs/{job_id}/logs")
+def internal_logs(job_id: str, body: InternalLogIn, request: Request) -> dict:
+    _require_worker_token(request)
+    if store.get_job(job_id) is None:
+        raise HTTPException(404, "job not found")
+    for line in body.lines:
+        store.append_job_log(job_id, line[:500])
+    return {"ok": True}
+
+
+@app.post("/api/internal/jobs/{job_id}/failed")
+def internal_failed(job_id: str, body: InternalFailedIn, request: Request) -> dict:
+    _require_worker_token(request)
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    job.update({
+        "stage": "failed",
+        "error": body.error[:500],
+        "errorDetail": (body.detail or "")[:1500],
+        "completedAt": int(time.time() * 1000),
+    })
+    store.write_job(job)
+    store.append_job_log(job_id, f"FAILED (remote worker): {body.error[:200]}")
+    return {"ok": True}
+
+
+@app.post("/api/internal/jobs/{job_id}/complete")
+def internal_complete(job_id: str, body: InternalCompleteIn, request: Request) -> dict:
+    _require_worker_token(request)
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    job.update({
+        "stage": "complete",
+        "progress": 100,
+        "progressDetail": f"{body.clipCount} clips ready (rendered on your worker).",
+        "clipCount": body.clipCount,
+        "totalClipsSec": body.totalClipsSec,
+        "captionsTxt": body.captionsTxt,
+        "completedAt": int(time.time() * 1000),
+    })
+    store.write_job(job)
+    store.append_job_log(job_id, f"remote worker finished — {body.clipCount} clips")
+    return {"ok": True}
+
+
+class RegisterWorkerIn(BaseModel):
+    workerUrl: str = Field(min_length=8, max_length=300)
+    token: str = ""
+
+
+@app.post("/api/internal/register-worker")
+def register_worker(body: RegisterWorkerIn) -> dict:
+    """The home worker-agent can self-register its tailnet URL.
+
+    Disabled unless CLIPFORGE_ALLOW_SELF_REGISTER=true (else it would let any
+    internet caller repoint the dispatch target).
+    """
+    import os as _os
+
+    if _os.getenv("CLIPFORGE_ALLOW_SELF_REGISTER", "").lower() not in {"1", "true", "yes"}:
+        raise HTTPException(403, "self-registration disabled — set WORKER_URL via the platform env")
+    settings.hosted.worker_url = body.workerUrl.rstrip("/")
+    if body.token.strip():
+        settings.hosted.worker_token = body.token.strip()
+    logger.info(f"[hosting] worker self-registered: {settings.hosted.worker_url}")
+    return {"ok": True, "workerUrl": settings.hosted.worker_url}
 
 
 @app.post("/api/jobs/{job_id}/redetect")

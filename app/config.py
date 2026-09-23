@@ -100,6 +100,26 @@ class DownloadConfig:
 
 
 @dataclass
+class HostedConfig:
+    """Hosted-mode limits and remote-worker dispatch settings."""
+
+    # Plan guard: reject sources longer than this at SUBMIT time (the free
+    # sandbox cannot finish hour-long renders before being restarted).
+    max_source_min: int = 30
+    # Delete finished artifacts (outputs/ + downloads/) this long after a job
+    # completes — hosted storage is finite and users expect cleanup.
+    retention_hours: int = 24
+    # Remote worker dispatch: when set (e.g. http://100.x.y.z:8765), the API
+    # sends jobs to the user's home machine over Tailscale instead of running
+    # the pipeline locally in the sandbox.
+    worker_url: str = ""
+    # Token the remote worker-agent must present (Authorization: Bearer ...).
+    worker_token: str = ""
+    # Serve the pipeline API only inside the user's tailnet when true.
+    tailscale_only: bool = False
+
+
+@dataclass
 class Settings:
     app: AppConfig
     whisper: WhisperConfig
@@ -107,6 +127,7 @@ class Settings:
     subtitle: SubtitleConfig
     video: VideoConfig
     download: DownloadConfig
+    hosted: HostedConfig
     gemini_api_key: str | None
 
 
@@ -228,6 +249,16 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         auto_update=bool(d.get("auto_update", True)),
     )
 
+    h = raw.get("hosted", {})
+    hosted = HostedConfig(
+        max_source_min=max(1, int(h.get("max_source_min", os.getenv("CLIPFORGE_MAX_SOURCE_MIN", 30)))),
+        retention_hours=max(1, int(h.get("retention_hours", os.getenv("CLIPFORGE_RETENTION_HOURS", 24)))),
+        worker_url=(os.getenv("WORKER_URL") or h.get("worker_url", "") or "").strip().rstrip("/"),
+        worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),
+        tailscale_only=str(os.getenv("TAILSCALE_ONLY", str(h.get("tailscale_only", False)))).strip().lower()
+        in {"1", "true", "yes", "on"},
+    )
+
     gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip() or None
 
     if errors:
@@ -245,6 +276,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         subtitle=subtitle,
         video=video,
         download=download,
+        hosted=hosted,
         gemini_api_key=gemini_key,
     )
 
@@ -285,6 +317,13 @@ def boot_banner(settings: Settings) -> None:
     print(f"[boot] Whisper model: {settings.whisper.model} ({settings.whisper.resolved_compute})")
     print(f"[boot] Output: {settings.video.width}x{settings.video.height} @ {settings.video.fps}fps CRF {settings.video.crf}")
     print(f"[boot] Folders: {settings.app.paths.downloads_dir} / {settings.app.paths.outputs_dir} / {settings.app.paths.data_dir}")
+    print(f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min | retention: {settings.hosted.retention_hours}h")
+    if settings.hosted.worker_url:
+        print(f"[boot] Worker dispatch: {settings.hosted.worker_url} (rendering happens on the remote worker)")
+    else:
+        print("[boot] Worker dispatch: local (pipeline runs in this process)")
+    if not key_loaded:
+        pass  # already printed above
 
 
 def _self_check() -> int:

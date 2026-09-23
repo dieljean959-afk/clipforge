@@ -14,6 +14,7 @@ from loguru import logger
 
 from app import download, llm, reframe, subtitle, vad, video
 from app.config import Settings
+from app.hosting import DispatchError, dispatch_job
 from app.store import LocalStore
 
 
@@ -75,11 +76,33 @@ class Pipeline:
             return
         t_start = time.time()
         try:
+            # ---- remote dispatch mode: hand off, then the agent reports via
+            # /api/internal/* — this thread's work is done after handoff.
+            if self.settings.hosted.worker_url:
+                src = self._stage_grab(job)
+                ack = dispatch_job(self.settings, job, src)
+                job = self.store.get_job(job_id) or job
+                job.update({
+                    "stage": "rendering",
+                    "progress": 10,
+                    "progressDetail": "Your worker is rendering — this page updates live.",
+                })
+                self.store.write_job(job)
+                self._log(
+                    job_id,
+                    f"dispatched to worker {self.settings.hosted.worker_url} "
+                    f"(agent {ack.get('version', '?')}) — heavy rendering runs on your machine",
+                )
+                return
+
             src = self._stage_grab(job)
             transcript = self._stage_transcribe(job, src)
             candidates = self._stage_find(job, transcript)
             self._stage_render(job, src, transcript, candidates)
             self._finish(job_id, time.time() - t_start)
+        except DispatchError as exc:
+            # remote worker refused/unreachable — honest error, job stays failed
+            self._fail(job_id, f"Could not hand the job to your worker: {exc}", str(exc))
         except llm.LlmNotConfigured as exc:
             self._fail(job_id, "AI detection offline — add GEMINI_API_KEY to .env", str(exc))
         except llm.LlmError as exc:

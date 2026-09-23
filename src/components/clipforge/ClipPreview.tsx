@@ -6,9 +6,9 @@ import { api } from "@/lib/api";
 import type { ClipDto } from "@/lib/api";
 
 /**
- * ClipPreview — plays the REAL rendered MP4 from ./outputs via the local API
- * streaming endpoint. There is no scene generator here on purpose: a clip
- * without a rendered file shows an honest "not rendered yet" state, never
+ * ClipPreview — plays the REAL rendered MP4 streamed from the server via the
+ * same-origin /api endpoint. There is no scene generator here on purpose: a
+ * clip without a rendered file shows an honest "not rendered yet" state, never
  * invented frames or labels.
  */
 export function ClipPreview({
