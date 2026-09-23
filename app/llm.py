@@ -15,7 +15,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.config import GeminiConfig, Settings
+from app.config import GeminiConfig, Settings, live_gemini_key
 
 
 class LlmNotConfigured(Exception):
@@ -166,7 +166,15 @@ def detect_clips(
     retries. There is deliberately no heuristic fallback here.
     """
     if not settings.gemini_api_key:
-        raise LlmNotConfigured("GEMINI_API_KEY missing — add it to .env for AI detection")
+        live = live_gemini_key()
+        live.refresh(force=True)
+        detail = live.problem or (
+            f"no key found under any supported name ({', '.join(live.status()['aliases'])})"
+        )
+        raise LlmNotConfigured(
+            "GEMINI_API_KEY missing — add it in the Keys/API keys tab (or .env), "
+            f"then hit Re-check. Detail: {detail}"
+        )
 
     cfg = settings.gemini
     if min_clip_sec is not None:

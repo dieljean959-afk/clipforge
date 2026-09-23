@@ -20,6 +20,19 @@ viral clips". See [LICENSE](LICENSE).
 3. **Finds** the hooks — the transcript is chunked and scored by Gemini
    (free tier). Top 5–15 windows become clips with titles, hook lines and
    scores 0–100. No key? The UI says exactly that — no fake heuristics.
+
+### Gemini key is detected LIVE
+
+The key is **never snapshotted at boot**. The backend re-reads the env files
+whenever they change on disk (and on every health poll), so a key saved in
+the platform's Keys/API keys tab — even minutes after the app started — is
+picked up automatically. The dashboard status chip shows exactly where the
+key was found, or precisely why a present-but-unusable value was rejected
+(encrypted blob, placeholder text, malformed paste), and a **Re-check**
+button forces an immediate re-read with the result in a toast. Supported
+names: `GEMINI_API_KEY` (canonical), plus `GOOGLE_API_KEY`,
+`GOOGLE_GENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_KEY`,
+`VITE_GEMINI_API_KEY`.
 4. **Renders** the clips — FFmpeg cuts each segment frame-accurately,
    MediaPipe face-tracking follows the speaker into the 9:16 crop (when
    installed), Silero VAD trims dead air (when installed), and ASS captions

@@ -68,12 +68,20 @@ export interface SystemStatsDto {
   pid: number | null;
 }
 
+export interface KeyStatusDto {
+  keyLoaded: boolean;
+  source: string;
+  problem: string | null;
+  lastCheckedAt: number;
+  aliases: string[];
+}
+
 export interface HealthDto {
   ok: boolean;
   version: string;
   worker: { online: boolean; currentJob: string | null; queueDepth: number };
   warmup: { stage: string; detail: string; startedAt: number | null };
-  llm: { provider: string; keyLoaded: boolean };
+  llm: KeyStatusDto;
   whisper: { model: string; compute: string };
   system: SystemStatsDto;
   tailnetIp: string | null;
@@ -166,6 +174,8 @@ export const api = {
   verifyClips: (jobId: string) =>
     request<VerifyClipsDto>(`/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`),
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),
+  /** Force the server to re-read env files and re-resolve the Gemini key. */
+  reloadSecrets: () => request<KeyStatusDto>("/api/settings/reload-secrets", { method: "POST" }),
   listClips: (jobId: string) => request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>
     requestBlob("/api/export/zip", {

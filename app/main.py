@@ -27,6 +27,7 @@ from app.config import (
     boot_banner,
     ffmpeg_bin,
     ffprobe_bin,
+    live_gemini_key,
     load_config,
 )
 from app.download import probe_url
@@ -264,7 +265,9 @@ def health() -> dict:
         "warmup": warmup,
         "llm": {
             "provider": "gemini",
-            "keyLoaded": settings.gemini_api_key is not None,
+            # LIVE re-resolution — a key saved in the platform after boot is
+            # picked up on the next health poll without restarting anything.
+            **live_gemini_key().status(),
         },
         "whisper": {
             "model": settings.whisper.model,
@@ -287,6 +290,16 @@ def health() -> dict:
 @app.get("/api/warmup")
 def warmup_status() -> dict:
     return warmup
+
+
+@app.post("/api/settings/reload-secrets")
+def reload_secrets() -> dict:
+    """Force re-read of env files + live key resolution (the Re-check button)."""
+    live = live_gemini_key()
+    live.refresh(force=True)
+    status = live.status()
+    logger.info(f"[config] secrets re-checked — key loaded: {status['keyLoaded']} ({status['source']})")
+    return status
 
 
 # --------------------------------------------------------------------------- #
@@ -490,9 +503,12 @@ def redetect_job(job_id: str) -> dict:
     if job is None:
         raise HTTPException(404, "job not found")
     if settings.gemini_api_key is None:
+        live = live_gemini_key()
+        live.refresh(force=True)
         raise HTTPException(
             400,
-            "AI detection offline — add GEMINI_API_KEY to .env and restart.",
+            live.problem
+            or "AI detection offline — add GEMINI_API_KEY in the Keys/API keys tab (or .env), then hit Re-check on the dashboard.",
         )
     src = store.find_source_file(job_id)
     if src is None:

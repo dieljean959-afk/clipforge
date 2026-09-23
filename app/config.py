@@ -3,6 +3,10 @@
 ``config.toml`` holds the pruned MoneyPrinterTurbo-style settings; ``.env``
 (secret keys) is loaded via python-dotenv. Validation fails fast at boot with
 readable errors — no half-configured process.
+
+The Gemini API key is resolved LIVE (see `_LiveKeyState`): the hosted platform
+writes saved keys into env files without restarting the web process, so a
+snapshot taken at boot would stay "missing" forever.
 """
 
 from __future__ import annotations
@@ -11,9 +15,12 @@ import base64
 import os
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from loguru import logger
 
 try:
     import tomllib
@@ -67,10 +74,19 @@ def _dotenvx_decrypt(private_key_hex: str, encrypted_b64: str) -> str:
     """Decrypt a dotenvx `encrypted:…` value with the matching private key.
 
     Blob layout (base64): ephemeral_pubkey[65] || nonce[16] || tag[16] || ct.
-    AES key = HKDF-SHA256(ephemeral_pubkey || full_shared_point[65]) — the
-    FULL uncompressed ECDH point, matching @dotenvx/primitives (BSD-3-Clause,
-    ECIES secp256k1 + AES-256-GCM). cryptography's exchange() only yields the
-    32-byte X coordinate, so the point multiplication is done directly.
+
+    Byte-compatible with @dotenvx/primitives (BSD-3-Clause), verified
+    bidirectionally (see tools/decrypt_confirm.py):
+
+    - The HKDF input key material is ephemeral_pubkey(65) || FULL uncompressed
+      shared point(65) — the shared point INCLUDES the 0x04 prefix. The lib's
+      fallback path calls noble's `Point.multiply(scalar).toBytes()`, whose
+      default serialization is compressed — but the ECIES config wraps it via
+      getSharedPoint(secp256k1, …) which returns the uncompressed point.
+    - HKDF-SHA256 with an EMPTY salt (which cryptography's HKDF(salt=b"")
+      and @noble/hashes both treat per RFC 5869 as zeros — identical results
+      here), info=None, length=32.
+    - AES-256-GCM, nonce = blob[65:81], ciphertext+tag = blob[81:].
     """
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -78,6 +94,8 @@ def _dotenvx_decrypt(private_key_hex: str, encrypted_b64: str) -> str:
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
     raw = base64.b64decode(encrypted_b64)
+    if len(raw) < 97:  # 65 pubkey + 16 nonce + 16 tag minimum
+        raise ValueError("dotenvx blob too short to contain a valid envelope")
     eph_pub, rest = raw[:65], raw[65:]
     nonce, rest = rest[:16], rest[16:]
     tag, ct = rest[:16], rest[16:]
@@ -86,9 +104,11 @@ def _dotenvx_decrypt(private_key_hex: str, encrypted_b64: str) -> str:
     eph_x = int.from_bytes(eph_pub[1:33], "big")
     eph_y = int.from_bytes(eph_pub[33:65], "big")
     sx, sy = _ec_mul(scalar, (eph_x, eph_y))
-    shared_point = sx.to_bytes(32, "big") + sy.to_bytes(32, "big")
+    # FULL uncompressed shared point — 0x04 prefix REQUIRED (65 bytes total).
+    # Without it the AES key diverges and GCM auth fails (InvalidTag).
+    shared_point = b"\x04" + sx.to_bytes(32, "big") + sy.to_bytes(32, "big")
 
-    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=None)
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=b"", info=None)
     aes_key = hkdf.derive(eph_pub + shared_point)
     return AESGCM(aes_key).decrypt(nonce, ct + tag, None).decode("utf-8")
 
@@ -119,6 +139,195 @@ def _decrypt_encrypted_values(environ: dict[str, str]) -> dict[str, str]:
             except Exception:
                 continue
     return environ
+
+
+GEMINI_KEY_ALIASES = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "GEMINI_KEY",
+    "VITE_GEMINI_API_KEY",
+)
+
+_PLACEHOLDER_VALUES = {
+    "changeme", "change-me", "your-api-key", "your_api_key",
+    "your-key-here", "<paste-key-here>", "none", "null", "todo", "xxx",
+}
+
+
+def _fresh_env_snapshot(root: Path) -> tuple[str, dict[str, str]]:
+    """Fingerprint + raw contents of the project's env files.
+
+    The fingerprint changes whenever the platform writes a new key into
+    .env/.env.local/.env.keys — which is what makes live re-detection possible
+    without restarting the web process.
+    """
+    parts: list[str] = []
+    merged: dict[str, str] = {}
+    for name in (".env", ".env.local", ".env.keys"):
+        p = root / name
+        if p.exists():
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            parts.append(f"{name}:{len(text)}:{int(p.stat().st_mtime)}")
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                merged.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    return "|".join(parts), merged
+
+
+def _empty_encrypted(value: str) -> bool:
+    """True when an `encrypted:` blob contains ZERO plaintext bytes.
+
+    dotenvx blob = base64(ephemeral_pubkey[65] || nonce[16] || tag[16] || ct);
+    ciphertext length == plaintext length, so a 97-byte blob means the
+    platform saved an EMPTY value — an envelope with no key inside.
+    """
+    if not value.startswith(_ENC_PREFIX):
+        return False
+    try:
+        raw = base64.b64decode(value[len(_ENC_PREFIX):] + "=" * (-len(value) % 4))
+    except Exception:
+        return False
+    return len(raw) == 97
+
+
+def _resolve_gemini_key(environ: dict[str, str]) -> tuple[str | None, str, str | None]:
+    """Find the Gemini key under any supported name.
+
+    Returns (key, source, problem). `source` says WHERE the key came from so
+    misconfigurations are diagnosable from the UI; `problem` is a
+    human-readable reason when a key-shaped value exists but is unusable
+    (empty platform save, undecryptable blob, placeholder text, malformed).
+    Never returns the secret itself.
+    """
+    for name in GEMINI_KEY_ALIASES:
+        value = (environ.get(name) or "").strip()
+        if not value:
+            continue
+        if value.startswith(_ENC_PREFIX):
+            if _empty_encrypted(value):
+                return None, f"{name} (empty)", (
+                    f"{name} is an EMPTY save — the platform stored an encrypted envelope "
+                    "with no key inside. Paste the full key (starts with AIza) in the "
+                    "Keys/API keys tab again, then hit Re-check."
+                )
+            return None, f"{name} (encrypted)", (
+                f"{name} is stored in the platform's encrypted dotenvx format and could "
+                "not be decrypted inside the app — re-save it in the Keys/API keys tab, "
+                "then hit Re-check."
+            )
+        low = value.lower()
+        if low in _PLACEHOLDER_VALUES:
+            return None, f"{name} (placeholder)", (
+                f"{name} still contains placeholder text — paste the real Gemini API key."
+            )
+        if " " in value:
+            return None, f"{name} (malformed)", (
+                f"{name} contains spaces — it should be the raw key with no quotes or spaces."
+            )
+        if name == "GEMINI_API_KEY" and not low.startswith("aiza") and len(value) < 20:
+            # A short non-Google-looking value is almost always a paste error.
+            # Still accepted (key shapes can change), but flagged for the UI.
+            return value, f"{name} (short — verify)", (
+                f"{name} is only {len(value)} characters — a Google API key is longer. "
+                "Double-check the paste."
+            )
+        return value, name, None
+    return None, "", None
+
+
+def _load_env_files(root: Path) -> list[str]:
+    """Load .env plus platform-injected env files, decrypting dotenvx values.
+
+    dotenv does not override variables already set in the process environment,
+    so OS-provided secrets always win over file contents. Values stored in the
+    dotenvx `encrypted:…` format (how the platform saves workspace keys) are
+    decrypted in place using the private key from .env.keys.
+    """
+    loaded: list[str] = []
+    for name in (".env", ".env.local", ".env.keys"):
+        p = root / name
+        if p.exists():
+            load_dotenv(p, override=False)
+            loaded.append(name)
+    # Decrypt any encrypted values that python-dotenv loaded verbatim. Only
+    # platform-provided keys are ever in this format; a plaintext GEMINI_API_KEY
+    # (starts with AIza) passes through untouched.
+    _decrypt_encrypted_values(os.environ)
+    return loaded
+
+
+class _LiveKeyState:
+    """Re-resolves the Gemini key when the env files change on disk.
+
+    The platform writes saved keys into .env.local (encrypted dotenvx format)
+    WITHOUT restarting the web process. A key captured once at boot would stay
+    None forever — so this state re-reads the env files whenever their
+    mtime/size fingerprint changes (plus on demand), and records exactly where
+    the key was found (or why it was rejected). Never stores logs the secret.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._fingerprint: str | None = None
+        self._lock = threading.Lock()
+        self.key: str | None = None
+        self.source: str = "not checked"
+        self.problem: str | None = None
+        self.lastCheckedAt: float = 0.0
+
+    def refresh(self, force: bool = False) -> None:
+        with self._lock:
+            fingerprint, file_values = _fresh_env_snapshot(self._root)
+            if not force and fingerprint == self._fingerprint:
+                return
+            self._fingerprint = fingerprint
+
+            # Re-load env files into the process (idempotent; never overrides
+            # real OS env), then decrypt any platform-encrypted values.
+            _load_env_files(self._root)
+
+            # OS env wins first (freshly injected keys), then file contents —
+            # which covers values the platform added after this process started.
+            key, source, problem = _resolve_gemini_key(os.environ)
+            if key is None and problem is None:
+                key, source, problem = _resolve_gemini_key(file_values)
+            self.key = key
+            self.source = source or "not found in env files or OS env"
+            self.problem = problem
+            self.lastCheckedAt = time.time()
+            if key is not None:
+                logger.info(f"[config] Gemini key detected ({source})")
+            elif problem:
+                logger.warning(f"[config] Gemini key rejected: {problem}")
+
+    def status(self) -> dict:
+        self.refresh()
+        return {
+            "keyLoaded": self.key is not None,
+            "source": self.source,
+            "problem": self.problem,
+            "lastCheckedAt": self.lastCheckedAt,
+            "aliases": list(GEMINI_KEY_ALIASES),
+        }
+
+
+_live_key: _LiveKeyState | None = None
+
+
+def live_gemini_key() -> _LiveKeyState:
+    """Process-wide live Gemini-key state (created on first use)."""
+    global _live_key
+    if _live_key is None:
+        _live_key = _LiveKeyState(ROOT)
+    return _live_key
 
 
 @dataclass
@@ -225,7 +434,17 @@ class Settings:
     video: VideoConfig
     download: DownloadConfig
     hosted: HostedConfig
-    gemini_api_key: str | None
+
+    @property
+    def gemini_api_key(self) -> str | None:
+        """LIVE Gemini key — re-resolved whenever the env files change.
+
+        Never snapshot this at boot: the platform can deliver the key after
+        the process has already started.
+        """
+        state = live_gemini_key()
+        state.refresh()
+        return state.key
 
 
 class ConfigError(Exception):
@@ -240,27 +459,6 @@ def _load_toml(path: Path) -> dict:
             return tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"config.toml is not valid TOML: {exc}") from exc
-
-
-def _load_env_files(root: Path) -> list[str]:
-    """Load .env plus platform-injected env files, decrypting dotenvx values.
-
-    dotenv does not override variables already set in the process environment,
-    so OS-provided secrets always win over file contents. Values stored in the
-    dotenvx `encrypted:…` format (how the platform saves workspace keys) are
-    decrypted in place using the private key from .env.keys.
-    """
-    loaded: list[str] = []
-    for name in (".env", ".env.local", ".env.keys"):
-        p = root / name
-        if p.exists():
-            load_dotenv(p, override=False)
-            loaded.append(name)
-    # Decrypt any encrypted values that python-dotenv loaded verbatim. Only
-    # platform-provided keys are ever in this format; a plaintext GEMINI_API_KEY
-    # (starts with AIza) passes through untouched.
-    _decrypt_encrypted_values(os.environ)
-    return loaded
 
 
 def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
@@ -362,7 +560,9 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         in {"1", "true", "yes", "on"},
     )
 
-    gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip() or None
+    # Initialize the live key state so the boot banner reports it. The key is
+    # NEVER snapshotted into Settings — every read re-resolves.
+    live_gemini_key().refresh(force=True)
 
     if errors:
         raise ConfigError(
@@ -380,7 +580,6 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         video=video,
         download=download,
         hosted=hosted,
-        gemini_api_key=gemini_key,
     )
 
 
@@ -411,10 +610,18 @@ def ffprobe_bin() -> str:
 
 def boot_banner(settings: Settings) -> None:
     """Print the fail-fast boot banner with the exact lines ops greps for."""
-    key_loaded = settings.gemini_api_key is not None
+    live = live_gemini_key()
+    live.refresh(force=True)
+    key_loaded = live.key is not None
     print(f"[boot] LLM: gemini | key loaded: {'YES' if key_loaded else 'NO'}")
+    print(f"[boot] Gemini key source: {live.source}")
     if not key_loaded:
-        print("[boot] AI detection offline — add GEMINI_API_KEY to .env")
+        if live.problem:
+            print(f"[boot] Gemini key problem: {live.problem}")
+        print(
+            "[boot] AI detection offline — add GEMINI_API_KEY in the Keys/API keys tab "
+            "(or .env), then hit Re-check on the dashboard"
+        )
     env_files = _load_env_files(ROOT)
     print(f"[boot] env files loaded: {', '.join(env_files) if env_files else 'none found'}")
     print(f"[boot] Whisper model: {settings.whisper.model} ({settings.whisper.resolved_compute})")
@@ -425,8 +632,6 @@ def boot_banner(settings: Settings) -> None:
         print(f"[boot] Worker dispatch: {settings.hosted.worker_url} (rendering happens on the remote worker)")
     else:
         print("[boot] Worker dispatch: local (pipeline runs in this process)")
-    if not key_loaded:
-        pass  # already printed above
 
 
 def _self_check() -> int:
