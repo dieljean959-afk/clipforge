@@ -52,5 +52,8 @@ jobs:
       - name: Typecheck
         run: bun tsc -b --noEmit
 
+      - name: Lint
+        run: bun run lint
+
       - name: Build dashboard
         run: bun run build

@@ -88,17 +88,24 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api || !setApi) return
-    setApi(api)
+    // Defer the parent's setState callback by a tick so the effect never
+    // triggers a cascading synchronous render during commit.
+    const id = setTimeout(() => setApi(api), 0)
+    return () => clearTimeout(id)
   }, [api, setApi])
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
+    // Initial canScroll* values are computed via the embla "select" event on
+    // the next tick instead of a synchronous setState in the effect body.
+    const id = setTimeout(() => onSelect(api), 0)
     api.on("reInit", onSelect)
     api.on("select", onSelect)
 
     return () => {
-      api?.off("select", onSelect)
+      clearTimeout(id)
+      api.off("select", onSelect)
+      api.off("reInit", onSelect)
     }
   }, [api, onSelect])
 
