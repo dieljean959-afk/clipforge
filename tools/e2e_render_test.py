@@ -81,6 +81,7 @@ def main() -> int:
             start=cue_start, end=cue_end,
             settings=settings,
             ass_path=ass,
+            caption_cues=shifted,
             crop_windows=windows,
             silence_cuts=[],
         )

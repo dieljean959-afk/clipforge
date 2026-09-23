@@ -277,6 +277,7 @@ class Pipeline:
                     start=c0, end=c1,
                     settings=self.settings,
                     ass_path=ass_path if cues else None,
+                    caption_cues=cues if cues else None,
                     crop_windows=crop_windows,
                     silence_cuts=cuts,
                 )

@@ -43,7 +43,12 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const load1 = typeof sys?.load1 === "number" ? sys.load1 : null;
 
   const dispatch = health?.dispatch;
-  const remoteOnline = dispatch?.remote?.online === true;
+  const remoteOnline =
+    dispatch?.enabled === true && dispatch.remote?.online === true;
+  const remoteDetail =
+    dispatch?.enabled === true
+      ? (dispatch.remote?.detail ?? "no answer")
+      : "no answer";
   const maxMin = typeof health?.limits?.maxSourceMin === "number" ? health.limits.maxSourceMin : null;
   const retentionH = typeof health?.limits?.retentionHours === "number" ? health.limits.retentionHours : null;
 
@@ -101,7 +106,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                   <span className="text-primary">home worker online</span>
                 ) : (
                   <span className="text-amber-300">
-                    home worker unreachable ({dispatch.remote?.detail ?? "no answer"})
+                    home worker unreachable ({remoteDetail})
                   </span>
                 )}
               </StatLine>

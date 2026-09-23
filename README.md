@@ -57,9 +57,17 @@ invocations and `pip install -U yt-dlp` for rot-recovery). yt-dlp itself runs
 via its **Python API** (`import yt_dlp`) — no shell-outs for fetching. On
 platforms that forbid subprocesses entirely, the app fails honestly at boot
 (`ffmpeg not found on PATH` / clear ConfigError) rather than pretending to
-render; there is no pure-Python ffmpeg fallback in the codebase
-(imageio-ffmpeg/moviepy are not wired in — deliberately, after benchmarking
-showed the ffmpeg binary path is the reliable one).
+render.
+
+**Caption fallback:** if the host's ffmpeg build lacks libass (no `subtitles`
+filter), the render path automatically switches to a pure-Python Pillow
+fallback — each caption cue is rendered to a transparent PNG and burned in via
+ffmpeg's overlay filter with per-cue time windows. Captions export either way;
+they are never silently dropped.
+
+**yt-dlp rot guard:** on download failure the server self-updates yt-dlp
+(pip, or uv when the venv was created by uv — `ensurepip` is bootstrapped
+automatically) and retries once before surfacing the exact error.
 
 ### Persistent disk
 

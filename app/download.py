@@ -23,7 +23,37 @@ class DownloadError(Exception):
 
 
 def _pip_self_update() -> str:
-    """`pip install -U yt-dlp` in-process. Returns the update log tail."""
+    """`pip install -U yt-dlp` in-process. Returns the update log tail.
+
+    Uses uv (much faster) when available, falling back to pip. On uv-created
+    venvs without pip, `ensurepip` is bootstrapped first so the rot guard can
+    never silently no-op.
+    """
+    import shutil as _shutil
+
+    if _shutil.which("uv") and _pip_missing():
+        try:
+            proc = subprocess.run(
+                ["uv", "pip", "install", "-U", "yt-dlp", "--python", sys.executable, "--quiet"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            tail = (proc.stdout + proc.stderr).strip()[-400:]
+            logger.info(f"[download] yt-dlp self-update via uv exit={proc.returncode}: {tail[:200]}")
+            return tail
+        except Exception as exc:
+            logger.warning(f"[download] uv self-update failed ({exc}); falling back to pip")
+    if _pip_missing():
+        try:
+            boot = subprocess.run(
+                [sys.executable, "-m", "ensurepip", "--upgrade"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if boot.returncode != 0:
+                return f"ensurepip failed: {(boot.stderr or boot.stdout).strip()[-200:]}"
+        except Exception as exc:
+            return f"ensurepip failed: {exc}"
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-U", "yt-dlp", "--quiet"],
@@ -37,6 +67,17 @@ def _pip_self_update() -> str:
     except Exception as exc:
         logger.error(f"[download] yt-dlp self-update failed: {exc}")
         return str(exc)
+
+
+def _pip_missing() -> bool:
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return False
+    except Exception:
+        return True
 
 
 def probe_url(url: str) -> dict[str, Any] | None:

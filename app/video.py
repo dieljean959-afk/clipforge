@@ -9,6 +9,7 @@ needs, but the render path is straight ffmpeg for speed and reliability.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 
 from loguru import logger
 
+from app import subtitle as subtitle_svc
 from app.config import Settings, ffmpeg_bin, ffprobe_bin
 
 
@@ -122,6 +124,21 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
     return f"crop={out_w}:{out_h}:{expr}:0"
 
 
+def _ffmpeg_has_filter(filt: str) -> bool:
+    """True when this ffmpeg build supports `filt` (e.g. libass `subtitles`)."""
+    try:
+        out = subprocess.run(
+            [ffmpeg_bin(), "-hide_banner", "-filters"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return (
+            re.search(rf"^\s*\S+\s+{re.escape(filt)}\s", out.stdout, re.MULTILINE)
+            is not None
+        )
+    except Exception:
+        return False
+
+
 def render_clip(
     src: Path,
     dest: Path,
@@ -130,6 +147,7 @@ def render_clip(
     end: float,
     settings: Settings,
     ass_path: Path | None = None,
+    caption_cues: list[dict] | None = None,
     crop_windows: list[dict] | None = None,
     silence_cuts: list[dict] | None = None,
 ) -> dict[str, Any]:
@@ -172,8 +190,45 @@ def render_clip(
             # split select for video only; audio passthrough keeps sync close enough
             vf = vf + "," + trim_graph.split(",asetpts")[0]
 
-    if ass_path is not None:
-        ass_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
+    # Caption burn path: libass `subtitles` filter when the build has it;
+    # otherwise the pure-Python Pillow fallback (cue PNGs + overlay) so captions
+    # export either way. Never silently drop captions.
+    ass_escaped = (
+        str(ass_path).replace("\\", "/").replace(":", "\\:")
+        if ass_path is not None
+        else None
+    )
+    use_pillow = (
+        ass_path is not None
+        and caption_cues
+        and not _ffmpeg_has_filter("subtitles")
+    )
+    if use_pillow:
+        png_dir = dest.parent / f"{dest.stem}_cues"
+        pngs = subtitle_svc.render_word_pngs_pillow(
+            caption_cues, settings, png_dir, out_w, out_h, settings.video.fps,
+        )
+        cmd: list[str] = [ffmpeg_bin(), "-y", "-i", str(tmp)]
+        for cue in caption_cues:
+            cmd += ["-i", pngs[f"{cue['start']:.3f}-{cue['end']:.3f}"]]
+        chain: list[str] = []
+        prev = "[base]"
+        for i, cue in enumerate(caption_cues, 1):
+            outl = f"[v{i}]"
+            chain.append(
+                f"{prev}[{i}:v]overlay=0:0:enable='between(t,{cue['start']:.3f},{cue['end']:.3f})'{outl}"
+            )
+            prev = outl
+        cmd += [
+            "-filter_complex", f"[0:v]{vf}[base];" + ";".join(chain),
+            "-map", prev, "-map", "0:a?",
+            "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            str(dest),
+        ]
+        logger.info(f"[video] libass unavailable — burning {len(caption_cues)} caption PNGs via Pillow overlay")
+    elif ass_path is not None:
         cmd = [
             ffmpeg_bin(), "-y", "-i", str(tmp),
             "-vf", f"{vf},subtitles={ass_escaped}",

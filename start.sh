@@ -19,6 +19,12 @@ if [ ! -x "$PY" ]; then
   python3 -m venv "$VENV"
 fi
 
+# venvs created by `uv venv` ship without pip — bootstrap it so installs work.
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  echo "==> Bootstrapping pip (ensurepip)"
+  "$PY" -m ensurepip --upgrade >/dev/null
+fi
+
 echo "==> Installing dependencies (pip)"
 "$PY" -m pip install --quiet --upgrade pip
 "$PY" -m pip install --quiet -e .
