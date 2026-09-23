@@ -7,6 +7,7 @@ readable errors — no half-configured process.
 
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import sys
@@ -22,6 +23,102 @@ except ModuleNotFoundError:  # Python 3.10 dev/test environments
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# --------------------------------------------------------------------------- #
+# dotenvx-style secret decryption (Freebuff stores workspace keys encrypted)
+# --------------------------------------------------------------------------- #
+
+_ENC_PREFIX = "encrypted:"
+
+# secp256k1 domain parameters (for the dotenvx ECIES shared-point math)
+_SECP256K1_P = 2**256 - 2**32 - 977
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP256K1_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+_SECP256K1_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+
+
+def _ec_mul(scalar: int, point: tuple[int, int]) -> tuple[int, int]:
+    """Double-and-add scalar multiplication on secp256k1 (affine)."""
+    result: tuple[int, int] | None = None
+    addend = point
+    while scalar:
+        if scalar & 1:
+            result = _ec_add(result, addend)
+        addend = _ec_add(addend, addend)
+        scalar >>= 1
+    return result or (0, 0)
+
+
+def _ec_add(p1: tuple[int, int] | None, p2: tuple[int, int]) -> tuple[int, int]:
+    """Affine point addition on secp256k1."""
+    if p1 is None:
+        return p2
+    if p1[0] == p2[0] and (p1[1] + p2[1]) % _SECP256K1_P == 0:
+        return (0, 0)
+    if p1 == p2:
+        lam = (3 * p1[0] * p1[0]) * pow(2 * p1[1], -1, _SECP256K1_P) % _SECP256K1_P
+    else:
+        lam = (p2[1] - p1[1]) * pow(p2[0] - p1[0], -1, _SECP256K1_P) % _SECP256K1_P
+    x3 = (lam * lam - p1[0] - p2[0]) % _SECP256K1_P
+    return (x3, (lam * (p1[0] - x3) - p1[1]) % _SECP256K1_P)
+
+
+def _dotenvx_decrypt(private_key_hex: str, encrypted_b64: str) -> str:
+    """Decrypt a dotenvx `encrypted:…` value with the matching private key.
+
+    Blob layout (base64): ephemeral_pubkey[65] || nonce[16] || tag[16] || ct.
+    AES key = HKDF-SHA256(ephemeral_pubkey || full_shared_point[65]) — the
+    FULL uncompressed ECDH point, matching @dotenvx/primitives (BSD-3-Clause,
+    ECIES secp256k1 + AES-256-GCM). cryptography's exchange() only yields the
+    32-byte X coordinate, so the point multiplication is done directly.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    raw = base64.b64decode(encrypted_b64)
+    eph_pub, rest = raw[:65], raw[65:]
+    nonce, rest = rest[:16], rest[16:]
+    tag, ct = rest[:16], rest[16:]
+
+    scalar = int(private_key_hex, 16) % _SECP256K1_N
+    eph_x = int.from_bytes(eph_pub[1:33], "big")
+    eph_y = int.from_bytes(eph_pub[33:65], "big")
+    sx, sy = _ec_mul(scalar, (eph_x, eph_y))
+    shared_point = sx.to_bytes(32, "big") + sy.to_bytes(32, "big")
+
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=None)
+    aes_key = hkdf.derive(eph_pub + shared_point)
+    return AESGCM(aes_key).decrypt(nonce, ct + tag, None).decode("utf-8")
+
+
+def _decrypt_encrypted_values(environ: dict[str, str]) -> dict[str, str]:
+    """Decrypt every `encrypted:…` value that has a matching private key.
+
+    dotenvx writes ciphertext into .env files and the private key into
+    .env.keys (DOTENV_PRIVATE_KEY_<ENV>). python-dotenv loads both verbatim,
+    so values arrive here still encrypted — decrypt them in place. Errors are
+    logged and left as-is (the app reports them as unusable rather than
+    silently pretending the key works).
+    """
+    priv_names = [k for k in list(environ.keys()) if k.startswith("DOTENV_PRIVATE_KEY_")]
+    if not priv_names:
+        return environ
+    for name in list(environ.keys()):
+        value = environ.get(name, "")
+        if not value or not value.startswith(_ENC_PREFIX):
+            continue
+        for priv_name in priv_names:
+            priv_hex = environ.get(priv_name, "").strip()
+            if not priv_hex:
+                continue
+            try:
+                environ[name] = _dotenvx_decrypt(priv_hex, value[len(_ENC_PREFIX):])
+                break
+            except Exception:
+                continue
+    return environ
 
 
 @dataclass
@@ -146,10 +243,12 @@ def _load_toml(path: Path) -> dict:
 
 
 def _load_env_files(root: Path) -> list[str]:
-    """Load .env plus platform-injected env files, without clobbering real env.
+    """Load .env plus platform-injected env files, decrypting dotenvx values.
 
-    dotenv does not override variables that are already set in the process
-    environment, so OS-provided secrets always win over file contents.
+    dotenv does not override variables already set in the process environment,
+    so OS-provided secrets always win over file contents. Values stored in the
+    dotenvx `encrypted:…` format (how the platform saves workspace keys) are
+    decrypted in place using the private key from .env.keys.
     """
     loaded: list[str] = []
     for name in (".env", ".env.local", ".env.keys"):
@@ -157,6 +256,10 @@ def _load_env_files(root: Path) -> list[str]:
         if p.exists():
             load_dotenv(p, override=False)
             loaded.append(name)
+    # Decrypt any encrypted values that python-dotenv loaded verbatim. Only
+    # platform-provided keys are ever in this format; a plaintext GEMINI_API_KEY
+    # (starts with AIza) passes through untouched.
+    _decrypt_encrypted_values(os.environ)
     return loaded
 
 
