@@ -599,7 +599,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
 
     g = raw.get("gemini", {})
     gemini = GeminiConfig(
-        model=str(g.get("model", "gemini-2.0-flash")),
+        model=str(g.get("model", "gemini-3.6-flash")),
         min_clip_sec=max(5, int(g.get("min_clip_sec", 15))),
         max_clip_sec=max(15, int(g.get("max_clip_sec", 60))),
         max_clips=min(15, max(5, int(g.get("max_clips", 10)))),

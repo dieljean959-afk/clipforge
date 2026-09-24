@@ -26,6 +26,13 @@ class LlmError(Exception):
     """Gemini call failed after retries."""
 
 
+# Model names rot: Google retires old flash models with a 404 that names the
+# recommended replacement ("models/gemini-X-flash"). When that happens the
+# call self-heals to the recommended model and persists it to config.toml so
+# every later chunk uses it too.
+_MODEL_RETIRED = re.compile(r"models/([A-Za-z0-9._-]+)\s+is no longer available", re.IGNORECASE)
+_RECOMMENDED_MODEL = re.compile(r"use\s+models/([A-Za-z0-9._-]+)", re.IGNORECASE)
+
 # --------------------------------------------------------------------------- #
 # optional SDK import (kept lazy so the API can boot without the package)
 # --------------------------------------------------------------------------- #
@@ -119,6 +126,70 @@ def chunk_words(words: list[dict], target_seconds: float = 120.0) -> list[list[d
     return chunks
 
 
+def _model_rotated(msg: str) -> str | None:
+    """Return the recommended replacement model when Google retires the current one.
+
+    The 404 body looks like: 'This model models/gemini-2.0-flash is no longer
+    available. Please update your code to use models/gemini-3.6-flash ...'
+    """
+    if "no longer available" not in msg:
+        return None
+    m = _RECOMMENDED_MODEL.search(msg)
+    if m:
+        return m.group(1)
+    m = _MODEL_RETIRED.search(msg)
+    if m:
+        # fallback: strip the version from the retired name, e.g.
+        # gemini-2.0-flash → gemini-2.0 (rare; Google usually names a successor)
+        return re.sub(r"-\d+$", "", m.group(1))
+    return None
+
+
+def _persist_model_fix(settings: Settings, new_model: str) -> None:
+    """Persist a working model name into the [gemini] section of config.toml.
+
+    Only the `model =` line inside `[gemini]` is touched — the whisper section
+    has its own `model =` line that must stay intact.
+    """
+    import tomllib as _tomllib
+    from pathlib import Path as _Path
+
+    from app.config import ROOT
+
+    cfg_path = _Path(ROOT) / "config.toml"
+    try:
+        lines = cfg_path.read_text(encoding="utf-8").splitlines()
+        section = ""
+        replaced = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped[1:-1].strip().lower()
+                continue
+            if section == "gemini" and not replaced and re.match(r"^model\s*=", stripped):
+                indent = line[: len(line) - len(line.lstrip())]
+                comment = ""
+                # keep an inline comment if present (outside quotes)
+                in_q = False
+                for j, ch in enumerate(stripped):
+                    if ch == '"':
+                        in_q = not in_q
+                    elif ch == "#" and not in_q:
+                        comment = "  " + stripped[j:].rstrip()
+                        break
+                lines[i] = f'{indent}model = "{new_model}"{comment}'
+                replaced = True
+        if replaced:
+            cfg_path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+            logger.info(f"[llm] persisted model fix to config.toml [gemini]: {new_model}")
+        else:
+            logger.warning("[llm] could not find model = line under [gemini] in config.toml")
+    except Exception as exc:
+        logger.warning(f"[llm] could not persist model fix to config.toml: {exc}")
+    # keep this process consistent immediately
+    settings.gemini.model = new_model
+
+
 def call_gemini(chunk_text_prompt: str, settings: Settings) -> str:
     """Single Gemini call with 429 backoff. Raises LlmError after retries."""
     genai = _load_google_module()
@@ -144,6 +215,17 @@ def call_gemini(chunk_text_prompt: str, settings: Settings) -> str:
                 logger.warning(f"[llm] 429 rate limited, backing off {wait:.1f}s (attempt {attempt + 1})")
                 time.sleep(wait)
             else:
+                # Model retirement is not a transient error: retrying with the
+                # same name can never succeed. Switch to Google's recommended
+                # replacement immediately and keep going.
+                replacement = _model_rotated(msg)
+                if replacement and replacement != model:
+                    logger.warning(
+                        f"[llm] model {model!r} was retired by Google — self-healing to {replacement!r}"
+                    )
+                    model = replacement
+                    _persist_model_fix(settings, replacement)
+                    continue
                 wait = 2.0 * (attempt + 1)
                 logger.warning(f"[llm] gemini error ({msg[:140]}), retry {attempt + 1} in {wait:.0f}s")
                 time.sleep(wait)

@@ -49,12 +49,24 @@ def main() -> int:
           all(e - s <= WINDOW_SEC + 1e-9 for s, e in long))
 
     # --- overlap dedup -----------------------------------------------------
-    # word "world" re-decoded inside the 1s overlap between window 1 and 2
-    win1 = [Word(0.0, 0.3, "hello"), Word(0.4, 0.8, "world")]
-    win2 = [Word(29.4, 29.7, "world"), Word(30.0, 30.4, "again")]  # "world" dup, shifted +29
+    # window 1 = [0, 30): "world" is spoken at 29.4s, near the end of it.
+    # window 2 = [29, 60): the same "world" is re-decoded inside the 1s overlap
+    # and lands at the SAME absolute time (local 0.4 + offset 29). Dedupe must
+    # drop the twin. Duplicates never appear at different absolute times —
+    # that would be genuine repeated speech (checked below).
+    win1 = [Word(0.0, 0.3, "hello"), Word(29.4, 29.8, "world")]
+    win2 = [Word(29.4, 29.8, "world"), Word(30.0, 30.4, "again")]
     out = _dedupe_words(win1 + win2)
     check("overlap duplicate removed", [w.word for w in out] == ["hello", "world", "again"],
           str([w.word for w in out]))
+
+    # the same word 29s apart is real speech, not an overlap artifact — kept
+    far = [Word(0.4, 0.8, "world"), Word(29.4, 29.8, "world")]
+    check("same word far apart in time kept", len(_dedupe_words(far)) == 2)
+
+    # VAD padding can re-cut a word as an exact-timestamp twin — dropped
+    twins = [Word(12.0, 12.4, "uh"), Word(12.0, 12.4, "uh")]
+    check("exact-timestamp twin dropped", len(_dedupe_words(twins)) == 1)
 
     # genuinely repeated speech at different times must survive
     speech = [Word(1.0, 1.2, "yeah"), Word(10.0, 10.2, "yeah")]

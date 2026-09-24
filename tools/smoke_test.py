@@ -157,13 +157,34 @@ def main() -> int:
 
     print("== 4. llm guard: detection without key raises LlmNotConfigured")
     from app import llm as llm_mod
+    from app.config import live_gemini_key
 
-    try:
-        llm_mod.detect_clips([{"start": 0, "end": 1, "word": "x"}], settings)
-        print("   FAIL: expected LlmNotConfigured")
-        return 1
-    except llm_mod.LlmNotConfigured as exc:
-        print(f"   OK: {exc}")
+    live_gemini_key().refresh(force=True)
+    if settings.gemini_api_key:
+        # A usable key exists in this environment (platform Keys tab / .env).
+        # The no-key guard cannot fire here — verify the positive path instead:
+        # parse_candidates must still reject garbage replies deterministically.
+        print("   note: key present — testing parse-only guard instead")
+        try:
+            llm_mod.parse_candidates("not json at all")
+            print("   FAIL: expected LlmError for unparseable reply")
+            return 1
+        except llm_mod.LlmError:
+            print("   OK: unparseable Gemini reply raises LlmError")
+        empty = llm_mod.parse_candidates(
+            '[{"start": 1.0, "end": 5.0, "score": 88, "title": "T", "hook_text": "H"}]'
+        )
+        if len(empty) != 1 or empty[0]["score"] != 88.0:
+            print(f"   FAIL: candidate parse wrong: {empty}")
+            return 1
+        print("   OK: valid candidate JSON parses with defaults filled in")
+    else:
+        try:
+            llm_mod.detect_clips([{"start": 0, "end": 1, "word": "x"}], settings)
+            print("   FAIL: expected LlmNotConfigured")
+            return 1
+        except llm_mod.LlmNotConfigured as exc:
+            print(f"   OK: {exc}")
 
     print("== 5. silence-trim + reframe filters are pure functions")
     from app import video as video_mod

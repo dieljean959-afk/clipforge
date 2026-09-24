@@ -24,7 +24,9 @@ language = "auto"
 
 [gemini]
 # Free-tier friendly flash model. GEMINI_API_KEY comes from .env.
-model = "gemini-2.0-flash"
+# Model names rot: Google retires old ones with a 404 naming the replacement —
+# the backend parses that error and self-heals to the recommended model.
+model = "gemini-3.6-flash"
 min_clip_sec = 15
 max_clip_sec = 60
 # Auto-select the top N clips by score (5-15).
