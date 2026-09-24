@@ -69,6 +69,16 @@ def main() -> int:
         assert "disk" in health and "freeBytes" in health["disk"]
         print(f"   limits: {health['limits']}, disk: {health['disk']}")
 
+        # doctor + caption presets endpoints
+        r = client.get("/api/doctor")
+        assert r.status_code == 200, r.text
+        doc = r.json()
+        assert "checks" in doc and len(doc["checks"]) > 3, doc
+        print(f"   doctor: ok={doc['ok']} checks={len(doc['checks'])}")
+        r = client.get("/api/caption-presets")
+        assert r.status_code == 200 and len(r.json()) == 4, r.text
+        print("   caption presets: 4 styles")
+
         r = client.post(
             "/api/jobs",
             json={"sourceType": "url", "source": "https://example.com/not-a-video.mp4"},
@@ -182,13 +192,27 @@ def main() -> int:
             return 1
         except llm_mod.LlmError:
             print("   OK: unparseable Gemini reply raises LlmError")
-        empty = llm_mod.parse_candidates(
-            '[{"start": 1.0, "end": 5.0, "score": 88, "title": "T", "hook_text": "H"}]'
+        # word-index contract: the model returns indices, we resolve timings
+        parsed = llm_mod.parse_candidates(
+            '[{"start_word": 4, "end_word": 9, "score": 88, "title": "T", "hook_text": "H"}]'
         )
-        if len(empty) != 1 or empty[0]["score"] != 88.0:
-            print(f"   FAIL: candidate parse wrong: {empty}")
+        if len(parsed) != 1 or parsed[0]["score"] != 88.0 or parsed[0]["start_word"] != 4:
+            print(f"   FAIL: candidate parse wrong: {parsed}")
             return 1
-        print("   OK: valid candidate JSON parses with defaults filled in")
+        words = [
+            {"start": i * 2.0, "end": i * 2.0 + 1.5, "word": f"w{i}"} for i in range(20)
+        ]
+        resolved = llm_mod.resolve_candidates(
+            parsed, words, 0, llm_mod.GeminiConfig("m", 5, 60, 10, 3)
+        )
+        if len(resolved) != 1:
+            print(f"   FAIL: resolve produced {resolved}")
+            return 1
+        c = resolved[0]
+        if abs(c["start"] - 8.0) > 0.01 or c["transcript"].split() != [f"w{i}" for i in range(4, 10)]:
+            print(f"   FAIL: index→timestamp mapping wrong: {c}")
+            return 1
+        print("   OK: word indices map to real timestamps and local transcript")
     else:
         try:
             llm_mod.detect_clips([{"start": 0, "end": 1, "word": "x"}], settings)

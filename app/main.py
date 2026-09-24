@@ -36,6 +36,7 @@ from app.config import (
 )
 from app.download import probe_url
 from app.hosting import RetentionCleaner, disk_stats
+from app.stages import StageWorkspace
 from app.store import LocalStore
 from app.worker import InProcessWorker
 
@@ -196,6 +197,7 @@ class CreateJobIn(BaseModel):
     minClipSec: int | None = Field(default=None, ge=5, le=180)
     maxClipSec: int | None = Field(default=None, ge=10, le=180)
     maxClips: int | None = Field(default=None, ge=1, le=15)
+    captionPreset: str | None = Field(default=None, pattern="^(bold_pop|karaoke|lower_third|boxed)$")
 
 
 class RequeueIn(BaseModel):
@@ -281,10 +283,11 @@ def verify_clips(jobId: str | None = None) -> dict:
 @app.get("/api/health")
 def health() -> dict:
     remote = hosting.remote_probe(settings) if settings.hosted.worker_url else None
+    worker_status = worker.status()
     return {
         "ok": True,
         "version": "1.1.0",
-        "worker": worker.status(),
+        "worker": worker_status,
         "warmup": warmup,
         "llm": {
             "provider": "gemini",
@@ -303,12 +306,31 @@ def health() -> dict:
             "maxSourceMin": settings.hosted.max_source_min,
             "retentionHours": settings.hosted.retention_hours,
         },
+        "stallTimeoutSec": worker_status.get("stallTimeoutSec"),
         "dispatch": (
             {"enabled": True, "workerUrl": settings.hosted.worker_url, "remote": remote}
             if settings.hosted.worker_url
             else {"enabled": False}
         ),
     }
+
+
+@app.get("/api/doctor")
+def doctor() -> dict:
+    """Actionable environment diagnostics (ffmpeg build, GPU, model, API, disk)."""
+    from app.doctor import run_doctor
+
+    return run_doctor(settings)
+
+
+@app.get("/api/caption-presets")
+def caption_presets() -> list[dict]:
+    from app.subtitle import CAPTION_PRESETS
+
+    return [
+        {"key": p.key, "label": p.label}
+        for p in CAPTION_PRESETS.values()
+    ]
 
 
 @app.get("/api/warmup")
@@ -412,6 +434,7 @@ def create_job(body: CreateJobIn) -> dict:
         min_clip_sec=body.minClipSec,
         max_clip_sec=body.maxClipSec,
         max_clips=body.maxClips,
+        caption_preset=body.captionPreset,
     )
     job_id = job["_id"]
     store.append_job_log(job_id, f"job created ({body.sourceType}: {body.source[:80]})")
@@ -425,6 +448,7 @@ async def upload_job(
     minClipSec: int | None = None,
     maxClipSec: int | None = None,
     maxClips: int | None = None,
+    captionPreset: str | None = None,
 ) -> dict:
     """Manual upload: always works, no URL fetching involved."""
     from app import download as download_svc
@@ -435,6 +459,7 @@ async def upload_job(
         min_clip_sec=minClipSec,
         max_clip_sec=maxClipSec,
         max_clips=maxClips,
+        caption_preset=captionPreset,
     )
     job_id = job["_id"]
     dest_dir = settings.app.paths.downloads_dir / job_id
@@ -594,13 +619,15 @@ def redetect_job(job_id: str) -> dict:
     src = store.find_source_file(job_id)
     if src is None:
         raise HTTPException(400, "source file no longer on disk — re-run the job from a fresh URL/upload")
-    # reset and re-run the pipeline from the find stage: simplest correct path
-    # is a full re-run; the source is already local so grab is instant.
+    # Re-run detection onward. The stage workspace keeps fetch + transcribe
+    # artifacts, so the job resumes at 'detect' instead of starting over.
+    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
+    ws.clear_from("detect")
     job = store.get_job(job_id) or job
     job.update({"stage": "queued", "progress": 0, "error": None, "errorDetail": None})
     store.write_job(job)
     worker.enqueue(job_id)
-    return {"queued": True}
+    return {"queued": True, "resumesAt": ws.first_incomplete()}
 
 
 @app.get("/api/jobs/{job_id}/logs")

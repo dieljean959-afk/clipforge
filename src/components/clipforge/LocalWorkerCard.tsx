@@ -9,6 +9,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
+import { Stethoscope } from "lucide-react";
 import {
   Cpu,
   Eye,
@@ -63,6 +64,34 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const [showKey, setShowKey] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [runningDoctor, setRunningDoctor] = useState(false);
+
+  // doctor: replaces vague "API unreachable" with specific, fixable checks
+  const runDoctor = async () => {
+    setRunningDoctor(true);
+    try {
+      const report = await api.doctor();
+      const bad = report.checks.filter((c) => c.status === "fail");
+      const warn = report.checks.filter((c) => c.status === "warn");
+      if (bad.length === 0) {
+        toast.success(
+          `Diagnostics passed${warn.length > 0 ? ` (${warn.length} warning${warn.length > 1 ? "s" : ""})` : ""}.`,
+          { description: warn.map((c) => c.name).join(", ") || "All systems nominal." },
+        );
+      } else {
+        toast.error(`${bad.length} diagnostic failure${bad.length > 1 ? "s" : ""} found.`, {
+          description: bad
+            .map((c) => `${c.name}: ${c.detail}${c.fix ? ` — ${c.fix}` : ""}`)
+            .join(" · "),
+          duration: 12_000,
+        });
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Diagnostics could not run.");
+    } finally {
+      setRunningDoctor(false);
+    }
+  };
 
   const workerOnline = health?.worker.online === true;
   const warmup = health?.warmup;
@@ -290,6 +319,23 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 max video: {maxMin} min · files deleted after {retentionH ?? "?"}h
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => void runDoctor()}
+              disabled={runningDoctor}
+              className={cn(
+                "flex cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground transition hover:border-primary/50 hover:text-foreground",
+                runningDoctor && "cursor-wait opacity-60",
+              )}
+              title="Run environment diagnostics (ffmpeg build, GPU, Whisper, Gemini key, disk)"
+            >
+              {runningDoctor ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Stethoscope className="size-3" />
+              )}
+              {runningDoctor ? "Checking…" : "Doctor"}
+            </button>
             {health.worker.queueDepth > 0 && (
               <span className="text-muted-foreground">queue: {health.worker.queueDepth}</span>
             )}

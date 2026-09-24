@@ -30,6 +30,12 @@ export interface JobDto {
   downloadSource?: string | null;
   transcriptWordCount?: number | null;
   captionsTxt?: string | null;
+  options?: {
+    minClipSec?: number | null;
+    maxClipSec?: number | null;
+    maxClips?: number | null;
+    captionPreset?: string | null;
+  } | null;
   createdAt: number;
   completedAt?: number | null;
 }
@@ -91,6 +97,7 @@ export interface HealthDto {
   system: SystemStatsDto;
   disk: DiskStatsDto;
   tailnetIp: string | null;
+  stallTimeoutSec?: number | null;
   limits: { maxSourceMin: number; retentionHours: number };
   dispatch:
     | { enabled: false }
@@ -118,6 +125,24 @@ export interface VerifyClipsDto {
   valid: number;
   invalid: number;
   clips: VerifyClipResult[];
+}
+
+export interface DoctorCheck {
+  name: string;
+  status: "ok" | "warn" | "fail";
+  detail: string;
+  fix: string;
+}
+
+export interface DoctorReport {
+  ok: boolean;
+  summary: { fail: number; warn: number; ok: number };
+  checks: DoctorCheck[];
+}
+
+export interface CaptionPresetDto {
+  key: string;
+  label: string;
 }
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
@@ -155,17 +180,24 @@ async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
 
 export const api = {
   health: () => request<HealthDto>("/api/health"),
+  doctor: () => request<DoctorReport>("/api/doctor"),
+  captionPresets: () => request<CaptionPresetDto[]>("/api/caption-presets"),
   listJobs: () => request<JobDto[]>("/api/jobs"),
   getJob: (jobId: string) => request<JobDto>(`/api/jobs/${jobId}`),
-  createJob: (source: string, sourceType: "url" | "upload" = "url") =>
+  createJob: (
+    source: string,
+    sourceType: "url" | "upload" = "url",
+    captionPreset?: string,
+  ) =>
     request<{ jobId: string }>("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceType, source }),
+      body: JSON.stringify({ sourceType, source, captionPreset }),
     }),
-  uploadJob: (file: File) => {
+  uploadJob: (file: File, captionPreset?: string) => {
     const fd = new FormData();
     fd.append("file", file);
+    if (captionPreset) fd.append("captionPreset", captionPreset);
     return request<{ jobId: string; file: string; bytes: number }>("/api/jobs/upload", {
       method: "POST",
       body: fd,

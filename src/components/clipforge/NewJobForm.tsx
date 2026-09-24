@@ -1,9 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Paperclip, Sparkles, Youtube } from "lucide-react";
+import { Loader2, Paperclip, Sparkles, Type, Youtube } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api } from "@/lib/api";
+import { api, type CaptionPresetDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
@@ -17,7 +17,28 @@ export function NewJobForm({ className }: { className?: string }) {
   const [file, setFile] = useState<File | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [presets, setPresets] = useState<CaptionPresetDto[]>([]);
+  const [preset, setPreset] = useState("bold_pop");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // caption styles come from the backend so the UI never drifts from the
+  // pipeline's presets
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const list = await api.captionPresets();
+        if (!cancelled && list.length > 0) setPresets(list);
+      } catch {
+        // fall back to the static default below; never block submission
+      }
+    };
+    const t = setTimeout(() => void load(), 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, []);
 
   const canSubmit =
     confirmed &&
@@ -30,9 +51,9 @@ export function NewJobForm({ className }: { className?: string }) {
     setSubmitting(true);
     try {
       if (mode === "url") {
-        await api.createJob(url.trim(), "url");
+        await api.createJob(url.trim(), "url", preset);
       } else if (file !== null) {
-        await api.uploadJob(file);
+        await api.uploadJob(file, preset);
       }
       toast.success("Job queued — the local worker is on it.", {
         description: mode === "url" ? url.trim() : file?.name,
@@ -111,6 +132,34 @@ export function NewJobForm({ className }: { className?: string }) {
           </button>
         </>
       )}
+
+      <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+        <Type className="mt-0.5 size-3.5 shrink-0 text-primary" />
+        <span className="flex-1">
+          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Caption style
+          </span>
+          <select
+            value={preset}
+            onChange={(e) => setPreset(e.target.value)}
+            className="h-9 w-full cursor-pointer rounded-md border border-input bg-card px-2 text-sm text-foreground"
+          >
+            {(presets.length > 0
+              ? presets
+              : [
+                  { key: "bold_pop", label: "Bold pop (default)" },
+                  { key: "karaoke", label: "Karaoke fill" },
+                  { key: "lower_third", label: "Clean lower-third" },
+                  { key: "boxed", label: "Boxed" },
+                ]
+            ).map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </span>
+      </label>
 
       <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
         <input

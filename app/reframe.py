@@ -1,8 +1,10 @@
 """MediaPipe face-tracking reframe (optional dependency).
 
 Produces a time series of 9:16 crop windows that follow the active speaker.
-If mediapipe is not installed, reframe falls back to a centered crop and logs
-it — no fabricated tracking data.
+Shot-aware: given the source's detected cut boundaries, each shot is framed
+independently and the sample at a cut is flagged so the crop snaps (no
+interpolated pan through a cut). If mediapipe is not installed, reframe falls
+back to a centered crop and logs it — no fabricated tracking data.
 """
 
 from __future__ import annotations
@@ -27,6 +29,11 @@ def _load_mediapipe():
         return None
 
 
+def _center_window(src_width: int, src_height: int, target_aspect: float, t: float) -> dict:
+    w = min(int(src_height * target_aspect), src_width)
+    return {"t": t, "x": (src_width - w) // 2, "y": 0, "w": w, "h": src_height}
+
+
 def face_crop_windows(
     video_path: str,
     clip_start: float,
@@ -35,19 +42,21 @@ def face_crop_windows(
     src_height: int,
     target_aspect: float = 9 / 16,
     sample_hz: float = 2.0,
+    scene_cuts: list[float] | None = None,
 ) -> tuple[list[dict], bool]:
-    """Sample faces between clip_start..clip_end.
+    """Sample faces between clip_start..clip_end, per shot.
 
-    Returns (windows, used_mediapipe) where windows are
-    [{t, x, y, w, h}] in source pixels. Falls back to a single centered
-    window when MediaPipe is unavailable.
+    `scene_cuts` are absolute timestamps of shot boundaries (from
+    video.detect_scene_cuts). The sample nearest each boundary inside the clip
+    is marked ``"cut": True`` so video.crop_pan_filter hard-snaps the crop at
+    the cut instead of interpolating across it.
+
+    Returns (windows, used_mediapipe). Falls back to a single centered window
+    when MediaPipe is unavailable or sampling fails.
     """
     mp = _load_mediapipe()
     if mp is None:
-        w = int(src_height * target_aspect)
-        w = min(w, src_width)
-        x = (src_width - w) // 2
-        return ([{"t": clip_start, "x": x, "y": 0, "w": w, "h": src_height}], False)
+        return ([_center_window(src_width, src_height, target_aspect, clip_start)], False)
 
     import cv2  # mediapipe solutions require opencv
 
@@ -81,7 +90,17 @@ def face_crop_windows(
                 t += step
         finally:
             cap.release()
+
     if not windows:
-        w = min(int(src_height * target_aspect), src_width)
-        return ([{"t": crop_w and clip_start, "x": (src_width - w) // 2, "y": 0, "w": w, "h": src_height}], True)
+        return ([_center_window(src_width, src_height, target_aspect, clip_start)], True)
+
+    # Flag the first sample at/after each cut (within the clip) as a hard snap.
+    for cut in scene_cuts or []:
+        if cut <= clip_start or cut > clip_end:
+            continue
+        # first sample whose time is at or after the cut
+        for wdw in windows:
+            if wdw["t"] >= cut - 1e-6:
+                wdw["cut"] = True
+                break
     return (windows, True)

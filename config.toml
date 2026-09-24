@@ -50,6 +50,9 @@ words_per_cue = 2
 position_y = 0.78
 # Pop/scale animation on each word group.
 pop_animation = true
+# Default caption style preset: bold_pop | karaoke | lower_third | boxed
+# (per-job override: pick a style on the dashboard form)
+preset = "bold_pop"
 
 [video]
 width = 1080

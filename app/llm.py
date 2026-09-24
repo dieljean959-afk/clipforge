@@ -1,8 +1,13 @@
 """Gemini clip detection (LLM service).
 
-Chunked transcript → Gemini → JSON [{start, end, score, title, hook_text}]
-with 429-aware exponential backoff. The key-missing case is surfaced loudly:
-no silent heuristic fallback exists in this module.
+Chunked transcript → Gemini → JSON [{start_word, end_word, score, title,
+hook_text}] with 429-aware exponential backoff. The model returns WORD
+INDICES, never timestamps — fragile float math is the LLM's weak spot, so we
+resolve the real start/end from Whisper's word-level timings afterwards.
+
+Only transcript text is ever sent to the hosted provider — never audio or
+video. The key-missing case is surfaced loudly: no silent heuristic fallback
+exists in this module.
 """
 
 from __future__ import annotations
@@ -47,32 +52,32 @@ def _load_google_module():
     return genai
 
 
-def build_prompt(chunk: list[dict], cfg: GeminiConfig) -> str:
-    lines = ["TRANSCRIPT (word-level, seconds):"]
-    for w in chunk:
-        lines.append(f'{w["start"]:.2f}-{w["end"]:.2f} {w["word"]}')
+def build_prompt(chunk: list[dict], cfg: GeminiConfig, start_index: int = 0) -> str:
+    """Prompt with globally-numbered words; the model picks index ranges."""
+    lines = ["NUMBERED TRANSCRIPT (word index, seconds):"]
+    for i, w in enumerate(chunk):
+        lines.append(f'[{start_index + i}] {w["start"]:.2f}s {w["word"]}')
     transcript_text = "\n".join(lines)
-    return f"""
-You select the most viral short-form clips from a video transcript.
-Timing window: clips must be {cfg.min_clip_sec}-{cfg.max_clip_sec} seconds long.
-Pick {cfg.max_clips} best candidates max — fewer is fine. Do NOT invent times
-that are not backed by the transcript. Score 0-100 for hook strength, pacing
-and emotional energy. hook_text is a short punchy phrase that would work as the
-opening caption. transcript must quote the words actually spoken inside the
-window (trimmed to ~300 chars). hashtags: 3-6 short tags for the platform.
+    return f"""You select the most viral short-form clips from a video transcript.
+Every transcript line starts with a [word_index]. Identify clip-worthy moments
+BY WORD INDEX RANGE — do NOT output timestamps, the indices are the contract.
+Timing window: clips must be {cfg.min_clip_sec}-{cfg.max_clip_sec} seconds long
+(as shown next to each word). Pick {cfg.max_clips} best candidates max — fewer
+is fine. Do NOT invent indices that are not in the transcript. Score 0-100 for
+hook strength, pacing and emotional energy. hook_text is a short punchy phrase
+that would work as the opening caption. hashtags: 3-6 short tags for the
+platform.
 
 Return ONLY a JSON array (no prose, no markdown fences):
-[{{"start": 12.5, "end": 48.2, "score": 92, "title": "Short punchy title",
-   "hook_text": "WAIT FOR IT",
-   "transcript": "exact words spoken in this window...",
-   "hashtags": ["#viral", "#podcast"]}}]
+[{{"start_word": 120, "end_word": 310, "score": 92, "title": "Short punchy title",
+   "hook_text": "WAIT FOR IT", "hashtags": ["#viral", "#podcast"]}}]
 
 {transcript_text}
 """.strip()
 
 
 def parse_candidates(text: str) -> list[dict[str, Any]]:
-    """Extract the JSON array from a model reply, tolerating fences/prose."""
+    """Extract word-index candidates from a model reply, tolerating fences."""
     m = re.search(r"\[.*\]", text, re.DOTALL)
     if m is None:
         raise LlmError(f"no JSON array in Gemini reply: {text[:200]!r}")
@@ -85,44 +90,95 @@ def parse_candidates(text: str) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         try:
-            start = float(item["start"])
-            end = float(item["end"])
+            start_word = int(item["start_word"])
+            end_word = int(item["end_word"])
             score = float(item.get("score", 0))
         except (KeyError, TypeError, ValueError):
             continue
-        if end <= start or start < 0:
+        if end_word <= start_word:
             continue
         out.append(
             {
-                "start": start,
-                "end": end,
+                "start_word": start_word,
+                "end_word": end_word,
                 "score": max(0.0, min(100.0, score)),
-                "title": str(item.get("title", "Untitled clip")),
-                "hook_text": str(item.get("hook_text", "")),
-                "transcript": str(item.get("transcript", ""))[:500],
+                "title": str(item.get("title", "Untitled clip"))[:120],
+                "hook_text": str(item.get("hook_text", ""))[:200],
                 "hashtags": [
-                    str(h) for h in (item.get("hashtags") or []) if str(h).strip()
+                    str(t) for t in (item.get("hashtags") or []) if str(t).strip()
                 ][:8],
             }
         )
     return out
 
 
-def chunk_words(words: list[dict], target_seconds: float = 120.0) -> list[list[dict]]:
-    """Split a word-level transcript into ~2-minute chunks for the LLM."""
+def resolve_candidates(
+    parsed: list[dict[str, Any]],
+    words: list[dict],
+    start_index: int,
+    cfg: GeminiConfig,
+) -> list[dict[str, Any]]:
+    """Map word indices → real timestamps via Whisper timings.
+
+    The transcript quote is derived LOCALLY from the selected words (the model
+    is not asked to reproduce text, so it cannot paraphrase or hallucinate it).
+    """
+    out: list[dict[str, Any]] = []
+    n = len(words)
+    if n == 0:
+        return out
+    lo = start_index
+    hi = start_index + n - 1
+    for c in parsed:
+        si = max(lo, min(hi, int(c["start_word"])))
+        ei = max(lo, min(hi, int(c["end_word"])))
+        if ei <= si:
+            continue
+        start = float(words[si]["start"])
+        end = float(words[ei]["end"])
+        # enforce the duration window (indices can drift out of range)
+        if end - start < cfg.min_clip_sec:
+            end = min(float(words[-1]["end"]), start + cfg.max_clip_sec)
+        if end - start > cfg.max_clip_sec:
+            end = start + cfg.max_clip_sec
+        if end - start < 1.0:
+            continue
+        quote = " ".join(words[j]["word"] for j in range(si, ei + 1))[:300]
+        out.append(
+            {
+                "start": start,
+                "end": end,
+                "score": c["score"],
+                "title": c["title"],
+                "hook_text": c["hook_text"],
+                "transcript": quote,
+                "hashtags": c["hashtags"],
+            }
+        )
+    return out
+
+
+def chunk_words(words: list[dict], target_seconds: float = 120.0) -> list[tuple[int, list[dict]]]:
+    """Split a word-level transcript into ~2-minute chunks.
+
+    Returns [(global_start_index, chunk_words), ...] so prompts can carry the
+    same word numbering the resolver uses.
+    """
     if not words:
         return []
-    chunks: list[list[dict]] = []
+    chunks: list[tuple[int, list[dict]]] = []
     current: list[dict] = []
+    start_index = 0
     t0 = words[0]["start"]
-    for w in words:
+    for i, w in enumerate(words):
         current.append(w)
         if w["end"] - t0 >= target_seconds:
-            chunks.append(current)
+            chunks.append((start_index, current))
+            start_index += len(current)
             current = []
             t0 = w["end"]
     if current:
-        chunks.append(current)
+        chunks.append((start_index, current))
     return chunks
 
 
@@ -139,8 +195,6 @@ def _model_rotated(msg: str) -> str | None:
         return m.group(1)
     m = _MODEL_RETIRED.search(msg)
     if m:
-        # fallback: strip the version from the retired name, e.g.
-        # gemini-2.0-flash → gemini-2.0 (rare; Google usually names a successor)
         return re.sub(r"-\d+$", "", m.group(1))
     return None
 
@@ -151,7 +205,6 @@ def _persist_model_fix(settings: Settings, new_model: str) -> None:
     Only the `model =` line inside `[gemini]` is touched — the whisper section
     has its own `model =` line that must stay intact.
     """
-    import tomllib as _tomllib
     from pathlib import Path as _Path
 
     from app.config import ROOT
@@ -169,7 +222,6 @@ def _persist_model_fix(settings: Settings, new_model: str) -> None:
             if section == "gemini" and not replaced and re.match(r"^model\s*=", stripped):
                 indent = line[: len(line) - len(line.lstrip())]
                 comment = ""
-                # keep an inline comment if present (outside quotes)
                 in_q = False
                 for j, ch in enumerate(stripped):
                     if ch == '"':
@@ -183,7 +235,7 @@ def _persist_model_fix(settings: Settings, new_model: str) -> None:
             cfg_path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
             logger.info(f"[llm] persisted model fix to config.toml [gemini]: {new_model}")
         else:
-            logger.warning("[llm] could not find model = line under [gemini] in config.toml")
+            logger.warning(f"[llm] could not find model = line under [gemini] in config.toml")
     except Exception as exc:
         logger.warning(f"[llm] could not persist model fix to config.toml: {exc}")
     # keep this process consistent immediately
@@ -211,7 +263,7 @@ def call_gemini(chunk_text_prompt: str, settings: Settings) -> str:
             if not text.strip():
                 raise LlmError("Gemini returned an empty reply")
             return text
-        except Exception as exc:  # noqa: BLE001 - SDK raises many types
+        except Exception as exc:  # noqa: BLE001 — SDK raises many types
             msg = str(exc)
             rate_limited = "429" in msg or "RESOURCE_EXHAUSTED" in msg
             last_err = exc
@@ -248,7 +300,7 @@ def detect_clips(
     max_clips: int | None = None,
     on_log=None,
 ) -> list[dict[str, Any]]:
-    """Full detection: chunk → Gemini per chunk → merge → top-N by score.
+    """Full detection: chunk → Gemini (word indices) → resolve timings → top-N.
 
     Returns MPT-style dicts: start, end, score, title, hook_text.
     Raises LlmNotConfigured when no key, LlmError when the API fails after
@@ -261,7 +313,7 @@ def detect_clips(
             f"no key found under any supported name ({', '.join(live.status()['aliases'])})"
         )
         raise LlmNotConfigured(
-            "GEMINI_API_KEY missing — add it in the Keys/API keys tab (or .env), "
+            f"GEMINI_API_KEY missing — add it in the Keys/API keys tab (or .env), "
             f"then hit Re-check. Detail: {detail}"
         )
 
@@ -279,14 +331,15 @@ def detect_clips(
         on_log(f"Gemini: scoring {len(chunks)} chunk(s)...")
 
     candidates: list[dict[str, Any]] = []
-    for i, chunk in enumerate(chunks):
-        prompt = build_prompt(chunk, cfg)
+    for i, (start_index, chunk) in enumerate(chunks):
+        prompt = build_prompt(chunk, cfg, start_index=start_index)
         text = call_gemini(prompt, settings)
         parsed = parse_candidates(text)
-        candidates.extend(parsed)
+        resolved = resolve_candidates(parsed, words, start_index, cfg)
+        candidates.extend(resolved)
         if on_log:
-            on_log(f"Gemini: chunk {i + 1}/{len(chunks)} → {len(parsed)} candidates")
-        logger.info(f"[llm] chunk {i + 1}/{len(chunks)}: {len(parsed)} candidates")
+            on_log(f"Gemini: chunk {i + 1}/{len(chunks)} → {len(resolved)} candidates")
+        logger.info(f"[llm] chunk {i + 1}/{len(chunks)}: {len(resolved)} candidates")
 
     # keep only the top N by score
     candidates.sort(key=lambda c: c["score"], reverse=True)

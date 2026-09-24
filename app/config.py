@@ -479,6 +479,8 @@ class SubtitleConfig:
     words_per_cue: int = 2
     position_y: float = 0.78
     pop_animation: bool = True
+    # Default caption style preset: bold_pop | karaoke | lower_third | boxed
+    preset: str = "bold_pop"
 
 
 @dataclass
@@ -587,7 +589,8 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
             errors.append(f"cannot create {name}: {exc}")
 
     w = raw.get("whisper", {})
-    model = str(w.get("model", "small"))
+    # env override wins (tests / low-memory hosts): CLIPFORGE_WHISPER_MODEL
+    model = str(os.getenv("CLIPFORGE_WHISPER_MODEL") or w.get("model", "small"))
     if model not in {"tiny", "base", "small", "medium", "large-v3"}:
         errors.append(
             f'whisper.model "{model}" is not one of tiny/base/small/medium/large-v3'
@@ -623,7 +626,13 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         words_per_cue=max(1, int(s.get("words_per_cue", 2))),
         position_y=min(0.95, max(0.3, float(s.get("position_y", 0.78)))),
         pop_animation=bool(s.get("pop_animation", True)),
+        preset=str(s.get("preset", "bold_pop")),
     )
+    if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed"}:
+        errors.append(
+            f'subtitle.preset "{subtitle.preset}" is not one of '
+            "bold_pop/karaoke/lower_third/boxed"
+        )
 
     v = raw.get("video", {})
     video = VideoConfig(

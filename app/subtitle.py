@@ -62,6 +62,65 @@ OVERLAP_SEC = 1.0
 MAX_DECODE_SEC = 45.0
 
 
+# --------------------------------------------------------------------------- #
+# Caption style presets
+#
+# Each preset is a full override of the ASS style (colors are in ASS BGR hex
+# via _hex_to_ass). The user picks one per job on the dashboard; the default
+# stays the signature ClipForge look (bold pop).
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class CaptionPreset:
+    key: str
+    label: str
+    font_size: int
+    primary: str          # main text color (#RRGGBB)
+    secondary: str        # accent (karaoke fill / pop color)
+    outline_color: str
+    outline_width: int
+    shadow: int
+    box: bool = False     # opaque box behind text (ASS BorderStyle=3)
+    karaoke: bool = False # word-by-word fill (ASS \k) instead of cue-level pop
+    pop: bool = False     # scale-pop animation per cue
+    position_y: float = 0.78
+
+
+CAPTION_PRESETS: dict[str, CaptionPreset] = {
+    "bold_pop": CaptionPreset(
+        key="bold_pop", label="Bold pop (default)",
+        font_size=68, primary="#FFFFFF", secondary="#39FF14",
+        outline_color="#39FF14", outline_width=5, shadow=1,
+        pop=True, position_y=0.78,
+    ),
+    "karaoke": CaptionPreset(
+        key="karaoke", label="Karaoke fill",
+        font_size=64, primary="#FFFFFF", secondary="#39FF14",
+        outline_color="#101010", outline_width=3, shadow=1,
+        karaoke=True, position_y=0.78,
+    ),
+    "lower_third": CaptionPreset(
+        key="lower_third", label="Clean lower-third",
+        font_size=48, primary="#FFFFFF", secondary="#FFFFFF",
+        outline_color="#000000", outline_width=2, shadow=2,
+        pop=False, position_y=0.86,
+    ),
+    "boxed": CaptionPreset(
+        key="boxed", label="Boxed",
+        font_size=60, primary="#FFFFFF", secondary="#39FF14",
+        outline_color="#000000", outline_width=0, shadow=0,
+        box=True, pop=False, position_y=0.78,
+    ),
+}
+
+
+def get_preset(key: str | None) -> CaptionPreset:
+    """Resolve a preset by key, falling back to the default (never raises)."""
+    if not key:
+        return CAPTION_PRESETS["bold_pop"]
+    return CAPTION_PRESETS.get(key, CAPTION_PRESETS["bold_pop"])
+
+
 @dataclass
 class Word:
     start: float
@@ -290,13 +349,22 @@ def _plan_windows(duration: float) -> list[tuple[float, float]]:
     return windows
 
 
-def transcribe(path: Path, settings: Settings, on_progress=None) -> Transcript:
+def transcribe(
+    path: Path,
+    settings: Settings,
+    on_progress=None,
+    cache_dir: Path | None = None,
+) -> Transcript:
     """Word-level transcription, hardened against repetition loops.
 
     Long inputs are decoded in ~30s overlapping windows instead of one pass,
     every call runs with condition_on_previous_text=False, a tight
     compression_ratio_threshold (2.2) and no_speech_threshold=0.6, and the
     built-in Silero VAD filter strips silence/music before the model sees it.
+
+    `cache_dir` enables INCREMENTAL resume: each completed window is written
+    to cache_dir/win_XXXXX.json as it decodes, so a retry after a crash/stall
+    skips the windows already done and loses at most one window of work.
     """
     model = _load_model(settings)
     try:
@@ -308,6 +376,9 @@ def transcribe(path: Path, settings: Settings, on_progress=None) -> Transcript:
     language = None if settings.whisper.language == "auto" else settings.whisper.language
 
     windows = _plan_windows(duration)
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    resumed = 0
     if len(windows) == 1:
         logger.info(
             f"[subtitle] transcribing {duration:.1f}s in one window "
@@ -321,6 +392,24 @@ def transcribe(path: Path, settings: Settings, on_progress=None) -> Transcript:
 
     all_words: list[Word] = []
     for idx, (w_start, w_end) in enumerate(windows):
+        # ---- incremental resume: reuse an already-decoded window ----------
+        cached = None
+        if cache_dir is not None:
+            cache_file = cache_dir / f"win_{idx:05d}.json"
+            if cache_file.exists():
+                try:
+                    data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    if abs(float(data.get("w_start", -1)) - w_start) < 0.01:
+                        cached = [Word(**w) for w in data.get("words", [])]
+                except Exception:
+                    cached = None  # corrupt cache → just redo this window
+        if cached is not None:
+            all_words.extend(cached)
+            resumed += 1
+            if on_progress and duration > 0:
+                on_progress(min(1.0, w_end / duration))
+            continue
+
         # heartbeat BEFORE extraction: audio decode of a long window can take
         # tens of seconds, and the stall watchdog keys off progress events
         if on_progress and duration > 0:
@@ -345,14 +434,32 @@ def transcribe(path: Path, settings: Settings, on_progress=None) -> Transcript:
             ) from exc
 
         # window-local word timings → source-absolute time
-        all_words.extend(
+        abs_words = [
             Word(start=w.start + w_start, end=w.end + w_start, word=w.word)
             for w in words
-        )
+        ]
+        all_words.extend(abs_words)
         wav.unlink(missing_ok=True)
+
+        # persist the window BEFORE moving on (incremental resume)
+        if cache_dir is not None:
+            cache_file = cache_dir / f"win_{idx:05d}.json"
+            tmp = cache_file.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"w_start": w_start, "w_end": w_end,
+                     "words": [w.as_dict() for w in abs_words]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            tmp.replace(cache_file)
 
         if on_progress and duration > 0:
             on_progress(min(1.0, w_end / duration))
+
+    if resumed:
+        logger.info(f"[subtitle] resumed: reused {resumed}/{len(windows)} cached windows")
 
     words_out = _dedupe_words(all_words)
     dropped = len(all_words) - len(words_out)
@@ -406,6 +513,7 @@ def words_to_cues(
                 "start": current[0]["start"],
                 "end": w["end"],
                 "text": text,
+                "words": list(current),
             })
             current = []
     if current:
@@ -413,13 +521,23 @@ def words_to_cues(
             "start": current[0]["start"],
             "end": current[-1]["end"],
             "text": " ".join(x["word"] for x in current),
+            "words": list(current),
         })
     return cues
 
 
-def build_ass_header(settings: Settings, width: int, height: int) -> str:
+def build_ass_header(
+    settings: Settings, width: int, height: int, preset_key: str | None = None
+) -> str:
+    p = get_preset(preset_key)
     font = settings.subtitle.font
-    outline = _hex_to_ass(settings.subtitle.outline_color)
+    primary = _hex_to_ass(p.primary)
+    secondary = _hex_to_ass(p.secondary)
+    outline = _hex_to_ass(p.outline_color)
+    # BorderStyle 3 = opaque box (ASS renders BackColour behind the text)
+    border_style = 3 if p.box else 1
+    back = "&HA0000000" if p.box else "&H80000000"
+    pos = p.position_y if preset_key else settings.subtitle.position_y
     return f"""[Script Info]
 Title: ClipForge Captions
 ScriptType: v4.00+
@@ -430,24 +548,45 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ClipForge,{font},{settings.subtitle.font_size},&H00FFFFFF,&H00FFFFFF,{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{settings.subtitle.outline_width},0,2,60,60,{int(height * (1 - settings.subtitle.position_y))},1
+Style: ClipForge,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0,0,0,100,100,0,0,{border_style},{p.outline_width},{p.shadow},2,60,60,{int(height * (1 - pos))},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
-def build_ass_events(cues: list[dict], settings: Settings, start_offset: float = 0.0) -> str:
+def _karaoke_tags(cue: dict) -> str:
+    """ASS \\k timing tags (centiseconds per word) for karaoke-fill style."""
+    words = cue.get("words") or []
+    if not words:
+        return ""
+    total = max(0.01, cue["end"] - cue["start"])
+    parts: list[str] = []
+    for w in words:
+        dur = max(0.0, w["end"] - w["start"])
+        cs = int(round(dur / total * 100 * len(words)))
+        parts.append(r"{\k%d}%s" % (max(1, cs), w["text"]))
+    return "".join(parts)
+
+
+def build_ass_events(
+    cues: list[dict], settings: Settings, start_offset: float = 0.0,
+    preset_key: str | None = None,
+) -> str:
+    p = get_preset(preset_key)
     lines: list[str] = []
     for c in cues:
         start = _ass_time(c["start"] - start_offset)
         end = _ass_time(c["end"] - start_offset)
-        text = c["text"].replace("{", "(").replace("}", ")")
-        if settings.subtitle.pop_animation:
-            text = (
-                r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
-                r"\t(90,140,\fscx100\fscy100)}" + text
-            )
+        if p.karaoke and c.get("words"):
+            text = _karaoke_tags(c)
+        else:
+            text = c["text"].replace("{", "(").replace("}", ")")
+            if p.pop:
+                text = (
+                    r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
+                    r"\t(90,140,\fscx100\fscy100)}" + text
+                )
         lines.append(f"Dialogue: 0,{start},{end},ClipForge,,0,0,0,,{text}")
     return "\n".join(lines) + "\n"
 
@@ -459,9 +598,12 @@ def write_ass(
     width: int,
     height: int,
     start_offset: float = 0.0,
+    preset_key: str | None = None,
 ) -> Path:
     """Write an .ass subtitle file; returns the path."""
-    content = build_ass_header(settings, width, height) + build_ass_events(cues, settings, start_offset)
+    content = build_ass_header(settings, width, height, preset_key) + build_ass_events(
+        cues, settings, start_offset, preset_key
+    )
     path.write_text(content, encoding="utf-8")
     return path
 

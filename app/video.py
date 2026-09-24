@@ -4,6 +4,9 @@ Cuts the REAL segment from the source (re-encode, frame-accurate), applies the
 face-tracked crop, burns ASS captions in, and writes thumbnails as true first
 frames. libx264/AAC, 1080x1920. MoviePy is available for any future composite
 needs, but the render path is straight ffmpeg for speed and reliability.
+
+Shot-aware: scene cuts are detected up front (ffmpeg scdet) so the vertical
+crop is framed per shot and never interpolates across a cut.
 """
 
 from __future__ import annotations
@@ -69,6 +72,58 @@ def extract_wav(src: Path, dest: Path) -> Path:
     return dest
 
 
+def _ffmpeg_has_filter(filt: str) -> bool:
+    """True when this ffmpeg build supports `filt` (e.g. libass `subtitles`)."""
+    try:
+        out = subprocess.run(
+            [ffmpeg_bin(), "-hide_banner", "-filters"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return (
+            re.search(rf"^\s*\S+\s+{re.escape(filt)}\s", out.stdout, re.MULTILINE)
+            is not None
+        )
+    except Exception:
+        return False
+
+
+def detect_scene_cuts(src: Path, threshold: int = 10) -> list[float]:
+    """Return shot-boundary timestamps (seconds) via ffmpeg's scdet filter.
+
+    Shot-aware reframing needs the cut list: a crop path must never be
+    interpolated across a cut, because the subject jumps discontinuously.
+    Returns [] honestly when the build lacks scdet or detection fails.
+    """
+    if not _ffmpeg_has_filter("scdet"):
+        logger.info("[video] ffmpeg build has no scdet filter — cut-aware crop disabled")
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(src),
+                "-vf", f"scdet=threshold={threshold}:metadata=print",
+                "-an", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=3600,
+        )
+    except Exception as exc:
+        logger.warning(f"[video] scene-cut detection failed (continuing without cuts): {exc}")
+        return []
+    # metadata lines look like:
+    #   frame:12  pts:12345  pts_time:12.345
+    #   lavfi.scd.score=...  lavfi.scd.time=12.345
+    cuts: list[float] = []
+    for m in re.finditer(r"lavfi\.scd\.time=([0-9.]+)", proc.stderr or ""):
+        try:
+            t = float(m.group(1))
+        except ValueError:
+            continue
+        if t > 0 and (not cuts or t - cuts[-1] > 0.25):
+            cuts.append(t)
+    logger.info(f"[video] scene cuts detected: {len(cuts)}")
+    return cuts
+
+
 def silence_trim_filter(cuts: list[dict], total_dur: float) -> tuple[str, float]:
     """Build an ffmpeg filter that drops [start,end] windows (clip-relative).
 
@@ -98,8 +153,11 @@ def silence_trim_filter(cuts: list[dict], total_dur: float) -> tuple[str, float]
 def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out_h: int) -> str:
     """crop filter with a time-interpolated x for face tracking.
 
-    Builds a nested ffmpeg if(lt(t,x), ...) expression: between samples the
-    crop x eases linearly toward the next face position.
+    Between two samples the crop x eases linearly toward the next face
+    position. When a sample is marked ``"cut": True`` (a detected shot
+    boundary) the x SNAPS to the new shot's position instead of interpolating
+    across the cut — the subject jumps at a cut, so a smooth pan through it
+    would be a lie.
     """
     if not windows:
         return f"crop={out_w}:{out_h}:(in_w-out_w)/2:0"
@@ -114,29 +172,18 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
         else:
             prev = windows[i - 1]["t"]
             prev_x = int(windows[i - 1]["x"])
-            frac = f"(t-{prev:.3f})/{(t - prev):.6f}" if t > prev else "0"
-            parts.append(
-                f"if(lt(t\\,{t:.3f})\\,{prev_x}+({x}-{prev_x})*min(1\\,max(0\\,{frac}))"
-            )
+            if wdw.get("cut"):
+                # hold prev_x until the cut, then jump hard to this shot's x
+                parts.append(f"if(lt(t\\,{t:.3f})\\,{prev_x}")
+            else:
+                frac = f"(t-{prev:.3f})/{(t - prev):.6f}" if t > prev else "0"
+                parts.append(
+                    f"if(lt(t\\,{t:.3f})\\,{prev_x}+({x}-{prev_x})*min(1\\,max(0\\,{frac}))"
+                )
     # every comma inside the expression (including between nested ifs) must be
     # escaped, or ffmpeg's filtergraph parser treats it as a filter separator
-    expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])}" + ")" * len(parts)
+    expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])})" * len(parts)
     return f"crop={out_w}:{out_h}:{expr}:0"
-
-
-def _ffmpeg_has_filter(filt: str) -> bool:
-    """True when this ffmpeg build supports `filt` (e.g. libass `subtitles`)."""
-    try:
-        out = subprocess.run(
-            [ffmpeg_bin(), "-hide_banner", "-filters"],
-            capture_output=True, text=True, timeout=30,
-        )
-        return (
-            re.search(rf"^\s*\S+\s+{re.escape(filt)}\s", out.stdout, re.MULTILINE)
-            is not None
-        )
-    except Exception:
-        return False
 
 
 def render_clip(
