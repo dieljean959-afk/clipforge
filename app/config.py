@@ -1,8 +1,8 @@
-"""Central configuration for ClipForge local.
+"""Central configuration for the hosted ClipForge service.
 
-``config.toml`` holds the pruned MoneyPrinterTurbo-style settings; ``.env``
-(secret keys) is loaded via python-dotenv. Validation fails fast at boot with
-readable errors — no half-configured process.
+``config.toml`` holds the pruned MoneyPrinterTurbo-style settings. Secret keys
+are supplied by the platform and loaded via python-dotenv. Validation fails
+fast at boot with readable errors — no half-configured process.
 
 The Gemini API key is resolved LIVE (see `_LiveKeyState`): the hosted platform
 writes saved keys into env files without restarting the web process, so a

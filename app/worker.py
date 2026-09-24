@@ -77,18 +77,33 @@ class InProcessWorker:
         job = self.store.get_job(job_id)
         if job is None:
             raise KeyError(job_id)
+
+        # If a user retries while the same job is still being supervised, stop
+        # the old process before queueing the new attempt. Otherwise two
+        # processes could write the same job/stage artifacts concurrently.
+        with self._lock:
+            current_proc = self._current_proc
+            current_job = self._current_job
+        if current_job == job_id and current_proc is not None and current_proc.poll() is None:
+            self._stalled_job = job_id
+            self._kill_current()
+            logger.info(f"[worker] retry requested for active job {job_id}; old process group killed")
+
         job.update({
             "stage": "queued",
             "progress": 0,
             "progressDetail": "Re-queued — a fresh server worker will pick it up.",
             "error": None,
             "errorDetail": None,
+            "completedAt": None,
             "lastProgressAt": int(time.time() * 1000),
         })
         self.store.write_job(job)
-        # a retry is a genuinely fresh process; stage artifacts on disk let it
-        # resume from the first incomplete stage (see app/stages.py)
-        self._stalled_job = None
+        # A retry is a genuinely fresh process; stage artifacts on disk let it
+        # resume from the first incomplete stage (see app/stages.py). Keep the
+        # old attempt marked as superseded until the new queue item starts;
+        # this prevents the old supervisor from labeling the fresh attempt
+        # failed while it is being killed/reaped.
         return self.enqueue(job_id)
 
     # ------------------------------------------------------------------
@@ -162,6 +177,13 @@ class InProcessWorker:
 
         pump.join(timeout=5)
         rc = proc.returncode
+        # A retry may have started a new process for this job before the old
+        # supervisor finished reaping. Never let the old process report the new
+        # attempt's terminal state.
+        with self._lock:
+            is_current_process = self._current_proc is proc
+        if not is_current_process:
+            return
         job = self.store.get_job(job_id)
         stage = (job or {}).get("stage")
         if self._stalled_job == job_id:
@@ -215,42 +237,55 @@ class InProcessWorker:
                 continue
         logger.error(f"[worker] pid {proc.pid} survived SIGKILL")
 
+    def _check_watchdog_once(self) -> bool:
+        """Check the current process once; return True when it was killed.
+
+        Kept separate from the daemon loop so focused tests can verify the
+        actual process-group kill without waiting for the polling interval.
+        """
+        job_id = self._current_job
+        if job_id is None or self._stalled_job == job_id:
+            return False
+        job = self.store.get_job(job_id)
+        if job is None or job.get("stage") in {"complete", "failed"}:
+            return False
+        proc = self._current_proc
+        if proc is None or proc.poll() is not None:
+            return False
+        last = job.get("lastProgressAt") or job.get("stageStartedAt") or job.get("createdAt") or 0
+        silent_for = time.time() * 1000 - last
+        if silent_for <= STALL_TIMEOUT_SEC * 1000:
+            return False
+
+        logger.error(
+            f"[worker] job {job_id} stalled: no progress for {silent_for / 1000:.0f}s "
+            f"at stage {job.get('stage')} — killing pid {proc.pid}"
+        )
+        self._stalled_job = job_id
+        self._kill_current()
+        job.update({
+            "stage": "failed",
+            "error": (
+                f"Pipeline stalled — no progress for {int(silent_for / 1000)}s "
+                f"at stage {job.get('stage')}. The stuck worker process was killed. "
+                "Retry resumes from the last completed stage."
+            ),
+            "errorDetail": f"stall watchdog killed pid {proc.pid} after {int(silent_for / 1000)}s of silence",
+            "completedAt": int(time.time() * 1000),
+        })
+        self.store.write_job(job)
+        # Write after the terminal state so this log cannot be overwritten by
+        # the stale job snapshot above.
+        self.store.append_job_log(
+            job_id,
+            f"stall watchdog: no progress for {int(silent_for / 1000)}s at stage "
+            f"{job.get('stage')} — killed the stuck worker process",
+        )
+        return True
+
     def _watchdog(self) -> None:
         while not self._stop.wait(5.0):
-            job_id = self._current_job
-            if job_id is None or self._stalled_job == job_id:
-                continue
-            job = self.store.get_job(job_id)
-            if job is None or job.get("stage") in {"complete", "failed"}:
-                continue
-            proc = self._current_proc
-            if proc is None or proc.poll() is not None:
-                continue
-            last = job.get("lastProgressAt") or job.get("stageStartedAt") or job.get("createdAt") or 0
-            silent_for = time.time() * 1000 - last
-            if silent_for > STALL_TIMEOUT_SEC * 1000:
-                logger.error(
-                    f"[worker] job {job_id} stalled: no progress for {silent_for / 1000:.0f}s "
-                    f"at stage {job.get('stage')} — killing pid {proc.pid}"
-                )
-                self.store.append_job_log(
-                    job_id,
-                    f"stall watchdog: no progress for {int(silent_for / 1000)}s at stage "
-                    f"{job.get('stage')} — killing the stuck worker process",
-                )
-                self._stalled_job = job_id
-                self._kill_current()  # the real fix: the process is gone
-                job.update({
-                    "stage": "failed",
-                    "error": (
-                        f"Pipeline stalled — no progress for {int(silent_for / 1000)}s "
-                        f"at stage {job.get('stage')}. The stuck worker process was killed. "
-                        "Retry resumes from the last completed stage."
-                    ),
-                    "errorDetail": f"stall watchdog killed pid {proc.pid} after {int(silent_for / 1000)}s of silence",
-                    "completedAt": int(time.time() * 1000),
-                })
-                self.store.write_job(job)
+            self._check_watchdog_once()
 
     # ------------------------------------------------------------------
     # status for the dashboard card
