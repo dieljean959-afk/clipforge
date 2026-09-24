@@ -12,9 +12,9 @@ data_dir = "data"
 
 [whisper]
 # small (~500MB, fast, decent accuracy — default)
-# medium (~1.5GB, better accuracy)
+# medium (~1.5GB, better accuracy, ~2-3x slower on CPU)
 # large-v3 (~3GB, best, needs 8GB+ free RAM)
-model = "small"
+model = "medium"
 # auto | cpu | cuda  (auto picks CUDA when torch/ctranslate2 sees a GPU)
 device = "auto"
 # auto -> int8 on CPU, float16 on GPU. Override only if you know why.

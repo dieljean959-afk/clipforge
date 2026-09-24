@@ -109,6 +109,8 @@ class Pipeline:
             self._fail(job_id, f"AI detection failed: {exc}", str(exc))
         except download.DownloadError as exc:
             self._fail(job_id, f"Could not fetch video: {exc}", str(exc))
+        except subtitle.TranscribeError as exc:
+            self._fail(job_id, f"Transcription failed: {exc}", str(exc))
         except video.RenderError as exc:
             self._fail(job_id, f"Render failed: {exc}", str(exc))
         except Exception as exc:  # noqa: BLE001 - the UI must see the real error

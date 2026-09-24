@@ -8,6 +8,7 @@ captions must export either way.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import time
@@ -217,6 +218,47 @@ def _dedupe_words(words: list[Word], overlap: float = OVERLAP_SEC) -> list[Word]
         if not dup:
             kept.append(w)
     return kept
+
+
+def _probe_duration(path: Path) -> float:
+    """Probe media duration in seconds via ffprobe.
+
+    Used to plan decode windows before transcription starts. Raises
+    TranscribeError with a readable message instead of crashing the job when
+    the file is missing or unreadable.
+    """
+    if not path.exists():
+        raise TranscribeError(f"cannot probe duration — source file not found: {path}")
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe_bin(), "-v", "error",
+                "-print_format", "json",
+                "-show_format",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+    except FileNotFoundError as exc:
+        raise TranscribeError(f"ffprobe not found — install ffmpeg or set FFPROBE_PATH: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise TranscribeError(f"ffprobe timed out reading {path.name} after 60s") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip().splitlines()
+        tail = stderr[-1] if stderr else f"exit code {exc.returncode}"
+        raise TranscribeError(f"ffprobe failed on {path.name}: {tail}") from exc
+    except OSError as exc:
+        raise TranscribeError(f"could not run ffprobe on {path.name}: {exc}") from exc
+    try:
+        meta = json.loads(proc.stdout)
+        duration = float(meta.get("format", {}).get("duration", 0) or 0)
+    except (ValueError, TypeError) as exc:
+        raise TranscribeError(f"ffprobe returned no readable duration for {path.name}") from exc
+    if duration <= 0:
+        raise TranscribeError(
+            f"source file {path.name} has no playable duration — the download is corrupt"
+        )
+    return duration
 
 
 def _plan_windows(duration: float) -> list[tuple[float, float]]:
