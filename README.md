@@ -21,6 +21,11 @@ viral clips". See [LICENSE](LICENSE).
    (free tier). Top 5–15 windows become clips with titles, hook lines and
    scores 0–100. No key? The UI says exactly that — no fake heuristics.
 
+   **Model rot self-heals:** if Google retires the configured Gemini model,
+   the server parses the replacement model name out of the API error, retries
+   the request, and persists the new model to `config.toml` `[gemini]` —
+   no manual edit, no failed jobs.
+
 ### Gemini key is detected LIVE
 
 The key is **never snapshotted at boot**. The backend re-reads the env files
