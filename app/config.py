@@ -503,9 +503,9 @@ class DownloadConfig:
 class HostedConfig:
     """Hosted-mode limits and remote-worker dispatch settings."""
 
-    # Plan guard: reject sources longer than this at SUBMIT time (the free
-    # sandbox cannot finish hour-long renders before being restarted).
-    max_source_min: int = 30
+    # Plan guard: reject sources longer than this at SUBMIT time. Long sources
+    # ARE supported — processing time scales proportionally, see [hosted] notes.
+    max_source_min: int = 120
     # Delete finished artifacts (outputs/ + downloads/) this long after a job
     # completes — hosted storage is finite and users expect cleanup.
     retention_hours: int = 24
@@ -572,10 +572,12 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     if not (1 <= port <= 65535):
         errors.append(f"app.port {port} is out of range (1-65535)")
 
+    # Env overrides for the working folders — used by tests/tools to isolate
+    # from the real job store (never by the hosted app itself).
     paths = Paths(
-        downloads_dir=root / str(app.get("downloads_dir", "downloads")),
-        outputs_dir=root / str(app.get("outputs_dir", "outputs")),
-        data_dir=root / str(app.get("data_dir", "data")),
+        downloads_dir=Path(os.getenv("CLIPFORGE_DOWNLOADS_DIR", root / str(app.get("downloads_dir", "downloads")))),
+        outputs_dir=Path(os.getenv("CLIPFORGE_OUTPUTS_DIR", root / str(app.get("outputs_dir", "outputs")))),
+        data_dir=Path(os.getenv("CLIPFORGE_DATA_DIR", root / str(app.get("data_dir", "data")))),
         static_dir=root / "webui",
     )
     for name in ("downloads_dir", "outputs_dir", "data_dir"):
@@ -646,7 +648,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
 
     h = raw.get("hosted", {})
     hosted = HostedConfig(
-        max_source_min=max(1, int(h.get("max_source_min", os.getenv("CLIPFORGE_MAX_SOURCE_MIN", 30)))),
+        max_source_min=max(1, int(h.get("max_source_min", os.getenv("CLIPFORGE_MAX_SOURCE_MIN", 120)))),
         retention_hours=max(1, int(h.get("retention_hours", os.getenv("CLIPFORGE_RETENTION_HOURS", 24)))),
         worker_url=(os.getenv("WORKER_URL") or h.get("worker_url", "") or "").strip().rstrip("/"),
         worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),

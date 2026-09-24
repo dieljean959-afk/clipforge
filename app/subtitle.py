@@ -176,21 +176,34 @@ def _extract_media(path: Path, start: float, end: float, workdir: Path) -> Path:
     return out
 
 
-def _decode_window(model, wav: Path, language: str | None) -> tuple[list[Word], float]:
-    """Transcribe one 16kHz mono WAV window; returns (words, audio_len_sec)."""
+def _decode_window(
+    model,
+    wav: Path,
+    language: str | None,
+    on_segment=None,
+) -> tuple[list[Word], float]:
+    """Transcribe one 16kHz mono WAV window; returns (words, audio_len_sec).
+
+    `on_segment(local_end_sec)` fires after each decoded segment so the caller
+    can report progress INSIDE a window — on CPU the `medium` model can spend
+    minutes on one 30s window, and without this the job looks dead.
+    """
     segments_iter, info = model.transcribe(
         str(wav),
         language=language,
         **WHISPER_KWARGS,
     )
     words: list[Word] = []
+    win_len = float(info.duration or 0)
     for seg in segments_iter:
         for w in (seg.words or []):
             text = w.word.strip()
             if not text:
                 continue
             words.append(Word(start=float(w.start), end=float(w.end), word=text))
-    return words, float(info.duration or 0)
+        if on_segment is not None and win_len > 0:
+            on_segment(min(win_len, float(seg.end)))
+    return words, win_len
 
 
 def _dedupe_words(words: list[Word], overlap: float = OVERLAP_SEC) -> list[Word]:
@@ -286,7 +299,12 @@ def transcribe(path: Path, settings: Settings, on_progress=None) -> Transcript:
     built-in Silero VAD filter strips silence/music before the model sees it.
     """
     model = _load_model(settings)
-    duration = _probe_duration(path)
+    try:
+        duration = _probe_duration(path)
+    except TranscribeError:
+        # _probe_duration already raised a readable message (missing file,
+        # ffprobe failure, corrupt download) — surface it, never a NameError
+        raise
     language = None if settings.whisper.language == "auto" else settings.whisper.language
 
     windows = _plan_windows(duration)
@@ -303,14 +321,24 @@ def transcribe(path: Path, settings: Settings, on_progress=None) -> Transcript:
 
     all_words: list[Word] = []
     for idx, (w_start, w_end) in enumerate(windows):
+        # heartbeat BEFORE extraction: audio decode of a long window can take
+        # tens of seconds, and the stall watchdog keys off progress events
+        if on_progress and duration > 0:
+            on_progress(min(1.0, w_start / duration))
         try:
             wav = _extract_media(path, w_start, w_end, Path(settings.app.paths.data_dir))
         except Exception as exc:
             raise TranscribeError(
                 f"Could not extract audio window {w_start:.1f}-{w_end:.1f}s: {exc}"
             ) from exc
+
+        def on_segment(local_end: float) -> None:
+            # intra-window liveness: map window-local segment end → absolute
+            if on_progress and duration > 0:
+                on_progress(min(1.0, (w_start + local_end) / duration))
+
         try:
-            words, _ = _decode_window(model, wav, language)
+            words, _ = _decode_window(model, wav, language, on_segment=on_segment)
         except Exception as exc:
             raise TranscribeError(
                 f"Whisper decode failed on window {idx + 1}/{len(windows)}: {exc}"

@@ -75,9 +75,9 @@ auto_update = true
 # Hosted-deployment guardrails. Env overrides: CLIPFORGE_MAX_SOURCE_MIN,
 # CLIPFORGE_RETENTION_HOURS, WORKER_URL, WORKER_TOKEN, TAILSCALE_ONLY.
 
-# Sources longer than this are REJECTED at submit time (413) — the hosted
-# sandbox cannot finish hour-long renders before a restart.
-max_source_min = 30
+# Sources longer than this are REJECTED at submit time (413). Long sources are
+# supported — a 2-hour video transcribes and renders proportionally longer.
+max_source_min = 120
 
 # Finished downloads/outputs are deleted this long after a job completes.
 retention_hours = 24

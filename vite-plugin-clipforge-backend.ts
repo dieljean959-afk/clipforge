@@ -53,6 +53,11 @@ function pickPython(): string | null {
 async function pingBackend(timeoutMs = 1500): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.get(HEALTH, { timeout: timeoutMs }, (res) => {
+      if (res.statusCode !== 200) {
+        // Surface the real status — "backend answered but with 400" is a very
+        // different failure from "no answer at all" (crash loop / bad request).
+        log(`health probe answered HTTP ${res.statusCode} (expected 200)`);
+      }
       res.resume();
       resolve(res.statusCode === 200);
     });
@@ -89,7 +94,19 @@ async function startBackend(): Promise<boolean> {
   log(`starting FastAPI via ${state.python} (uvicorn app.main:app on 127.0.0.1:8000)...`);
   const proc = spawn(
     state.python,
-    ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--log-level", "info"],
+    [
+      "-m", "uvicorn", "app.main:app",
+      "--host", "127.0.0.1", "--port", "8000", "--log-level", "info",
+      // h11 rejects requests whose header block exceeds this (default 16KB).
+      // Deployments behind platform proxies with large cookie headers can hit
+      // it, surfacing to the UI as a bare "HTTP 400" — raise it well past any
+      // realistic header set.
+      "--h11-max-incomplete-event-size", "1048576",
+      // Keep-alive: default 5s closes idle connections aggressively; proxies
+      // that reuse a connection right at the boundary can get a 400 on the
+      // raced request. 75s is the common reverse-proxy default.
+      "--timeout-keep-alive", "75",
+    ],
     {
       cwd: ROOT,
       env,

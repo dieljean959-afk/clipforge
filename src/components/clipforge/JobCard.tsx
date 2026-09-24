@@ -221,8 +221,10 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress
               from the worker for 90s at stage{" "}
-              <span className="font-mono">{job.stage}</span>. Open the logs, or retry
-              the job.
+              <span className="font-mono">{job.stage}</span>. Long videos can legitimately
+              spend minutes inside one transcription window — check the logs for the
+              exact stage. If it stays stuck, the server-side watchdog fails the job
+              automatically after 20 minutes of silence so you can retry.
             </div>
           )}
         </div>

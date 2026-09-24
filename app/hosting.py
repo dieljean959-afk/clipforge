@@ -27,7 +27,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.config import Settings
+from app.config import ROOT, Settings
 from app.store import LocalStore
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +115,24 @@ def system_stats() -> dict[str, Any]:
         _STATS_CACHE = stats
         _STATS_CACHE_AT = time.time()
         return dict(stats)
+
+
+def disk_stats() -> dict[str, Any]:
+    """Disk free/total for the deployment sandbox (the volumes jobs write to).
+
+    Real values via shutil.disk_usage on the repo root — never fabricated.
+    Unknown values stay None and the UI renders them honestly.
+    """
+    stats: dict[str, Any] = {"freeBytes": None, "totalBytes": None}
+    try:
+        import shutil as _shutil
+
+        usage = _shutil.disk_usage(ROOT)
+        stats["freeBytes"] = usage.free
+        stats["totalBytes"] = usage.total
+    except Exception:
+        pass  # unknown stays None
+    return stats
 
 
 def tailnet_ip() -> str | None:

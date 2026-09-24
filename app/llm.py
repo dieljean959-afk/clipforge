@@ -194,7 +194,14 @@ def call_gemini(chunk_text_prompt: str, settings: Settings) -> str:
     """Single Gemini call with 429 backoff. Raises LlmError after retries."""
     genai = _load_google_module()
     model = settings.gemini.model
-    client = genai.Client(api_key=settings.gemini_api_key)
+    # Generous per-call HTTP timeout: long transcripts (2h video = ~60 chunks)
+    # can take a while per request, and SDK default timeouts abort mid-call.
+    from google.genai import types as _types  # noqa: PLC0415
+
+    client = genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=_types.HttpOptions(timeout=120_000),
+    )
 
     last_err: Exception | None = None
     for attempt in range(settings.gemini.max_retries + 1):

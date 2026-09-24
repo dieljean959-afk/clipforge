@@ -10,8 +10,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Use throwaway folders so the real ./data stays clean.
+# Use throwaway folders so the real ./data stays clean — and so the FIFO
+# worker is not blocked behind any real in-flight jobs on re-queue at boot.
 ROOT = Path(__file__).resolve().parent.parent
+tmp_root = Path(os.environ.get("CLIPFORGE_SMOKE_TMP", ROOT / "data" / "smoke-tmp"))
+os.environ["CLIPFORGE_DOWNLOADS_DIR"] = str(tmp_root / "downloads")
+os.environ["CLIPFORGE_OUTPUTS_DIR"] = str(tmp_root / "outputs")
+os.environ["CLIPFORGE_DATA_DIR"] = str(tmp_root / "data")
 os.environ.setdefault("CLIPFORGE_SMOKE", "1")
 
 
@@ -57,6 +62,12 @@ def main() -> int:
         print(f"   health: worker={health['worker']['online']}, llm={health['llm']}")
         assert health["ok"] is True
         assert health["worker"]["online"] is True, "in-process worker must be online"
+
+        # limits + disk: the 2h support round — limit raised from 30 to 120
+        # and disk stats reported honestly (None allowed, but key must exist)
+        assert health["limits"]["maxSourceMin"] == 120, health["limits"]
+        assert "disk" in health and "freeBytes" in health["disk"]
+        print(f"   limits: {health['limits']}, disk: {health['disk']}")
 
         r = client.post(
             "/api/jobs",

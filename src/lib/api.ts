@@ -68,6 +68,11 @@ export interface SystemStatsDto {
   pid: number | null;
 }
 
+export interface DiskStatsDto {
+  freeBytes: number | null;
+  totalBytes: number | null;
+}
+
 export interface KeyStatusDto {
   keyLoaded: boolean;
   source: string;
@@ -84,6 +89,7 @@ export interface HealthDto {
   llm: KeyStatusDto;
   whisper: { model: string; compute: string };
   system: SystemStatsDto;
+  disk: DiskStatsDto;
   tailnetIp: string | null;
   limits: { maxSourceMin: number; retentionHours: number };
   dispatch:

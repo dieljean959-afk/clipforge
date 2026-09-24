@@ -115,8 +115,9 @@ export default function Dashboard() {
               API unreachable: {apiError}
             </p>
             <p className="mt-1 text-xs leading-relaxed text-destructive/80">
-              The pipeline server did not answer /api/health. If this persists,
-              the deployment is restarting — try again in a minute.
+              {/^(HTTP [45]\d\d)/.test(apiError)
+                ? "The pipeline server answered with an HTTP error on /api/health — the response is logged server-side; try again in a minute or check the deployment logs."
+                : "The pipeline server did not answer /api/health. If this persists, the deployment is restarting — try again in a minute."}
             </p>
           </div>
         )}

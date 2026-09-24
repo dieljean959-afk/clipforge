@@ -35,7 +35,7 @@ from app.config import (
     write_env_var,
 )
 from app.download import probe_url
-from app.hosting import RetentionCleaner
+from app.hosting import RetentionCleaner, disk_stats
 from app.store import LocalStore
 from app.worker import InProcessWorker
 
@@ -48,6 +48,11 @@ store: LocalStore
 worker: InProcessWorker
 retention: RetentionCleaner | None = None
 warmup: dict = {"stage": "pending", "detail": "", "startedAt": None}
+
+# Disk preflight floor for new jobs: source download + caption/work files need
+# headroom (a 2h 1080p source is multi-GB). Below this, submits are refused
+# with a readable 507 instead of failing mid-pipeline.
+MIN_FREE_BYTES = 1.5 * 1024**3
 
 
 def _do_warmup() -> None:
@@ -119,6 +124,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _log_errors(request: Request, call_next):
+    """Log every non-2xx API response with its exception — the dashboard only
+    shows "HTTP 400"-style codes, so the server must keep the real evidence."""
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(f"[api] {request.method} {request.url.path} raised")
+        raise
+    if response.status_code >= 400 and request.url.path.startswith("/api"):
+        logger.warning(f"[api] {request.method} {request.url.path} -> {response.status_code}")
+    return response
 
 
 # --------------------------------------------------------------------------- #
@@ -278,6 +297,7 @@ def health() -> dict:
             "compute": settings.whisper.resolved_compute,
         },
         "system": hosting.system_stats(),
+        "disk": disk_stats(),
         "tailnetIp": hosting.tailnet_ip(),
         "limits": {
             "maxSourceMin": settings.hosted.max_source_min,
@@ -374,6 +394,16 @@ def create_job(body: CreateJobIn) -> dict:
             413,
             f"Video is {duration / 60:.0f} min — this plan processes at most "
             f"{settings.hosted.max_source_min} min. Trim the source or run ClipForge on your own machine.",
+        )
+    # Disk preflight: long videos download multi-GB sources; a full disk would
+    # otherwise fail mid-pipeline with a confusing ffmpeg/whisper error.
+    free = disk_stats().get("freeBytes")
+    if free is not None and free < MIN_FREE_BYTES:
+        raise HTTPException(
+            507,
+            f"Server disk is almost full ({free // (1024 * 1024)} MB free) — "
+            "files are deleted automatically 24h after a job completes, or delete "
+            "old jobs on the dashboard and try again.",
         )
     job = store.create_job(
         source_type=body.sourceType,

@@ -22,6 +22,7 @@ import {
   ServerCog,
   ShieldCheck,
   Trash2,
+  TriangleAlert,
 } from "lucide-react";
 import { useHealth } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
@@ -76,6 +77,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const memUsed = typeof sys?.memUsedBytes === "number" ? sys.memUsedBytes : null;
   const memTotal = typeof sys?.memTotalBytes === "number" ? sys.memTotalBytes : null;
   const load1 = typeof sys?.load1 === "number" ? sys.load1 : null;
+  const diskFree =
+    typeof health?.disk?.freeBytes === "number" ? health.disk.freeBytes : null;
+  const diskTotal =
+    typeof health?.disk?.totalBytes === "number" ? health.disk.totalBytes : null;
+  const diskLow = diskFree !== null && diskFree < 1.5 * 1024 ** 3;
 
   const dispatch = health?.dispatch;
   const remoteOnline =
@@ -201,6 +207,16 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             {memUsed !== null && memTotal !== null && memTotal > 0 && (
               <StatLine icon={MemoryStick}>
                 RAM {fmtBytes(memUsed)} / {fmtBytes(memTotal)}
+              </StatLine>
+            )}
+            {diskFree !== null && (
+              <StatLine
+                icon={HardDrive}
+                className={diskLow ? "text-amber-300" : undefined}
+              >
+                {diskLow && <TriangleAlert className="size-3" />}
+                Disk {fmtBytes(diskFree)} free
+                {diskTotal !== null ? ` / ${fmtBytes(diskTotal)}` : ""}
               </StatLine>
             )}
             {dispatch?.enabled === true && (
