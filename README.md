@@ -97,7 +97,7 @@ temporary: download your clips.
 
 ### Plan limits
 
-Sources longer than `max_source_min` (default **30 min**) are rejected at
+Sources longer than `max_source_min` (default **120 min / 2 hours**) are rejected at
 submit time with a readable 413 — never a mid-render failure. The limit comes
 from `/api/health` (`limits.maxSourceMin`) and is shown on the status card.
 
@@ -132,7 +132,9 @@ to your own machine over the tailnet:
    ```
 
    (self-registration needs `CLIPFORGE_ALLOW_SELF_REGISTER=true` on the
-   server; otherwise set `WORKER_URL`/`WORKER_TOKEN` in the platform env.)
+   server; otherwise set `WORKER_URL`/`WORKER_TOKEN` in the platform env.
+   Required variable names and safe placeholders are listed in `.env.example`;
+   never paste secrets into source files.)
 
 2. On the server: `WORKER_URL=http://<your-tailnet-ip>:8765`,
    `WORKER_TOKEN=<shared-secret>`.

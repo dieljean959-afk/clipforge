@@ -134,13 +134,23 @@ class LocalStore:
         self.write_job(job)
         return job
 
-    def write_job(self, job: dict[str, Any]) -> None:
+    def _write_job_unlocked(self, job: dict[str, Any]) -> None:
+        """Write a job while the caller's cross-process lock is held."""
         path = self._job_path(job["_id"])
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._tmp_for(path)
-        with self._lock:
-            tmp.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(path)
+        tmp.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    def write_job(self, job: dict[str, Any]) -> None:
+        # The API supervisor tails runner output while the child updates stage
+        # state. Without the advisory lock, a stale read-modify-write can erase
+        # the child's terminal `failed` state and make the parent report a
+        # misleading "worker exited unexpectedly" error.
+        path = self._job_path(job["_id"])
+        with self._file_lock(path):
+            with self._lock:
+                self._write_job_unlocked(job)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         path = self._job_path(job_id)
@@ -313,7 +323,11 @@ class LocalStore:
             logs: list[str] = list(job.get("logs", []))
             logs.append(f"{time.strftime('%H:%M:%S')} {line}")
             job["logs"] = logs[-300:]
-            self.write_job(job)
+            # write_job() would try to acquire the same advisory lock again;
+            # use the explicitly locked primitive while this read-modify-write
+            # is in progress.
+            with self._lock:
+                self._write_job_unlocked(job)
 
     # ------------------------------------------------------------------
     # misc helpers

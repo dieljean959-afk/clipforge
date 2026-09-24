@@ -52,6 +52,11 @@ def main() -> int:
     # Don't run real warmup (whisper not installed here); patch it out.
     import app.main as main_mod
 
+    # A previous interrupted run may have left the synthetic clip behind. The
+    # smoke test owns this exact id, so clear it before checking the empty-store
+    # contract; otherwise an unrelated residue makes the test report a false
+    # failure before it reaches the real media assertions.
+    (tmp_root / "data" / "clips" / "smokeclip1.json").unlink(missing_ok=True)
     main_mod._do_warmup = lambda: None
 
     # context-manager form so FastAPI startup events (worker.start) actually fire
