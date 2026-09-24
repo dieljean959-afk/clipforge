@@ -178,7 +178,7 @@ export default function Landing() {
           <div className="max-w-xl flex-1">
             <Badge variant="outline" className="mb-5 gap-1.5 border-primary/40 bg-primary/10 text-primary">
               <Flame className="size-3" />
-              MoneyPrinterTurbo fork · MIT · 100% local
+              MoneyPrinterTurbo fork · MIT · Hosted pipeline
             </Badge>
             <h1 className="text-4xl font-black leading-[1.05] tracking-tight sm:text-5xl md:text-6xl">
               Turn one long video into{" "}

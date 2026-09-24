@@ -106,7 +106,7 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* local worker status (CPU/RAM/queue/warmup) */}
+      {/* hosted pipeline status (CPU/RAM/queue/warmup) */}
       <div className="mx-auto w-full max-w-6xl px-4 pt-6">
         <LocalWorkerCard />
         {apiError && (
@@ -134,8 +134,8 @@ export default function Dashboard() {
               The forge
             </h1>
             <p className="mt-3 max-w-lg text-sm leading-relaxed text-muted-foreground">
-              Paste a video you own, watch it move through the four-stage
-              pipeline, and export vertical clips with captions ready to post.
+              Paste a video you own, watch it move through the server pipeline,
+              and export vertical clips with captions ready to post.
             </p>
             <RightsNotice className="mt-5 max-w-lg" compact />
           </div>

@@ -158,12 +158,9 @@ dispatch mode — pull them from `GET /agent/output/{jobId}/{clip}.mp4`.
 Requirements: **Python 3.11+** and **ffmpeg/ffprobe** on PATH.
 
 ```bash
-./start.sh                    # venv → deps → UI build → launch (API + worker, one process)
+The hosted dashboard is already running. Use the URL provided by Freebuff; do not run a local start command.
 # optional extras (face tracking + silence trim):
-./start.sh --with-extras
-```
-
-This path is for **local development** — the hosted app does not need it.
+The repository also includes `start.sh` only for optional local development. The hosted app does not need it.
 
 ## Rights & fairness
 

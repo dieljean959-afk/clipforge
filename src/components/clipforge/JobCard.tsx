@@ -45,9 +45,9 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
 };
 
 /**
- * Global stall watchdog: if the worker has written no progress event for this
- * job in 90s while it is in an active stage, the pipeline is dead — surface it
- * instead of spinning. 2s poll mirrors the progress cadence.
+ * Global stall watchdog: mirror the server's 20-minute silence watchdog so
+ * the UI does not claim a long transcription is dead while it is progressing.
+ * 2s poll mirrors the progress cadence.
  */
 function useStalled(job: JobDoc): boolean {
   const [stalled, setStalled] = useState(false);
@@ -62,7 +62,7 @@ function useStalled(job: JobDoc): boolean {
     const check = () => {
       const j = jobRef.current;
       const last = j.lastProgressAt ?? j.stageStartedAt ?? j.createdAt;
-      setStalled(Date.now() - last > 90_000);
+      setStalled(Date.now() - last > 1_200_000);
     };
     // first evaluation deferred a tick — no synchronous setState on mount
     const initial = setTimeout(check, 0);
@@ -220,11 +220,11 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress
-              from the worker for 90s at stage{" "}
+              from the worker for 20 minutes at stage{" "}
               <span className="font-mono">{job.stage}</span>. Long videos can legitimately
-              spend minutes inside one transcription window — check the logs for the
-              exact stage. If it stays stuck, the server-side watchdog fails the job
-              automatically after 20 minutes of silence so you can retry.
+              spend many minutes inside one transcription window — check the logs for
+              the exact stage. If it stays stuck, the server-side watchdog kills the
+              stuck worker and marks the job failed so you can retry.
             </div>
           )}
         </div>

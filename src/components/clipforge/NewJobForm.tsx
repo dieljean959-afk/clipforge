@@ -55,7 +55,7 @@ export function NewJobForm({ className }: { className?: string }) {
       } else if (file !== null) {
         await api.uploadJob(file, preset);
       }
-      toast.success("Job queued — the local worker is on it.", {
+      toast.success("Job queued — ClipForge's server is on it.", {
         description: mode === "url" ? url.trim() : file?.name,
       });
       setUrl("");

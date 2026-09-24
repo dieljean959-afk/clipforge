@@ -93,7 +93,10 @@ class Pipeline:
             # ---- remote dispatch mode: hand off, then the agent reports via
             # /api/internal/* — this thread's work is done after handoff.
             if self.settings.hosted.worker_url:
-                src = self._stage_fetch(job)
+                # Remote dispatch still needs the source fetched locally first;
+                # the source pointer is reused by the worker-agent handoff.
+                ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
+                src = self._stage_fetch(job, ws)
                 ack = dispatch_job(self.settings, job, src)
                 job = self.store.get_job(job_id) or job
                 job.update({
@@ -184,6 +187,12 @@ class Pipeline:
             )
         video.verify_source(src)
         meta = video.probe(src)
+        max_seconds = self.settings.hosted.max_source_min * 60
+        if meta["duration"] > max_seconds:
+            raise video.RenderError(
+                f"source is {meta['duration'] / 60:.0f} min; this plan accepts "
+                f"up to {self.settings.hosted.max_source_min} min"
+            )
         job = self.store.get_job(job_id) or job
         job["durationSec"] = meta["duration"]
         job["downloadSource"] = "upload" if job.get("sourceType") == "upload" else "yt-dlp"
@@ -434,6 +443,19 @@ class Pipeline:
                 f"Rendering clip {idx + 1} of {total}",
                 unit_label="clips", units_done=idx + 1, units_total=total,
             )
+
+        # A failed clip is a failed pipeline, not a successful batch with
+        # missing media. Leave the stage markers incomplete so Retry resumes
+        # this render stage and keeps already-finished clips.
+        failed_renders = [
+            c for c in self.store.list_clips(job_id) if c.get("renderState") == "failed"
+        ]
+        if failed_renders:
+            detail = "; ".join(
+                f"clip {c.get('order', 0) + 1}: {c.get('mediaError') or 'render failed'}"
+                for c in failed_renders
+            )
+            raise video.RenderError(detail)
 
         # ---- stage: export (final state on disk) --------------------------
         ws.mark_done("captions", artifacts=[])

@@ -121,7 +121,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # same-origin UI; permissive for local API tooling
+    allow_origins=["*"],  # same-origin UI; permissive for API tooling
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -415,7 +415,7 @@ def create_job(body: CreateJobIn) -> dict:
         raise HTTPException(
             413,
             f"Video is {duration / 60:.0f} min — this plan processes at most "
-            f"{settings.hosted.max_source_min} min. Trim the source or run ClipForge on your own machine.",
+            f"{settings.hosted.max_source_min} min. Trim the source and try again.",
         )
     # Disk preflight: long videos download multi-GB sources; a full disk would
     # otherwise fail mid-pipeline with a confusing ffmpeg/whisper error.
@@ -450,7 +450,11 @@ async def upload_job(
     maxClips: int | None = None,
     captionPreset: str | None = None,
 ) -> dict:
-    """Manual upload: always works, no URL fetching involved."""
+    """Manual upload: always works, no URL fetching involved.
+
+    The duration is checked before enqueueing so an oversized upload is rejected
+    at submit time rather than failing halfway through transcription.
+    """
     from app import download as download_svc
 
     job = store.create_job(
@@ -469,6 +473,21 @@ async def upload_job(
         while chunk := await file.read(1024 * 1024):
             fh.write(chunk)
     final = download_svc.save_upload(tmp, dest_dir)
+    try:
+        uploaded_meta = video_svc.probe(final)
+    except Exception as exc:
+        final.unlink(missing_ok=True)
+        store.delete_job(job_id)
+        raise HTTPException(400, f"Could not read the uploaded video: {exc}") from exc
+    max_seconds = settings.hosted.max_source_min * 60
+    if uploaded_meta["duration"] > max_seconds:
+        final.unlink(missing_ok=True)
+        store.delete_job(job_id)
+        raise HTTPException(
+            413,
+            f"Video is {uploaded_meta['duration'] / 60:.0f} min — this plan "
+            f"processes at most {settings.hosted.max_source_min} min. Trim the source and try again.",
+        )
     job = store.get_job(job_id) or job
     job["source"] = final.name
     store.write_job(job)
@@ -773,9 +792,9 @@ else:
     @app.get("/")
     def root() -> dict:
         return {
-            "name": "ClipForge Local API",
+            "name": "ClipForge API",
             "docs": "/docs",
-            "ui": "run `bun run build` and restart to serve the built dashboard here",
+            "ui": "The hosted dashboard is served by the platform's web process.",
         }
 
 

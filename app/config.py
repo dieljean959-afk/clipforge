@@ -590,7 +590,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
 
     w = raw.get("whisper", {})
     # env override wins (tests / low-memory hosts): CLIPFORGE_WHISPER_MODEL
-    model = str(os.getenv("CLIPFORGE_WHISPER_MODEL") or w.get("model", "small"))
+    model = str(os.getenv("CLIPFORGE_WHISPER_MODEL") or w.get("model", "medium"))
     if model not in {"tiny", "base", "small", "medium", "large-v3"}:
         errors.append(
             f'whisper.model "{model}" is not one of tiny/base/small/medium/large-v3'

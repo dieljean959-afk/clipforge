@@ -1,4 +1,4 @@
-// Lightweight polling hooks — the local worker writes progress to the store
+// Lightweight polling hooks — the server worker writes progress to the store
 // continuously, so 2s polling gives live progress without websockets.
 //
 // Initial fetches are deferred by one tick (setTimeout 0) so effects never

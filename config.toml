@@ -1,18 +1,16 @@
-# ClipForge — local pipeline configuration (MoneyPrinterTurbo heritage, pruned).
-# Everything here is safe defaults for a personal machine. Secrets live in .env
-# (GEMINI_API_KEY), never in this file.
+# ClipForge — hosted pipeline configuration (MoneyPrinterTurbo heritage, pruned).
+# Secrets are supplied through the platform Keys/API keys tab, never this file.
 
 [app]
 host = "127.0.0.1"
 port = 8000
-# Local working folders — created on boot next to the repo.
+# Server working folders — created on boot in the deployment filesystem.
 downloads_dir = "downloads"
 outputs_dir = "outputs"
 data_dir = "data"
 
 [whisper]
-# small (~500MB, fast, decent accuracy — default)
-# medium (~1.5GB, better accuracy, ~2-3x slower on CPU)
+# medium is the accuracy default (~1.5GB model; slower/heavier than small on CPU)
 # large-v3 (~3GB, best, needs 8GB+ free RAM)
 model = "medium"
 # auto | cpu | cuda  (auto picks CUDA when torch/ctranslate2 sees a GPU)

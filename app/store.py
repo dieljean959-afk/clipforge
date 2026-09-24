@@ -103,7 +103,7 @@ class LocalStore:
             "isUpload": source_type == "upload",
             "stage": "queued",
             "progress": 0.0,
-            "progressDetail": "Queued — the local worker will pick it up.",
+            "progressDetail": "Queued — ClipForge's server worker will pick it up.",
             "unitLabel": None,
             "unitsDone": None,
             "unitsTotal": None,

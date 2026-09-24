@@ -59,7 +59,7 @@ class InProcessWorker:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="clipforge-worker", daemon=True)
             self._thread.start()
-            logger.info("In-process worker online, consuming queue: clipforge-local")
+            logger.info("In-process worker online, consuming the hosted job queue")
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -80,7 +80,7 @@ class InProcessWorker:
         job.update({
             "stage": "queued",
             "progress": 0,
-            "progressDetail": "Re-queued — the local worker will pick it up.",
+            "progressDetail": "Re-queued — a fresh server worker will pick it up.",
             "error": None,
             "errorDetail": None,
             "lastProgressAt": int(time.time() * 1000),
@@ -96,7 +96,7 @@ class InProcessWorker:
     # ------------------------------------------------------------------
 
     def _run(self) -> None:
-        logger.info("[worker] consuming queue: clipforge-local (one child process per job)")
+        logger.info("[worker] consuming the hosted queue (one child process per job)")
         watchdog = threading.Thread(target=self._watchdog, name="clipforge-watchdog", daemon=True)
         watchdog.start()
         while not self._stop.is_set():
