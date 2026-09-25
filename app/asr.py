@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import os
 import threading
 from dataclasses import dataclass, field
@@ -57,6 +58,15 @@ ANTI_REPETITION = {
     "no_speech_threshold": 0.6,
     "vad_filter": True,
     "vad_parameters": VAD_PARAMETERS,
+}
+
+# WhisperX configures decoding when its pipeline is loaded. Its transcribe()
+# method does not accept faster-whisper's VAD keys (and older 3.3.x releases do
+# not accept the decoder keys there either), so keep the two surfaces separate.
+WHISPERX_ASR_OPTIONS = {
+    key: value
+    for key, value in ANTI_REPETITION.items()
+    if key not in {"vad_filter", "vad_parameters"}
 }
 
 
@@ -285,25 +295,46 @@ class LoadedEngine:
         language: str | None,
         on_segment: Callable[[float], None] | None,
     ) -> tuple[list[AsrWord], str | None]:
-        wx = self.whisperx
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "batch_size": self.batch_size,
             "language": language,
             "task": "transcribe",
             "print_progress": False,
-            **ANTI_REPETITION,
         }
+        transcribe_params = inspect.signature(self.model.transcribe).parameters
+        progress_sent = False
+        if "progress_callback" in transcribe_params:
+            audio_seconds = len(audio) / 16_000.0
+
+            def report_progress(percent: float) -> None:
+                nonlocal progress_sent
+                progress_sent = True
+                if on_segment is not None and audio_seconds > 0:
+                    try:
+                        on_segment(audio_seconds * max(0.0, min(100.0, float(percent))) / 100.0)
+                    except Exception:
+                        pass
+
+            kwargs["progress_callback"] = report_progress
         try:
             result = self.model.transcribe(audio, **kwargs)
         except TypeError as exc:
-            # whisperx pins its own generation-config surface; retry with the
-            # minimal accepted set rather than failing the job.
-            logger.warning(f"[asr] whisperx rejected generation config ({exc}) — retrying minimal")
-            result = self.model.transcribe(audio, batch_size=self.batch_size, language=language)
+            if "progress_callback" not in kwargs or "progress_callback" not in str(exc):
+                raise
+            # A wrapper can advertise a callback in its signature but reject it
+            # at runtime. Retry once; the aligned segments below still update
+            # progress after decode on these older builds.
+            logger.warning(f"[asr] whisperx progress callback rejected ({exc}) — retrying without it")
+            kwargs.pop("progress_callback", None)
+            progress_sent = False
+            result = self.model.transcribe(audio, **kwargs)
         segments = list(result.get("segments") or [])
         detected = result.get("language") or language
 
-        if on_segment is not None:
+        # WhisperX 3.3.x has no decode callback, so publish each returned
+        # segment as soon as decoding finishes. Newer builds already reported
+        # live decode progress above.
+        if on_segment is not None and not progress_sent:
             for seg in segments:
                 try:
                     on_segment(float(seg.get("end") or 0.0))
@@ -485,14 +516,25 @@ def _load_whisperx(
         # container-aware: never spawn one inference thread per HOST core
         "threads": hostlimits.inference_threads(),
     }
+    load_kwargs = dict(base)
+    load_params = inspect.signature(wx.load_model).parameters
+    if "asr_options" in load_params:
+        load_kwargs["asr_options"] = dict(WHISPERX_ASR_OPTIONS)
+    if "vad_method" in load_params:
+        # New WhisperX releases ship a local Silero VAD implementation. Older
+        # 3.3.x releases have no selector and use their bundled default VAD.
+        load_kwargs["vad_method"] = "silero"
     try:
-        model = wx.load_model(
-            model_name,
-            asr_options={"condition_on_previous_text": False},
-            **base,
-        )
-    except Exception:
-        model = wx.load_model(model_name, **base)
+        model = wx.load_model(model_name, **load_kwargs)
+    except TypeError as exc:
+        # Defensive compatibility for wrappers whose signature is incomplete.
+        # Never retry after an arbitrary model/OOM failure: that would load the
+        # multi-GB model twice. The outer loader falls back to faster-whisper.
+        if "asr_options" not in str(exc) and "vad_method" not in str(exc):
+            raise
+        load_kwargs.pop("asr_options", None)
+        load_kwargs.pop("vad_method", None)
+        model = wx.load_model(model_name, **load_kwargs)
     if on_log:
         on_log(
             f"WhisperX loaded: {model_name} on {device} ({compute}), "

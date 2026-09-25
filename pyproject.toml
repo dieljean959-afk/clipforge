@@ -23,11 +23,13 @@ dependencies = [
 # WhisperX: the same CTranslate2 engine as faster-whisper plus a wav2vec2
 # forced-alignment pass for genuinely accurate word-level timestamps (caption
 # sync + clip highlighting depend on those). Heavy — pulls torch, torchaudio
-# and pyannote-audio (multi-GB) — so it is opt-in. Without it the app runs
+# and alignment models (multi-GB) — so it is opt-in. Newer releases also
+# provide the Silero VAD path used by app.asr. Without it the app runs
 # faster-whisper's own BatchedInferencePipeline: identical batching speed-up,
 # engine-native word timestamps. `config.toml [whisper] engine` selects between
-# them (`auto` prefers WhisperX when importable).
-whisperx = ["whisperx>=3.3"]
+# them (`auto` prefers WhisperX when importable). The upper bound prevents an
+# unreviewed major API change from breaking the compatibility adapter.
+whisperx = ["whisperx>=3.3,<4", "silero-vad>=5.1"]
 # heavy extras installed by start.sh --with-extras (or manually)
 gpu = ["ctranslate2>=4.3"]
 vad = ["silero-vad>=5.1", "torch>=2.2", "numpy>=1.26"]

@@ -25,6 +25,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -65,15 +67,102 @@ def section_engine(settings) -> None:
         )
 
 
+def section_whisperx_compat(settings) -> None:
+    """Exercise the API boundaries that changed across WhisperX releases."""
+    from app import asr
+
+    print("== 1b. WhisperX API compatibility")
+    captured: dict[str, dict] = {}
+
+    def new_load(name, device, compute_type, language, asr_options=None,
+                 vad_method=None, threads=4):
+        captured["new"] = {
+            "name": name, "device": device, "compute_type": compute_type,
+            "language": language, "asr_options": asr_options,
+            "vad_method": vad_method, "threads": threads,
+        }
+        return "new-model"
+
+    wx_new = SimpleNamespace(load_model=new_load)
+    with patch.object(asr.importlib, "import_module", return_value=wx_new):
+        result = asr._load_whisperx("medium", "cpu", "int8", 4, settings, None)
+    check("new WhisperX load uses Silero VAD", captured["new"]["vad_method"] == "silero")
+    check(
+        "decoder safeguards go through load_model(asr_options=...)",
+        captured["new"]["asr_options"] == {
+            "condition_on_previous_text": False,
+            "compression_ratio_threshold": 2.2,
+            "no_speech_threshold": 0.6,
+        },
+        str(captured["new"]["asr_options"]),
+    )
+    check(
+        "new WhisperX load returns the loaded engine handle",
+        result.engine == asr.ENGINE_WHISPERX and result.model == "new-model",
+        str(result),
+    )
+
+    def old_load(name, device, compute_type, language, asr_options=None, threads=4):
+        captured["old"] = {"asr_options": asr_options, "threads": threads}
+        return "old-model"
+
+    wx_old = SimpleNamespace(load_model=old_load)
+    with patch.object(asr.importlib, "import_module", return_value=wx_old):
+        asr._load_whisperx("medium", "cpu", "int8", 2, settings, None)
+    check(
+        "3.3.x-compatible load keeps safeguards without vad_method",
+        captured["old"]["asr_options"] == captured["new"]["asr_options"]
+        and captured["old"]["threads"] == asr.hostlimits.inference_threads(),
+        str(captured["old"]),
+    )
+
+    segment = {
+        "start": 0.0, "end": 1.0, "text": "hello",
+        "words": [{"word": "hello", "start": 0.1, "end": 0.8}],
+    }
+
+    def align(segments, model, metadata, audio, device, return_char_alignments=False):
+        return {"segments": segments}
+
+    class OldModel:
+        def transcribe(self, audio, batch_size=None, language=None, task=None,
+                       print_progress=False, combined_progress=False, verbose=False):
+            return {"segments": [segment], "language": language or "en"}
+
+    class NewModel:
+        def transcribe(self, audio, batch_size=None, language=None, task=None,
+                       print_progress=False, combined_progress=False, verbose=False,
+                       progress_callback=None):
+            if progress_callback is not None:
+                progress_callback(50.0)
+            return {"segments": [segment], "language": language or "en"}
+
+    for label, model in (("old", OldModel()), ("new", NewModel())):
+        wx = SimpleNamespace(align=align)
+        loaded = asr.LoadedEngine(
+            engine=asr.ENGINE_WHISPERX, device="cpu", compute_type="int8",
+            model_name="medium", batch_size=1, model=model, whisperx=wx,
+        )
+        progress: list[float] = []
+        words, detected = loaded.asr_words([0.0] * 16000, "en", progress.append)
+        check(
+            f"{label} WhisperX words use aligned timing",
+            [(w.word, round(w.start, 2), round(w.end, 2)) for w in words]
+            == [("hello", 0.1, 0.8)] and detected == "en",
+            str(words),
+        )
+        check(f"{label} WhisperX reports progress", bool(progress), str(progress))
+
+
 # --------------------------------------------------------------------------- #
 # 2. queue pool: 3+ simultaneous jobs
 # --------------------------------------------------------------------------- #
 
 def section_queue(tmp: Path) -> None:
     print("== 2. queue pool (3 simultaneous jobs, concurrency 3)")
+    import app.worker as worker_mod
     from app.config import load_config
     from app.store import LocalStore
-    import app.worker as worker_mod
     from app.worker import InProcessWorker
 
     os.environ["CLIPFORGE_DOWNLOADS_DIR"] = str(tmp / "downloads")
@@ -84,6 +173,10 @@ def section_queue(tmp: Path) -> None:
     settings.hosted.worker_concurrency = 3
     store = LocalStore(settings.app.paths)
     worker = InProcessWorker(settings, store)
+    # The deployment's real limit may be one slot. This focused dispatcher test
+    # overrides it explicitly so queue ordering/release is exercised with 3 jobs
+    # without pretending this constrained host can run three model instances.
+    worker.concurrency = 3
 
     job_ids = [store.create_job("upload", "missing.mp4")["_id"] for _ in range(3)]
     for job_id in job_ids:
@@ -127,6 +220,32 @@ def section_queue(tmp: Path) -> None:
     for job_id in job_ids:
         store.delete_job(job_id)
     worker_mod.STALL_TIMEOUT_SEC = worker_mod.STALL_TIMEOUT_SEC  # unchanged, keeps import used
+
+    # Retry must kill a live old process before enqueueing a new attempt. This
+    # uses a fake process so the check never starts a second real model load.
+    retry_job = store.create_job("upload", "missing-retry.mp4")["_id"]
+    class FakeProcess:
+        pid = 424242
+        def poll(self):
+            return None
+    old_process = FakeProcess()
+    worker._active[retry_job] = old_process
+    worker._current_job = retry_job
+    worker._current_proc = old_process
+    killed: list[object] = []
+    original_kill = worker._kill_process
+    worker._kill_process = lambda proc: killed.append(proc)  # type: ignore[method-assign]
+    try:
+        worker.retry(retry_job)
+    finally:
+        worker._kill_process = original_kill  # type: ignore[method-assign]
+        worker._active.pop(retry_job, None)
+        worker._current_job = None
+        worker._current_proc = None
+    check("retry kills the old process before fresh enqueue", killed == [old_process], str(killed))
+    retried = store.get_job(retry_job)
+    check("retry resets the job to queued", retried.get("stage") == "queued", str(retried.get("stage")))
+    store.delete_job(retry_job)
 
 
 # --------------------------------------------------------------------------- #
@@ -244,8 +363,9 @@ def section_benchmark(tmp: Path, seconds: int) -> None:
     measures decode throughput rather than how much silence VAD strips.
     """
     print(f"== 4. benchmark: {seconds}s of audio, per-30s-window vs batched")
-    import numpy as np
     import wave
+
+    import numpy as np
     from faster_whisper import WhisperModel
     from faster_whisper.transcribe import BatchedInferencePipeline
 
@@ -312,6 +432,7 @@ def main() -> int:
 
         settings = load_config(quiet=True)
         section_engine(settings)
+        section_whisperx_compat(settings)
         section_queue(tmp)
         section_eta(tmp)
         if os.getenv("CLIPFORGE_BENCH", "").strip() in {"1", "true", "yes"}:

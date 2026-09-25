@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # ClipForge — one-command local bootstrap.
-#   ./start.sh               # create venv, install deps, launch the app
-#   ./start.sh --with-extras # also install silero-vad + mediapipe (silence trim + face reframe)
+#   ./start.sh                  # create venv, install deps, launch the app
+#   ./start.sh --with-extras    # also install silero-vad + mediapipe
+#   ./start.sh --with-whisperx  # install WhisperX (large torch/alignment stack)
+#   ./start.sh --all-extras     # install every optional backend/feature
 #
 # The Whisper model (~500MB-3GB depending on size) is pre-downloaded at app
-# boot with a visible progress stage — never silently mid-job.
+# boot with a visible progress stage — never silently mid-job. WhisperX remains
+# opt-in so constrained hosts do not spend their disk/RAM on it unexpectedly.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -29,9 +32,27 @@ echo "==> Installing dependencies (pip)"
 "$PY" -m pip install --quiet --upgrade pip
 "$PY" -m pip install --quiet -e .
 
-if [ "${1:-}" = "--with-extras" ]; then
+WITH_EXTRAS=0
+WITH_WHISPERX=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-extras) WITH_EXTRAS=1 ;;
+    --with-whisperx) WITH_WHISPERX=1 ;;
+    --all-extras) WITH_EXTRAS=1; WITH_WHISPERX=1 ;;
+    *) echo "Unknown option: $arg"; exit 2 ;;
+  esac
+done
+
+if [ "$WITH_EXTRAS" = "1" ]; then
   echo "==> Installing optional extras (silero-vad, mediapipe)"
   "$PY" -m pip install --quiet ".[vad,reframe]"
+fi
+
+if [ "$WITH_WHISPERX" = "1" ]; then
+  echo "==> Installing WhisperX (large download; medium + alignment models are larger)"
+  "$PY" -m pip install --quiet ".[whisperx]"
+  echo "==> Checking WhisperX import and hardware selection"
+  "$PY" -m app.doctor || true
 fi
 
 echo "==> Checking ffmpeg"

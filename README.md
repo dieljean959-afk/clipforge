@@ -14,9 +14,13 @@ viral clips". See [LICENSE](LICENSE).
 1. **Grabs** it — the server pulls up to 1080p MP4 via yt-dlp (Python API,
    self-updates on failure, borrows your browser cookies for age-gated
    videos). Manual file upload always works as the fallback.
-2. **Transcribes** it — faster-whisper produces **word-level timestamps**
-   (model size configurable: `small` default / `medium` / `large-v3`,
-   pre-downloaded at boot so jobs never wait on a silent download).
+2. **Transcribes** it — WhisperX runs VAD-filtered, batched `medium` inference
+   and forced alignment for precise **word-level timestamps**. If the optional
+   WhisperX/torch stack is unavailable, ClipForge visibly falls back to
+   batched faster-whisper (`medium`, CPU int8) rather than failing silently.
+   Both paths use anti-repetition/no-speech thresholds and overlapping
+   resumable chunks. The active engine, device, compute type, model and batch
+   size are reported by health checks, diagnostics and each job's logs.
 3. **Finds** the hooks — the transcript is chunked and scored by Gemini
    (free tier). Top 5–15 windows become clips with titles, hook lines and
    scores 0–100. No key? The UI says exactly that — no fake heuristics.
@@ -59,7 +63,8 @@ platform web process (Vite, managed by Freebuff)
   └── vite-plugin-clipforge-backend
         └── uvicorn app.main:app  (127.0.0.1:8000, respawned if it dies)
               └── InProcessWorker thread (API + worker = one process)
-                    └── yt-dlp / faster-whisper / ffmpeg run HERE, on the host
+                    └── one child process per job
+                          └── yt-dlp / WhisperX / ffmpeg run HERE, on the host
 ```
 
 The browser calls same-origin relative `/api/...` URLs; the Vite proxy
@@ -95,11 +100,27 @@ redeploys — the retention cleaner also deletes finished job artifacts 24h
 after completion (`[hosted] retention_hours`), so treat the hosted storage as
 temporary: download your clips.
 
+### Worker queue and live ETA
+
+Jobs run FIFO in dedicated child processes. The pool size is bounded by both
+configuration and actual CPU/RAM, so a small host automatically narrows itself
+instead of overcommitting. Queued cards show their real FIFO position
+(`waiting behind 2 other jobs`), which distinguishes a busy queue from a stuck
+worker. A hung process group is killed by the watchdog; Retry kills the old
+attempt before starting a fresh process and resumes completed on-disk stages.
+
+During transcription, ClipForge shows remaining time. Before enough progress
+exists it uses `audio duration × RTF` from measurements saved on that host;
+afterwards it switches to elapsed-time progress. `/api/health` exposes the
+current engine, device, compute type, batch size, RTF history and host limits.
+
 ### Plan limits
 
 Sources longer than `max_source_min` (default **120 min / 2 hours**) are rejected at
 submit time with a readable 413 — never a mid-render failure. The limit comes
 from `/api/health` (`limits.maxSourceMin`) and is shown on the status card.
+Long transcription work is split into overlapping five-minute resume chunks;
+each completed chunk is cached atomically under the job's transcribe stage.
 
 ## Tailscale modes
 
@@ -155,12 +176,22 @@ dispatch mode — pull them from `GET /agent/output/{jobId}/{clip}.mp4`.
 
 ## Running it yourself (dev)
 
-Requirements: **Python 3.11+** and **ffmpeg/ffprobe** on PATH.
+Requirements: **Python 3.11+** and **ffmpeg/ffprobe** on PATH. The hosted
+Freebuff dashboard is already managed for you; use its provided URL rather than
+starting a duplicate local server. For a separate local installation:
 
 ```bash
-The hosted dashboard is already running. Use the URL provided by Freebuff; do not run a local start command.
-# optional extras (face tracking + silence trim):
-The repository also includes `start.sh` only for optional local development. The hosted app does not need it.
+./start.sh --all-extras
+# or install only the large WhisperX stack:
+./start.sh --with-whisperx
+```
+
+`--with-whisperx` is deliberately opt-in: WhisperX can add several gigabytes of
+Torch/alignment dependencies and model downloads. On CPU, ClipForge uses
+`medium` with int8 and a host-sized batch; on CUDA it uses float16. Run
+`python -m app.doctor` after installation to verify ffmpeg capabilities, GPU,
+engine availability, effective device/compute type, model fit and disk space.
+`GET /api/doctor` returns the same checks as JSON.
 
 ## Rights & fairness
 
@@ -171,12 +202,22 @@ The UI asks you to confirm this before every job.
 ## Verify the pipeline
 
 ```bash
-python3 tools/compile_check.py   # compile-check every backend module
-curl localhost:8000/api/health   # worker/warmup/LLM/system status
+python3 tools/compile_check.py   # compile + undefined-name check every backend module
+python3 tools/transcribe_unit_test.py  # chunking, repetition and engine logic
+python3 tools/asr_engine_test.py       # mocked queue/retry + ETA checks
+python3 -m app.doctor                  # hardware/engine/ffmpeg diagnostics
+curl localhost:8000/api/health         # worker/warmup/LLM/system status
 curl "localhost:8000/api/dev/verify-clips?jobId=<id>"   # ffprobe every rendered clip
 python3 tools/smoke_test.py      # API + worker + honest failure paths
 python3 tools/e2e_render_test.py # real ffmpeg: cut → crop → captions → thumbnail
 ```
+
+For a real same-audio decode benchmark (requires enough RAM/disk and, ideally,
+CUDA), run `CLIPFORGE_BENCH=1 CLIPFORGE_BENCH_SECONDS=120 python3
+tools/asr_engine_test.py`. The optional benchmark reports wall time and RTF;
+full WhisperX before/after and 2-hour accuracy comparisons must be run on a
+host that can hold the torch/alignment/model stack, not on a constrained
+1-CPU/2-GiB deployment.
 
 ## Removed in this fork
 
