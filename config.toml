@@ -12,6 +12,11 @@ data_dir = "data"
 [whisper]
 # medium is the accuracy default (~1.5GB model; slower/heavier than small on CPU)
 # large-v3 (~3GB, best, needs 8GB+ free RAM)
+#
+# This is the SANDBOX default and is deliberately modest: the hosted worker runs
+# on 1 vCPU / 2 GiB, where hostlimits downgrades large-v3/medium to small to
+# fit. A GPU worker host should NOT inherit this value — override it there with
+# CLIPFORGE_WHISPER_MODEL=large-v3, which wins over this file.
 model = "medium"
 
 # Transcription backend. "auto" prefers WhisperX (github.com/m-bain/whisperX —
@@ -26,8 +31,13 @@ engine = "auto"
 device = "auto"
 # auto -> int8 on CPU, float16 on GPU. Override only if you know why.
 compute_type = "auto"
-# Whisper language hint: "auto" detects, or force e.g. "en"
-language = "auto"
+# Whisper language hint: "auto" detects, or force an ISO code e.g. "en".
+# Forcing the language removes a whole class of misdetection failures (short
+# clips, music, mixed-speaker audio silently detected as the wrong language,
+# which truncates the transcript and quietly wrecks clip boundaries).
+# WARNING: a WRONG forced language is worse than "auto" — it does not fall
+# back. Set this to the language your sources are actually in.
+language = "en"
 # 30s windows decoded per batched pass (WhisperX's default is 8).
 # Lower it if the host is RAM-constrained; raise it on a big GPU.
 batch_size = 8
