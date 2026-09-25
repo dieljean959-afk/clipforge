@@ -246,6 +246,48 @@ def check_host(settings: Settings) -> list[Check]:
     ]
 
 
+def check_worker(settings: Settings) -> list[Check]:
+    """Remote worker reachability — decides where renders actually run.
+
+    Once WORKER_URL is set, dispatch is unconditional (app/task.py hands the
+    job over and returns; there is no local fallback). An unreachable worker
+    therefore fails every job instead of degrading, which is why this is a
+    FAIL and not a WARN. The token itself is never printed — only whether one
+    is configured.
+    """
+    from app import hosting  # noqa: PLC0415 - avoids an import cycle
+
+    url = settings.hosted.worker_url
+    if not url:
+        return [Check(
+            "remote worker", "ok",
+            "not configured — the pipeline runs in this process",
+            "set WORKER_URL to render on a bigger machine (see README, Tailscale mode B)",
+        )]
+    if not settings.hosted.worker_token:
+        return [Check(
+            "remote worker", "fail",
+            f"{url} is set but WORKER_TOKEN is missing",
+            "set WORKER_TOKEN to the same secret the agent was started with; "
+            "progress/complete callbacks would be rejected as 401",
+        )]
+    probe = hosting.remote_probe(settings)
+    if probe.get("online"):
+        return [Check(
+            "remote worker", "ok",
+            f"{url} reachable — {probe.get('detail')}, "
+            f"queue depth {probe.get('queueDepth', 0)}",
+            "",
+        )]
+    return [Check(
+        "remote worker", "fail",
+        f"{url} unreachable — {probe.get('detail')}",
+        "start the agent (python3 tools/worker_agent.py --server <this host>), and "
+        "confirm this server can reach that address: a 100.x tailnet IP needs "
+        "tailscale on BOTH ends, and a public IP needs a forwarded port",
+    )]
+
+
 def check_network() -> list[Check]:
     code, _ = _run(["curl", "-sI", "-m", "5", "https://www.youtube.com"], timeout=10)
     if code == 0:
@@ -267,7 +309,11 @@ def check_encode(settings: Settings) -> list[Check]:
     status = "ok" if choice.hardware else "warn"
     fix = "" if choice.hardware else (
         "expected on a CPU-only host: 9:16 software encoding runs at ~0.1x realtime. "
-        "Move rendering to a GPU worker (WORKER_URL), or lower [video] width/height."
+        + (
+            "Lower [video] width/height, or wait for the remote worker check below."
+            if settings.hosted.worker_url
+            else "Move rendering to a GPU worker (WORKER_URL), or lower [video] width/height."
+        )
     )
     checks = [Check("video encoder", status, encode_mod.summary(choice), fix)]
     if choice.degraded_from:
@@ -295,6 +341,7 @@ def run_doctor(settings: Settings) -> dict[str, Any]:
     checks: list[Check] = []
     checks += check_ffmpeg(settings)
     checks += check_encode(settings)
+    checks += check_worker(settings)
     checks += check_gpu()
     checks += check_whisper(settings)
     checks += check_llm(settings)
