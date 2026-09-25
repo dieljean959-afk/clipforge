@@ -22,11 +22,12 @@ import {
   RefreshCw,
   ServerCog,
   ShieldCheck,
+  Sparkles,
   Trash2,
   TriangleAlert,
 } from "lucide-react";
 import { useHealth } from "@/hooks/use-poll";
-import { api } from "@/lib/api";
+import { api, type DetectionProvider } from "@/lib/api";
 import { fmtBytes } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -133,6 +134,29 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const llm = health?.llm;
   const llmProblem = llm?.problem ?? null;
   const llmSource = typeof llm?.source === "string" ? llm.source : "";
+
+  // AI highlight-DETECTION backend (Gemini = hosted default, Ollama = local).
+  // Separate from the ASR engine on purpose: switching this never touches
+  // faster-whisper, and the UI says so.
+  const detection = health?.detection;
+  const [switchingBackend, setSwitchingBackend] = useState(false);
+  const switchBackend = async (provider: DetectionProvider) => {
+    if (!detection || provider === detection.provider) return;
+    setSwitchingBackend(true);
+    try {
+      await api.setDetectionBackend(provider);
+      toast.success(
+        provider === "ollama"
+          ? "AI detection switched to local Ollama — free and private, but slower (it shares the CPU with Whisper)."
+          : "AI detection switched to the hosted model — fastest, and it overlaps local CPU work.",
+      );
+      void refreshHealth();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not switch the detection backend.");
+    } finally {
+      setSwitchingBackend(false);
+    }
+  };
 
   const runRecheck = async () => {
     setRechecking(true);
@@ -269,6 +293,60 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 tailnet {health.tailnetIp}
               </StatLine>
             )}
+            {/* AI detection backend: the tradeoff is stated in full, not hidden
+                behind a tooltip, so nobody picks Ollama expecting hosted speed. */}
+            {detection && (
+              <span className="flex flex-wrap items-center gap-1.5 text-muted-foreground">
+                <Sparkles className="size-3.5" />
+                <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium text-foreground">
+                  AI detection: {detection.label}
+                </span>
+                <span
+                  className={cn(
+                    "text-[10px]",
+                    detection.provider === "ollama" ? "text-amber-300" : "text-muted-foreground",
+                  )}
+                >
+                  {detection.provider === "ollama"
+                    ? "fully local · free & private, but slower (shares the CPU with Whisper)"
+                    : "hosted · fastest, overlaps local CPU work"}
+                </span>
+                <span className="flex items-center gap-1">
+                  {detection.options.map((o) => (
+                    <button
+                      key={o.value}
+                      type="button"
+                      disabled={switchingBackend}
+                      onClick={() => switchBackend(o.value)}
+                      title={o.tradeoff}
+                      className={cn(
+                        "rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors",
+                        o.value === detection.provider
+                          ? "border-primary/50 bg-primary/15 text-primary"
+                          : "border-border text-muted-foreground hover:border-border hover:bg-muted hover:text-foreground",
+                        switchingBackend && "opacity-60",
+                      )}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </span>
+                {detection.provider === "ollama" && detection.ready === false && (
+                  <span className="text-[10px] text-destructive">
+                    {detection.detail ?? "local model not ready"}
+                  </span>
+                )}
+                {detection.transcriptionEngine && (
+                  <span
+                    className="text-[10px] text-muted-foreground"
+                    title="Switching the detection backend never changes the transcription engine."
+                  >
+                    transcription stays {detection.transcriptionEngine}
+                  </span>
+                )}
+              </span>
+            )}
+
             <span
               className="flex items-center gap-1 text-muted-foreground"
               title={

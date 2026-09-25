@@ -30,6 +30,7 @@ import {
   fmtClock,
   fmtDate,
   fmtEta,
+  overallStatus,
   sourceLabel,
   type ClipStage,
   type JobDoc,
@@ -80,6 +81,7 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
   const failed = job.stage === "failed";
   const complete = job.stage === "complete";
   const activeIdx = STAGES.indexOf(job.stage as (typeof STAGES)[number]);
+  const overall = overallStatus(job);
   const stalled = useStalled(job);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -164,6 +166,54 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
           )}
         </div>
       </div>
+
+      {/* whole-pipeline status: the single answer to "running / done / broken" */}
+      {overall.state === "done" ? (
+        <div
+          data-testid="job-done"
+          className="mt-3 flex items-center gap-2 rounded-lg border border-primary/50 bg-primary/10 px-3 py-2.5 text-sm font-semibold text-primary"
+        >
+          <CheckCircle2 className="size-4 shrink-0" />
+          <span>
+            Done — {job.clipCount ?? 0} clip{(job.clipCount ?? 0) === 1 ? "" : "s"} ready
+          </span>
+          <span className="ml-auto font-mono text-[11px] font-normal opacity-80">
+            {job.totalClipsSec ? `· ${fmtClock(job.totalClipsSec)} total` : null}
+          </span>
+        </div>
+      ) : overall.state === "failed" ? (
+        <div
+          data-testid="job-failed"
+          className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2.5 text-sm"
+        >
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+          <div className="min-w-0">
+            <div className="font-semibold text-destructive">{overall.label}</div>
+            {job.error && (
+              <div className="mt-0.5 truncate text-xs text-muted-foreground" title={job.error}>
+                {job.error}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3" data-testid="job-overall">
+          <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
+            <span className="flex min-w-0 items-center gap-1.5 text-foreground">
+              {overall.state === "running" ? (
+                <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
+              ) : (
+                <Clock className="size-3 shrink-0 text-muted-foreground" />
+              )}
+              <span className="truncate">{overall.label}</span>
+            </span>
+            <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
+              {overall.percent}% overall
+            </span>
+          </div>
+          <Progress value={overall.percent} className="h-1.5" />
+        </div>
+      )}
 
       {/* stage stepper */}
       <div className="mt-3 flex items-center gap-1">

@@ -1,13 +1,19 @@
-"""Gemini clip detection (LLM service).
+"""Clip/highlight detection (LLM service).
 
-Chunked transcript → Gemini → JSON [{start_word, end_word, score, title,
+Chunked transcript → LLM → JSON [{start_word, end_word, score, title,
 hook_text}] with 429-aware exponential backoff. The model returns WORD
 INDICES, never timestamps — fragile float math is the LLM's weak spot, so we
 resolve the real start/end from Whisper's word-level timings afterwards.
 
-Only transcript text is ever sent to the hosted provider — never audio or
-video. The key-missing case is surfaced loudly: no silent heuristic fallback
-exists in this module.
+Two interchangeable backends, chosen by `[llm] provider` / CLIPFORGE_LLM_PROVIDER:
+  - gemini (default) — hosted. Overlaps local CPU work, so it is the fast path.
+  - ollama           — self-hosted. Free and fully private, but it competes for
+                       the SAME CPU as Whisper, so it runs sequentially and is
+                       markedly slower. Requires no API key.
+
+Only transcript text is ever sent to either backend — never audio or video.
+The key-missing case is surfaced loudly: no silent heuristic fallback exists
+in this module.
 """
 
 from __future__ import annotations
@@ -16,19 +22,38 @@ import json
 import random
 import re
 import time
+import urllib.error
+import urllib.request
 from typing import Any
 
 from loguru import logger
 
 from app.config import GeminiConfig, Settings, live_gemini_key
 
+PROVIDER_GEMINI = "gemini"
+PROVIDER_OLLAMA = "ollama"
+PROVIDERS = (PROVIDER_GEMINI, PROVIDER_OLLAMA)
+
 
 class LlmNotConfigured(Exception):
-    """GEMINI_API_KEY missing — the caller must surface this, not fall back."""
+    """Selected backend is unusable (no key / no server) — surface, never fall back."""
 
 
 class LlmError(Exception):
-    """Gemini call failed after retries."""
+    """The selected backend's call failed after retries."""
+
+
+def provider(settings: Settings) -> str:
+    """Which detection backend is active. Defaults to the hosted one."""
+    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_GEMINI)
+
+
+def provider_label(settings: Settings) -> str:
+    """Human-readable backend name for logs and the dashboard."""
+    if provider(settings) == PROVIDER_OLLAMA:
+        model = settings.llm.ollama_model
+        return f"ollama ({model})"
+    return f"gemini ({settings.gemini.model})"
 
 
 # Model names rot: Google retires old flash models with a 404 that names the
@@ -80,11 +105,11 @@ def parse_candidates(text: str) -> list[dict[str, Any]]:
     """Extract word-index candidates from a model reply, tolerating fences."""
     m = re.search(r"\[.*\]", text, re.DOTALL)
     if m is None:
-        raise LlmError(f"no JSON array in Gemini reply: {text[:200]!r}")
+        raise LlmError(f"no JSON array in model reply: {text[:200]!r}")
     try:
         raw = json.loads(m.group(0))
     except json.JSONDecodeError as exc:
-        raise LlmError(f"invalid JSON from Gemini: {exc}") from exc
+        raise LlmError(f"invalid JSON from model: {exc}") from exc
     out: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -291,6 +316,77 @@ def call_gemini(chunk_text_prompt: str, settings: Settings) -> str:
     raise LlmError(f"Gemini failed after retries: {last_err}")
 
 
+def ollama_status(settings: Settings) -> tuple[bool, str]:
+    """Is the local Ollama server reachable, and is the model pulled?
+
+    Returns (ok, reason). Never raises — the dashboard renders this verbatim.
+    """
+    url = f"{settings.llm.ollama_url}/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 - local http
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - any transport error is "unreachable"
+        return False, f"ollama server unreachable at {settings.llm.ollama_url} ({exc})"
+    names = {
+        str(m.get("name", ""))
+        for m in (data.get("models") or [])
+        if isinstance(m, dict)
+    }
+    want = settings.llm.ollama_model
+    if names and not any(n == want or n.split(":")[0] == want.split(":")[0] for n in names):
+        return False, f"model {want!r} is not pulled (have: {', '.join(sorted(names)) or 'none'})"
+    return True, f"ollama ready: {want} @ {settings.llm.ollama_url}"
+
+
+def call_ollama(chunk_text_prompt: str, settings: Settings) -> str:
+    """Single local Ollama call over its plain HTTP API.
+
+    TEXT ONLY: `chunk_text_prompt` is the numbered transcript built by
+    build_prompt(). No audio, no video, no file handles ever leave this call.
+    Uses urllib (stdlib) so the backend adds no Python dependency.
+    """
+    llm = settings.llm
+    endpoint = f"{llm.ollama_url}/api/generate"
+    payload = json.dumps(
+        {
+            "model": llm.ollama_model,
+            # `format: json` makes Ollama constrain decoding to a JSON document.
+            "prompt": chunk_text_prompt,
+            "stream": False,
+            "format": "json",
+            "keep_alive": llm.ollama_keep_alive,
+            "options": {"temperature": 0.4},
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(  # noqa: S310 - local http by design
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=llm.ollama_timeout_sec) as resp:  # noqa: S310
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise LlmNotConfigured(
+            f"ollama server unreachable at {llm.ollama_url} ({exc.reason}) — "
+            f"start it with `ollama serve`, or switch [llm] provider back to gemini"
+        ) from exc
+    except (TimeoutError, json.JSONDecodeError) as exc:
+        raise LlmError(f"ollama call failed: {exc}") from exc
+    text = str(body.get("response") or "")
+    if not text.strip():
+        raise LlmError("ollama returned an empty reply")
+    return text
+
+
+def call_llm(chunk_text_prompt: str, settings: Settings) -> str:
+    """Dispatch one detection call to the configured backend."""
+    if provider(settings) == PROVIDER_OLLAMA:
+        return call_ollama(chunk_text_prompt, settings)
+    return call_gemini(chunk_text_prompt, settings)
+
+
 def detect_clips(
     words: list[dict],
     settings: Settings,
@@ -306,7 +402,16 @@ def detect_clips(
     Raises LlmNotConfigured when no key, LlmError when the API fails after
     retries. There is deliberately no heuristic fallback here.
     """
-    if not settings.gemini_api_key:
+    if provider(settings) == PROVIDER_OLLAMA:
+        # No API key by design. The only precondition is a reachable server.
+        ok, reason = ollama_status(settings)
+        if not ok:
+            raise LlmNotConfigured(
+                f"Ollama backend selected but unusable — {reason}. "
+                f"Run `ollama serve` and `ollama pull {settings.llm.ollama_model}`, "
+                f"or switch the detection backend back to the hosted one."
+            )
+    elif not settings.gemini_api_key:
         live = live_gemini_key()
         live.refresh(force=True)
         detail = live.problem or (
@@ -326,25 +431,26 @@ def detect_clips(
         cfg = GeminiConfig(cfg.model, cfg.min_clip_sec, cfg.max_clip_sec, max_clips, cfg.max_retries)
 
     chunks = chunk_words(words)
-    logger.info(f"[llm] detecting on {len(chunks)} chunk(s), {len(words)} words")
+    label = provider_label(settings)
+    logger.info(f"[llm] detecting on {len(chunks)} chunk(s), {len(words)} words via {label}")
     if on_log:
-        on_log(f"Gemini: scoring {len(chunks)} chunk(s)...")
+        on_log(f"Detecting highlights on {len(chunks)} chunk(s) via {label}...")
 
     candidates: list[dict[str, Any]] = []
     for i, (start_index, chunk) in enumerate(chunks):
         prompt = build_prompt(chunk, cfg, start_index=start_index)
-        text = call_gemini(prompt, settings)
+        text = call_llm(prompt, settings)
         parsed = parse_candidates(text)
         resolved = resolve_candidates(parsed, words, start_index, cfg)
         candidates.extend(resolved)
         if on_log:
-            on_log(f"Gemini: chunk {i + 1}/{len(chunks)} → {len(resolved)} candidates")
+            on_log(f"Detection: chunk {i + 1}/{len(chunks)} → {len(resolved)} candidates")
         logger.info(f"[llm] chunk {i + 1}/{len(chunks)}: {len(resolved)} candidates")
 
     # keep only the top N by score
     candidates.sort(key=lambda c: c["score"], reverse=True)
     top = candidates[: cfg.max_clips]
     if not top:
-        raise LlmError("Gemini returned no valid clip candidates")
+        raise LlmError(f"{label} returned no valid clip candidates")
     logger.info(f"[llm] selected {len(top)} clips (scores {top[0]['score']:.0f}…{top[-1]['score']:.0f})")
     return top

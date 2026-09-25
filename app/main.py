@@ -19,6 +19,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app import eta, hosting, hostlimits
+from app import llm as llm_mod
 from app import subtitle as subtitle_svc
 from app import video as video_svc
 from app.config import (
@@ -290,6 +291,61 @@ def verify_clips(jobId: str | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# detection backend (Gemini = hosted default, Ollama = local/free/private)
+# --------------------------------------------------------------------------- #
+
+# Shown verbatim in the UI so the tradeoff is visible BEFORE the user picks.
+DETECTION_TRADEOFFS = {
+    "gemini": "Hosted. Fastest — the call overlaps local CPU work. Needs a Gemini API key.",
+    "ollama": "Fully local, free and private: your transcript never leaves the machine. "
+              "Slower — it shares the same CPU as Whisper, so it runs sequentially "
+              "after the transcript exists instead of alongside it.",
+}
+
+
+def detection_status() -> dict:
+    """Which backend runs AI highlight detection, and is it actually usable."""
+    active = llm_mod.provider(settings)
+    out: dict = {
+        "provider": active,
+        "label": llm_mod.provider_label(settings),
+        "tradeoff": DETECTION_TRADEOFFS.get(active, ""),
+        "options": [
+            {"value": p, "label": p, "tradeoff": DETECTION_TRADEOFFS[p]}
+            for p in llm_mod.PROVIDERS
+        ],
+        "models": {
+            "gemini": settings.gemini.model,
+            "ollama": settings.llm.ollama_model,
+        },
+        # Transcription is unaffected by this choice — say so explicitly so the
+        # UI never implies the ASR engine changes with the detection backend.
+        "transcriptionEngine": subtitle_svc.engine_status(settings).engine,
+    }
+    if active == "ollama":
+        ok, reason = llm_mod.ollama_status(settings)
+        out["ready"] = ok
+        out["detail"] = reason
+    return out
+
+
+class DetectionIn(BaseModel):
+    provider: str
+
+
+@app.post("/api/settings/detection")
+def set_detection_backend(body: DetectionIn) -> dict:
+    """Switch the AI-detection backend. Transcription engine is untouched."""
+    if body.provider not in llm_mod.PROVIDERS:
+        raise HTTPException(
+            400, f"unknown detection backend {body.provider!r} (expected one of {llm_mod.PROVIDERS})"
+        )
+    settings.llm.provider = body.provider
+    logger.info(f"[llm] detection backend switched to {body.provider}")
+    return detection_status()
+
+
+# --------------------------------------------------------------------------- #
 # health / status
 # --------------------------------------------------------------------------- #
 
@@ -313,6 +369,7 @@ def health() -> dict:
             # picked up on the next health poll without restarting anything.
             **live_gemini_key().status(),
         },
+        "detection": detection_status(),
         "whisper": {
             # The RESOLVED engine/model/compute, not what config.toml asks for.
             # The host-limit downgrade (medium -> small) has to be visible in the
@@ -667,12 +724,18 @@ def register_worker(body: RegisterWorkerIn) -> dict:
 
 @app.post("/api/jobs/{job_id}/redetect")
 def redetect_job(job_id: str) -> dict:
-    """Re-run Gemini detection on an existing job and re-render the clips."""
+    """Re-run highlight detection on an existing job and re-render the clips."""
 
     job = store.get_job(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    if settings.gemini_api_key is None:
+    # Precondition depends on the ACTIVE detection backend: the local Ollama
+    # path needs no key, it needs a running server.
+    if llm_mod.provider(settings) == llm_mod.PROVIDER_OLLAMA:
+        ok, reason = llm_mod.ollama_status(settings)
+        if not ok:
+            raise HTTPException(400, f"AI detection offline — {reason}")
+    elif settings.gemini_api_key is None:
         live = live_gemini_key()
         live.refresh(force=True)
         raise HTTPException(

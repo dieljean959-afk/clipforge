@@ -327,6 +327,8 @@ class InProcessWorker:
         if job is not None:
             job.update({
                 "stage": "failed",
+                # keep the stage the child died in, for the dashboard banner
+                "failedStage": stage,
                 "error": msg,
                 "errorDetail": detail[:4000],
                 "completedAt": int(time.time() * 1000),
@@ -412,6 +414,7 @@ class InProcessWorker:
             self._kill_process(proc)
             job.update({
                 "stage": "failed",
+                "failedStage": job.get("stage"),
                 "error": (
                     f"Pipeline stalled — no progress for {int(silent_for / 1000)}s "
                     f"at stage {job.get('stage')}. The stuck worker process was killed. "

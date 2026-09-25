@@ -206,7 +206,12 @@ def _extract_audio(path: Path, dest: Path) -> Path:
                 "-y", "-loglevel", "error",
                 "-i", str(path),
                 "-vn", "-ac", "1", "-ar", "16000",
-                "-c:a", "pcm_s16le", str(tmp),
+                # `-f wav` is REQUIRED, not cosmetic: the temp name ends in
+                # `.part`, and ffmpeg infers the muxer from the file extension
+                # when -f is absent -> "Unable to find a suitable output format
+                # for 'source.wav.part': Invalid argument". Never rely on
+                # extension inference when the output is a temp path.
+                "-c:a", "pcm_s16le", "-f", "wav", str(tmp),
             ],
             check=True, capture_output=True, timeout=3600,
         )

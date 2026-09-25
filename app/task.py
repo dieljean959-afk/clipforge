@@ -571,8 +571,13 @@ class Pipeline:
         job = self.store.get_job(job_id)
         if job is None:
             return
+        # Keep the stage that actually failed — `stage` is about to be
+        # overwritten with "failed", and without this the dashboard can only
+        # say "Failed" with no idea which step broke.
+        failed_stage = job.get("stage")
         job.update({
             "stage": "failed",
+            "failedStage": failed_stage,
             "error": message,
             "errorDetail": detail[:4000],
         })

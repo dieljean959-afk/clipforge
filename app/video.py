@@ -68,7 +68,17 @@ def _run(cmd: list[str], *, timeout: int = 3600) -> None:
 
 
 def extract_wav(src: Path, dest: Path) -> Path:
-    _run([ffmpeg_bin(), "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(dest)])
+    # `-f wav` is explicit for the same reason as app.subtitle._extract_audio:
+    # `dest` is caller-supplied and may be a `.part`/temp path, where ffmpeg's
+    # extension-based muxer inference fails with "Invalid argument". Pinning
+    # the muxer also pins the codec, so the file is always readable by the
+    # stdlib `wave` module that app.subtitle._WavReader relies on.
+    _run([
+        ffmpeg_bin(), "-y", "-loglevel", "error",
+        "-i", str(src),
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le", "-f", "wav", str(dest),
+    ])
     return dest
 
 
@@ -208,13 +218,15 @@ def render_clip(
     # Input-seeking with an explicit -t duration: unambiguous across ffmpeg
     # versions (with -ss before -i, -to counts from the seek point on some
     # builds, which would silently shorten the cut).
+    # Temp name ends in `.mp4`, but the muxer is pinned explicitly below so no
+    # ffmpeg call in this module ever depends on extension inference.
     tmp = dest.with_suffix(".tmp.mp4")
     _run([
         ffmpeg_bin(), "-y",
         "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{clip_dur:.3f}",
         "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
         "-c:a", "aac", "-b:a", "160k",
-        str(tmp),
+        "-f", "mp4", str(tmp),
     ])
 
     # 2) build the crop + trim + subtitle filtergraph
@@ -272,7 +284,7 @@ def render_clip(
             "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
             "-pix_fmt", "yuv420p",
             "-c:a", "copy",
-            str(dest),
+            "-f", "mp4", str(dest),
         ]
         logger.info(f"[video] libass unavailable — burning {len(caption_cues)} caption PNGs via Pillow overlay")
     elif ass_path is not None:
@@ -282,7 +294,7 @@ def render_clip(
             "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
             "-pix_fmt", "yuv420p",
             "-c:a", "copy",
-            str(dest),
+            "-f", "mp4", str(dest),
         ]
     else:
         cmd = [
@@ -291,7 +303,7 @@ def render_clip(
             "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
             "-pix_fmt", "yuv420p",
             "-c:a", "copy",
-            str(dest),
+            "-f", "mp4", str(dest),
         ]
     _run(cmd)
     tmp.unlink(missing_ok=True)
@@ -318,7 +330,10 @@ def render_first_frame_thumb(clip_path: Path, thumb_path: Path) -> Path:
         ffmpeg_bin(), "-y",
         "-ss", "0", "-i", str(clip_path),
         "-frames:v", "1",
-        "-q:v", "3",
-        str(thumb_path),
+        # Pin encoder + muxer: `thumb_path` is caller-supplied, and inferring
+        # either from its extension is the same class of bug as the `.wav.part`
+        # extraction failure.
+        "-c:v", "mjpeg", "-q:v", "3",
+        "-f", "image2", str(thumb_path),
     ], timeout=120)
     return thumb_path

@@ -7,18 +7,23 @@ Run: python3 tools/transcribe_unit_test.py
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import asr  # noqa: E402
+from app.config import ffmpeg_bin  # noqa: E402
 from app.subtitle import (  # noqa: E402
     CHUNK_SEC,
     OVERLAP_SEC,
     WHISPER_KWARGS,
     Word,
     _dedupe_words,
+    _extract_audio,
     _plan_windows,
 )
 
@@ -108,12 +113,82 @@ def main() -> int:
     check("batch size is clamped to a sane range", 1 <= asr.batch_size(_Settings()) <= 64)
     check("whisperx_available() never raises", reason != "")
 
+    section_wav_part_regression(check)
+
     print()
     if failures:
         print(f"TRANSCRIBE UNIT: {len(failures)} FAILURE(S): {failures}")
         return 1
     print("TRANSCRIBE UNIT: ALL CHECKS PASSED")
     return 0
+
+
+def section_wav_part_regression(check) -> None:
+    """Regression: audio extraction to a `.wav.part` temp path must succeed.
+
+    The temp-then-rename convention appends `.part` AFTER the `.wav` extension.
+    ffmpeg infers the output muxer from that extension, `.part` is not a known
+    muxer, and the run dies with:
+
+        Unable to find a suitable output format for 'source.wav.part':
+        Invalid argument
+
+    which surfaced to users as "Transcription failed: could not extract
+    audio". This runs the REAL extraction against a REAL ffmpeg so the test
+    fails again if `-f wav` is ever dropped from the command.
+    """
+    print()
+    print("== .wav.part extraction regression (real ffmpeg)")
+    if shutil.which("ffmpeg") is None:
+        check("ffmpeg available for the regression test", False, "ffmpeg not on PATH")
+        return
+    try:
+        ffmpeg_bin()
+    except Exception as exc:  # noqa: BLE001 - ffmpeg unresolvable on this host
+        check("ffmpeg resolvable via app.config.ffmpeg_bin", False, str(exc))
+        return
+
+    with tempfile.TemporaryDirectory(prefix="clipforge-wavpart-") as td:
+        root = Path(td)
+        src = root / "source.mp4"
+        # 2s of video carrying a tone: any decodable A/V input exercises the
+        # same code path as a real downloaded source.
+        subprocess.run(
+            [
+                ffmpeg_bin(), "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-f", "mp4", str(src),
+            ],
+            check=True, capture_output=True, timeout=120,
+        )
+
+        dest = root / "chunks" / "source.wav"
+        out = _extract_audio(src, dest)
+
+        check("extraction to a .wav.part temp path succeeds", out == dest and dest.exists())
+        check("atomic rename landed the final .wav", dest.suffix == ".wav" and dest.stat().st_size > 0)
+        check(
+            "no .part file is left behind",
+            not dest.with_suffix(".wav.part").exists(),
+        )
+
+        # The output must be readable by the stdlib `wave` module that
+        # app.subtitle._WavReader depends on: 16kHz mono PCM s16le.
+        import wave  # noqa: PLC0415 - local, only needed by this regression
+
+        with wave.open(str(dest), "rb") as wf:
+            rate, channels, width = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+            frames = wf.getnframes()
+        check("output is 16kHz mono pcm_s16le", rate == 16000 and channels == 1 and width == 2,
+              f"{rate}Hz ch={channels} width={width*8}bit")
+        check("output has real audio samples", frames > 0, f"{frames} frames")
+
+        # A second call must short-circuit on the cached file, not re-run ffmpeg.
+        before = dest.stat().st_mtime_ns
+        again = _extract_audio(src, dest)
+        check("re-extraction reuses the cached wav", again == dest and dest.stat().st_mtime_ns == before)
 
 
 class _Settings:

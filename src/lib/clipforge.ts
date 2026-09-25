@@ -43,6 +43,89 @@ export const STAGE_LOADING: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// whole-pipeline status
+// ---------------------------------------------------------------------------
+
+/** The real stages a job walks through, in order (queued is not a stage). */
+export const PIPELINE_STAGES: ClipStage[] = [
+  "grabbing",
+  "transcribing",
+  "finding",
+  "rendering",
+];
+
+export type OverallState = "queued" | "running" | "done" | "failed";
+
+export interface OverallStatus {
+  state: OverallState;
+  /** 1-based index of the active stage, or the total when finished. */
+  stageNumber: number;
+  total: number;
+  /** 0-100 across the WHOLE pipeline, not just the active stage. */
+  percent: number;
+  /** Plain-language headline, e.g. "Stage 3 of 4 — AI clip detection". */
+  label: string;
+}
+
+/**
+ * One unambiguous answer to "is this job running, done, or broken?".
+ *
+ * Deliberately separate from the per-stage stepper: that one answers "which
+ * step am I on", this answers "should I still be waiting, or can I go use the
+ * clips?". `done` requires stage === "complete" — never inferred from
+ * progress, so a job sitting at 99% can never read as finished.
+ */
+export function overallStatus(job: JobDoc): OverallStatus {
+  const total = PIPELINE_STAGES.length;
+  if (job.stage === "complete") {
+    return {
+      state: "done",
+      stageNumber: total,
+      total,
+      percent: 100,
+      label: "Done — clips ready",
+    };
+  }
+  if (job.stage === "failed") {
+    // `stage` is "failed", so the stage that actually broke lives in
+    // `failedStage` (recorded server-side before `stage` is overwritten).
+    // Fall back to the generic headline for older jobs without the field.
+    const where = job.failedStage
+      ? (STAGE_LABELS[job.failedStage as ClipStage] ?? job.failedStage)
+      : null;
+    return {
+      state: "failed",
+      stageNumber: where
+        ? Math.max(1, PIPELINE_STAGES.indexOf(job.failedStage as ClipStage) + 1)
+        : total,
+      total,
+      percent: 100,
+      label: where ? `Failed during ${where}` : "Failed",
+    };
+  }
+  if (job.stage === "queued") {
+    return {
+      state: "queued",
+      stageNumber: 0,
+      total,
+      percent: 0,
+      label: "Queued — waiting for a worker",
+    };
+  }
+  const idx = PIPELINE_STAGES.indexOf(job.stage as ClipStage);
+  const stageNumber = idx === -1 ? 1 : idx + 1;
+  const within = Math.min(100, Math.max(0, job.progress ?? 0));
+  const percent = Math.round(((stageNumber - 1 + within / 100) / total) * 100);
+  return {
+    state: "running",
+    stageNumber,
+    total,
+    percent: Math.min(99, percent),
+    label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[job.stage as ClipStage]}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // formatting
 // ---------------------------------------------------------------------------
 

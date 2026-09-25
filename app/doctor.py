@@ -157,6 +157,16 @@ def check_whisper(settings: Settings) -> list[Check]:
 
 
 def check_llm(settings: Settings) -> list[Check]:
+    from app import llm as llm_mod  # noqa: PLC0415 - avoids an import cycle at boot
+
+    if llm_mod.provider(settings) == llm_mod.PROVIDER_OLLAMA:
+        # Local backend: no key exists or is needed; the server IS the check.
+        ok, reason = llm_mod.ollama_status(settings)
+        return [Check(
+            "detection backend", "ok" if ok else "fail", reason,
+            "" if ok else "run `ollama serve` + `ollama pull <model>`, or switch "
+                          "[llm] provider back to gemini",
+        )]
     live = live_gemini_key()
     live.refresh(force=True)
     status = live.status()

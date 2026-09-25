@@ -21,9 +21,21 @@ viral clips". See [LICENSE](LICENSE).
    Both paths use anti-repetition/no-speech thresholds and overlapping
    resumable chunks. The active engine, device, compute type, model and batch
    size are reported by health checks, diagnostics and each job's logs.
-3. **Finds** the hooks — the transcript is chunked and scored by Gemini
-   (free tier). Top 5–15 windows become clips with titles, hook lines and
-   scores 0–100. No key? The UI says exactly that — no fake heuristics.
+3. **Finds** the hooks — the transcript is chunked and scored by an AI
+   backend. Top 5–15 windows become clips with titles, hook lines and scores
+   0–100. Only transcript **text** is ever sent — never audio or video. No
+   key? The UI says exactly that — no fake heuristics.
+
+   Two interchangeable backends, chosen in `config.toml` `[llm] provider`
+   (or `CLIPFORGE_LLM_PROVIDER`), switchable from the dashboard:
+
+   | Backend | Speed | Cost / privacy | Needs |
+   |---|---|---|---|
+   | `gemini` (default) | **Fastest** — the request overlaps local CPU work | Hosted API, free tier | `GEMINI_API_KEY` |
+   | `ollama` | **Slower** — it shares the same CPU as Whisper, so it runs sequentially after the transcript exists | **Free and fully private** — the transcript never leaves the machine | `ollama serve` + the model pulled, no API key |
+
+   This choice affects **detection only**. Transcription is always
+   faster-whisper/WhisperX, and the dashboard says so next to the toggle.
 
    **Model rot self-heals:** if Google retires the configured Gemini model,
    the server parses the replacement model name out of the API error, retries
@@ -203,14 +215,23 @@ The UI asks you to confirm this before every job.
 
 ```bash
 python3 tools/compile_check.py   # compile + undefined-name check every backend module
-python3 tools/transcribe_unit_test.py  # chunking, repetition and engine logic
+python3 tools/transcribe_unit_test.py  # chunking, repetition, engine logic, .wav.part regression
 python3 tools/asr_engine_test.py       # mocked queue/retry + ETA checks
+python3 tools/detect_backend_test.py   # Gemini vs Ollama detection, text-only payloads
+bun tools/overall_status_test.ts       # job Done/Failed/overall-progress indicator logic
 python3 -m app.doctor                  # hardware/engine/ffmpeg diagnostics
 curl localhost:8000/api/health         # worker/warmup/LLM/system status
 curl "localhost:8000/api/dev/verify-clips?jobId=<id>"   # ffprobe every rendered clip
 python3 tools/smoke_test.py      # API + worker + honest failure paths
 python3 tools/e2e_render_test.py # real ffmpeg: cut → crop → captions → thumbnail
 ```
+
+`tools/transcribe_unit_test.py` includes a **live** regression for the
+`.wav.part` extraction bug: it runs real ffmpeg to a `source.wav.part` temp
+path and asserts the extraction succeeds, lands the atomic rename, and leaves
+no `.part` behind. That path previously died with `Invalid argument`, because
+ffmpeg infers the output muxer from the file extension and `.part` is not a
+known container. Every ffmpeg call in the repo now pins `-f` explicitly.
 
 For a real same-audio decode benchmark (requires enough RAM/disk and, ideally,
 CUDA), run `CLIPFORGE_BENCH=1 CLIPFORGE_BENCH_SECONDS=120 python3

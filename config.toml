@@ -44,6 +44,32 @@ max_clips = 10
 # 429 backoff retries before giving up (free tier = 15 RPM).
 max_retries = 3
 
+[llm]
+# Which backend runs AI clip/highlight DETECTION — NOT transcription.
+# Transcription is always faster-whisper (see [whisper] above); this choice
+# never changes the ASR engine.
+#
+#   gemini (default) — hosted. Fastest: the request overlaps local CPU work.
+#                      Needs GEMINI_API_KEY (Keys/API keys tab).
+#   ollama           — self-hosted. Free and fully private (the transcript
+#                      never leaves the machine) and needs no API key, but it
+#                      shares the SAME CPU as Whisper, so detection runs
+#                      sequentially after the transcript exists and is markedly
+#                      slower. Requires `ollama serve` + the model pulled.
+#
+# Env overrides: CLIPFORGE_LLM_PROVIDER, OLLAMA_URL, OLLAMA_MODEL.
+# The dashboard shows the active backend and its tradeoff, and can switch it.
+provider = "gemini"
+
+# Only read when provider = "ollama".
+ollama_url = "http://127.0.0.1:11434"
+ollama_model = "llama3.1:8b"
+# Keep the model resident between chunks (detection runs many calls per job).
+ollama_keep_alive = "30m"
+# Per-call ceiling. Local models on a busy CPU are slow; a 2h transcript is
+# ~60 chunks, so this must exceed a single slow generation comfortably.
+ollama_timeout_sec = 600
+
 [subtitle]
 # ASS style: bold white with thick neon-green outline, word pop-in.
 font = "Arial Black"

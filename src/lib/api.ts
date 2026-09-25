@@ -3,6 +3,23 @@
 
 import type { ClipStage } from "@/lib/clipforge";
 
+export type DetectionProvider = "gemini" | "ollama";
+
+/** Which backend scores the viral moments (NOT the ASR engine). */
+export interface DetectionDto {
+  provider: DetectionProvider;
+  label: string;
+  /** Plain-language speed/privacy tradeoff, shown BEFORE the user picks. */
+  tradeoff: string;
+  options: { value: DetectionProvider; label: string; tradeoff: string }[];
+  models: Record<DetectionProvider, string>;
+  /** The ASR engine, unchanged by this choice — surfaced to avoid confusion. */
+  transcriptionEngine?: string;
+  /** Ollama only: is the local server reachable with the model pulled? */
+  ready?: boolean;
+  detail?: string;
+}
+
 export interface JobDto {
   _id: string;
   sourceType: "url" | "upload";
@@ -28,6 +45,9 @@ export interface JobDto {
   logs: string[];
   error?: string | null;
   errorDetail?: string | null;
+  /** The stage that failed — `stage` is overwritten with "failed", so this
+   *  is the only way to tell the user WHICH step broke. */
+  failedStage?: string | null;
   durationSec?: number | null;
   clipCount?: number | null;
   totalClipsSec?: number | null;
@@ -122,6 +142,7 @@ export interface HealthDto {
   };
   warmup: { stage: string; detail: string; startedAt: number | null };
   llm: KeyStatusDto;
+  detection?: DetectionDto;
   // Resolved engine/model/compute (already host-limit adjusted). The raw
   // config.toml request, when it differs, is `configuredModel`.
   whisper: {
@@ -265,6 +286,12 @@ export const api = {
   /** Delete GEMINI_API_KEY from the backend's env file (missing Delete button). */
   deleteGeminiKey: () =>
     request<KeyStatusDto & { linesRemoved: number }>("/api/settings/gemini-key", { method: "DELETE" }),
+  /** Switch the AI-detection backend. Transcription engine is untouched. */
+  setDetectionBackend: (provider: DetectionProvider) =>
+    request<DetectionDto>("/api/settings/detection", {
+      method: "POST",
+      body: JSON.stringify({ provider }),
+    }),
   listClips: (jobId: string) => request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>
     requestBlob("/api/export/zip", {

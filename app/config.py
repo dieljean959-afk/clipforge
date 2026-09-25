@@ -478,6 +478,28 @@ class GeminiConfig:
 
 
 @dataclass
+class LlmConfig:
+    """Which backend runs the AI clip/highlight DETECTION stage.
+
+    This is deliberately NOT part of the ASR engine choice: transcription is
+    always faster-whisper (app/asr.py). Only the "which moments are viral"
+    scoring step is pluggable, because that is the one step a user may want
+    to run fully offline on their own hardware.
+
+        gemini — hosted. Default. Fast: the call overlaps local CPU work.
+        ollama — self-hosted. Free and private, but it shares the same CPU
+                 as Whisper, so detection runs sequentially AFTER the
+                 transcript exists (no overlap) and is markedly slower.
+    """
+
+    provider: str = "gemini"
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "llama3.1:8b"
+    ollama_timeout_sec: int = 600
+    ollama_keep_alive: str = "30m"
+
+
+@dataclass
 class SubtitleConfig:
     font: str
     font_fallbacks: list[str] = field(default_factory=list)
@@ -537,6 +559,7 @@ class Settings:
     app: AppConfig
     whisper: WhisperConfig
     gemini: GeminiConfig
+    llm: LlmConfig
     subtitle: SubtitleConfig
     video: VideoConfig
     download: DownloadConfig
@@ -638,6 +661,23 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     if gemini.min_clip_sec >= gemini.max_clip_sec:
         errors.append("gemini.min_clip_sec must be < gemini.max_clip_sec")
 
+    lc = raw.get("llm", {})
+    provider = str(
+        os.getenv("CLIPFORGE_LLM_PROVIDER") or lc.get("provider", "gemini")
+    ).strip().lower()
+    if provider not in {"gemini", "ollama"}:
+        errors.append(f'llm.provider "{provider}" is not one of gemini/ollama')
+        provider = "gemini"
+    llm = LlmConfig(
+        provider=provider,
+        ollama_url=str(
+            os.getenv("OLLAMA_URL") or lc.get("ollama_url", "http://127.0.0.1:11434")
+        ).strip().rstrip("/"),
+        ollama_model=str(os.getenv("OLLAMA_MODEL") or lc.get("ollama_model", "llama3.1:8b")),
+        ollama_timeout_sec=max(30, int(lc.get("ollama_timeout_sec", 600))),
+        ollama_keep_alive=str(lc.get("ollama_keep_alive", "30m")),
+    )
+
     s = raw.get("subtitle", {})
     outline = str(s.get("outline_color", "#39FF14"))
     if not outline.startswith("#") or len(outline) not in (4, 7):
@@ -713,6 +753,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         app=AppConfig(host=host, port=port, paths=paths),
         whisper=whisper,
         gemini=gemini,
+        llm=llm,
         subtitle=subtitle,
         video=video,
         download=download,
