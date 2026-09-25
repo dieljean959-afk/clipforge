@@ -98,6 +98,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const warming = warmup?.stage === "loading_model";
   const warmupFailed = warmup?.stage === "failed";
   const llmOk = health?.llm.keyLoaded === true;
+  // The host-limit downgrade is invisible unless the label says so: the server
+  // may load `small` while config.toml still asks for `medium`.
+  const downgraded =
+    !!health?.whisper.configuredModel &&
+    health.whisper.configuredModel !== health.whisper.model;
 
   // null-safe system stats — the server sends null for anything it can't read
   const sys = health?.system ?? null;
@@ -268,12 +273,17 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               className="flex items-center gap-1 text-muted-foreground"
               title={
                 health.asr?.detail ??
-                `${health.whisper.model} on ${health.whisper.compute}`
+                `${health.whisper.engine ?? "engine"}: ${health.whisper.model} on ${health.whisper.compute}`
               }
             >
               <ServerCog className="size-3.5" />
               {health.asr?.engine ? `${health.asr.engine} · ` : ""}
               {health.whisper.model} ({health.whisper.compute})
+              {downgraded && (
+                <span className="text-amber-300/80">
+                  (host limit, configured {health.whisper.configuredModel})
+                </span>
+              )}
               {typeof health.asr?.estimatedRtf === "number" &&
                 ` · RTF ${health.asr.estimatedRtf.toFixed(3)}`}
             </span>
@@ -336,7 +346,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 "flex cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground transition hover:border-primary/50 hover:text-foreground",
                 runningDoctor && "cursor-wait opacity-60",
               )}
-              title="Run environment diagnostics (ffmpeg build, GPU, Whisper, Gemini key, disk)"
+              title="Run environment diagnostics (ffmpeg build, GPU, ASR engine, Gemini key, disk)"
             >
               {runningDoctor ? (
                 <Loader2 className="size-3 animate-spin" />
@@ -361,14 +371,14 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       {warming && (
         <p className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
           <Loader2 className="size-3 animate-spin text-primary" />
-          Loading the {health?.asr?.engine ?? "whisper"} model (one-time,
+          Loading the {health?.asr?.engine ?? "transcription"} model (one-time,
           ~500MB-3GB)…
           {warmup?.detail && <span className="font-mono">{warmup.detail}</span>}
         </p>
       )}
       {warmupFailed && (
         <p className="mt-2 text-[11px] text-destructive">
-          Whisper warmup failed: {warmup?.detail}
+          {health?.asr?.engine ?? "ASR"} warmup failed: {warmup?.detail}
         </p>
       )}
       {warmup?.stage === "skipped" && (

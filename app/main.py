@@ -314,9 +314,14 @@ def health() -> dict:
             **live_gemini_key().status(),
         },
         "whisper": {
-            "model": settings.whisper.model,
-            "compute": settings.whisper.resolved_compute,
+            # The RESOLVED engine/model/compute, not what config.toml asks for.
+            # The host-limit downgrade (medium -> small) has to be visible in the
+            # status label, otherwise the UI advertises a model that never loads.
+            "model": engine.model,
+            "compute": engine.compute_type,
+            "configuredModel": settings.whisper.model,
             "engine": engine.engine,
+            "isWhisperx": engine.is_whisperx,
         },
         "asr": {
             # Which engine is really transcribing, which model actually loads,

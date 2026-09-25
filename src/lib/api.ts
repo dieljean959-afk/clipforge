@@ -122,7 +122,15 @@ export interface HealthDto {
   };
   warmup: { stage: string; detail: string; startedAt: number | null };
   llm: KeyStatusDto;
-  whisper: { model: string; compute: string; engine?: string };
+  // Resolved engine/model/compute (already host-limit adjusted). The raw
+  // config.toml request, when it differs, is `configuredModel`.
+  whisper: {
+    model: string;
+    compute: string;
+    engine?: string;
+    configuredModel?: string;
+    isWhisperx?: boolean;
+  };
   asr?: AsrDto;
   system: SystemStatsDto;
   disk: DiskStatsDto;
