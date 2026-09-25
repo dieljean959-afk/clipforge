@@ -253,9 +253,48 @@ def check_network() -> list[Check]:
     return [Check("network (yt-dlp fetch)", "warn", "could not reach youtube.com — URL jobs will fail, uploads still work", "")]
 
 
+def check_encode(settings: Settings) -> list[Check]:
+    """Which video encoder this host will actually use, and what it costs.
+
+    A missing hardware encoder is a WARN, not a FAIL: software rendering works,
+    it is just slow on a small host. Saying so explicitly is the point — the
+    symptom users report is "the render just stops", and the real cause is that
+    a 9:16 software encode on one vCPU runs at ~0.1x realtime.
+    """
+    from app import encode as encode_mod  # noqa: PLC0415 - avoids an import cycle
+
+    choice = encode_mod.choose(settings)
+    status = "ok" if choice.hardware else "warn"
+    fix = "" if choice.hardware else (
+        "expected on a CPU-only host: 9:16 software encoding runs at ~0.1x realtime. "
+        "Move rendering to a GPU worker (WORKER_URL), or lower [video] width/height."
+    )
+    checks = [Check("video encoder", status, encode_mod.summary(choice), fix)]
+    if choice.degraded_from:
+        checks.append(Check(
+            "x264 preset", "warn",
+            f"{choice.degraded_from} → {choice.preset} (CPU-only fallback)",
+            "raise it back to veryfast once a hardware encoder is available",
+        ))
+    checks.append(Check(
+        "render deadline", "ok",
+        f"{choice.timeout_sec // 60} min "
+        f"({'hardware' if choice.hardware else 'CPU-only fallback'} mode)",
+        "",
+    ))
+    sample_hz = encode_mod.analysis_sample_hz(30.0, hardware=choice.hardware)
+    checks.append(Check(
+        "reframe sampling", "ok",
+        f"{sample_hz:.2f} samples/s",
+        "" if choice.hardware else "coarse on CPU-only hosts to leave cycles for the encode",
+    ))
+    return checks
+
+
 def run_doctor(settings: Settings) -> dict[str, Any]:
     checks: list[Check] = []
     checks += check_ffmpeg(settings)
+    checks += check_encode(settings)
     checks += check_gpu()
     checks += check_whisper(settings)
     checks += check_llm(settings)

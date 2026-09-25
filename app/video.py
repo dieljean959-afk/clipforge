@@ -20,6 +20,7 @@ from typing import Any
 
 from loguru import logger
 
+from app import encode
 from app import subtitle as subtitle_svc
 from app.config import Settings, ffmpeg_bin, ffprobe_bin
 
@@ -42,10 +43,17 @@ def probe(path: Path) -> dict[str, Any]:
         )
         meta = json.loads(out.stdout)
         vstream = next((s for s in meta.get("streams", []) if s.get("codec_type") == "video"), None)
+        fps_raw = (vstream or {}).get("avg_frame_rate") or (vstream or {}).get("r_frame_rate") or "0/1"
+        try:
+            num, _, den = str(fps_raw).partition("/")
+            fps = float(num) / float(den or 1)
+        except (ValueError, ZeroDivisionError):
+            fps = 0.0
         return {
             "duration": float(meta.get("format", {}).get("duration", 0) or 0),
             "width": int(vstream.get("width", 0)) if vstream else 0,
             "height": int(vstream.get("height", 0)) if vstream else 0,
+            "fps": fps if fps > 0 else 30.0,
         }
     except Exception as exc:
         raise RenderError(f"ffprobe failed for {path.name}: {exc}") from exc
@@ -59,9 +67,34 @@ def verify_source(path: Path) -> None:
     logger.info(f"[video] source verified: {meta['width']}x{meta['height']}, {meta['duration']:.1f}s")
 
 
-def _run(cmd: list[str], *, timeout: int = 3600) -> None:
+def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
+    """Run ffmpeg, failing with a message that says WHICH deadline was hit.
+
+    `mode` labels the deadline in the error so a CPU-only host that ran out of
+    time is never confused with a broken encode on a GPU host.
+    """
     logger.debug("[video] " + " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        tail = (exc.stderr or b"")
+        if isinstance(tail, bytes):
+            tail = tail.decode("utf-8", "replace")
+        lines = (tail or "").strip().splitlines()[-6:]
+        progress = " | ".join(lines)
+        raise RenderError(
+            f"ffmpeg exceeded its {mode.upper()}-render deadline of "
+            f"{timeout // 60} min and was killed. "
+            + (
+                "This host has no hardware encoder, so 9:16 software encoding is "
+                "the bottleneck — lower [video] width/height or clip length, or "
+                "move the render to a GPU worker (WORKER_URL)."
+                if mode == "cpu"
+                else "The encode should not be this slow on a hardware encoder — "
+                     "check GPU health."
+            )
+            + (f" Last output: {progress}" if progress else "")
+        ) from exc
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-8:]
         raise RenderError("ffmpeg failed: " + " | ".join(tail))
@@ -97,25 +130,49 @@ def _ffmpeg_has_filter(filt: str) -> bool:
         return False
 
 
-def detect_scene_cuts(src: Path, threshold: int = 10) -> list[float]:
+def detect_scene_cuts(
+    src: Path,
+    threshold: int = 10,
+    *,
+    sample_hz: float | None = None,
+    source_fps: float = 30.0,
+) -> list[float]:
     """Return shot-boundary timestamps (seconds) via ffmpeg's scdet filter.
 
     Shot-aware reframing needs the cut list: a crop path must never be
     interpolated across a cut, because the subject jumps discontinuously.
-    Returns [] honestly when the build lacks scdet or detection fails.
+
+    `sample_hz` inspects only every Nth frame (N derived from `source_fps`).
+    This matters a lot on a CPU-only host, where the per-frame scdet work
+    competes with the encode for the same single core. Shot boundaries are
+    still found reliably because a cut is a large instantaneous score change,
+    not a gradual motion signal — it survives coarse sampling. Returns []
+    honestly when the build lacks scdet or detection fails.
     """
     if not _ffmpeg_has_filter("scdet"):
         logger.info("[video] ffmpeg build has no scdet filter — cut-aware crop disabled")
         return []
+    hz = sample_hz if sample_hz is not None else 2.0
+    filt = encode.scdet_sample_filter(threshold, hz, source_fps)
     try:
         proc = subprocess.run(
             [
                 ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(src),
-                "-vf", f"scdet=threshold={threshold}:metadata=print",
+                "-vf", filt,
                 "-an", "-f", "null", "-",
             ],
-            capture_output=True, text=True, timeout=3600,
+            capture_output=True, text=True,
+            # analysis deadline follows the render mode, so a slow CPU-only
+            # host is not killed mid-scan
+            timeout=(
+                encode.RENDER_TIMEOUT_CPU_SEC if hz < 2.0 else encode.RENDER_TIMEOUT_GPU_SEC
+            ),
         )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "[video] scene-cut detection timed out — continuing without cut-aware crop"
+        )
+        return []
     except Exception as exc:
         logger.warning(f"[video] scene-cut detection failed (continuing without cuts): {exc}")
         return []
@@ -208,11 +265,22 @@ def render_clip(
     crop_windows: list[dict] | None = None,
     silence_cuts: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Cut + reframe + burn captions into one 9:16 clip. Returns metadata."""
+    """Cut + reframe + burn captions into one 9:16 clip. Returns metadata.
+
+    Encoder, preset and deadline come from app.encode.choose(): a hardware
+    encoder is used when the host has one, and on a CPU-only host the x264
+    preset is lowered and the deadline is the long CPU one — both logged, so a
+    slower render is never a silent surprise.
+    """
     t0 = time.time()
     dest.parent.mkdir(parents=True, exist_ok=True)
     out_w, out_h = settings.video.width, settings.video.height
     clip_dur = end - start
+    enc = encode.choose(settings)
+    for note in enc.notes:
+        logger.info(f"[video] {note}")
+    logger.debug(f"[video] render config: {encode.summary(enc)}")
+    codec_args = enc.ffmpeg_codec_args()
 
     # 1) cut segment (re-encode, frame-accurate) into an intermediate.
     # Input-seeking with an explicit -t duration: unambiguous across ffmpeg
@@ -228,6 +296,10 @@ def render_clip(
         "-c:a", "aac", "-b:a", "160k",
         "-f", "mp4", str(tmp),
     ])
+    # NOTE: the intermediate cut stays libx264/veryfast on purpose. It is
+    # throwaway (deleted at the end of this function) and the FINAL encode is
+    # where quality is decided, so there is nothing to gain by slowing this
+    # down or by spending a hardware encoder on it.
 
     # 2) build the crop + trim + subtitle filtergraph
     src_meta = probe(tmp)
@@ -281,8 +353,7 @@ def render_clip(
         cmd += [
             "-filter_complex", f"[0:v]{vf}[base];" + ";".join(chain),
             "-map", prev, "-map", "0:a?",
-            "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
-            "-pix_fmt", "yuv420p",
+            *codec_args,
             "-c:a", "copy",
             "-f", "mp4", str(dest),
         ]
@@ -291,8 +362,7 @@ def render_clip(
         cmd = [
             ffmpeg_bin(), "-y", "-i", str(tmp),
             "-vf", f"{vf},subtitles={ass_escaped}",
-            "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
-            "-pix_fmt", "yuv420p",
+            *codec_args,
             "-c:a", "copy",
             "-f", "mp4", str(dest),
         ]
@@ -300,19 +370,18 @@ def render_clip(
         cmd = [
             ffmpeg_bin(), "-y", "-i", str(tmp),
             "-vf", vf,
-            "-c:v", "libx264", "-preset", settings.video.preset, "-crf", str(settings.video.crf),
-            "-pix_fmt", "yuv420p",
+            *codec_args,
             "-c:a", "copy",
             "-f", "mp4", str(dest),
         ]
-    _run(cmd)
+    _run(cmd, timeout=enc.timeout_sec, mode="gpu" if enc.hardware else "cpu")
     tmp.unlink(missing_ok=True)
 
     meta = probe(dest)
     took = time.time() - t0
     logger.info(
         f"[video] rendered {dest.name}: {meta['width']}x{meta['height']}, "
-        f"{meta['duration']:.1f}s in {took:.1f}s"
+        f"{meta['duration']:.1f}s in {took:.1f}s via {encode.summary(enc)}"
     )
     return {
         "duration": meta["duration"],
@@ -320,6 +389,11 @@ def render_clip(
         "height": meta["height"],
         "bytes": dest.stat().st_size,
         "renderMs": int(took * 1000),
+        # what actually encoded this clip, so a slow render is explainable
+        "encoder": enc.encoder or "libx264",
+        "encoderLabel": enc.label,
+        "hardwareEncoded": enc.hardware,
+        "preset": enc.preset,
     }
 
 

@@ -96,6 +96,11 @@ height = 1920
 fps = 30
 # x264 quality (lower = better). 20 is visually clean for clips.
 crf = 20
+# x264 preset. This is the SOFTWARE path: when a hardware encoder is detected
+# (NVENC/VAAPI/QSV) the render is offloaded and this value is kept as-is.
+# On a CPU-only host the preset is automatically lowered to `ultrafast`
+# (app/encode.py) because a 9:16 software encode runs at ~0.1x realtime on one
+# vCPU. Set this lower to trade quality for speed, or higher for smaller files.
 preset = "veryfast"
 # Follow the active speaker with MediaPipe when installed; center crop otherwise.
 reframe = true

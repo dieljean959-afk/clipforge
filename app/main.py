@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app import encode as encode_mod
 from app import eta, hosting, hostlimits
 from app import llm as llm_mod
 from app import subtitle as subtitle_svc
@@ -392,6 +393,7 @@ def health() -> dict:
             "hostDetail": hostlimits.describe(),
         },
         "system": hosting.system_stats(),
+        "encode": encode_mod.as_dict(encode_mod.choose(settings)),
         "disk": disk_stats(),
         "tailnetIp": hosting.tailnet_ip(),
         "limits": {

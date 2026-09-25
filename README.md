@@ -85,6 +85,29 @@ IPs, no CORS in play. Boot log shows: `[boot] API up on http://127.0.0.1:8000
 (worker: local in-process)` and `backend is UP on 127.0.0.1:8000 — /api proxy
 is live (same-origin)`.
 
+### CPU-only render degradation
+
+A 1080p60 source encoded to 9:16 with libx264 on a single vCPU runs at roughly
+**0.1x realtime**, so a 15-second clip takes minutes and long sources never
+finish. `app/encode.py` makes that degrade gracefully instead of stalling, and
+every step is reported by `app.doctor` and `GET /api/health` under `encode`:
+
+| Lever | Behaviour |
+|---|---|
+| **Hardware encoder** | NVENC → VAAPI → QSV is auto-detected and used when present. Detection is **functional**: ffmpeg must both list the encoder *and* successfully encode one frame. A `/dev/dri` node without a working driver is rejected — otherwise a merely-slow render becomes a hard "unknown encoder" failure. |
+| **x264 preset** | With no hardware encoder, the preset is lowered to `ultrafast` (never below `superfast`) and the downgrade is logged, not silent. Costs compression efficiency, not correctness. |
+| **Frame sampling** | Scene-cut detection (`scdet`) and face-tracked reframing sample every Nth frame — 2.0/s with hardware, 0.75/s on CPU-only, with the stride scaled to the source fps. Shot boundaries survive coarse sampling because a cut is a large instantaneous score change. |
+| **Render deadline** | Two separate, labelled deadlines: **20 min** on a hardware encoder (fail fast, a broken job should not hold a worker slot) and **90 min** on the CPU-only fallback. The timeout error names which one was hit and what to do about it. |
+
+The throwaway intermediate cut stays `libx264/veryfast` on purpose — it is
+deleted at the end of the render, and the final encode is where quality is
+decided.
+
+⚠️ **Hardware-dependent validation is still outstanding.** Real-content render
+timings, a true NVENC/VAAPI encode, and WhisperX performance must be measured
+on a GPU-equipped or production-equivalent host. A 1-vCPU/2-GiB sandbox encodes
+at ~0.1x realtime and is not a valid measurement of either.
+
 ### Subprocess support
 
 The pipeline uses `subprocess` **inside the backend process** (ffmpeg/ffprobe
@@ -218,6 +241,7 @@ python3 tools/compile_check.py   # compile + undefined-name check every backend 
 python3 tools/transcribe_unit_test.py  # chunking, repetition, engine logic, .wav.part regression
 python3 tools/asr_engine_test.py       # mocked queue/retry + ETA checks
 python3 tools/detect_backend_test.py   # Gemini vs Ollama detection, text-only payloads
+python3 tools/encode_profile_test.py   # encoder/preset/deadline degradation logic
 bun tools/overall_status_test.ts       # job Done/Failed/overall-progress indicator logic
 python3 -m app.doctor                  # hardware/engine/ffmpeg diagnostics
 curl localhost:8000/api/health         # worker/warmup/LLM/system status

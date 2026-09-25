@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Tests for render graceful degradation (app/encode.py).
+
+The behaviour under test is what makes a CPU-only host finish rather than
+stall: a faster x264 preset, coarser frame sampling for analysis, a deadline
+sized to the mode, and hardware-encoder detection that does NOT trust a bare
+device node.
+
+Run: python3 tools/encode_profile_test.py
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app import encode  # noqa: E402
+from app.config import load_config  # noqa: E402
+
+
+def main() -> int:
+    failures: list[str] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        print(f"   {'OK ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail else ""))
+        if not ok:
+            failures.append(name)
+
+    settings = load_config(quiet=True)
+    settings.video.preset = "veryfast"
+    settings.video.crf = 20
+
+    # --- 1. preset clamping ---------------------------------------------
+    print("== 1. x264 preset falls back on a CPU-only host")
+    preset, note = encode.resolve_preset("veryfast")
+    check("veryfast is lowered on CPU", preset == "ultrafast", f"veryfast → {preset}")
+    check("the downgrade is explained, not silent", note != "", note[:60])
+    preset, note = encode.resolve_preset("medium")
+    check("a slow preset is lowered further", preset == "ultrafast", f"medium → {preset}")
+    preset, note = encode.resolve_preset("ultrafast")
+    check("ultrafast is left alone", preset == "ultrafast" and note == "")
+    preset, note = encode.resolve_preset("superfast")
+    check("superfast is left alone (the floor)", preset == "superfast" and note == "")
+
+    # --- 2. deadlines are per-mode, not shared ---------------------------
+    print()
+    print("== 2. CPU fallback has its own, longer deadline")
+    check("CPU deadline is longer than the GPU one",
+          encode.RENDER_TIMEOUT_CPU_SEC > encode.RENDER_TIMEOUT_GPU_SEC,
+          f"cpu {encode.RENDER_TIMEOUT_CPU_SEC // 60}min > gpu {encode.RENDER_TIMEOUT_GPU_SEC // 60}min")
+    check("the CPU deadline is generous enough for a slow host",
+          encode.RENDER_TIMEOUT_CPU_SEC >= 60 * 60,
+          f"{encode.RENDER_TIMEOUT_CPU_SEC // 60} min")
+
+    encode.reset_cache()
+    real_hw = encode.hardware_encoder
+    try:
+        # software host
+        encode.hardware_encoder = lambda: ("", "x264 (software)", "")  # type: ignore[assignment]
+        cpu = encode.choose(settings)
+        check("CPU host reports software encoding", not cpu.hardware, cpu.label)
+        check("CPU host uses the long deadline",
+              cpu.timeout_sec == encode.RENDER_TIMEOUT_CPU_SEC)
+        check("CPU host records the preset downgrade",
+              cpu.degraded_from == "veryfast" and cpu.preset == "ultrafast")
+        check("CPU host explains the deadline in a note",
+              any("deadline" in n for n in cpu.notes), cpu.notes[-1][:60])
+
+        # hardware host
+        encode.hardware_encoder = lambda: ("h264_nvenc", "NVENC (NVIDIA, hardware)", "cuda")  # type: ignore[assignment]
+        gpu = encode.choose(settings)
+        check("GPU host reports hardware encoding", gpu.hardware, gpu.label)
+        check("GPU host keeps the requested preset", gpu.preset == "veryfast", gpu.preset)
+        check("GPU host uses the strict deadline",
+              gpu.timeout_sec == encode.RENDER_TIMEOUT_GPU_SEC)
+        check("GPU host records no downgrade", gpu.degraded_from == "")
+
+        # forced software (e.g. an operator escape hatch)
+        forced = encode.choose(settings, force_software=True)
+        check("force_software overrides detection", not forced.hardware, forced.label)
+        check("forced software still gets the CPU deadline",
+              forced.timeout_sec == encode.RENDER_TIMEOUT_CPU_SEC)
+    finally:
+        encode.hardware_encoder = real_hw  # type: ignore[assignment]
+        encode.reset_cache()
+
+    # --- 3. codec args per encoder --------------------------------------
+    print()
+    print("== 3. each encoder gets correct ffmpeg args")
+    libx = encode.EncoderChoice(preset="ultrafast", crf=20)
+    args = libx.ffmpeg_codec_args()
+    check("x264 path uses libx264 + preset + crf",
+          args[:2] == ["-c:v", "libx264"] and "ultrafast" in args and "20" in args, " ".join(args))
+
+    nvenc = encode.EncoderChoice(encoder="h264_nvenc", hardware=True, preset="veryfast", crf=20)
+    args = nvenc.ffmpeg_codec_args()
+    check("NVENC path uses h264_nvenc, not libx264",
+          args[:2] == ["-c:v", "h264_nvenc"] and "libx264" not in args, " ".join(args))
+    check("NVENC path uses -cq (NVENC has no CRF)", "-cq" in args)
+    check("NVENC path uses an NVENC preset, not an x264 one",
+          args[args.index("-preset") + 1] == "p5", "preset p5 (from veryfast)")
+    check("NVENC path never sends an x264 CRF", "-crf" not in args, " ".join(args))
+    # ultrafast is the CPU-fallback preset; on NVENC it maps to p4 (fastest).
+    nvenc_fast = encode.EncoderChoice(
+        encoder="h264_nvenc", hardware=True, preset="ultrafast", crf=20
+    ).ffmpeg_codec_args()
+    check("an ultrafast preset maps to NVENC p4",
+          nvenc_fast[nvenc_fast.index("-preset") + 1] == "p4", "preset p4")
+
+    vaapi = encode.EncoderChoice(encoder="h264_vaapi", hardware=True, crf=20)
+    args = vaapi.ffmpeg_codec_args()
+    check("VAAPI path uses a bitrate, not CRF",
+          "-b:v" in args and "-crf" not in args, " ".join(args))
+
+    qsv = encode.EncoderChoice(encoder="h264_qsv", hardware=True, crf=20)
+    args = qsv.ffmpeg_codec_args()
+    check("QSV path uses global_quality", "-global_quality" in args, " ".join(args))
+
+    # --- 4. frame sampling for analysis ---------------------------------
+    print()
+    print("== 4. analysis samples fewer frames on a CPU-only host")
+    hw_hz = encode.analysis_sample_hz(60.0, hardware=True)
+    cpu_hz = encode.analysis_sample_hz(60.0, hardware=False)
+    check("hardware keeps the dense sampling", hw_hz == 2.0, f"{hw_hz}/s")
+    check("CPU-only sampling is coarser", cpu_hz < hw_hz, f"{cpu_hz}/s < {hw_hz}/s")
+    check("CPU-only sampling is still frequent enough to find shots",
+          cpu_hz >= 0.5, f"{cpu_hz}/s")
+
+    # scdet must actually subsample frames, or the sampling is cosmetic.
+    cpu_filter = encode.scdet_sample_filter(10, cpu_hz, 60.0)
+    check("scdet drops frames on a CPU-only host", "select=" in cpu_filter, cpu_filter)
+    hw_filter = encode.scdet_sample_filter(10, hw_hz, 60.0)
+    check("scdet still subsamples on hardware (less often)",
+          "select=" in hw_filter and hw_filter != cpu_filter, hw_filter)
+    check("scdet filter keeps the real detector", "scdet=" in cpu_filter and "scdet=" in hw_filter)
+    # 60fps and 30fps inputs should analyse at a similar wall-clock rate.
+    f60 = encode.scdet_sample_filter(10, cpu_hz, 60.0)
+    f30 = encode.scdet_sample_filter(10, cpu_hz, 30.0)
+    check("stride scales with source fps (60fps skips more frames than 30fps)",
+          int(f60.split("\\,")[1].split(")")[0]) > int(f30.split("\\,")[1].split(")")[0]),
+          f"60fps {f60} vs 30fps {f30}")
+    check("a high sample rate degenerates to no select (every frame)",
+          "select=" not in encode.scdet_sample_filter(10, 999.0, 30.0))
+
+    # --- 5. a listed-but-unusable encoder is never selected -------------
+    print()
+    print("== 5. a listed hardware encoder is verified before use")
+    check("the functional probe exists", callable(encode._encoder_works))
+    # A codec that definitely is not compiled in must fail the probe.
+    check("a bogus encoder fails the functional probe",
+          encode._encoder_works("definitely_not_an_encoder", "") is False)
+    # x264 is a real software encoder and must pass — proves the probe is not
+    # just failing everything.
+    check("a real encoder passes the functional probe",
+          encode._encoder_works("libx264", "") is True)
+
+    # summary should name the mode so logs are greppable
+    check("summary names the deadline", "deadline" in encode.summary(cpu),
+          encode.summary(cpu))
+
+    print()
+    if failures:
+        print(f"ENCODE PROFILE: {len(failures)} FAILURE(S): {failures}")
+        return 1
+    print("ENCODE PROFILE: ALL CHECKS PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

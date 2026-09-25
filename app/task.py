@@ -24,7 +24,7 @@ from typing import Any
 
 from loguru import logger
 
-from app import asr, download, eta, llm, reframe, subtitle, vad, video
+from app import asr, download, encode, eta, llm, reframe, subtitle, vad, video
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
@@ -397,13 +397,29 @@ class Pipeline:
         if not ws.is_done("reframe"):
             self._progress(job_id, "rendering", 0, "Detecting shots and framing 9:16 crops...")
             cuts: list[float] = []
+            # Analysis and encoding share one CPU on a hardware-less host, so
+            # sample frames more coarsely there (see app.encode).
+            enc_choice = encode.choose(self.settings)
+            sample_hz = encode.analysis_sample_hz(
+                src_meta.get("fps", 30.0), hardware=enc_choice.hardware
+            )
             if self.settings.video.reframe:
-                cuts = video.detect_scene_cuts(src)
+                self._log(
+                    job_id,
+                    f"reframe analysis at {sample_hz:.2f} samples/s "
+                    f"({enc_choice.label})",
+                )
+                cuts = video.detect_scene_cuts(
+                    src,
+                    sample_hz=sample_hz,
+                    source_fps=src_meta.get("fps", 30.0),
+                )
             ws.write_json("reframe", "cuts.json", cuts)
             for i, c in enumerate(candidates):
                 windows, used_mp = reframe.face_crop_windows(
                     str(src), c["start"], c["end"],
                     src_meta["width"], src_meta["height"],
+                    sample_hz=sample_hz,
                     scene_cuts=cuts,
                 )
                 ws.write_json("reframe", f"clip_{i + 1:02d}.json", {
