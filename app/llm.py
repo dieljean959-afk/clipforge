@@ -235,7 +235,7 @@ def _persist_model_fix(settings: Settings, new_model: str) -> None:
             cfg_path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
             logger.info(f"[llm] persisted model fix to config.toml [gemini]: {new_model}")
         else:
-            logger.warning(f"[llm] could not find model = line under [gemini] in config.toml")
+            logger.warning("[llm] could not find model = line under [gemini] in config.toml")
     except Exception as exc:
         logger.warning(f"[llm] could not persist model fix to config.toml: {exc}")
     # keep this process consistent immediately

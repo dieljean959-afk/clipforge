@@ -6,7 +6,6 @@ from __future__ import annotations
 import base64
 import os
 import sys
-import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

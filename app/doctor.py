@@ -9,13 +9,10 @@ messages. Every check returns ok/warn/fail plus a `fix` hint.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any
 
 from app import hostlimits

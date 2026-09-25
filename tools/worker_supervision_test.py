@@ -14,10 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import app.worker as worker_mod
 from app.config import load_config
 from app.stages import STAGES, StageWorkspace
 from app.store import LocalStore
-import app.worker as worker_mod
 from app.worker import InProcessWorker
 
 

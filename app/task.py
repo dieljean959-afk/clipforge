@@ -17,7 +17,6 @@ the job's errorDetail — never swallowed.
 
 from __future__ import annotations
 
-import json
 import time
 import traceback
 from pathlib import Path

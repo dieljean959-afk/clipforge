@@ -12,12 +12,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import (  # noqa: E402
+    ROOT,
     _decrypt_encrypted_values,
     _fresh_env_snapshot,
     _load_env_files,
     _resolve_gemini_key,
 )
-from app.config import ROOT  # noqa: E402
 
 
 def main() -> int:

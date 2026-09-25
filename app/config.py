@@ -89,7 +89,6 @@ def _dotenvx_decrypt(private_key_hex: str, encrypted_b64: str) -> str:
     - AES-256-GCM, nonce = blob[65:81], ciphertext+tag = blob[81:].
     """
     from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 

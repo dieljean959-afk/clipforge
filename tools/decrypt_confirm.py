@@ -53,10 +53,11 @@ def main() -> int:
     # (the GCM tag comes BEFORE the ciphertext — see symEncrypt in the lib).
 
     # ---- direction 2: python encrypt -> JS decrypt
+    import os
+
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-    import os
 
     P = 2**256 - 2**32 - 977
     N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -102,7 +103,6 @@ def main() -> int:
 
     priv = ec.generate_private_key(ec.SECP256K1())
     priv_hex = format(priv.private_numbers().private_value, "064x")
-    pub_hex = "04" + format(priv.private_numbers().public_numbers.x, "064x") + format(priv.private_numbers().public_numbers.y, "064x")
     body = py_encrypt(priv_hex, b"python-to-js-456")
     payload = json.dumps({"priv": priv_hex, "body": body})
     got2 = subprocess.run(

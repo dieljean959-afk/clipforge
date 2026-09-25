@@ -18,9 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app import eta
-from app import hosting
-from app import hostlimits
+from app import eta, hosting, hostlimits
 from app import subtitle as subtitle_svc
 from app import video as video_svc
 from app.config import (
