@@ -28,6 +28,7 @@ from typing import Any
 from loguru import logger
 
 from app.config import ROOT, Settings
+from app.stages import remove_workspace
 from app.store import LocalStore
 
 # --------------------------------------------------------------------------- #
@@ -351,6 +352,9 @@ class RetentionCleaner:
                     self.settings.app.paths.outputs_dir / job_id,
                 ):
                     _shutil.rmtree(d, ignore_errors=True)
+                # per-stage mirrors: extracted audio WAVs + per-chunk transcript
+                # caches are the biggest artifacts a long job leaves behind
+                remove_workspace(self.settings.app.paths.data_dir, job_id)
                 removed += 1
                 logger.info(f"[hosting] retention: removed job {job_id} artifacts")
         return removed

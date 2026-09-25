@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Unit checks for the repetition-hardened transcription helpers.
+"""Unit checks for the repetition-hardened, engine-backed transcription helpers.
 
-Pure-logic tests (no model load): window planning, overlap dedup, and the
-anti-repetition kwargs. Run: python3 tools/transcribe_unit_test.py
+Pure-logic tests (no model load): chunk planning, overlap dedup, the
+anti-repetition kwargs shared by both engines, and the engine resolver.
+Run: python3 tools/transcribe_unit_test.py
 """
 from __future__ import annotations
 
@@ -11,9 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import asr  # noqa: E402
 from app.subtitle import (  # noqa: E402
+    CHUNK_SEC,
     OVERLAP_SEC,
-    WINDOW_SEC,
     WHISPER_KWARGS,
     Word,
     _dedupe_words,
@@ -29,39 +31,51 @@ def main() -> int:
         if not ok:
             failures.append(name)
 
-    # --- anti-repetition kwargs ------------------------------------------
+    # --- anti-repetition kwargs (single source of truth: app.asr) ---------
     check("condition_on_previous_text=False", WHISPER_KWARGS["condition_on_previous_text"] is False)
     check("compression_ratio_threshold=2.2", WHISPER_KWARGS["compression_ratio_threshold"] == 2.2)
     check("no_speech_threshold=0.6", WHISPER_KWARGS["no_speech_threshold"] == 0.6)
     check("vad_filter=True", WHISPER_KWARGS["vad_filter"] is True)
     check("word_timestamps=True", WHISPER_KWARGS["word_timestamps"] is True)
+    check(
+        "kwargs are shared with the engine layer (no drift)",
+        asr.ANTI_REPETITION["condition_on_previous_text"] is False
+        and WHISPER_KWARGS["compression_ratio_threshold"]
+        == asr.ANTI_REPETITION["compression_ratio_threshold"],
+    )
 
-    # --- window planning ---------------------------------------------------
-    check("short file → single window", _plan_windows(10.0) == [(0.0, 10.0)],
+    # --- chunk planning (resume units, not decode units) -------------------
+    check("short file → single chunk", _plan_windows(10.0) == [(0.0, 10.0)],
           str(_plan_windows(10.0)))
-    long = _plan_windows(95.0)
-    check("95s file → multiple ~30s windows", len(long) == 4 and long[0] == (0.0, 30.0),
-          f"{len(long)} windows, first={long[0]}, last={long[-1]}")
-    check("windows overlap (no gaps)",
+    check("95s file → single chunk (under CHUNK_SEC)", _plan_windows(95.0) == [(0.0, 95.0)],
+          str(_plan_windows(95.0)))
+
+    # 2-hour source: the resume granularity must stay coarse (dozens of chunks,
+    # not hundreds) while still covering the whole file.
+    long = _plan_windows(7200.0)
+    check("2h file → a handful of chunks (not hundreds)", 20 <= len(long) <= 30,
+          f"{len(long)} chunks")
+    check("chunks never exceed CHUNK_SEC",
+          all(e - s <= CHUNK_SEC + 1e-9 for s, e in long))
+    check("chunks overlap (no gaps)",
           all(s2 < e1 for (s1, e1), (s2, e2) in zip(long, long[1:])))
-    check("windows cover to the end", abs(long[-1][1] - 95.0) < 1e-9, f"last end={long[-1][1]}")
-    check("windows never exceed WINDOW_SEC",
-          all(e - s <= WINDOW_SEC + 1e-9 for s, e in long))
+    check("chunks cover to the end", abs(long[-1][1] - 7200.0) < 1e-9, f"last end={long[-1][1]}")
+    check("overlap matches OVERLAP_SEC",
+          all(abs((e1 - s2) - OVERLAP_SEC) < 1e-6 for (s1, e1), (s2, e2) in zip(long, long[1:])),
+          f"overlap={OVERLAP_SEC}")
 
     # --- overlap dedup -----------------------------------------------------
-    # window 1 = [0, 30): "world" is spoken at 29.4s, near the end of it.
-    # window 2 = [29, 60): the same "world" is re-decoded inside the 1s overlap
-    # and lands at the SAME absolute time (local 0.4 + offset 29). Dedupe must
-    # drop the twin. Duplicates never appear at different absolute times —
-    # that would be genuine repeated speech (checked below).
-    win1 = [Word(0.0, 0.3, "hello"), Word(29.4, 29.8, "world")]
-    win2 = [Word(29.4, 29.8, "world"), Word(30.0, 30.4, "again")]
+    # chunk 1 = [0, 300): "world" is spoken at 299.4s, near the end of it.
+    # chunk 2 = [298, 600): the same "world" is re-decoded inside the overlap
+    # and lands at the SAME absolute time. Dedupe must drop the twin, while
+    # genuine repeated speech at different times is preserved.
+    win1 = [Word(0.0, 0.3, "hello"), Word(299.4, 299.8, "world")]
+    win2 = [Word(299.4, 299.8, "world"), Word(300.0, 300.4, "again")]
     out = _dedupe_words(win1 + win2)
     check("overlap duplicate removed", [w.word for w in out] == ["hello", "world", "again"],
           str([w.word for w in out]))
 
-    # the same word 29s apart is real speech, not an overlap artifact — kept
-    far = [Word(0.4, 0.8, "world"), Word(29.4, 29.8, "world")]
+    far = [Word(0.4, 0.8, "world"), Word(299.4, 299.8, "world")]
     check("same word far apart in time kept", len(_dedupe_words(far)) == 2)
 
     # VAD padding can re-cut a word as an exact-timestamp twin — dropped
@@ -81,12 +95,37 @@ def main() -> int:
     check("case/punctuation normalized for dup detection",
           len(_dedupe_words(punct)) == 1, str([w.word for w in _dedupe_words(punct)]))
 
+    # a word just outside the overlap window is NOT treated as a duplicate
+    edge = [Word(1.0, 1.2, "word"), Word(1.0 + OVERLAP_SEC + 0.5, 1.2 + OVERLAP_SEC + 0.5, "word")]
+    check("word outside the overlap window kept", len(_dedupe_words(edge)) == 2)
+
+    # --- engine resolution -------------------------------------------------
+    check("engine names are the documented pair",
+          asr.ENGINES == ("whisperx", "faster-whisper"), str(asr.ENGINES))
+    ok, reason = asr.whisperx_available()
+    check("whisperx availability is reported honestly", isinstance(ok, bool) and bool(reason),
+          f"{ok} — {reason}")
+    check("batch size is clamped to a sane range", 1 <= asr.batch_size(_Settings()) <= 64)
+    check("whisperx_available() never raises", reason != "")
+
     print()
     if failures:
         print(f"TRANSCRIBE UNIT: {len(failures)} FAILURE(S): {failures}")
         return 1
     print("TRANSCRIBE UNIT: ALL CHECKS PASSED")
     return 0
+
+
+class _Settings:
+    """Minimal stand-in for Settings.whisper (engine resolution is pure)."""
+
+    class whisper:  # noqa: N801
+        model = "medium"
+        device = "cpu"
+        compute_type = "int8"
+        language = "auto"
+        engine = "auto"
+        batch_size = 8
 
 
 if __name__ == "__main__":

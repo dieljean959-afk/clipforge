@@ -29,6 +29,7 @@ import {
   STAGE_LABELS,
   fmtClock,
   fmtDate,
+  fmtEta,
   sourceLabel,
   type ClipStage,
   type JobDoc,
@@ -204,18 +205,39 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
                 {job.progressDetail ?? `${STAGE_LABELS[job.stage as ClipStage]}...`}
               </span>
             </span>
-            <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
+            <span className="flex shrink-0 items-center gap-2 font-mono tabular-nums text-muted-foreground">
+              {/* live ETA — measured once progress exists, RTF-prior before that */}
+              {typeof job.stageEtaSec === "number" && (
+                <span
+                  className="text-primary/80"
+                  title={
+                    job.etaSource === "measured"
+                      ? "Estimated from measured progress"
+                      : "Estimated from this host's average transcription speed (RTF)"
+                  }
+                >
+                  ~{fmtEta(job.stageEtaSec)} left
+                </span>
+              )}
               {Math.round(job.progress)}%
             </span>
           </div>
           <Progress value={job.progress} className="h-1.5" />
-          <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 text-[11px] text-muted-foreground">
             <span>
               {job.unitsDone !== undefined && job.unitsDone !== null &&
               job.unitsTotal !== undefined && job.unitsTotal !== null
                 ? `${fmtUnits(job.unitLabel ?? undefined, job.unitsDone)} of ${fmtUnits(job.unitLabel ?? undefined, job.unitsTotal)}`
-                : "Waiting for worker…"}
+                : job.queuePosition != null
+                  ? queuedLabel(job.queuePosition)
+                  : "Starting on the server worker…"}
             </span>
+            {typeof job.totalEtaSec === "number" && (
+              <span>
+                whole job ~{fmtEta(job.totalEtaSec)}
+                {job.etaSource !== "measured" && " (estimate)"}
+              </span>
+            )}
           </div>
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
@@ -282,6 +304,12 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
       </Dialog>
     </div>
   );
+}
+
+/** "Waiting behind 2 other jobs" — a backed-up queue is not a stuck job. */
+function queuedLabel(position: number): string {
+  if (position <= 0) return "Next up — starting on the server worker…";
+  return `Waiting behind ${position} other job${position > 1 ? "s" : ""}…`;
 }
 
 /** Unit-aware value formatting: "142 MB", "4 min", "chunk 2". */

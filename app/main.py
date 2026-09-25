@@ -18,7 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app import eta
 from app import hosting
+from app import hostlimits
 from app import subtitle as subtitle_svc
 from app import video as video_svc
 from app.config import (
@@ -36,7 +38,7 @@ from app.config import (
 )
 from app.download import probe_url
 from app.hosting import RetentionCleaner, disk_stats
-from app.stages import StageWorkspace
+from app.stages import StageWorkspace, remove_workspace
 from app.store import LocalStore
 from app.worker import InProcessWorker
 
@@ -57,13 +59,26 @@ MIN_FREE_BYTES = 1.5 * 1024**3
 
 
 def _do_warmup() -> None:
-    """Pre-download / load the Whisper model once, with honest progress."""
+    """Pre-download / load the model once, with honest progress."""
     if settings.hosted.worker_url:
         # dispatch mode: rendering happens on the home machine — do not burn
         # sandbox RAM/disk on a model this process will never use.
         warmup["stage"] = "skipped"
         warmup["detail"] = "dispatch mode — the remote worker loads its own model"
         logger.info("[boot] Whisper warmup skipped (remote worker dispatch mode)")
+        return
+    # Tight-memory hosts: holding the model in the API process would leave too
+    # little for the job that has to load its own copy, so the API process would
+    # be the thing that OOMs. Jobs still load the model themselves on first use.
+    headroom_need = hostlimits.per_job_bytes(settings.whisper.model) * 2
+    limit = hostlimits.effective_memory_bytes()
+    if limit is not None and headroom_need > limit:
+        warmup["stage"] = "skipped"
+        warmup["detail"] = (
+            f"skipped to save memory — {hostlimits.describe()}; each job loads its own model "
+            "(the first job therefore starts a little slower)"
+        )
+        logger.info(f"[boot] Whisper warmup skipped: {warmup['detail']}")
         return
     warmup["startedAt"] = time.time()
     warmup["stage"] = "loading_model"
@@ -73,10 +88,10 @@ def _do_warmup() -> None:
             warmup["detail"] = line
             logger.info(f"[warmup] {line}")
 
-        subtitle_svc.predownload_model(settings, on_log=on_log)
+        transcript = subtitle_svc.predownload_model(settings, on_log=on_log)
         warmup["stage"] = "ready"
-        warmup["detail"] = f"loaded in {time.time() - t0:.1f}s"
-        logger.info(f"[boot] Whisper model loaded: {settings.whisper.model} in {time.time() - t0:.1f}s")
+        warmup["detail"] = f"{transcript.engine} / {transcript.model_size} loaded in {time.time() - t0:.1f}s"
+        logger.info(f"[boot] ASR model loaded: {warmup['detail']}")
     except Exception as exc:
         warmup["stage"] = "failed"
         warmup["detail"] = str(exc)
@@ -284,6 +299,11 @@ def verify_clips(jobId: str | None = None) -> dict:
 def health() -> dict:
     remote = hosting.remote_probe(settings) if settings.hosted.worker_url else None
     worker_status = worker.status()
+    engine = subtitle_svc.engine_status(settings)
+    rtf_store = eta.store(settings.app.paths.data_dir)
+    rtf_value, rtf_source = rtf_store.effective_rtf(
+        engine.engine, engine.device, engine.model, engine.compute_type
+    )
     return {
         "ok": True,
         "version": "1.1.0",
@@ -298,6 +318,18 @@ def health() -> dict:
         "whisper": {
             "model": settings.whisper.model,
             "compute": settings.whisper.resolved_compute,
+            "engine": engine.engine,
+        },
+        "asr": {
+            # Which engine is really transcribing, which model actually loads,
+            # and the RTF this host has measured — the same numbers the ETA is
+            # derived from.
+            **engine.as_dict(),
+            "estimatedRtf": round(rtf_value, 4),
+            "rtfSource": rtf_source,
+            "rtfHistory": rtf_store.snapshot(),
+            "host": hostlimits.limits(),
+            "hostDetail": hostlimits.describe(),
         },
         "system": hosting.system_stats(),
         "disk": disk_stats(),
@@ -498,7 +530,13 @@ async def upload_job(
 
 @app.get("/api/jobs")
 def list_jobs() -> list[dict]:
-    return store.list_jobs()
+    jobs = store.list_jobs()
+    # live queue positions — a job waiting at 0% must be distinguishable from
+    # one that is genuinely stuck
+    positions = worker.queue_snapshot()
+    for job in jobs:
+        job["queuePosition"] = positions.get(job["_id"])
+    return jobs
 
 
 @app.get("/api/jobs/{job_id}")
@@ -506,6 +544,7 @@ def get_job(job_id: str) -> dict:
     job = store.get_job(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
+    job["queuePosition"] = worker.queue_snapshot().get(job_id)
     return job
 
 
@@ -514,6 +553,9 @@ def delete_job(job_id: str) -> dict:
     ok = store.delete_job(job_id)
     if not ok:
         raise HTTPException(404, "job not found")
+    # stage mirrors (per-chunk transcript caches, the extracted audio WAV) are
+    # not part of the job store and would otherwise accumulate forever
+    remove_workspace(settings.app.paths.data_dir, job_id)
     return {"deleted": True}
 
 

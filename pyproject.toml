@@ -13,12 +13,21 @@ dependencies = [
   "python-dotenv>=1.0",
   "loguru>=0.7",
   "faster-whisper>=1.1",
+  "numpy>=1.26",
   "yt-dlp>=2024.10.22",
   "google-genai>=0.6",
   "pillow>=10.4",
 ]
 
 [project.optional-dependencies]
+# WhisperX: the same CTranslate2 engine as faster-whisper plus a wav2vec2
+# forced-alignment pass for genuinely accurate word-level timestamps (caption
+# sync + clip highlighting depend on those). Heavy — pulls torch, torchaudio
+# and pyannote-audio (multi-GB) — so it is opt-in. Without it the app runs
+# faster-whisper's own BatchedInferencePipeline: identical batching speed-up,
+# engine-native word timestamps. `config.toml [whisper] engine` selects between
+# them (`auto` prefers WhisperX when importable).
+whisperx = ["whisperx>=3.3"]
 # heavy extras installed by start.sh --with-extras (or manually)
 gpu = ["ctranslate2>=4.3"]
 vad = ["silero-vad>=5.1", "torch>=2.2", "numpy>=1.26"]

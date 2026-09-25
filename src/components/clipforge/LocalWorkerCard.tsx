@@ -264,9 +264,18 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 tailnet {health.tailnetIp}
               </StatLine>
             )}
-            <span className="flex items-center gap-1 text-muted-foreground">
+            <span
+              className="flex items-center gap-1 text-muted-foreground"
+              title={
+                health.asr?.detail ??
+                `${health.whisper.model} on ${health.whisper.compute}`
+              }
+            >
               <ServerCog className="size-3.5" />
-              Whisper: {health.whisper.model} ({health.whisper.compute})
+              {health.asr?.engine ? `${health.asr.engine} · ` : ""}
+              {health.whisper.model} ({health.whisper.compute})
+              {typeof health.asr?.estimatedRtf === "number" &&
+                ` · RTF ${health.asr.estimatedRtf.toFixed(3)}`}
             </span>
             <span
               className={cn(
@@ -336,9 +345,15 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               )}
               {runningDoctor ? "Checking…" : "Doctor"}
             </button>
-            {health.worker.queueDepth > 0 && (
-              <span className="text-muted-foreground">queue: {health.worker.queueDepth}</span>
-            )}
+            <span
+              className="text-muted-foreground"
+              title="Each slot runs its own child process, so a hung job cannot block the queue"
+            >
+              {health.worker.concurrency ?? 1} worker
+              {(health.worker.concurrency ?? 1) > 1 ? "s" : ""} ·{" "}
+              {health.worker.activeCount ?? 0} running
+              {health.worker.queueDepth > 0 ? ` · ${health.worker.queueDepth} queued` : ""}
+            </span>
           </>
         )}
       </div>
@@ -346,7 +361,8 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       {warming && (
         <p className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
           <Loader2 className="size-3 animate-spin text-primary" />
-          Downloading Whisper model (one-time, ~500MB-3GB)…
+          Loading the {health?.asr?.engine ?? "whisper"} model (one-time,
+          ~500MB-3GB)…
           {warmup?.detail && <span className="font-mono">{warmup.detail}</span>}
         </p>
       )}

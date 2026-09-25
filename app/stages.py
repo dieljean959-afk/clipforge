@@ -35,11 +35,27 @@ from loguru import logger
 STAGES = ["fetch", "transcribe", "detect", "reframe", "captions", "export"]
 
 
+def workspace_root(data_dir: Path, job_id: str) -> Path:
+    return Path(data_dir) / "work" / job_id
+
+
+def remove_workspace(data_dir: Path, job_id: str) -> None:
+    """Delete a job's stage artifacts (called when the job itself is deleted).
+
+    Without this the per-stage mirrors — including the extracted audio WAV and
+    the per-chunk transcript caches — accumulate forever on a hosted disk.
+    """
+    root = workspace_root(data_dir, job_id)
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+        logger.info(f"[stages] removed workspace {root}")
+
+
 class StageWorkspace:
     """Per-job artifact store rooted at data/work/{job_id}."""
 
     def __init__(self, data_dir: Path, job_id: str) -> None:
-        self.root = Path(data_dir) / "work" / job_id
+        self.root = workspace_root(data_dir, job_id)
         self.root.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ #

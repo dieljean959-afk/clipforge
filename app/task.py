@@ -25,17 +25,23 @@ from typing import Any
 
 from loguru import logger
 
-from app import download, llm, reframe, subtitle, vad, video
+from app import asr, download, eta, llm, reframe, subtitle, vad, video
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
 from app.store import LocalStore
+
+# Stages whose ETA still has to account for detection + rendering afterwards.
+_PRE_TAIL_STAGES = {"queued", "grabbing", "transcribing"}
 
 
 class Pipeline:
     def __init__(self, settings: Settings, store: LocalStore) -> None:
         self.settings = settings
         self.store = store
+        # Remaining-time prior for the CURRENT stage (e.g. duration x RTF while
+        # transcribing). Reset by _progress whenever the stage changes.
+        self._prior_eta_sec: float | None = None
 
     # ------------------------------------------------------------------
     # progress / logging helpers
@@ -51,10 +57,47 @@ class Pipeline:
         unit_label: str | None = None,
         units_done: float | None = None,
         units_total: float | None = None,
+        prior_eta_sec: float | None = None,
     ) -> None:
+        """Write progress AND a live remaining-time estimate.
+
+        The ETA comes from measured progress once the stage has visibly moved
+        (elapsed / done * remaining) and from an RTF prior before that, so a
+        long transcription shows a number from the first percent instead of an
+        indefinite spinner. Every estimate is labelled with how it was derived
+        (``etaSource``) so the UI never presents a guess as a measurement.
+        """
         job = self.store.get_job(job_id)
         if job is None:
             return
+        now_ms = int(time.time() * 1000)
+        fraction = max(0.0, min(1.0, pct))
+        prev_stage = job.get("stage")
+        if prev_stage != stage:
+            self._prior_eta_sec = None
+            timings = list(job.get("stageTimings") or [])
+            prev_start = job.get("stageStartedAt")
+            if prev_stage and prev_start:
+                timings.append({
+                    "stage": prev_stage,
+                    "sec": round(max(0.0, (now_ms - prev_start) / 1000), 1),
+                })
+            job["stageTimings"] = timings[-12:]
+            job["stageStartedAt"] = now_ms
+        if prior_eta_sec is not None:
+            self._prior_eta_sec = float(prior_eta_sec)
+
+        elapsed = max(0.0, (now_ms - (job.get("stageStartedAt") or now_ms)) / 1000)
+        stage_eta, eta_source = eta.estimate(
+            elapsed_sec=elapsed,
+            fraction=fraction,
+            prior_remaining_sec=self._prior_eta_sec,
+        )
+        tail = 0.0
+        if stage in _PRE_TAIL_STAGES:
+            opts = job.get("options") or {}
+            tail = eta.tail_estimate_sec(opts.get("maxClips") or self.settings.gemini.max_clips)
+
         job.update({
             "stage": stage,
             "progress": max(0.0, min(100.0, pct * 100)),
@@ -62,7 +105,10 @@ class Pipeline:
             "unitLabel": unit_label,
             "unitsDone": units_done,
             "unitsTotal": units_total,
-            "lastProgressAt": int(time.time() * 1000),
+            "stageEtaSec": None if stage_eta is None else round(stage_eta, 1),
+            "totalEtaSec": None if stage_eta is None else round(stage_eta + tail, 1),
+            "etaSource": eta_source,
+            "lastProgressAt": now_ms,
         })
         self.store.write_job(job)
 
@@ -136,7 +182,9 @@ class Pipeline:
             self._fail(job_id, f"AI detection failed: {exc}", self._detail(exc))
         except download.DownloadError as exc:
             self._fail(job_id, f"Could not fetch video: {exc}", self._detail(exc))
-        except subtitle.TranscribeError as exc:
+        except asr.AsrError as exc:
+            # covers subtitle.TranscribeError too — one class of readable
+            # transcription failure reaches the UI either way
             self._fail(job_id, f"Transcription failed: {exc}", self._detail(exc))
         except video.RenderError as exc:
             self._fail(job_id, f"Render failed: {exc}", self._detail(exc))
@@ -219,36 +267,72 @@ class Pipeline:
                     words=words,
                     duration=float(data.get("duration", 0)),
                     model_size=str(data.get("model", self.settings.whisper.model)),
+                    engine=str(data.get("engine", "")),
                 )
                 self._set_word_count(job_id, len(words))
                 return transcript
 
-        self._progress(job_id, "transcribing", 0, "Whisper is transcribing word timings...")
-        self._log(job_id, f"Stage: transcribe — model '{self.settings.whisper.model}'")
+        # ---- engine + ETA prior -------------------------------------------
+        engine = subtitle.engine_status(self.settings)
+        rtf_store = eta.store(self.settings.app.paths.data_dir)
+        rtf, rtf_source = rtf_store.effective_rtf(
+            engine.engine, engine.device, engine.model, engine.compute_type
+        )
+        job_now = self.store.get_job(job_id) or job
+        duration = float(job_now.get("durationSec") or 0) or 0.0
+        prior_eta = eta.eta_from_prior(duration, rtf) if duration > 0 else None
+        self._log(
+            job_id,
+            f"Stage: transcribe — engine {engine.engine} "
+            f"({engine.device}/{engine.compute_type}, batch {engine.batch_size}), "
+            f"model '{engine.model}' | ETA basis: RTF {rtf:.3f} ({rtf_source})"
+            + (f" → ~{prior_eta / 60:.1f} min for {duration / 60:.1f} min of audio" if prior_eta else ""),
+        )
+        detail = f"{engine.engine} is transcribing word timings..."
+        self._progress(job_id, "transcribing", 0, detail, prior_eta_sec=prior_eta)
 
         def on_progress(frac: float) -> None:
-            job_now = self.store.get_job(job_id)
-            total = job_now.get("durationSec") or 0 if job_now else 0
+            now_job = self.store.get_job(job_id)
+            total = (now_job.get("durationSec") or 0) if now_job else 0
             self._progress(
-                job_id, "transcribing", frac, "Whisper is transcribing word timings...",
+                job_id, "transcribing", frac, detail,
                 unit_label="min",
                 units_done=round(frac * (total / 60), 1),
                 units_total=round(total / 60, 1),
+                prior_eta_sec=prior_eta,
             )
 
         transcript = subtitle.transcribe(
             src, self.settings, on_progress=on_progress,
-            cache_dir=ws.stage_dir("transcribe") / "windows",
+            cache_dir=ws.stage_dir("transcribe") / "chunks",
         )
+        # Record what this host actually achieved so the next job's ETA starts
+        # from a measurement instead of the documented prior.
+        if transcript.rtf is not None:
+            rtf_store.observe(
+                eta.rtf_key(transcript.engine or engine.engine, engine.device, engine.model),
+                transcript.rtf,
+                audio_seconds=transcript.duration,
+                engine=transcript.engine or engine.engine,
+                device=engine.device,
+                model=engine.model,
+            )
         ws.write_json("transcribe", "words.json", {
             "words": [w.as_dict() for w in transcript.words],
             "duration": transcript.duration,
             "model": transcript.model_size,
+            "engine": transcript.engine,
+            "rtf": transcript.rtf,
         })
         ws.mark_done("transcribe", artifacts=["transcribe/words.json"],
                      words=len(transcript.words))
         self._set_word_count(job_id, len(transcript.words))
-        self._log(job_id, f"transcribed {len(transcript.words)} words in {transcript.duration:.1f}s of audio")
+        self._log(
+            job_id,
+            f"transcribed {len(transcript.words)} words in {transcript.duration:.1f}s of audio "
+            f"via {transcript.engine or engine.engine}"
+            + (f" (RTF {transcript.rtf:.3f})" if transcript.rtf is not None else ""),
+        )
         return transcript
 
     def _set_word_count(self, job_id: str, count: int) -> None:

@@ -1,4 +1,10 @@
-"""Subtitle service: faster-whisper word-level transcription + ASS captions.
+"""Subtitle service: WhisperX/batched-whisper word-level transcription + ASS captions.
+
+Transcription is delegated to ``app.asr`` (WhisperX when installed, otherwise
+faster-whisper's batched CTranslate2 pipeline — see that module for why). This
+module owns the parts that do not depend on the engine: resumable chunk
+planning, overlap de-duplication, RTF measurement, progress reporting and the
+ASS/Pillow caption rendering.
 
 ASS style matches the reference look: bold white text with a thick neon-green
 outline, word-by-word pop-in, 2-3 words visible, lower-third. If ImageMagick
@@ -18,48 +24,46 @@ from typing import Any
 
 from loguru import logger
 
+from app import asr
 from app.config import Settings, ffmpeg_bin, ffprobe_bin
 
 
-class TranscribeError(Exception):
-    pass
+class TranscribeError(asr.AsrError):
+    """Transcription failed. Subclasses AsrError so callers can catch either."""
 
 
 # --------------------------------------------------------------------------- #
 # Anti-hallucination tuning
 #
 # Whisper is known to enter repetition loops on silent or music-only segments
-# ("Thank you for watching..." x40). Three defenses:
-#   1. condition_on_previous_text=False — each window decodes without seeing
-#      previous text, so a hallucination cannot anchor the next window.
+# ("Thank you for watching..." x40). The settings themselves live in app.asr
+# (single source of truth, shared by both engines); re-exported here because
+# the test-suite and older callers import them from this module:
+#   1. condition_on_previous_text=False — each chunk decodes without seeing
+#      previous text, so a hallucination cannot anchor the next chunk.
 #   2. compression_ratio_threshold — segments whose compressed text is far
 #      smaller than the raw text are repetitive; they are dropped (not kept).
 #   3. no_speech_threshold — segments with high silence probability are
 #      skipped, so near-silent audio yields no words instead of fantasy text.
-# On top of that, long files are transcribed in ~30s windows with a small
-# overlap so any drift that does accumulate only affects one window.
+#   4. vad_filter — Silero VAD strips non-speech before the encoder sees it.
+# On top of that, long files are decoded in overlapping chunks so a failure or
+# resume only costs one chunk, and so nothing drifts across the whole file.
 # --------------------------------------------------------------------------- #
 
-WHISPER_KWARGS = dict(
-    condition_on_previous_text=False,
-    compression_ratio_threshold=2.2,
-    no_speech_threshold=0.6,
-    word_timestamps=True,
-    vad_filter=True,
-    vad_parameters={
-        "min_silence_duration_ms": 300,
-        "speech_pad_ms": 60,
-    },
-)
+WHISPER_KWARGS = dict(asr.ANTI_REPETITION, word_timestamps=True)
 
-# Long files are decoded in windows of this length with this much overlap so
-# words spanning a boundary are caught once by at least one window (then
-# deduplicated in _dedupe_words).
-WINDOW_SEC = 30.0
-OVERLAP_SEC = 1.0
-# Whisper is most reliable on ~30s of audio; decode windows above this length
-# are split (unless they fall inside one detected speech window).
-MAX_DECODE_SEC = 45.0
+# Resume granularity. Long files are decoded in chunks of this length with this
+# much overlap, so a word spanning a boundary is caught by at least one chunk
+# (then deduplicated in _dedupe_words). Chunks are a RESUME unit, not a model
+# constraint: the engine batches its own 30s windows inside each chunk, so a
+# large chunk costs no extra compute — it just means a resume may lose up to
+# CHUNK_SEC of transcription instead of 30s.
+CHUNK_SEC = 300.0
+OVERLAP_SEC = 2.0
+
+# Back-compat aliases for callers/tests that used the old 30s window names.
+WINDOW_SEC = CHUNK_SEC
+MAX_DECODE_SEC = CHUNK_SEC
 
 
 # --------------------------------------------------------------------------- #
@@ -137,132 +141,133 @@ class Transcript:
     duration: float = 0.0
     model_size: str = ""
     model_path: str = ""
+    # Which engine produced this transcript, and how fast it ran
+    # (RTF = wall-seconds / audio-seconds; lower is faster).
+    engine: str = ""
+    rtf: float | None = None
 
 
 _MODEL_LOCK = threading.Lock()
-_MODEL_CACHE: dict[tuple, Any] = {}
 
 
-def _resolve_device(settings: Settings) -> tuple[str, str]:
-    """Return (device, compute_type) resolved from 'auto'."""
-    device = settings.whisper.device
-    compute = settings.whisper.compute_type
-    if device == "auto":
-        try:
-            import ctranslate2  # noqa: PLC0415
-
-            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
-        except Exception:
-            device = "cpu"
-    if compute == "auto":
-        compute = "float16" if device == "cuda" else "int8"
-    return device, compute
-
-
-def _model_cache_dir() -> Path:
-    env = None
-    try:
-        from huggingface_hub.constants import HF_HUB_CACHE  # noqa: PLC0415
-
-        env = Path(HF_HUB_CACHE)
-    except Exception:
-        env = None
-    if env is None:
-        env = Path.home() / ".cache" / "huggingface"
-    return env
+def engine_status(settings: Settings) -> asr.EngineStatus:
+    """The transcription engine that would run the next job (for health/doctor)."""
+    return asr.status(settings)
 
 
 def predownload_model(settings: Settings, on_progress=None, on_log=None) -> Transcript:
-    """Load (and therefore download) the configured Whisper model at boot.
+    """Load (and therefore download) the configured model at boot.
 
     Raises TranscribeError with a readable message on failure.
     """
-    from faster_whisper import WhisperModel  # imported here so config errors come first
-
-    device, compute = _resolve_device(settings)
-    key = (settings.whisper.model, device, compute)
-    with _MODEL_LOCK:
-        if key in _MODEL_CACHE:
-            return _MODEL_CACHE[key]
-        t0 = time.time()
-        if on_log:
-            on_log(f"Loading Whisper model '{settings.whisper.model}' ({compute})...")
-        try:
-            model = WhisperModel(
-                settings.whisper.model,
-                device=device,
-                compute_type=compute,
-            )
-        except Exception as exc:
-            raise TranscribeError(f"Whisper model load failed: {exc}") from exc
-        took = time.time() - t0
-        cache_dir = _model_cache_dir()
-        line = f"Whisper model loaded: {settings.whisper.model} from {cache_dir} in {took:.1f}s"
-        logger.info(f"[subtitle] {line}")
-        if on_log:
-            on_log(line)
-        transcript = Transcript(model_size=settings.whisper.model, model_path=str(cache_dir))
-        _MODEL_CACHE[key] = (model, transcript)
-        return transcript
-
-
-def _load_model(settings: Settings):
-
-    device, compute = _resolve_device(settings)
-    key = (settings.whisper.model, device, compute)
-    with _MODEL_LOCK:
-        if key not in _MODEL_CACHE:
-            predownload_model(settings)
-        return _MODEL_CACHE[key][0]
-
-
-def _extract_media(path: Path, start: float, end: float, workdir: Path) -> Path:
-    """Extract one audio window [start, end) to 16kHz mono WAV via ffmpeg."""
-    duration = max(0.5, end - start)
-    workdir.mkdir(parents=True, exist_ok=True)
-    out = workdir / f"win_{start:09.2f}_{end:09.2f}.wav"
-    subprocess.run(
-        [
-            ffmpeg_bin(),
-            "-y", "-loglevel", "error",
-            "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
-            "-i", str(path),
-            "-vn", "-ac", "1", "-ar", "16000",
-            "-c:a", "pcm_s16le", str(out),
-        ],
-        check=True, capture_output=True, timeout=120,
+    status = asr.status(settings)
+    t0 = time.time()
+    if on_log:
+        on_log(f"Loading {status.engine} model '{settings.whisper.model}' ({status.compute_type})...")
+    try:
+        loaded = asr.load(settings, on_log=on_log)
+    except asr.AsrError as exc:
+        raise TranscribeError(str(exc)) from exc
+    except Exception as exc:  # defensive: boot must never crash on a model error
+        raise TranscribeError(f"Whisper model load failed: {exc}") from exc
+    took = time.time() - t0
+    cache_dir = asr.model_cache_dir()
+    line = (
+        f"{loaded.engine} model loaded: {loaded.model_name} on {loaded.device}/{loaded.compute_type} "
+        f"from {cache_dir} in {took:.1f}s"
     )
-    return out
+    logger.info(f"[subtitle] {line}")
+    if on_log:
+        on_log(line)
+    return Transcript(
+        model_size=loaded.model_name,
+        model_path=str(cache_dir),
+        engine=loaded.engine,
+    )
 
 
-def _decode_window(
-    model,
-    wav: Path,
-    language: str | None,
-    on_segment=None,
-) -> tuple[list[Word], float]:
-    """Transcribe one 16kHz mono WAV window; returns (words, audio_len_sec).
+def _load_model(settings: Settings) -> asr.LoadedEngine:
+    return asr.load(settings)
 
-    `on_segment(local_end_sec)` fires after each decoded segment so the caller
-    can report progress INSIDE a window — on CPU the `medium` model can spend
-    minutes on one 30s window, and without this the job looks dead.
+
+def _extract_audio(path: Path, dest: Path) -> Path:
+    """Decode the WHOLE source to 16kHz mono WAV once (no per-chunk ffmpeg).
+
+    Chunk slicing then happens in memory, so a 2-hour source costs one ffmpeg
+    pass instead of one process spawn every 30 seconds.
     """
-    segments_iter, info = model.transcribe(
-        str(wav),
-        language=language,
-        **WHISPER_KWARGS,
-    )
-    words: list[Word] = []
-    win_len = float(info.duration or 0)
-    for seg in segments_iter:
-        for w in (seg.words or []):
-            text = w.word.strip()
-            if not text:
-                continue
-            words.append(Word(start=float(w.start), end=float(w.end), word=text))
-        if on_segment is not None and win_len > 0:
-            on_segment(min(win_len, float(seg.end)))
-    return words, win_len
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+    tmp = dest.with_suffix(".wav.part")
+    try:
+        subprocess.run(
+            [
+                ffmpeg_bin(),
+                "-y", "-loglevel", "error",
+                "-i", str(path),
+                "-vn", "-ac", "1", "-ar", "16000",
+                "-c:a", "pcm_s16le", str(tmp),
+            ],
+            check=True, capture_output=True, timeout=3600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TranscribeError(
+            "audio extraction timed out after 60 minutes — the source may be corrupt"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        tail = (exc.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
+        tmp.unlink(missing_ok=True)
+        raise TranscribeError(f"could not extract audio from {path.name}: {tail[0]}") from exc
+    tmp.replace(dest)
+    return dest
+
+
+class _WavReader:
+    """Random-access reader for a 16kHz mono PCM WAV.
+
+    Only the requested span is materialised. Holding a whole 2-hour source as
+    float32 would be ~250 MB, which does not fit a small container alongside a
+    whisper model — the decoder gets OOM-killed and the job "hangs" — so the
+    audio is paged in one resume chunk at a time (~19 MB for 5 minutes).
+    """
+
+    def __init__(self, path: Path) -> None:
+        import wave  # noqa: PLC0415
+
+        self._wave = wave.open(str(path), "rb")
+        if self._wave.getnchannels() != 1 or self._wave.getframerate() != 16000:
+            rate, channels = self._wave.getframerate(), self._wave.getnchannels()
+            self._wave.close()
+            raise TranscribeError(
+                f"expected 16kHz mono audio, got {rate}Hz/{channels}ch"
+            )
+        self.rate = 16000
+        self.frames = self._wave.getnframes()
+
+    def samples(self, start_sec: float, end_sec: float):
+        """float32 samples in [-1, 1] for [start_sec, end_sec)."""
+        import numpy as np  # noqa: PLC0415
+
+        first = max(0, int(round(start_sec * self.rate)))
+        last = min(self.frames, int(round(end_sec * self.rate)))
+        if last <= first:
+            return np.zeros(0, dtype=np.float32)
+        self._wave.setpos(first)
+        raw = self._wave.readframes(last - first)
+        return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+    def close(self) -> None:
+        try:
+            self._wave.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "_WavReader":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
 
 def _dedupe_words(words: list[Word], overlap: float = OVERLAP_SEC) -> list[Word]:
@@ -334,7 +339,11 @@ def _probe_duration(path: Path) -> float:
 
 
 def _plan_windows(duration: float) -> list[tuple[float, float]]:
-    """Plan [start, end) windows covering [0, duration)."""
+    """Plan the [start, end) resume chunks covering [0, duration).
+
+    These are RESUME units, not decode units: the engine batches its own 30s
+    windows inside each chunk. Short files are always one chunk.
+    """
     if duration <= MAX_DECODE_SEC:
         return [(0.0, max(duration, 0.5))]
     windows: list[tuple[float, float]] = []
@@ -355,125 +364,163 @@ def transcribe(
     on_progress=None,
     cache_dir: Path | None = None,
 ) -> Transcript:
-    """Word-level transcription, hardened against repetition loops.
+    """Word-level transcription through the configured ASR engine.
 
-    Long inputs are decoded in ~30s overlapping windows instead of one pass,
-    every call runs with condition_on_previous_text=False, a tight
-    compression_ratio_threshold (2.2) and no_speech_threshold=0.6, and the
-    built-in Silero VAD filter strips silence/music before the model sees it.
+    Engine: WhisperX when its torch stack is installed, otherwise
+    faster-whisper's batched CTranslate2 pipeline (see app.asr). Both decode
+    with condition_on_previous_text=False, compression_ratio_threshold=2.2,
+    no_speech_threshold=0.6 and Silero VAD, so the repetition hardening is kept
+    by the swap rather than traded away for speed.
 
-    `cache_dir` enables INCREMENTAL resume: each completed window is written
-    to cache_dir/win_XXXXX.json as it decodes, so a retry after a crash/stall
-    skips the windows already done and loses at most one window of work.
+    The source is decoded to audio ONCE, then split into overlapping resume
+    chunks in memory: no ffmpeg process per chunk, and the engine batches its
+    own 30s windows inside each chunk.
+
+    `cache_dir` enables INCREMENTAL resume: each completed chunk is written to
+    cache_dir/chunk_XXXXX.json as it decodes, so a retry after a crash/stall
+    skips the chunks already done (at most one chunk of work is lost).
     """
-    model = _load_model(settings)
-    try:
-        duration = _probe_duration(path)
-    except TranscribeError:
-        # _probe_duration already raised a readable message (missing file,
-        # ffprobe failure, corrupt download) — surface it, never a NameError
-        raise
+    loaded = _load_model(settings)
+    duration = _probe_duration(path)
     language = None if settings.whisper.language == "auto" else settings.whisper.language
+    sample_rate = 16000
 
     windows = _plan_windows(duration)
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-    resumed = 0
     if len(windows) == 1:
         logger.info(
-            f"[subtitle] transcribing {duration:.1f}s in one window "
-            "(condition_on_previous_text=False, cr=2.2, ns=0.6, VAD on)"
+            f"[subtitle] transcribing {duration:.1f}s with {loaded.engine} "
+            f"({loaded.device}/{loaded.compute_type}, batch {loaded.batch_size}) — one chunk"
         )
     else:
         logger.info(
-            f"[subtitle] transcribing {duration:.1f}s in {len(windows)} "
-            f"~{WINDOW_SEC:.0f}s windows (overlap {OVERLAP_SEC:.1f}s) to limit drift-induced repetition"
+            f"[subtitle] transcribing {duration:.1f}s with {loaded.engine} in {len(windows)} "
+            f"~{CHUNK_SEC / 60:.0f} min chunks (overlap {OVERLAP_SEC:.1f}s, "
+            f"batch {loaded.batch_size}) — resumable per chunk"
         )
 
+    # ---- decode the whole source to 16kHz mono WAV once --------------------
+    # Cached next to the chunk caches so a resume does not pay for it again.
+    if cache_dir is not None:
+        wav_path = cache_dir / "source.wav"
+    else:
+        wav_path = Path(settings.app.paths.data_dir) / f"asr-{time.time_ns()}.wav"
+    try:
+        _extract_audio(path, wav_path)
+        reader = _WavReader(wav_path)
+    except TranscribeError:
+        raise
+    except Exception as exc:
+        raise TranscribeError(f"Could not prepare audio for transcription: {exc}") from exc
+
     all_words: list[Word] = []
-    for idx, (w_start, w_end) in enumerate(windows):
-        # ---- incremental resume: reuse an already-decoded window ----------
-        cached = None
-        if cache_dir is not None:
-            cache_file = cache_dir / f"win_{idx:05d}.json"
-            if cache_file.exists():
-                try:
-                    data = json.loads(cache_file.read_text(encoding="utf-8"))
-                    if abs(float(data.get("w_start", -1)) - w_start) < 0.01:
-                        cached = [Word(**w) for w in data.get("words", [])]
-                except Exception:
-                    cached = None  # corrupt cache → just redo this window
-        if cached is not None:
-            all_words.extend(cached)
-            resumed += 1
+    resumed = 0
+    decoded_seconds = 0.0
+    decode_wall = 0.0
+    try:
+        for idx, (w_start, w_end) in enumerate(windows):
+            if on_progress and duration > 0:
+                on_progress(min(1.0, w_start / duration))
+
+            # ---- incremental resume: reuse an already-decoded chunk --------
+            cache_file = None
+            if cache_dir is not None:
+                cache_file = cache_dir / f"chunk_{idx:05d}.json"
+                if cache_file.exists():
+                    try:
+                        data = json.loads(cache_file.read_text(encoding="utf-8"))
+                        if abs(float(data.get("w_start", -1)) - w_start) < 0.01:
+                            all_words.extend(Word(**w) for w in data.get("words", []))
+                            resumed += 1
+                            logger.info(
+                                f"[subtitle] resume: chunk {idx + 1}/{len(windows)} reused from cache"
+                            )
+                            if on_progress and duration > 0:
+                                on_progress(min(1.0, w_end / duration))
+                            continue
+                    except Exception as exc:
+                        logger.warning(f"[subtitle] unreadable chunk cache {cache_file.name}: {exc}")
+
+            # page in ONLY this chunk (~19 MB for 5 minutes), never the whole file
+            audio = reader.samples(w_start, w_end)
+            if audio.size < sample_rate // 4:  # under 0.25s — nothing to decode
+                if on_progress and duration > 0:
+                    on_progress(min(1.0, w_end / duration))
+                continue
+
+            def on_segment(local_end: float, _w_start=w_start) -> None:
+                # intra-chunk liveness: chunk-local segment end → absolute time
+                if on_progress and duration > 0:
+                    on_progress(min(1.0, (_w_start + local_end) / duration))
+
+            t0 = time.time()
+            try:
+                words, _detected = loaded.asr_words(audio, language, on_segment=on_segment)
+            except Exception as exc:
+                raise TranscribeError(
+                    f"{loaded.engine} decode failed on chunk {idx + 1}/{len(windows)} "
+                    f"({w_start:.0f}-{w_end:.0f}s): {exc}"
+                ) from exc
+            chunk_wall = time.time() - t0
+            chunk_audio = audio.size / sample_rate
+            decoded_seconds += chunk_audio
+            decode_wall += chunk_wall
+            logger.info(
+                f"[subtitle] chunk {idx + 1}/{len(windows)}: {chunk_audio:.0f}s audio in "
+                f"{chunk_wall:.1f}s (RTF {chunk_wall / max(0.001, chunk_audio):.3f})"
+            )
+
+            # chunk-local word timings → source-absolute time
+            abs_words = [
+                Word(start=w.start + w_start, end=w.end + w_start, word=w.word)
+                for w in words
+            ]
+            all_words.extend(abs_words)
+
+            # persist the chunk BEFORE moving on (incremental resume)
+            if cache_file is not None:
+                tmp = cache_file.with_suffix(".json.tmp")
+                tmp.write_text(
+                    json.dumps(
+                        {"w_start": w_start, "w_end": w_end,
+                         "words": [w.as_dict() for w in abs_words]},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                tmp.replace(cache_file)
+
             if on_progress and duration > 0:
                 on_progress(min(1.0, w_end / duration))
-            continue
-
-        # heartbeat BEFORE extraction: audio decode of a long window can take
-        # tens of seconds, and the stall watchdog keys off progress events
-        if on_progress and duration > 0:
-            on_progress(min(1.0, w_start / duration))
-        try:
-            wav = _extract_media(path, w_start, w_end, Path(settings.app.paths.data_dir))
-        except Exception as exc:
-            raise TranscribeError(
-                f"Could not extract audio window {w_start:.1f}-{w_end:.1f}s: {exc}"
-            ) from exc
-
-        def on_segment(local_end: float) -> None:
-            # intra-window liveness: map window-local segment end → absolute
-            if on_progress and duration > 0:
-                on_progress(min(1.0, (w_start + local_end) / duration))
-
-        try:
-            words, _ = _decode_window(model, wav, language, on_segment=on_segment)
-        except Exception as exc:
-            raise TranscribeError(
-                f"Whisper decode failed on window {idx + 1}/{len(windows)}: {exc}"
-            ) from exc
-
-        # window-local word timings → source-absolute time
-        abs_words = [
-            Word(start=w.start + w_start, end=w.end + w_start, word=w.word)
-            for w in words
-        ]
-        all_words.extend(abs_words)
-        wav.unlink(missing_ok=True)
-
-        # persist the window BEFORE moving on (incremental resume)
-        if cache_dir is not None:
-            cache_file = cache_dir / f"win_{idx:05d}.json"
-            tmp = cache_file.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(
-                    {"w_start": w_start, "w_end": w_end,
-                     "words": [w.as_dict() for w in abs_words]},
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            tmp.replace(cache_file)
-
-        if on_progress and duration > 0:
-            on_progress(min(1.0, w_end / duration))
+    finally:
+        reader.close()
+        del reader
+        # the extracted audio is only needed while this call runs; the chunk
+        # caches (not the WAV) are what a resume reuses
+        if cache_dir is None:
+            wav_path.unlink(missing_ok=True)
 
     if resumed:
-        logger.info(f"[subtitle] resumed: reused {resumed}/{len(windows)} cached windows")
+        logger.info(f"[subtitle] resumed: reused {resumed}/{len(windows)} cached chunk(s)")
 
     words_out = _dedupe_words(all_words)
     dropped = len(all_words) - len(words_out)
     if dropped > 0:
         logger.info(f"[subtitle] overlap dedup removed {dropped} duplicate words")
 
+    rtf = (decode_wall / decoded_seconds) if decoded_seconds > 0 else None
     transcript = Transcript(
         words=words_out,
         duration=duration,
         model_size=settings.whisper.model,
+        engine=loaded.engine,
+        rtf=round(rtf, 4) if rtf is not None else None,
     )
     logger.info(
-        f"[subtitle] transcribed {len(words_out)} words across {len(windows)} window(s), "
+        f"[subtitle] transcribed {len(words_out)} words across {len(windows)} chunk(s), "
         f"{transcript.duration:.1f}s of audio"
+        + (f", RTF {rtf:.3f} ({loaded.engine})" if rtf is not None else "")
     )
     return transcript
 

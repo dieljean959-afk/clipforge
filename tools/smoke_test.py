@@ -74,6 +74,18 @@ def main() -> int:
         assert "disk" in health and "freeBytes" in health["disk"]
         print(f"   limits: {health['limits']}, disk: {health['disk']}")
 
+        # ASR engine + worker pool must be reported, not guessed by the UI
+        assert health["asr"]["engine"] in {"whisperx", "faster-whisper"}, health["asr"]
+        assert health["asr"]["batched"] is True, health["asr"]
+        assert health["asr"]["estimatedRtf"] > 0, health["asr"]
+        assert health["worker"]["concurrency"] >= 1, health["worker"]
+        assert "activeCount" in health["worker"], health["worker"]
+        print(
+            f"   asr: {health['asr']['engine']} on {health['asr']['device']}/"
+            f"{health['asr']['computeType']}, RTF {health['asr']['estimatedRtf']} "
+            f"({health['asr']['rtfSource']}), pool={health['worker']['concurrency']}"
+        )
+
         # doctor + caption presets endpoints
         r = client.get("/api/doctor")
         assert r.status_code == 200, r.text
@@ -93,8 +105,9 @@ def main() -> int:
         print(f"   job created: {job_id}")
 
         # wait for the worker thread to attempt the job (it must FAIL honestly —
-        # no fake stages, no heuristics)
-        deadline = time.time() + 25
+        # no fake stages, no heuristics). The deadline is generous because the
+        # fetch stage includes yt-dlp's auto-update retry (network-bound).
+        deadline = time.time() + 120
         stage, error = None, None
         while time.time() < deadline:
             job = main_mod.store.get_job(job_id)

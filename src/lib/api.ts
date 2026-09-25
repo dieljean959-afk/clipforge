@@ -17,6 +17,11 @@ export interface JobDto {
   unitsTotal?: number | null;
   stageEtaSec?: number | null;
   totalEtaSec?: number | null;
+  /** How the ETA was derived: "measured" progress or an "rtf-prior". */
+  etaSource?: string | null;
+  /** 0-based position in the waiting queue; null once a worker picks it up. */
+  queuePosition?: number | null;
+  stageTimings?: { stage: string; sec: number }[];
   lastProgressAt?: number;
   slow?: boolean;
   stageStartedAt?: number;
@@ -87,13 +92,38 @@ export interface KeyStatusDto {
   aliases: string[];
 }
 
+export interface AsrDto {
+  engine: "whisperx" | "faster-whisper" | string;
+  device: string;
+  computeType: string;
+  model: string;
+  batchSize: number;
+  batched: boolean;
+  detail: string;
+  estimatedRtf: number;
+  rtfSource: string;
+  rtfHistory?: Record<
+    string,
+    { rtf: number; lastRtf?: number; samples: number; engine?: string; device?: string; model?: string }
+  >;
+}
+
 export interface HealthDto {
   ok: boolean;
   version: string;
-  worker: { online: boolean; currentJob: string | null; queueDepth: number };
+  worker: {
+    online: boolean;
+    currentJob: string | null;
+    queueDepth: number;
+    concurrency?: number;
+    activeCount?: number;
+    activeJobs?: string[];
+    queuedJobs?: string[];
+  };
   warmup: { stage: string; detail: string; startedAt: number | null };
   llm: KeyStatusDto;
-  whisper: { model: string; compute: string };
+  whisper: { model: string; compute: string; engine?: string };
+  asr?: AsrDto;
   system: SystemStatsDto;
   disk: DiskStatsDto;
   tailnetIp: string | null;

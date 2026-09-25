@@ -13,12 +13,24 @@ data_dir = "data"
 # medium is the accuracy default (~1.5GB model; slower/heavier than small on CPU)
 # large-v3 (~3GB, best, needs 8GB+ free RAM)
 model = "medium"
+
+# Transcription backend. "auto" prefers WhisperX (github.com/m-bain/whisperX —
+# batched CTranslate2 decoding + wav2vec2 forced alignment for accurate
+# word-level timestamps) and falls back to faster-whisper's own batched
+# pipeline when WhisperX's torch/pyannote stack is not installed.
+#   pip install 'clipforge[whisperx]'    # enables the WhisperX path
+# The engine actually in use is printed at boot and shown by /api/doctor.
+engine = "auto"
+
 # auto | cpu | cuda  (auto picks CUDA when torch/ctranslate2 sees a GPU)
 device = "auto"
 # auto -> int8 on CPU, float16 on GPU. Override only if you know why.
 compute_type = "auto"
 # Whisper language hint: "auto" detects, or force e.g. "en"
 language = "auto"
+# 30s windows decoded per batched pass (WhisperX's default is 8).
+# Lower it if the host is RAM-constrained; raise it on a big GPU.
+batch_size = 8
 
 [gemini]
 # Free-tier friendly flash model. GEMINI_API_KEY comes from .env.
@@ -95,3 +107,9 @@ worker_token = ""
 # Tailscale mode A: when true, the API answers ONLY tailnet/loopback clients
 # (401 for the public internet). Use with `tailscale serve` on the host.
 tailscale_only = false
+
+# How many queued jobs run in parallel. Every job runs in its own child
+# process, so concurrency both drains the queue faster and guarantees one hung
+# job cannot stall the jobs behind it. Each parallel transcription holds its
+# own model in RAM (~1.5GB each for medium int8) — lower this on a small host.
+worker_concurrency = 2

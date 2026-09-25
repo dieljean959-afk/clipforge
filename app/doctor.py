@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from app import hostlimits
 from app.config import Settings, ffmpeg_bin, ffprobe_bin, live_gemini_key
 
 
@@ -99,23 +100,62 @@ def check_gpu() -> list[Check]:
 
 
 def check_whisper(settings: Settings) -> list[Check]:
+    """Report the ASR engine that will actually transcribe, and why.
+
+    WhisperX is the preferred engine; when its torch/pyannote stack is absent
+    the batched faster-whisper fallback still runs (same CTranslate2 engine and
+    the same batching speed-up), so this is a WARN with the exact install
+    command, never a FAIL.
+    """
+    from app import asr as asr_mod
+
     checks: list[Check] = []
     try:
         import faster_whisper  # noqa: F401
 
-        checks.append(Check("whisper backend", "ok", f"faster-whisper {getattr(faster_whisper, '__version__', '?')}"))
+        checks.append(Check(
+            "faster-whisper", "ok", f"{getattr(faster_whisper, '__version__', '?')}"
+        ))
     except Exception as exc:
-        checks.append(Check("whisper backend", "fail", f"faster-whisper missing: {exc}",
+        checks.append(Check("faster-whisper", "fail", f"missing: {exc}",
                             "pip install faster-whisper"))
         return checks
-    device = settings.whisper.device
-    compute = settings.whisper.resolved_compute
-    if device == "cuda" or (device == "auto" and compute == "float16"):
-        checks.append(Check("whisper compute", "warn", f"CUDA requested ({compute})",
-                            "no GPU detected — set [whisper] device = \"cpu\""))
+
+    status = asr_mod.status(settings)
+    ok, reason = asr_mod.whisperx_available()
+    if ok:
+        checks.append(Check("asr engine", "ok", f"whisperx — {reason}"))
+        checks.append(Check(
+            "word alignment", "ok",
+            "wav2vec2 forced alignment available (accurate word-level timestamps)",
+        ))
     else:
-        checks.append(Check("whisper compute", "ok", f"{device}/{compute} (model={settings.whisper.model})"))
-    checks.append(Check("whisper model", "ok", settings.whisper.model, ""))
+        checks.append(Check(
+            "asr engine", "warn",
+            f"faster-whisper batched pipeline — {reason}",
+            "optional upgrade: pip install 'clipforge[whisperx]' adds wav2vec2 "
+            "forced-alignment word timestamps; batched decoding is already active",
+        ))
+        checks.append(Check(
+            "word alignment", "warn",
+            "engine-native word timestamps (no forced-alignment pass)",
+            "install the whisperx extra for phoneme-level word timing accuracy",
+        ))
+
+    checks.append(Check(
+        "asr device",
+        "ok" if status.device == "cpu" else "warn",
+        f"{status.device}/{status.compute_type}, batch {status.batch_size}, model={status.model}",
+        "" if status.device == "cpu" else "GPU path selected — verify torch/CUDA is present",
+    ))
+    # Host fit (container CPU/memory caps vs. the configured model) is checked
+    # separately by check_host().
+    try:
+        import ctranslate2
+
+        checks.append(Check("ctranslate2", "ok", ctranslate2.__version__))
+    except Exception as exc:
+        checks.append(Check("ctranslate2", "warn", f"version unknown: {exc}", ""))
     return checks
 
 
@@ -159,6 +199,46 @@ def check_storage(settings: Settings) -> list[Check]:
     return checks
 
 
+def check_host(settings: Settings) -> list[Check]:
+    """What this host can actually do — with the honest numbers.
+
+    Container CPU/memory caps decide both the inference thread count and how
+    many jobs may run at once, so they belong in diagnostics rather than being
+    silently mis-detected from os.cpu_count().
+    """
+    info = hostlimits.limits()
+    model = settings.whisper.model
+    resolved, note = hostlimits.resolved_model(model)
+    per_job = hostlimits.per_job_bytes(resolved) / 1024**3
+    fit_status = "fail" if note else "ok"
+    return [
+        Check(
+            "host resources",
+            "warn" if info["constrained"] else "ok",
+            f"{info['cpus']} CPU (host reports {info['hostCpus']}), "
+            f"{(info['memoryEffectiveBytes'] or 0) / 1024**3:.1f} GiB RAM usable, "
+            f"inference threads {info['inferenceThreads']}",
+            ""
+            if not info["constrained"]
+            else "container-capped host: the worker pool and inference threads are sized "
+            "from these limits, not from the host's core count",
+        ),
+        Check(
+            "whisper model fits host",
+            fit_status,
+            note or f"'{model}' (~{per_job:.2f} GiB per job) fits the available memory",
+            "set CLIPFORGE_WHISPER_MODEL (or [whisper] model) to a smaller model" if note else "",
+        ),
+        Check(
+            "parallel jobs fit host",
+            "ok",
+            f"configured {settings.hosted.worker_concurrency}, "
+            f"memory allows {hostlimits.recommended_concurrency(resolved, 8)}",
+            "",
+        ),
+    ]
+
+
 def check_network() -> list[Check]:
     code, _ = _run(["curl", "-sI", "-m", "5", "https://www.youtube.com"], timeout=10)
     if code == 0:
@@ -173,6 +253,7 @@ def run_doctor(settings: Settings) -> dict[str, Any]:
     checks += check_whisper(settings)
     checks += check_llm(settings)
     checks += check_storage(settings)
+    checks += check_host(settings)
     checks += check_network()
     payload = {
         "ok": all(c.status != "fail" for c in checks),

@@ -347,7 +347,10 @@ def live_gemini_key() -> _LiveKeyState:
 # provides it for GEMINI_API_KEY by rewriting .env.local directly)
 # --------------------------------------------------------------------------- #
 
-ENV_LOCAL = ROOT / ".env.local"
+# The env file the dashboard's key manager writes to. CLIPFORGE_ENV_LOCAL lets
+# the test-suite point key-writing tests at a throwaway file so they can never
+# delete a real user's key from the deployment's real env file.
+ENV_LOCAL = Path(os.getenv("CLIPFORGE_ENV_LOCAL") or (ROOT / ".env.local"))
 
 
 def write_env_var(name: str, value: str) -> None:
@@ -445,6 +448,12 @@ class WhisperConfig:
     device: str
     compute_type: str
     language: str
+    # auto | whisperx | faster-whisper. `auto` prefers WhisperX when its torch
+    # stack is installed and otherwise uses faster-whisper's batched pipeline
+    # (the same CTranslate2 engine WhisperX runs on).
+    engine: str = "auto"
+    # How many 30s windows the engine decodes in one batched pass.
+    batch_size: int = 8
 
     @property
     def resolved_compute(self) -> str:
@@ -519,6 +528,9 @@ class HostedConfig:
     worker_token: str = ""
     # Serve the pipeline API only inside the user's tailnet when true.
     tailscale_only: bool = False
+    # How many jobs the in-process queue drains in parallel. Each job runs in
+    # its own child process, so a hung job can never block the whole queue.
+    worker_concurrency: int = 2
 
 
 @dataclass
@@ -595,11 +607,25 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         errors.append(
             f'whisper.model "{model}" is not one of tiny/base/small/medium/large-v3'
         )
+    engine = str(os.getenv("CLIPFORGE_WHISPER_ENGINE") or w.get("engine", "auto")).strip().lower()
+    if engine not in {"auto", "whisperx", "faster-whisper"}:
+        errors.append(
+            f'whisper.engine "{engine}" is not one of auto/whisperx/faster-whisper'
+        )
+    try:
+        batch_size = int(os.getenv("CLIPFORGE_WHISPER_BATCH_SIZE") or w.get("batch_size", 8))
+    except (TypeError, ValueError):
+        errors.append("whisper.batch_size must be an integer")
+        batch_size = 8
+    if not (1 <= batch_size <= 64):
+        errors.append(f"whisper.batch_size {batch_size} is out of range (1-64)")
     whisper = WhisperConfig(
         model=model,
         device=str(w.get("device", "auto")),
         compute_type=str(w.get("compute_type", "auto")),
         language=str(w.get("language", "auto")),
+        engine=engine,
+        batch_size=batch_size,
     )
 
     g = raw.get("gemini", {})
@@ -663,6 +689,13 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),
         tailscale_only=str(os.getenv("TAILSCALE_ONLY", str(h.get("tailscale_only", False)))).strip().lower()
         in {"1", "true", "yes", "on"},
+        worker_concurrency=max(
+            1,
+            min(
+                8,
+                int(os.getenv("CLIPFORGE_WORKER_CONCURRENCY") or h.get("worker_concurrency", 2)),
+            ),
+        ),
     )
 
     # Initialize the live key state so the boot banner reports it. The key is
@@ -729,10 +762,25 @@ def boot_banner(settings: Settings) -> None:
         )
     env_files = _load_env_files(ROOT)
     print(f"[boot] env files loaded: {', '.join(env_files) if env_files else 'none found'}")
-    print(f"[boot] Whisper model: {settings.whisper.model} ({settings.whisper.resolved_compute})")
+    from app import asr as asr_mod  # local import: avoids an import cycle at boot
+    from app import hostlimits
+
+    engine = asr_mod.status(settings)
+    model_line = f"[boot] Whisper model: {engine.model}"
+    if engine.model != settings.whisper.model:
+        model_line += f" (configured '{settings.whisper.model}' — does not fit this host)"
+    print(
+        f"{model_line} | engine: {engine.engine} "
+        f"({engine.device}/{engine.compute_type}, batch {engine.batch_size}, batched)"
+    )
+    print(f"[boot] ASR engine detail: {engine.detail}")
+    print(f"[boot] Host limits: {hostlimits.describe()}")
+    if engine.model_note:
+        print(f"[boot] WARNING: {engine.model_note}")
     print(f"[boot] Output: {settings.video.width}x{settings.video.height} @ {settings.video.fps}fps CRF {settings.video.crf}")
     print(f"[boot] Folders: {settings.app.paths.downloads_dir} / {settings.app.paths.outputs_dir} / {settings.app.paths.data_dir}")
     print(f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min | retention: {settings.hosted.retention_hours}h")
+    print(f"[boot] Worker pool: {settings.hosted.worker_concurrency} parallel job(s) (one child process each)")
     if settings.hosted.worker_url:
         print(f"[boot] Worker dispatch: {settings.hosted.worker_url} (rendering happens on the remote worker)")
     else:
