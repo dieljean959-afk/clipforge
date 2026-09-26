@@ -76,15 +76,43 @@ def main() -> int:
 
         print("== 4. REAL render: cut 1.0-9.0s → 9:16 1080x1920 + burned captions")
         dest = tmp / "clip_01.mp4"
-        info = video.render_clip(
-            src, dest,
-            start=cue_start, end=cue_end,
-            settings=settings,
-            ass_path=ass,
-            caption_cues=shifted,
-            crop_windows=windows,
-            silence_cuts=[],
+        # Regression guard: a render must be ONE encode pass.
+        #
+        # render_clip used to cut the segment into a throwaway `.tmp.mp4`
+        # intermediate first and then re-encode that into the real output. The
+        # intermediate used settings.video.preset *raw*, so it also bypassed the
+        # CPU preset downgrade. Measured on a real 1080p60 source it was 173s of
+        # a 246s clip — 70% of the work, spent on a file that is deleted at the
+        # end of the function. That is long enough, on a 1-vCPU host, that a
+        # 10-clip job could never finish inside one host-restart window.
+        calls: list[list[str]] = []
+        real_run = video._run
+
+        def _recording_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return real_run(cmd, **kwargs)
+
+        video._run = _recording_run
+        try:
+            info = video.render_clip(
+                src, dest,
+                start=cue_start, end=cue_end,
+                settings=settings,
+                ass_path=ass,
+                caption_cues=shifted,
+                crop_windows=windows,
+                silence_cuts=[],
+            )
+        finally:
+            video._run = real_run
+        encode_passes = [c for c in calls if "-c:v" in c]
+        assert len(encode_passes) == 1, (
+            f"render made {len(encode_passes)} video encode passes, expected 1 — "
+            f"the throwaway intermediate re-encode is back:\n"
+            + "\n".join(" ".join(c) for c in encode_passes)
         )
+        leftovers = [a for c in calls for a in c if ".tmp.mp4" in a]
+        assert not leftovers, f"render wrote a throwaway intermediate: {leftovers}"
         print(f"   rendered: {info['width']}x{info['height']}, {info['duration']:.1f}s, {info['bytes'] // 1024} KB in {info['renderMs'] / 1000:.1f}s")
         assert info["width"] == 1080 and info["height"] == 1920, info
         assert abs(info["duration"] - (cue_end - cue_start)) < 0.5, info["duration"]

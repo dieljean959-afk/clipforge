@@ -99,9 +99,33 @@ every step is reported by `app.doctor` and `GET /api/health` under `encode`:
 | **Frame sampling** | Scene-cut detection (`scdet`) and face-tracked reframing sample every Nth frame — 2.0/s with hardware, 0.75/s on CPU-only, with the stride scaled to the source fps. Shot boundaries survive coarse sampling because a cut is a large instantaneous score change. |
 | **Render deadline** | Two separate, labelled deadlines: **20 min** on a hardware encoder (fail fast, a broken job should not hold a worker slot) and **90 min** on the CPU-only fallback. The timeout error names which one was hit and what to do about it. |
 
-The throwaway intermediate cut stays `libx264/veryfast` on purpose — it is
-deleted at the end of the render, and the final encode is where quality is
-decided.
+| **Single encode pass** | A clip is cut, reframed and captioned in **one** ffmpeg pass that seeks the source directly. There used to be a second pass that cut the segment into a throwaway `.tmp.mp4` first, which was then re-encoded into the real output. |
+
+#### Why the intermediate pass was removed
+
+`render_clip` used to make two encode passes per clip: the first cut the segment
+into a throwaway `.tmp.mp4`, the second re-encoded that into the final file.
+Measured on a real 1080p60 source (44.4s clip, one vCPU):
+
+```
+05:05:49  pass 1  -ss 477.140 -i source.mp4 -t 44.340 ... clip_02.tmp.mp4        -> 173s
+05:08:42  pass 2  -i clip_02.tmp.mp4 -vf crop,scale,crop,subtitles ... clip_02.mp4 ->  73s
+05:09:55  rendered clip_02.mp4 in 246.5s
+```
+
+**70% of the clip went into producing a file that is deleted at the end of the
+function** — and that pass used `settings.video.preset` raw, so it ignored the
+`ultrafast` downgrade the log line directly above it had just announced. On a
+1-vCPU host that pushed a 10-clip job beyond the interval at which the host is
+restarted, so long jobs appeared to loop forever instead of converging.
+
+The intermediate was only ever used for `probe()` (width/height, also available
+from the source) and as the filtergraph input. Seeking the source directly is
+frame-accurate (`-ss` before `-i` decodes and discards up to the exact frame) and
+keeps the filtergraph on clip-relative timestamps, so crop windows, ASS cue
+timings and silence cuts are interpreted identically. `tools/e2e_render_test.py`
+asserts both the output duration and that the render makes exactly **one** encode
+pass and writes no `.tmp.mp4`.
 
 ✅ **NVENC detection is confirmed on a GPU host.** The functional probe passes
 there — ffmpeg lists `h264_nvenc` *and* a real 64x64 frame encodes through it —
