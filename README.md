@@ -103,10 +103,25 @@ The throwaway intermediate cut stays `libx264/veryfast` on purpose — it is
 deleted at the end of the render, and the final encode is where quality is
 decided.
 
-⚠️ **Hardware-dependent validation is still outstanding.** Real-content render
-timings, a true NVENC/VAAPI encode, and WhisperX performance must be measured
-on a GPU-equipped or production-equivalent host. A 1-vCPU/2-GiB sandbox encodes
-at ~0.1x realtime and is not a valid measurement of either.
+✅ **NVENC detection is confirmed on a GPU host.** The functional probe passes
+there — ffmpeg lists `h264_nvenc` *and* a real 64x64 frame encodes through it —
+so the acceptance path, not just the rejection path, has been observed:
+
+```
+encoder: h264_nvenc | hardwareEncoded: True | preset veryfast (no downgrade)
+codec args: -c:v h264_nvenc -cq 20 -b:v 0 -tune p4
+deadline: 20 min | analysis sampling: 2.00/s at 60fps
+```
+
+What that does and does not establish: the encoder initialises and accepts our
+argument set, so the probe is not merely trusting ffmpeg's encoder list. It
+does not yet prove sustained 1080p60 throughput, absence of frame drops, or
+correct output at clip length — a 64x64 single frame is a liveness check, not a
+benchmark.
+
+⚠️ **Still outstanding.** Real-content render timings on a full-length clip, and
+WhisperX `large-v3` RTF before/after, have not been measured. A 1-vCPU/2-GiB
+sandbox encodes at ~0.1x realtime and is not a valid measurement of either.
 
 ### Subprocess support
 
