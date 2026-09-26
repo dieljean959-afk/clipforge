@@ -289,7 +289,10 @@ export const api = {
     });
   },
   deleteJob: (jobId: string) =>
-    request<{ deleted: boolean }>(`/api/jobs/${jobId}`, { method: "DELETE" }),
+    request<{ deleted: boolean; cancelled: "queued" | "running" | "absent" }>(
+      `/api/jobs/${jobId}`,
+      { method: "DELETE" },
+    ),
   retryJob: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/retry`, { method: "POST" }),
   redetect: (jobId: string) =>

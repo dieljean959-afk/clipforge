@@ -138,6 +138,44 @@ class InProcessWorker:
         logger.info(f"[worker] job {job_id} queued (depth {depth})")
         return depth
 
+    def cancel(self, job_id: str) -> str:
+        """Stop a job for good. Returns what was actually cancelled.
+
+        Deleting a job must also stop the work, otherwise the user deletes a
+        slow batch and the server keeps downloading, transcribing and spending
+        LLM calls on a job whose record no longer exists.
+
+        - "queued"   — dropped from the queue before it ever started
+        - "running"  — its process group was SIGKILLed (ffmpeg children too)
+        - "absent"   — nothing was in flight for this id
+        """
+        killed = False
+        dropped = False
+        with self._lock:
+            if job_id in self._pending:
+                self._pending.remove(job_id)
+                dropped = True
+            proc = self._active.get(job_id)
+            if proc is None and self._current_job == job_id:
+                proc = self._current_proc
+        if proc is not None and proc.poll() is None:
+            # Same signal path as retry: a negative rc marks the job
+            # interrupted, and the tombstone stops it being written back.
+            self._stalled_job = job_id
+            self._stalled_jobs.add(job_id)
+            self._kill_process(proc)
+            killed = True
+        if killed:
+            logger.info(f"[worker] cancel: killed running job {job_id}")
+            return "running"
+        if dropped:
+            # Everyone behind it moves up a place; the lock is not held here
+            # because _promote_positions takes it itself.
+            self._promote_positions()
+            logger.info(f"[worker] cancel: dropped queued job {job_id}")
+            return "queued"
+        return "absent"
+
     def retry(self, job_id: str) -> int:
         job = self.store.get_job(job_id)
         if job is None:
@@ -170,6 +208,11 @@ class InProcessWorker:
             "totalEtaSec": None,
             "stageStartedAt": int(time.time() * 1000),
             "lastProgressAt": int(time.time() * 1000),
+            # Unit counters belong to the attempt that died; carrying them over
+            # showed "10 of 10 clips" beside a freshly reset 0% bar.
+            "unitLabel": None,
+            "unitsDone": None,
+            "unitsTotal": None,
         })
         self.store.write_job(job)
         # A retry is a genuinely fresh process; stage artifacts on disk let it
@@ -231,6 +274,16 @@ class InProcessWorker:
                 if job_id in self._pending:
                     self._pending.remove(job_id)
                 self._current_job = job_id
+            # The job may have been deleted while it sat in the queue. Spawning
+            # a process for it wastes a worker slot and a process launch on
+            # work nobody is waiting for.
+            if self.store.get_job(job_id) is None:
+                logger.info(f"[worker] dropping queued job {job_id} — no longer exists")
+                with self._lock:
+                    if self._current_job == job_id:
+                        self._current_job = None
+                self._queue.task_done()
+                continue
             self._clear_queue_position(job_id)
             self._promote_positions()
             try:

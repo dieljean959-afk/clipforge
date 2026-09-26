@@ -153,14 +153,30 @@ def _boot() -> None:
             # Clear the false terminal state so the resume can proceed; the
             # stage markers on disk, not this field, decide where it restarts.
             job.update({
-                "stage": job.get("failedStage") or "queued",
                 "error": None,
                 "completedAt": None,
                 "interrupted": True,
                 "interruptReason": "Recovered after an external kill — resuming from cached stages.",
-                "progressDetail": "Recovering — resuming from cached stages.",
             })
             store.write_job(job)
+        # Now in EVERY recovery path the job is waiting its turn like any other
+        # queued job, so say so. Leaving `stage` at the stage it died in made the
+        # dashboard render a job that was merely in the queue as "Stage 3 of 4
+        # — Detecting, 99%", indistinguishable from real work: the stage markers
+        # on disk (not this field) decide where the runner actually restarts.
+        job.update({
+            "stage": "queued",
+            "progress": 0,
+            "progressDetail": "Queued — resuming from cached stages after a restart.",
+            "completedAt": None,
+            # Unit counters describe work in the CURRENT attempt. Left over
+            # from the run that died, a queued job rendered "10 of 10 clips"
+            # next to a 0% progress bar.
+            "unitLabel": None,
+            "unitsDone": None,
+            "unitsTotal": None,
+        })
+        store.write_job(job)
         logger.info(f"[boot] re-queuing job {job['_id']} ({reason}, was {was})")
         worker.enqueue(job["_id"])
 
@@ -760,13 +776,17 @@ def get_job(job_id: str) -> dict:
 
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str) -> dict:
+    # Stop the work FIRST. Deleting the record while a child is still
+    # downloading/transcribing/rendering just burns CPU and LLM calls on a job
+    # nobody is waiting for — and the child would then write its state back.
+    cancelled = worker.cancel(job_id)
     ok = store.delete_job(job_id)
     if not ok:
         raise HTTPException(404, "job not found")
     # stage mirrors (per-chunk transcript caches, the extracted audio WAV) are
     # not part of the job store and would otherwise accumulate forever
     remove_workspace(settings.app.paths.data_dir, job_id)
-    return {"deleted": True}
+    return {"deleted": True, "cancelled": cancelled}
 
 
 @app.post("/api/jobs/{job_id}/retry")

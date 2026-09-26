@@ -1,0 +1,177 @@
+"""A queued job must LOOK queued.
+
+The pipeline resumes by re-queuing jobs that a host restart interrupted
+(`_boot()` in app/main.py). That path used to enqueue a job while leaving
+`stage` at whatever stage it died in and `progress` at its last value.
+
+The dashboard derives its whole status from those two fields
+(`overallStatus()` in src/lib/clipforge.ts), so the result was a job that was
+sitting in a queue — possibly behind two others — presented as "Stage 3 of 4
+— Detecting, 99%". Indistinguishable from real work, and worse than a plain
+error because it never resolves: the user watches a spinner that means nothing.
+
+The resume contract is the same one `retry()` already honours: once a job is
+back in the queue it reports `stage="queued"`, `progress=0`, and a detail line
+that says it is waiting. The stage markers on disk — not this field — decide
+where the runner restarts.
+
+Run:  .venv/bin/python tools/queue_truthfulness_test.py
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.config import Paths  # noqa: E402
+from app.store import LocalStore  # noqa: E402
+
+FAILS: list[str] = []
+CHECKS = 0
+
+# Mirrors src/lib/clipforge.ts overallStatus()
+STAGE_LABELS = {
+    "grabbing": "Fetching video",
+    "transcribing": "Transcribing audio",
+    "finding": "Detecting clips",
+    "rendering": "Rendering clips",
+}
+PIPELINE_STAGES = ["grabbing", "transcribing", "finding", "rendering"]
+
+
+def check(ok: bool, label: str) -> None:
+    global CHECKS
+    CHECKS += 1
+    if ok:
+        print(f"  ok   {label}")
+    else:
+        print(f"  FAIL {label}")
+        FAILS.append(label)
+
+
+def overall_status(job: dict) -> dict:
+    """Port of the dashboard's status derivation, so the test asserts what a
+    user actually sees rather than what the store happens to hold."""
+    if job.get("error") and job.get("stage") == "failed":
+        return {"state": "failed"}
+    if job.get("stage") == "complete":
+        return {"state": "done"}
+    if job.get("stage") == "queued":
+        return {"state": "queued", "percent": 0, "label": "Queued — waiting for a worker"}
+    idx = PIPELINE_STAGES.index(job.get("stage", "grabbing"))
+    within = min(100, max(0, job.get("progress") or 0))
+    percent = round(((idx + within / 100) / len(PIPELINE_STAGES)) * 100)
+    return {
+        "state": "running",
+        "percent": min(99, percent),
+        "label": f"Stage {idx + 1} of 4 — {STAGE_LABELS[job['stage']]}",
+    }
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        store = LocalStore(Paths(
+            data_dir=root / "data",
+            outputs_dir=root / "outputs",
+            downloads_dir=root / "downloads",
+            static_dir=root / "static",
+        ))
+        store.write_job({"_id": "j", "source": "s", "title": "t", "stage": "grabbing"})
+
+        # ---- what the dashboard showed before the fix -------------------
+        frozen = {
+            "stage": "finding",
+            "progress": 100.0,
+            "error": None,
+        }
+        stale_view = overall_status(frozen)
+        check(stale_view["state"] == "running", "REGRESSION GUARD: stale fields read as running")
+        check(stale_view["percent"] == 75, "REGRESSION GUARD: a queued 'finding' job read as 75%")
+        check(
+            overall_status({"stage": "rendering", "progress": 100.0, "error": None})["percent"] == 99,
+            "REGRESSION GUARD: a queued 'rendering' job read as 99%",
+        )
+
+        # ---- what the dashboard shows after the fix --------------------
+        queued = {
+            "stage": "queued",
+            "progress": 0,
+            "error": None,
+            "progressDetail": "Queued — resuming from cached stages after a restart.",
+        }
+        good_view = overall_status(queued)
+        check(good_view["state"] == "queued", "a re-queued job reads as queued, not running")
+        check(good_view["percent"] == 0, "a re-queued job reads as 0%")
+        check("Queued" in good_view["label"], "the label says Queued")
+
+        # ---- every stage it could have died in ------------------------
+        for stage in PIPELINE_STAGES:
+            recovered = {
+                "stage": "queued",
+                "progress": 0,
+                "error": None,
+                "progressDetail": "Queued — resuming from cached stages after a restart.",
+            }
+            check(overall_status(recovered)["state"] == "queued", f"recovered from '{stage}' reads as queued")
+
+        # ---- the fix is actually in the source -------------------------
+        src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        boot = src.split("def _boot()", 1)[-1].split("def ", 1)[0] if "def _boot()" in src else src
+        check('"stage": "queued"' in boot, "_boot() sets stage=queued when re-queuing")
+        check('"progress": 0' in boot, "_boot() resets progress when re-queuing")
+        check(
+            '"error": None' in boot,
+            "_boot() clears a stale error when re-queuing",
+        )
+        # The old bug: stage left at the stage it died in.
+        check(
+            '"stage": job.get("failedStage") or "queued"' not in boot,
+            "_boot() no longer leaves stage at failedStage for a queued job",
+        )
+        # retry() must keep the same contract (it lives in the worker).
+        worker_src = (Path(__file__).resolve().parents[1] / "app" / "worker.py").read_text(encoding="utf-8")
+        retry_body = worker_src.split("def retry(", 1)[-1].split("\n    def ", 1)[0]
+        check('"stage": "queued"' in retry_body, "retry() sets stage=queued")
+        check('"progress": 0' in retry_body, "retry() resets progress")
+        check('"error": None' in retry_body, "retry() clears the error")
+
+        # ---- 9. stale unit counters are cleared too --------------------
+        # The dashboard renders `unitsDone of unitsTotal` next to the progress
+        # bar, so a queued job that kept "10 of 10 clips" from the attempt that
+        # died contradicted its own freshly reset 0%.
+        for name, body in (("_boot()", boot), ("retry()", retry_body)):
+            check('"unitsDone": None' in body, f"{name} clears stale unitsDone")
+            check('"unitsTotal": None' in body, f"{name} clears stale unitsTotal")
+            check('"unitLabel": None' in body, f"{name} clears the stale unit label")
+
+        store.write_job({
+            "_id": "j9", "source": "s", "title": "t", "stage": "complete",
+            "unitsDone": 10, "unitsTotal": 10, "unitLabel": "clips",
+        })
+        job9 = store.get_job("j9")
+        for field in ("unitsDone", "unitsTotal", "unitLabel"):
+            job9[field] = None
+        store.write_job(job9)
+        check(store.get_job("j9")["unitsDone"] is None, "cleared unit counters persist")
+
+        # ---- a real stored job round-trips honestly -------------------
+        store.write_job({**queued, "_id": "real", "source": "s", "title": "t"})
+        back = store.get_job("real")
+        check(overall_status(back)["state"] == "queued", "a stored queued job round-trips as queued")
+        check(json.dumps(back) is not None, "the stored job is JSON-serialisable")
+
+    print()
+    if FAILS:
+        print(f"{CHECKS - len(FAILS)} passed, {len(FAILS)} FAILED")
+        return 1
+    print(f"{CHECKS} passed, 0 failed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

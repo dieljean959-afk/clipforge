@@ -147,7 +147,15 @@ class LocalStore:
         # state. Without the advisory lock, a stale read-modify-write can erase
         # the child's terminal `failed` state and make the parent report a
         # misleading "worker exited unexpectedly" error.
-        path = self._job_path(job["_id"])
+        job_id = job["_id"]
+        # A job deleted mid-run stays deleted. The child process cannot be
+        # interrupted mid-render, so without this it would faithfully write its
+        # progress and terminal state back and the job the user deleted would
+        # reappear, now pointing at files that were unlinked underneath it.
+        if self.is_deleted(job_id):
+            logger.info(f"[store] ignoring write for deleted job {job_id}")
+            return
+        path = self._job_path(job_id)
         with self._file_lock(path):
             with self._lock:
                 self._write_job_unlocked(job)
@@ -186,6 +194,17 @@ class LocalStore:
         if job is None:
             return False
         with self._lock:
+            # A tombstone FIRST. Deleting a job that a child process is still
+            # working on used to resurrect it: the runner kept going and its
+            # final write_job/write_clip calls recreated the very files we had
+            # just removed, so a deleted job reappeared as "complete" with
+            # zombie clips attached to no job. The marker makes those late
+            # writes no-ops instead.
+            self._tombstone_path(job_id).parent.mkdir(parents=True, exist_ok=True)
+            self._tombstone_path(job_id).write_text(
+                json.dumps({"jobId": job_id, "at": int(time.time() * 1000)}),
+                encoding="utf-8",
+            )
             # remove rendered artifacts + transcripts for this job
             for clip in self.list_clips(job_id):
                 for key in ("videoPath", "thumbPath"):
@@ -195,8 +214,15 @@ class LocalStore:
                 cpath = self._paths.data_dir / "clips" / f"{clip['_id']}.json"
                 cpath.unlink(missing_ok=True)
             self._job_path(job_id).unlink(missing_ok=True)
-            logger.info(f"[store] deleted job {job_id} and its clips")
+            logger.info(f"[store] deleted job {job_id} and its clips (tombstoned)")
         return True
+
+    def _tombstone_path(self, job_id: str) -> Path:
+        return self._paths.data_dir / "jobs" / f"{job_id}.deleted"
+
+    def is_deleted(self, job_id: str) -> bool:
+        """True once a job has been deleted; late writes must not revive it."""
+        return self._tombstone_path(job_id).exists()
 
     # ------------------------------------------------------------------
     # clips
@@ -285,9 +311,16 @@ class LocalStore:
             docs.append(doc)
             self.write_clip(doc)
         if docs:
-            job = self.get_job(job_id) or {}
-            job["detectedSource"] = detected_source
-            self.write_job(job)
+            # The job record can legitimately be gone: the user deleted the job
+            # while this child process was mid-render. Recording the detection
+            # source is a nice-to-have; crashing the render loop with a
+            # KeyError on a job that no longer exists is not.
+            job = self.get_job(job_id)
+            if job is not None:
+                job["detectedSource"] = detected_source
+                self.write_job(job)
+            else:
+                logger.info(f"[store] job {job_id} vanished mid-render — not recording detectedSource")
         return docs
 
     @staticmethod

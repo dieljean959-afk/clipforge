@@ -272,6 +272,33 @@ So reuse is now conditional on the cut actually matching:
 including that an unchanged cut still resumes instantly and keeps its clip id,
 so download links stay stable.
 
+### The dashboard must not narrate work that isn't happening
+
+Two rules, both learned the hard way on a host that recycles mid-job.
+
+**A queued job looks queued.** On boot, `_boot()` re-queues jobs a restart
+interrupted. It used to enqueue them while leaving `stage` at the stage they
+died in and `progress` at its last value. The dashboard derives its entire
+status from those two fields, so a job sitting in a queue rendered as
+"Stage 3 of 4 — Detecting clips, 75%" — indistinguishable from real work, and
+worse than an error because it never resolved. Stale `unitsDone`/`unitsTotal`
+compounded it: "10 of 10 clips" beside a 0% bar. Every re-queue path (`_boot()`
+and `retry()`) now sets `stage="queued"`, `progress=0`, a queue-worded detail
+line, and clears the unit counters. The stage markers on disk — not this
+field — decide where the runner restarts.
+
+**Deleting a job actually stops it.** `DELETE /api/jobs/{id}` removed the
+record and workspace but left the work running: the server kept downloading,
+transcribing and spending LLM calls on a job nobody could see. Worse, the job
+came *back* — the child cannot be interrupted mid-render, so it finished and
+its `write_job`/`write_clip` calls recreated exactly the files the delete had
+removed, leaving a "complete" job pointing at unlinked MP4s plus zombie clips
+attached to no job. Now `worker.cancel()` drops the id from the queue or
+SIGKILLs its process group *before* the record goes, and `delete_job()` leaves
+a tombstone that `write_job()` honours, so a late write is a logged no-op.
+`create_clips()` also stopped raising `KeyError: '_id'` when the job it was
+writing metadata for had just been deleted.
+
 > **The stored transcript names the model that actually ran.** `hostlimits`
 > downgrades a model that cannot fit the container, so `config.toml` saying
 > `medium` on a 2 GiB host means a `small` model did the work. `transcribe()`
@@ -582,6 +609,8 @@ python3 tools/smoke_test.py      # API + worker + honest failure paths
 python3 tools/e2e_render_test.py # real ffmpeg: cut → crop → captions → thumbnail
 python3 tools/batch_recheck.py <jobId> --detect  # ffprobe every clip + rerun detection
 python3 tools/resume_invalidation_test.py  # a moved cut must not reuse the old render
+python3 tools/queue_truthfulness_test.py  # a queued job must look queued
+python3 tools/delete_cancels_test.py       # deleting a job must actually stop it
 ```
 
 `tools/batch_recheck.py <jobId>` re-verifies a finished batch from its own
@@ -601,6 +630,10 @@ batch it reports `✓ this was a REAL api.groq.com round trip`.
 [Resume must not ship a stale render](#resume-must-not-ship-a-stale-render):
 an unchanged cut still resumes and keeps its clip id, while a cut that moved
 by more than 20 ms invalidates the render and clears every stale media field.
+
+`tools/queue_truthfulness_test.py` and `tools/delete_cancels_test.py` guard the
+two honesty rules below — a queued job must look queued, and deleting a job
+must actually stop it.
 
 `tools/transcribe_unit_test.py` includes a **live** regression for the
 `.wav.part` extraction bug: it runs real ffmpeg to a `source.wav.part` temp
