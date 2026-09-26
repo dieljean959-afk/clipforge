@@ -29,7 +29,20 @@ const state = {
   python: null as string | null,
   starting: null as Promise<boolean> | null,
   sawBackend: false,
+  // Crash-loop protection. A backend that dies on boot (bad import, missing
+  // dependency, OOM at import) must not be respawned by every incoming
+  // request, or a wedged app turns into a fork bomb.
+  attempts: 0,
+  lastAttemptAt: 0,
 };
+
+// Backoff schedule, ms. Doubles per failed boot, capped.
+const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
+const MAX_ATTEMPTS = 12;
+
+function backoffFor(attempts: number): number {
+  return BACKOFF_MS[Math.min(attempts, BACKOFF_MS.length - 1)];
+}
 
 function log(msg: string) {
   console.log(`${LOG_TAG} ${msg}`);
@@ -92,6 +105,7 @@ async function startBackend(): Promise<boolean> {
   };
 
   log(`starting FastAPI via ${state.python} (uvicorn app.main:app on 127.0.0.1:8000)...`);
+  state.lastAttemptAt = Date.now();
   const proc = spawn(
     state.python,
     [
@@ -135,9 +149,15 @@ async function startBackend(): Promise<boolean> {
   }
   if (up) {
     state.sawBackend = true;
+    state.attempts = 0; // healthy again — the backoff budget is restored
     log("backend is UP on 127.0.0.1:8000 — /api proxy is live (same-origin)");
   } else {
-    log("ERROR: backend did not answer /api/health within 30s");
+    state.attempts += 1;
+    log(
+      `ERROR: backend did not answer /api/health within 30s ` +
+        `(attempt ${state.attempts}/${MAX_ATTEMPTS}, next retry in ` +
+        `${backoffFor(state.attempts) / 1000}s)`,
+    );
   }
   return up;
 }
@@ -151,15 +171,38 @@ export function clipforgeBackend(): Plugin {
     async configureServer(server) {
       await startBackend();
 
-      // respawn guard: any proxied /api request revives a dead backend first
-      server.middlewares.use((req, _res, next) => {
+      // Respawn guard: any proxied /api request revives a dead backend first.
+      //
+      // This used to require `state.sawBackend`, i.e. "only revive a backend
+      // this process had already seen alive". That made a boot-time failure
+      // PERMANENT: if the first startBackend() crashed, sawBackend stayed
+      // false forever, so the on-demand path never fired and every request
+      // 500'd until the whole web process was restarted. A crash loop and a
+      // failed first boot are the same problem and deserve the same recovery.
+      //
+      // The reviving request now WAITS for the backend instead of being
+      // proxied into a guaranteed 500 — so the first page load after a crash
+      // succeeds rather than showing the user an error and needing a refresh.
+      server.middlewares.use(async (req, _res, next) => {
         const url = req.url ?? "";
         if (url.startsWith("/api") || url.startsWith("/clips")) {
-          if (state.proc === null && state.sawBackend) {
-            log("backend down — respawning on demand");
-            state.starting = state.starting ?? startBackend().finally(() => {
-              state.starting = null;
-            });
+          if (state.proc === null) {
+            const sinceLast = Date.now() - state.lastAttemptAt;
+            const wait = backoffFor(state.attempts);
+            if (state.attempts >= MAX_ATTEMPTS) {
+              log(
+                `ERROR: backend has failed to boot ${state.attempts} times — ` +
+                  `giving up on respawn. Reload the app to retry.`,
+              );
+            } else if (sinceLast >= wait) {
+              log(`backend down — respawning on demand (attempt ${state.attempts + 1})`);
+              state.starting = state.starting ?? startBackend().finally(() => {
+                state.starting = null;
+              });
+            }
+          }
+          if (state.starting) {
+            await state.starting;
           }
         }
         next();

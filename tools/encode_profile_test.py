@@ -159,6 +159,66 @@ def main() -> int:
     check("summary names the deadline", "deadline" in encode.summary(cpu),
           encode.summary(cpu))
 
+    # --- 6. adaptive bitrate -------------------------------------------
+    print()
+    print("== 6. the VBR ceiling is derived from the output geometry")
+    t = encode.target_bitrate_kbps
+    check("1080x1920@60 targets a sane ceiling", t(1080, 1920, 60) == 7465, f"{t(1080, 1920, 60)} kbps")
+    check("30fps gets roughly half the 60fps ceiling",
+          abs(t(1080, 1920, 30) - t(1080, 1920, 60) / 2) < 40,
+          f"{t(1080, 1920, 30)} vs {t(1080, 1920, 60)}")
+    check("4K is allowed more than 1080p", t(2160, 3840, 60) > t(1080, 1920, 60),
+          f"{t(2160, 3840, 60)} vs {t(1080, 1920, 60)}")
+    check("a tiny output is floored, not starved",
+          t(320, 240, 15) == encode.MIN_MAXRATE_KBPS, f"{t(320, 240, 15)}")
+    check("a huge output is capped", t(7680, 4320, 120) == encode.MAX_MAXRATE_KBPS)
+    check("a nonsense fps falls back instead of exploding",
+          t(1080, 1920, 0) == t(1080, 1920, 30), f"{t(1080, 1920, 0)}")
+
+    print()
+    print("== 7. the ceiling reaches ffmpeg, and the CRF adapts to the preset")
+    adaptive = encode.EncoderChoice(preset="ultrafast", crf=20).for_output(1080, 1920, 60)
+    a = adaptive.ffmpeg_codec_args()
+    check("libx264 gets -maxrate", "-maxrate" in a, " ".join(a))
+    check("libx264 gets -bufsize", "-bufsize" in a)
+    check("bufsize is twice maxrate (VBV wants 2x)",
+          a[a.index("-bufsize") + 1] == f"{adaptive.maxrate_kbps * 2}k")
+    check("the emitted maxrate matches the computed target",
+          a[a.index("-maxrate") + 1] == f"{adaptive.maxrate_kbps}k")
+    check("ultrafast raises the CRF (it is the least efficient preset)",
+          adaptive.crf == 23, f"crf {adaptive.crf}")
+    medium = encode.EncoderChoice(preset="medium", crf=20).for_output(1080, 1920, 60)
+    check("a capable preset keeps or lowers the CRF", medium.crf <= 20, f"crf {medium.crf}")
+    check("the ceiling is the same regardless of preset",
+          medium.maxrate_kbps == adaptive.maxrate_kbps)
+
+    # every encoder family must carry the ceiling, or the saving silently
+    # evaporates on a host with a GPU.
+    for name in ("h264_nvenc", "h264_qsv"):
+        hw = encode.EncoderChoice(
+            encoder=name, hardware=True, preset="ultrafast", crf=20
+        ).for_output(1080, 1920, 60)
+        hw_args = hw.ffmpeg_codec_args()
+        check(f"{name} carries the ceiling", "-maxrate" in hw_args, " ".join(hw_args))
+    vaapi_adaptive = encode.EncoderChoice(
+        encoder="h264_vaapi", hardware=True, crf=20
+    ).for_output(1080, 1920, 60)
+    vaapi_args = vaapi_adaptive.ffmpeg_codec_args()
+    check("VAAPI uses the adaptive target as its bitrate",
+          f"{vaapi_adaptive.maxrate_kbps}k" in vaapi_args, " ".join(vaapi_args))
+    check("VAAPI does not also get -maxrate (it IS the bitrate)",
+          "-maxrate" not in vaapi_args)
+
+    uncapped = encode.EncoderChoice(preset="ultrafast", crf=20)
+    check("without for_output() the behaviour is unchanged (no cap)",
+          "-maxrate" not in uncapped.ffmpeg_codec_args()
+          and uncapped.crf == 20,
+          " ".join(uncapped.ffmpeg_codec_args()))
+    check("summary reports the ceiling",
+          "maxrate" in encode.summary(adaptive), encode.summary(adaptive))
+    check("as_dict reports the ceiling",
+          encode.as_dict(adaptive).get("maxrateKbps") == adaptive.maxrate_kbps)
+
     print()
     if failures:
         print(f"ENCODE PROFILE: {len(failures)} FAILURE(S): {failures}")

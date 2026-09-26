@@ -312,6 +312,7 @@ def render_clip(
     caption_cues: list[dict] | None = None,
     crop_windows: list[dict] | None = None,
     silence_cuts: list[dict] | None = None,
+    src_fps: float | None = None,
 ) -> dict[str, Any]:
     """Cut + reframe + burn captions into one 9:16 clip. Returns metadata.
 
@@ -327,7 +328,14 @@ def render_clip(
     enc = encode.choose(settings)
     for note in enc.notes:
         logger.info(f"[video] {note}")
-    logger.debug(f"[video] render config: {encode.summary(enc)}")
+    # Size the encode to the frame we are actually producing. A flat CRF is a
+    # quality setting, not a size policy: on a CPU-only host the preset is
+    # lowered to ultrafast and the same crf yields a far bigger file than the
+    # config implies (13.2 Mbps, 81 MB for a 50s clip, measured on a real
+    # batch). for_output() derives a VBR ceiling from this output's geometry
+    # and adapts the CRF to the preset that actually ran.
+    enc.for_output(out_w, out_h, float(src_fps) if src_fps else 30.0)
+    logger.info(f"[video] render config: {encode.summary(enc)}")
     codec_args = enc.ffmpeg_codec_args()
 
     # 1) seek straight into the SOURCE for this segment.

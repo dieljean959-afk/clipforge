@@ -556,6 +556,11 @@ class Pipeline:
                     caption_cues=cues if cues else None,
                     crop_windows=crop_windows,
                     silence_cuts=cuts_for_clip,
+                    # The adaptive bitrate ceiling is derived from the output
+                    # geometry INCLUDING frame rate, so the source fps has to
+                    # reach the encoder. Without it a 30fps source would be
+                    # sized as if it were 60 and waste half its budget.
+                    src_fps=float(src_meta.get("fps") or 30.0),
                 )
                 thumb = self.settings.app.paths.outputs_dir / job_id / f"clip_{idx + 1:02d}.jpg"
                 video.render_first_frame_thumb(out_path, thumb)

@@ -355,6 +355,41 @@ suggesting a smaller batch, rather than being attempted.
 > is a per-model number and a mislabelled transcript makes it meaningless.
 > `python -m app.doctor` reports this as `whisper model fits host`.
 
+### The bitrate is adaptive, and it was measured
+
+A flat CRF is a *quality* setting, not a size policy. On a CPU-only host the
+preset is lowered to `ultrafast`, which drops the lookahead and CABAC work
+x264 normally does, so the same CRF produces a much larger file than the
+config implies. Measured on a real batch: **crf 20 at 1080×1920/60 came out at
+13.2 Mbps — 81 MB for a 50-second clip**, roughly 400 MB per batch on a 3 GB
+disk.
+
+`EncoderChoice.for_output(width, height, fps)` now sizes each render to the
+frame it is actually producing:
+
+- The VBR ceiling comes from **bits-per-pixel-per-frame**, so the policy is
+  geometry-driven rather than a magic constant. 1080×1920@60 → 7.5 Mbps;
+  the same frame at 30fps → 3.7 Mbps; 4K60 → 14 Mbps (clamped). A 30fps
+  source used to be sized as if it were 60 and could spend double its budget.
+- The CRF adapts to the preset that actually ran, because the presets are not
+  equally efficient — `ultrafast` gets +3, a capable preset keeps or lowers it.
+- The ceiling is carried by **all four** encoder paths (libx264, NVENC, QSV,
+  VAAPI), or the saving would silently evaporate on a host with a GPU.
+
+Measured on stress content at the true output geometry:
+
+| config | bitrate | size | SSIM vs source |
+|---|---|---|---|
+| before: ultrafast crf20, uncapped | 71.8 Mbps | 95.8 MB | 0.906 |
+| after: ultrafast crf23 + 7.5M cap | **6.2 Mbps** | **8.2 MB** | 0.895 |
+
+**-91% size for -0.011 SSIM** — and note the old setting was not actually
+high quality either. On the real 13.2 Mbps batch the cap projects to roughly
+81 MB → 46 MB per clip. Easy content stays well under the ceiling, so this
+costs nothing on simple footage. `tools/encode_profile_test.py` asserts the
+geometry math, the preset-adaptive CRF, and that every encoder path carries
+the cap.
+
 ## Deployment: how the backend is hosted
 
 There is **no local setup** for the hosted app. The platform runs one managed
@@ -370,6 +405,30 @@ platform web process (Vite, managed by Freebuff)
                     └── one child process per job
                           └── yt-dlp / WhisperX / ffmpeg run HERE, on the host
 ```
+
+The supervisor respawns a dead backend on the first proxied `/api` request,
+and the reviving request **waits** for the spawn so the first page load after a
+crash succeeds instead of 500ing. Two properties are deliberate:
+
+- **A failed first boot is recoverable.** The guard used to require
+  `state.sawBackend` — "only revive a backend this process already saw alive".
+  Since that flag is only set once `/api/health` has answered, a backend that
+  crashed on boot (a bad import, a missing dependency) never set it, the
+  on-demand branch never fired, and every request 500'd until the whole web
+  process was restarted. A crash loop and a failed first boot are the same
+  failure and now recover the same way.
+- **Crash loops are throttled.** Dropping the condition without a backoff
+  would have made a backend that dies on boot respawn on *every* request. So
+  failed boots back off (1s → 30s) and give up after 12 attempts with a
+  message telling the operator to reload, instead of forking.
+
+`bun tools/backend_respawn_test.ts` guards all of it.
+
+> **The backend is spawned lazily and only by the proxy.** Probing
+> `127.0.0.1:8000` directly reports "down" for a backend that is merely
+> asleep. `tools/live_watch.py` deliberately goes through the Vite proxy on
+> :5173, exactly as a browser does, so it both tests the real path and
+> triggers the revival.
 
 The browser calls same-origin relative `/api/...` URLs; the Vite proxy
 forwards them to the backend. No localhost from the browser, no hardcoded
@@ -648,7 +707,9 @@ python3 tools/asr_engine_test.py       # mocked queue/retry + ETA checks
 python3 tools/detect_backend_test.py   # provider dispatch, text-only payloads
 python3 tools/llm_provider_test.py     # Groq wire contract, 429 backoff, pacing, key handling
 python3 tools/caption_preset_test.py   # caption preset -> ASS style line + clip-relative timing
-python3 tools/encode_profile_test.py   # encoder/preset/deadline degradation logic
+python3 tools/encode_profile_test.py   # encoder/preset/deadline + adaptive bitrate logic
+python3 tools/live_watch.py            # verify the RUNNING site: waits, then checks every endpoint
+bun tools/backend_respawn_test.ts       # the backend supervisor recovers from a failed boot
 bun tools/overall_status_test.ts       # job Done/Failed/overall-progress indicator logic
 python3 -m app.doctor                  # hardware/engine/ffmpeg diagnostics
 curl localhost:8000/api/health         # worker/warmup/LLM/system status
