@@ -598,12 +598,24 @@ class Pipeline:
         if job is None:
             return
         ready = self.store.clips_ready_count(job_id)
+        resumes = int(job.get("interruptCount") or 0)
         job.update({
             "stage": "complete",
             "progress": 100,
             "progressDetail": f"{ready} clips ready.",
             "completedAt": int(time.time() * 1000),
+            # A completed job is no longer interrupted, whatever it survived.
+            "interrupted": False,
+            "interruptReason": None,
         })
+        if resumes:
+            # Worth stating plainly: the result is real, but it took extra
+            # attempts, which changes what a render-time estimate means.
+            self._log(
+                job_id,
+                f"completed after {resumes} host-restart interruption(s) — "
+                "resumed from cached stages each time",
+            )
         self.store.write_job(job)
         self._log(job_id, f"pipeline complete in {elapsed:.0f}s — {ready} clips rendered")
 

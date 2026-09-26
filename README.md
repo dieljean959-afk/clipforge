@@ -123,6 +123,41 @@ benchmark.
 WhisperX `large-v3` RTF before/after, have not been measured. A 1-vCPU/2-GiB
 sandbox encodes at ~0.1x realtime and is not a valid measurement of either.
 
+### Surviving a host restart
+
+On a host that restarts containers (managed sandboxes, autoscaling platforms),
+the runtime sends **SIGTERM** to in-flight processes partway through a render.
+That is not a pipeline bug, and it is not OOM — but it used to be fatal:
+
+| Symptom before | Now |
+|---|---|
+| `Worker process exited unexpectedly (code -15)` with no cause | Named for what it is: an external SIGTERM, explicitly **not** OOM. `-9` and `-15` are distinct. |
+| Job frozen at `rendering` with no terminal state | Resumed on next boot from cached stages |
+| Job killed once → `stage: failed` **forever** | Auto-resumed, up to `CLIPFORGE_INTERRUPT_MAX_RESUMES` (default 5) |
+| Old failures could never be recovered | Boot recovery also rescues jobs whose recorded failure was a signal banner |
+| `ffmpeg failed:` with eight progress frames and no error | Exit code + signal name lead; progress noise filtered out |
+
+How it decides, at every boot:
+
+1. **mid-flight** — stage is `grabbing/transcribing/finding/rendering/queued`:
+   the process died before writing a terminal state, so re-queue it.
+2. **flagged interrupted** — a shutdown hook or a previous SIGTERM marked it.
+3. **failed, but from a signal** — `stage: failed` whose message is a signal
+   banner. The stage cache is intact, so the false terminal state is cleared and
+   the job resumes.
+
+The retry is **bounded** — after `INTERRUPT_MAX_RESUMES` interrupts a job is
+left failed rather than looping. A job with a real content error (a 404, a bad
+URL) is *not* recovered: only signal-caused failures match, so retries cannot
+loop on something that will always fail.
+
+Resume is **stage-level**, so the expensive work is not repeated: a job killed
+during rendering restarts at `captions`, reusing the download, transcript and
+detected candidates already on disk.
+
+**A per-clip timeout cannot solve this.** A timeout inside a process cannot
+fire once that process has been killed; only boot-time reconciliation can.
+
 ### Multi-language caption tracks
 
 `[translate]` writes **sidecar** subtitle files next to each clip — separate

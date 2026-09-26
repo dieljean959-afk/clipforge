@@ -63,6 +63,15 @@ export interface JobDto {
   } | null;
   createdAt: number;
   completedAt?: number | null;
+  /**
+   * Set when the host killed the worker (SIGTERM/SIGKILL) mid-job, e.g. a
+   * container restart. The job is auto-resumed rather than failed, so this is
+   * normally transient and does not mean the job is lost.
+   */
+  interrupted?: boolean | null;
+  interruptReason?: string | null;
+  /** How many host restarts this job has survived; bounded server-side. */
+  interruptCount?: number | null;
 }
 
 export interface ClipDto {

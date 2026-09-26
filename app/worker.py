@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+from typing import Any
 
 from loguru import logger
 
@@ -43,6 +45,19 @@ from app.store import LocalStore
 
 # Seconds of progress silence before a running job is declared stalled.
 STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "1200"))
+
+# How many times a job killed by an EXTERNAL signal (SIGTERM/SIGKILL — host
+# restart, redeploy, scale-down) is auto-resumed before it is finally failed.
+# Bounded on purpose: a job that cannot survive a restart loop must stop
+# looping eventually, but losing hours of transcription to a 30-second host
+# bounce is the failure this prevents.
+INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "5"))
+
+# Matches the signalled-death banners this module writes, e.g.
+# "exited unexpectedly (code -15)". Kept deliberately narrow so it cannot match
+# a stray mention of "code" inside an ordinary traceback and cause a bad job to
+# be retried forever.
+_SIGNAL_BANNER = re.compile(r"\(code -\d+\)")
 
 
 class InProcessWorker:
@@ -314,6 +329,14 @@ class InProcessWorker:
                 tail = "\n".join(runner_log.read_text(encoding="utf-8", errors="replace").splitlines()[-12:])
         except Exception:
             pass
+        # A negative return code means the child was SIGNALLED, not that it
+        # failed. That is an external event (host restart/redeploy/scale-down),
+        # so the job did not fail on its own merit — treat it as interrupted and
+        # resumable. Without this, a host bounce permanently fails work whose
+        # expensive stages are already cached on disk.
+        if rc is not None and rc < 0 and self._note_interrupted(job, job_id, rc, stage, tail):
+            return
+
         msg = f"Worker process exited unexpectedly (code {rc}) before the job finished"
         # A SIGKILL'd child reports no traceback at all — name the OOM kill and
         # the fix instead of leaving the user with "exited unexpectedly".
@@ -329,6 +352,8 @@ class InProcessWorker:
                 "stage": "failed",
                 # keep the stage the child died in, for the dashboard banner
                 "failedStage": stage,
+                # a later hard failure supersedes any earlier interrupt flag
+                "interrupted": False,
                 "error": msg,
                 "errorDetail": detail[:4000],
                 "completedAt": int(time.time() * 1000),
@@ -339,6 +364,103 @@ class InProcessWorker:
     # ------------------------------------------------------------------
     # watchdog
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def has_signal_failure(job: dict[str, Any]) -> bool:
+        """True when a job's recorded FAILURE was really an external kill.
+
+        Jobs killed by SIGTERM/SIGKILL before the interrupted/resumed
+        distinction existed were stamped ``stage: failed`` with a message like
+        "exited unexpectedly (code -15)". Their stage cache is intact on disk,
+        so they are recoverable — this is what lets boot reconciliation rescue
+        them instead of leaving them dead forever.
+
+        Deliberately narrow: it matches the signalled-failure messages this
+        module writes, not the word "code" appearing anywhere in a traceback.
+        """
+        if job.get("stage") != "failed":
+            return False
+        text = f"{job.get('error') or ''}\n{job.get('errorDetail') or ''}"
+        return bool(_SIGNAL_BANNER.search(text))
+
+    def _note_interrupted(self, job: dict[str, Any] | None, job_id: str, rc: int,
+                          stage: str | None, tail: str) -> bool:
+        """Flag a signalled job as interrupted and re-queue it.
+
+        Returns False once the resume budget is spent, so the caller falls
+        through to the ordinary hard-failure path (we must not loop forever).
+
+        ``stage`` is deliberately left UNCHANGED: it stays where the child died,
+        so the stage-workspace resume picks up from the last completed stage
+        instead of starting over. That is the whole point — transcription on a
+        15-minute source is the expensive part and it is already on disk.
+        """
+        if job is None:
+            return False
+        count = int(job.get("interruptCount") or 0) + 1
+        if count > INTERRUPT_MAX_RESUMES:
+            return False
+        try:
+            how = signal.Signals(-rc).name
+        except ValueError:
+            how = f"signal {-rc}"
+        reason = (
+            f"Host terminated the worker with {how} during '{stage}' — this is an "
+            f"external kill (restart/redeploy), not a pipeline error."
+        )
+        job.update({
+            "interruptCount": count,
+            "interrupted": True,
+            "interruptReason": reason,
+            "error": None,
+            "progressDetail": (
+                f"Interrupted by a host restart — resuming "
+                f"(attempt {count} of {INTERRUPT_MAX_RESUMES})"
+            ),
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(
+            job_id,
+            f"INTERRUPTED: worker killed by {how} during '{stage}' — auto-resuming "
+            f"(attempt {count} of {INTERRUPT_MAX_RESUMES})",
+        )
+        if tail:
+            logger.debug(f"[worker] {job_id} last runner output before interrupt: {tail[-400:]}")
+        logger.warning(
+            f"[worker] job {job_id} interrupted by {how} during '{stage}' — "
+            f"re-queuing (attempt {count}/{INTERRUPT_MAX_RESUMES})"
+        )
+        self.enqueue(job_id)
+        return True
+
+    def mark_in_flight_interrupted(self) -> list[str]:
+        """Flag every job with a live child as interrupted, for the next boot.
+
+        Called from the app's shutdown hook. Best-effort by nature — the host may
+        SIGKILL us before this runs — but when we do get a graceful shutdown it
+        turns the next boot's re-queue into an informed resume instead of a
+        guess about what was happening when the lights went out.
+        """
+        flagged: list[str] = []
+        for job_id, proc in self._targets():
+            if proc.poll() is not None:
+                continue
+            job = self.store.get_job(job_id)
+            if job is None or job.get("stage") in {"complete", "failed"}:
+                continue
+            job.update({
+                "interrupted": True,
+                "interruptReason": "Host shut down while this job was running — it will resume.",
+                "progressDetail": "Host restarting — this job will resume automatically.",
+            })
+            self.store.write_job(job)
+            self.store.append_job_log(
+                job_id, "INTERRUPTED: host shutting down mid-job — will resume on next boot"
+            )
+            flagged.append(job_id)
+        if flagged:
+            logger.warning(f"[worker] flagged {len(flagged)} in-flight job(s) as interrupted before shutdown")
+        return flagged
 
     def _kill_process(self, proc: subprocess.Popen) -> None:
         """SIGKILL one job's process group (and its ffmpeg children)."""

@@ -80,6 +80,55 @@ def main() -> int:
     assert StageWorkspace(settings.app.paths.data_dir, job_id).first_incomplete() == "detect"
     assert ws.is_done("fetch") and ws.is_done("transcribe")
 
+    # --- externally-killed jobs resume instead of dying permanently -------
+    # Regression: a SIGTERM/SIGKILL from the host (restart, redeploy,
+    # scale-down) marked the job stage=failed forever, throwing away cached
+    # transcription that was intact on disk. A signalled child did not fail on
+    # its own merit, so it must be resumed — with a bounded budget.
+    assert worker_mod.INTERRUPT_MAX_RESUMES >= 1
+    enqueued: list[str] = []
+    real_enqueue = worker.enqueue
+    worker.enqueue = lambda jid: (enqueued.append(jid), 1)[1]  # type: ignore[assignment]
+    try:
+        j = store.get_job(job_id) or {}
+        j.update({"stage": "rendering", "error": None, "completedAt": None,
+                  "interruptCount": 0, "interrupted": False})
+        store.write_job(j)
+
+        handled = worker._note_interrupted(store.get_job(job_id), job_id, -15, "rendering", "some tail")
+        after = store.get_job(job_id) or {}
+        assert handled is True
+        assert after["stage"] == "rendering", after["stage"]      # stage PRESERVED for resume
+        assert after["interrupted"] is True
+        assert after["interruptCount"] == 1
+        assert after.get("error") is None                         # not treated as a failure
+        assert after.get("completedAt") is None
+        assert enqueued == [job_id], enqueued                     # auto-resumed immediately
+        assert any("INTERRUPTED" in str(entry) for entry in (after.get("logs") or [])), "must be logged"
+        assert "SIGTERM" in (after.get("interruptReason") or ""), after.get("interruptReason")
+
+        # SIGKILL (the OOM case) resumes the same way
+        j2 = store.get_job(job_id) or {}
+        j2.update({"stage": "finding", "interruptCount": 0})
+        store.write_job(j2)
+        assert worker._note_interrupted(store.get_job(job_id), job_id, -9, "finding", "") is True
+        assert (store.get_job(job_id) or {}).get("stage") == "finding"
+
+        # bounded: once the budget is spent it must stop auto-resuming, so the
+        # caller falls through to a real failure rather than looping forever
+        j3 = store.get_job(job_id) or {}
+        j3.update({"stage": "rendering", "interruptCount": worker_mod.INTERRUPT_MAX_RESUMES})
+        store.write_job(j3)
+        exhausted = worker._note_interrupted(
+            store.get_job(job_id), job_id, -15, "rendering", ""
+        )
+        assert exhausted is False, "resume budget must be finite"
+
+        # shutdown hook must be safe and non-throwing with no live children
+        assert isinstance(worker.mark_in_flight_interrupted(), list)
+    finally:
+        worker.enqueue = real_enqueue  # type: ignore[assignment]
+
     # --- signalled-worker attribution -------------------------------------
     # Regression: -15 (SIGTERM) used to fall through to a bare "exited
     # unexpectedly" with no cause, which is unactionable. -9 (SIGKILL) is the

@@ -23,6 +23,7 @@ from app import eta, hosting, hostlimits
 from app import llm as llm_mod
 from app import subtitle as subtitle_svc
 from app import video as video_svc
+from app import worker as worker_mod
 from app.config import (
     ConfigError,
     Settings,
@@ -115,11 +116,50 @@ def _boot() -> None:
     worker = InProcessWorker(settings, store)
     retention = RetentionCleaner(settings, store)
 
-    # Re-queue any jobs left mid-flight by a previous run (crash recovery).
+    # --- crash recovery ---------------------------------------------------
+    # Three things are recoverable, and they are not the same thing:
+    #   1. mid-flight — the process died before it could write a terminal state,
+    #      so the job is simply frozen at its last stage.
+    #   2. interrupted — we knew a host restart killed it.
+    #   3. a FAILURE whose message is a SIGNAL banner, i.e. recorded as failure
+    #      before the interrupted/resumed distinction existed. Those jobs are
+    #      sitting at stage=failed with an intact stage cache, and used to be
+    #      lost permanently.
+    # Bounded by INTERRUPT_MAX_RESUMES so a job that cannot survive a restart
+    # loop eventually stops instead of cycling forever.
+    recoverable = {"grabbing", "transcribing", "finding", "rendering", "queued"}
     for job in store.list_jobs():
-        if job.get("stage") in {"grabbing", "transcribing", "finding", "rendering", "queued"}:
-            logger.info(f"[boot] re-queuing interrupted job {job['_id']} (was {job['stage']})")
-            worker.enqueue(job["_id"])
+        reason = None
+        if job.get("stage") in recoverable:
+            reason = "mid-flight"
+        elif job.get("interrupted"):
+            reason = "flagged interrupted"
+        elif InProcessWorker.has_signal_failure(job):
+            reason = "recorded as failed, but the cause was an external kill"
+        if reason is None:
+            continue
+        resumes = int(job.get("interruptCount") or 0)
+        if resumes >= worker_mod.INTERRUPT_MAX_RESUMES:
+            logger.warning(
+                f"[boot] job {job['_id']} exhausted its resume budget "
+                f"({resumes}) — leaving it failed instead of looping"
+            )
+            continue
+        was = job.get("stage")
+        if was == "failed":
+            # Clear the false terminal state so the resume can proceed; the
+            # stage markers on disk, not this field, decide where it restarts.
+            job.update({
+                "stage": job.get("failedStage") or "queued",
+                "error": None,
+                "completedAt": None,
+                "interrupted": True,
+                "interruptReason": "Recovered after an external kill — resuming from cached stages.",
+                "progressDetail": "Recovering — resuming from cached stages.",
+            })
+            store.write_job(job)
+        logger.info(f"[boot] re-queuing job {job['_id']} ({reason}, was {was})")
+        worker.enqueue(job["_id"])
 
     # Whisper model pre-download happens in a background thread so /health
     # responds immediately while the model loads.
@@ -185,6 +225,21 @@ async def _tailscale_gate(request: Request, call_next):
                 status_code=401,
             )
     return await call_next(request)
+
+
+@app.on_event("shutdown")
+def _mark_interrupted() -> None:
+    """Best-effort: record in-flight jobs as interrupted before we go away.
+
+    The host can SIGKILL us at any moment, so this cannot be relied on — but
+    when the runtime does grant a graceful stop, flagging the running jobs is
+    what makes the next boot RESUME them instead of leaving them frozen at
+    their last stage with no terminal state.
+    """
+    try:
+        worker.mark_in_flight_interrupted()
+    except Exception as exc:  # noqa: BLE001 — never block shutdown
+        logger.warning(f"[shutdown] could not flag in-flight jobs: {exc}")
 
 
 @app.on_event("startup")

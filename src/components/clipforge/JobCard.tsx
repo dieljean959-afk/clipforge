@@ -181,6 +181,23 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
             {job.totalClipsSec ? `· ${fmtClock(job.totalClipsSec)} total` : null}
           </span>
         </div>
+      ) : job.interrupted ? (
+        <div
+          data-testid="job-interrupted"
+          className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/50 bg-amber-400/10 px-3 py-2.5 text-sm"
+        >
+          <RotateCcw className="mt-0.5 size-4 shrink-0 text-amber-300" />
+          <div className="min-w-0">
+            <div className="font-semibold text-amber-300">
+              Interrupted by a host restart — resuming
+              {job.interruptCount ? ` (attempt ${job.interruptCount})` : ""}
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {job.interruptReason ??
+                "The worker was stopped externally, not by a pipeline error. Completed stages are reused, so progress is not lost."}
+            </div>
+          </div>
+        </div>
       ) : overall.state === "failed" ? (
         <div
           data-testid="job-failed"
