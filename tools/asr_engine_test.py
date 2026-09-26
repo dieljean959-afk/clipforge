@@ -369,10 +369,23 @@ def section_benchmark(tmp: Path, seconds: int) -> None:
     from faster_whisper import WhisperModel
     from faster_whisper.transcribe import BatchedInferencePipeline
 
+    from app import asr as asr_mod
+    from app import hostlimits
     from app.config import load_config
 
     settings = load_config(quiet=True)
-    model_name = settings.whisper.model
+    # Benchmark what the pipeline would ACTUALLY load. A configured model that
+    # does not fit is downgraded at runtime; benchmarking the configured name
+    # instead measures a model production never uses — or OOMs on a small host.
+    configured = settings.whisper.model
+    model_name, downgrade = hostlimits.resolved_model(configured)
+    if downgrade:
+        print(f"   host limit: '{configured}' -> '{model_name}' ({downgrade.split('.')[0]}.)")
+    # Honour [whisper] device/compute_type the way app.asr does. Hardcoding
+    # "cpu" here reported CPU RTF for a machine that has a GPU, which is the
+    # one number this benchmark exists to inform.
+    device, compute = asr_mod._resolve_device(settings)
+    threads = hostlimits.inference_threads()
     batch = settings.whisper.batch_size
     wav = _synthetic_wav(tmp / "bench.wav", seconds)
     with wave.open(str(wav), "rb") as fh:
@@ -381,12 +394,17 @@ def section_benchmark(tmp: Path, seconds: int) -> None:
 
     try:
         t0 = time.time()
-        model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=os.cpu_count() or 4)
+        model = WhisperModel(model_name, device=device, compute_type=compute, cpu_threads=threads)
         load_s = time.time() - t0
     except Exception as exc:
-        print(f"   SKIP benchmark — could not load '{model_name}': {exc}")
+        # Previously a bare `return`, so the run ended with a clean pass and no
+        # numbers — the most dangerous possible failure for a benchmark.
+        print(f"   SKIP benchmark — could not load '{model_name}' on {device}/{compute}: {exc}")
+        check("benchmark produced RTF numbers", False, f"model load failed: {exc}")
         return
-    print(f"   model '{model_name}' loaded in {load_s:.1f}s (int8, {os.cpu_count()} threads)")
+    print(f"   model '{model_name}' loaded in {load_s:.1f}s on {device}/{compute} ({threads} threads)")
+    if device == "cpu":
+        print("   NOTE: no CUDA device visible — these RTF figures are CPU-only.")
 
     common = dict(
         condition_on_previous_text=False,
@@ -407,9 +425,19 @@ def section_benchmark(tmp: Path, seconds: int) -> None:
     before_wall = time.time() - t0
 
     # --- AFTER: one batched pass over the whole buffer ---------------------
+    # BatchedInferencePipeline raises "No clip timestamps found" for any audio
+    # >= 30s when vad_filter is False and clip_timestamps is unset, so the
+    # default 120s buffer used to crash here regardless of host. We are
+    # measuring decode throughput rather than VAD, so hand it the same uniform
+    # 30s window split the BEFORE loop walks — identical audio on both sides.
+    windows = [{"start": s, "end": min(s + 30, seconds)} for s in range(0, seconds, 30)]
+    print(f"   batched pass: {len(windows)} x 30s window(s), batch_size={batch} "
+          f"(fills {min(len(windows), batch)})")
     pipeline = BatchedInferencePipeline(model=model)
     t0 = time.time()
-    segments, _ = pipeline.transcribe(audio, language="en", batch_size=batch, **common)
+    segments, _ = pipeline.transcribe(
+        audio, language="en", batch_size=batch, clip_timestamps=windows, **common
+    )
     list(segments)
     after_wall = time.time() - t0
 
