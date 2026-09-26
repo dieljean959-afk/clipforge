@@ -80,6 +80,43 @@ def main() -> int:
     assert StageWorkspace(settings.app.paths.data_dir, job_id).first_incomplete() == "detect"
     assert ws.is_done("fetch") and ws.is_done("transcribe")
 
+    # --- signalled-worker attribution -------------------------------------
+    # Regression: -15 (SIGTERM) used to fall through to a bare "exited
+    # unexpectedly" with no cause, which is unactionable. -9 (SIGKILL) is the
+    # OOM case and must stay distinct from it.
+    from app import hostlimits
+
+    hint_15 = hostlimits.oom_hint(-15, "fetch")
+    assert hint_15 and "SIGTERM" in hint_15, hint_15
+    assert "NOT an out-of-memory kill" in hint_15, hint_15
+    assert "during 'fetch'" in hint_15, hint_15
+    hint_9 = hostlimits.oom_hint(-9, "transcribe")
+    assert hint_9 and "out-of-memory kill" in hint_9, hint_9
+    assert "SIGTERM" not in hint_9, hint_9
+    assert hostlimits.oom_hint(1, "render") is None
+    assert hostlimits.oom_hint(0, None) is None
+    assert hostlimits.oom_hint(None, None) is None
+
+    # --- ffmpeg error extraction -----------------------------------------
+    # Regression: a naive stderr tail returned eight progress frames and
+    # dropped the real error, so a failed render reported nothing usable.
+    from app import video
+
+    progress_noise = "\r".join(
+        f"frame=  {i} fps=6.3 q=28.0 size=     256kB time=00:00:0{i}.00 bitrate= 100.0kbits/s speed=0.10x"
+        for i in range(1, 40)
+    )
+    real_error = "[libx264 @ 0x55] height not divisible by 2 (1080x1081)\nConversion failed!"
+    tail = video._ffmpeg_error_tail(progress_noise + "\n" + real_error)
+    assert "height not divisible" in tail, tail
+    assert "frame=" not in tail, tail
+
+    only_progress = video._ffmpeg_error_tail(progress_noise)
+    assert "no diagnostic line" in only_progress, only_progress
+    assert "killed by a signal" in only_progress, only_progress
+
+    assert video._ffmpeg_error_tail("") == "(ffmpeg produced no output)"
+
     worker.stop(timeout=2)
     store.delete_job(job_id)
     for stage in STAGES:

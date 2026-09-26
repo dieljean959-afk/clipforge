@@ -274,11 +274,28 @@ def model_warning(model: str) -> str | None:
 
 
 def oom_hint(exit_code: int | None, stage: str | None) -> str | None:
-    """Turn a SIGKILL'd worker into an actionable message.
+    """Explain a signalled worker (SIGKILL -9, SIGTERM -15).
 
-    A child killed by the OOM killer reports code -9 and no traceback — the
-    least actionable failure in the system. Name it, and name the fix.
+    Two different things produce a signalled child, and conflating them sends
+    operators down the wrong path:
+
+      -9  SIGKILL — typically the OOM killer. Needs a smaller footprint.
+     -15  SIGTERM — an EXTERNAL termination: a host restart, redeploy, container
+          stop or scale-down. This is NOT memory pressure, and lowering the
+          model size will not help. Before this branch existed, -15 fell through
+          to a bare "exited unexpectedly" with no cause at all, which is the
+          least actionable failure in the system.
     """
+    if exit_code == -15:
+        where = f" during '{stage}'" if stage else ""
+        return (
+            f"The worker was terminated by SIGTERM{where} — something outside the "
+            "pipeline killed it; it did not fail on its own. This is NOT an "
+            "out-of-memory kill (that reports code -9). Typical causes are the host "
+            "restarting or redeploying, a container stop/scale-down, or a manual "
+            "restart. Retry the job; if it keeps happening, check whether a deploy "
+            "or restart time lines up with the failure."
+        )
     if exit_code != -9:
         return None
     limit = effective_memory_bytes()

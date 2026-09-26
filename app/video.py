@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -67,6 +68,34 @@ def verify_source(path: Path) -> None:
     logger.info(f"[video] source verified: {meta['width']}x{meta['height']}, {meta['duration']:.1f}s")
 
 
+# ffmpeg writes progress to stderr as carriage-return updates, so these lines
+# dominate any naive tail of the output.
+_FFMPEG_PROGRESS = re.compile(r"^\s*frame=\s*\d+.*(fps=|size=|time=)")
+
+
+def _ffmpeg_error_tail(stderr: str, limit: int = 8) -> str:
+    """Pull the DIAGNOSTIC lines out of ffmpeg's stderr.
+
+    A plain ``splitlines()[-8:]`` tail is almost always eight progress frames:
+    ffmpeg emits progress on stderr with ``\\r``, Python's splitlines() splits
+    on that too, and the real error — printed before the final frame stats —
+    gets pushed out. That is why a failed render used to report a message made
+    entirely of ``frame=/fps=`` noise, which told the operator nothing.
+    """
+    lines = [ln.rstrip() for ln in (stderr or "").splitlines() if ln.strip()]
+    meaningful = [ln for ln in lines if not _FFMPEG_PROGRESS.match(ln)]
+    if meaningful:
+        # Keep the tail of the meaningful lines: ffmpeg prints the cause last.
+        return " | ".join(meaningful[-limit:]).strip()
+    if lines:
+        return (
+            "(ffmpeg produced only progress output — no diagnostic line at all. "
+            "That usually means the process was killed by a signal rather than "
+            "exiting with an error of its own; check the exit code above.)"
+        )
+    return "(ffmpeg produced no output)"
+
+
 def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
     """Run ffmpeg, failing with a message that says WHICH deadline was hit.
 
@@ -96,8 +125,27 @@ def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
             + (f" Last output: {progress}" if progress else "")
         ) from exc
     if proc.returncode != 0:
-        tail = (proc.stderr or "").strip().splitlines()[-8:]
-        raise RenderError("ffmpeg failed: " + " | ".join(tail))
+        # Lead with the exit code. It is the difference between "ffmpeg rejected
+        # this input" (1, and stderr says why) and "something killed ffmpeg"
+        # (-15 SIGTERM / -9 SIGKILL, and stderr says nothing) — the two cases
+        # that used to be indistinguishable in the log.
+        if proc.returncode < 0:
+            try:
+                how = f" ({signal.Signals(-proc.returncode).name})"
+            except ValueError:
+                how = ""
+            where = (
+                " — this was an EXTERNAL kill, not an ffmpeg error: the process was "
+                "terminated by a signal while it was still working. Common causes are "
+                "the host restarting or redeploying mid-render, or a container stop. "
+                "Retry the job; if it recurs, correlate the time with restarts."
+            )
+        else:
+            how, where = "", ""
+        raise RenderError(
+            f"ffmpeg exited {proc.returncode}{how}{where} | "
+            + _ffmpeg_error_tail(proc.stderr or "")
+        )
 
 
 def extract_wav(src: Path, dest: Path) -> Path:
