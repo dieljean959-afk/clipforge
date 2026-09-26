@@ -436,6 +436,60 @@ answered at all**, with `ok`/`degraded` describing what is wrong. Returning
 503 for "the worker is busy" would teach clients to ignore the difference
 between "my server is broken" and "a job is running".
 
+### Pause, resume, and telling "stuck" from "just slow"
+
+Three manual controls, because a spinner that never resolves is indistinguishable
+from work that is genuinely happening.
+
+**Pause is cooperative, so it can never corrupt a file.** The real work runs in
+a per-job child process, and a child cannot be interrupted part-way through an
+ffmpeg write without risking exactly the corruption a pause is supposed to
+avoid. So `POST /api/jobs/{id}/pause` sets a flag the **pipeline** polls
+between units of work — transcript chunks, detection chunks, rendered clips,
+stage boundaries — and the job then stops itself and records a clean `paused`
+state. Nothing is ever killed mid-write. The API distinguishes `paused` (it has
+stopped) from `pausing` (still finishing the current unit), because claiming
+"paused" instantly while a 40-second encode is still running would be a lie.
+
+**Resume really does not redo paid work — and detection had a genuine gap
+here.** `detect_clips` looped over chunks calling the LLM and kept the results
+only in memory, so *any* resume re-ran and re-billed every chunk. A 7-chunk
+transcript caught by a host restart at chunk 5 paid for all seven again. Each
+chunk's resolved candidates now persist under `detect/chunks/` *before* progress
+is reported, so a kill in the next instant still keeps that chunk. Measured on
+the real `O0yDqRwmMSE` transcript (974 words, 930s, 7 chunks):
+
+```
+PAUSE  -> paused after chunk 3/7 — 1 candidate(s) kept
+  Groq calls so far: 3
+  chunks cached    : chunk_000.json, chunk_001.json, chunk_002.json
+RESUME -> completed
+  Groq calls on resume: 4  (not 7)
+  saved               : 3 call(s) not re-billed
+```
+
+Transcription already had per-chunk caching and now honours pause at the same
+boundaries; the render loop already skipped finished clips and now checkpoints
+between them. `paused` is a real terminal state — never auto-retried, never
+reported as running or failed, and never auto-resumed on boot.
+
+Fixing this also surfaced a latent bug: `StageWorkspace.write_json` did not
+create parent directories, so a nested name like `chunks/chunk_000.json` failed
+with `FileNotFoundError` on the very first cached chunk.
+
+**Liveness is now visible and self-updating.** Each active card ticks
+"updated 12s ago" every second from `lastProgressAt`, so a frozen bar is
+obvious without opening the logs. Two *separate* thresholds, deliberately far
+apart: **75s** shows a quiet amber "No recent activity" note — explicitly not
+an error, because one long encode legitimately emits no progress lines — while
+**10 minutes** is where the server-side watchdog has actually given up. The old
+UI waited 20 minutes, twice as long as the server would, so a job already
+killed and auto-retried still showed a bare spinner.
+
+**"Check now"** forces an immediate poll of that one job (`GET /api/jobs/{id}`)
+and reports what it saw, instead of making you reload the page or wait out the
+2s interval.
+
 ### The bitrate is adaptive, and it was measured
 
 A flat CRF is a *quality* setting, not a size policy. On a CPU-only host the
@@ -791,6 +845,7 @@ python3 tools/caption_preset_test.py   # caption preset -> ASS style line + clip
 python3 tools/encode_profile_test.py   # encoder/preset/deadline + adaptive bitrate logic
 python3 tools/live_watch.py            # verify the RUNNING site: waits, then checks every endpoint
 python3 tools/health_resilience_test.py # health never fails on a sub-block, never calls a vendor
+python3 tools/pause_resume_test.py        # pause stops cleanly; resume re-bills only what is left
 bun tools/backend_respawn_test.ts       # the backend supervisor recovers from a failed boot
 bun tools/overall_status_test.ts       # job Done/Failed/overall-progress indicator logic
 python3 -m app.doctor                  # hardware/engine/ffmpeg diagnostics

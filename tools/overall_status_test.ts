@@ -9,7 +9,12 @@
 
 import {
   PIPELINE_STAGES,
+  QUIET_THRESHOLD_MS,
+  STALL_THRESHOLD_MS,
+  fmtAgo,
+  isActiveJob,
   overallStatus,
+  silenceMs,
   type JobDoc,
 } from "../src/lib/clipforge";
 
@@ -154,6 +159,59 @@ console.log("== 6. stage coverage");
     PIPELINE_STAGES.every((s) => s !== "queued" && s !== "complete" && s !== "failed"),
     PIPELINE_STAGES.join(" -> "),
   );
+}
+
+console.log("\n== 7. paused is its own state, never 'running' or 'failed'");
+{
+  const p = overallStatus(
+    job({ stage: "paused" as never, progress: 62, pausedStage: "finding" as never }),
+  );
+  check("a paused job does not read as running", p.state !== "running", p.state);
+  check("a paused job does not read as failed", p.state !== "failed", p.state);
+  check("a paused job does not read as done", p.state !== "done", p.state);
+  check("it is reported as paused", p.state === "paused", p.state);
+  check("it says WHERE it stopped", /finding|AI clip detection/i.test(p.label), p.label);
+  check(
+    "it keeps the progress it had reached",
+    p.percent > 0 && p.percent <= 99,
+    String(p.percent),
+  );
+  const noStage = overallStatus(job({ stage: "paused" as never }));
+  check("a pause with no recorded stage still reads as paused", noStage.state === "paused");
+}
+
+console.log("\n== 8. liveness helpers");
+{
+  const now = 1_000_000_000;
+  const asJob = (o: Record<string, unknown>) => o as unknown as JobDoc;
+  check(
+    "an in-progress job is active",
+    isActiveJob(asJob({ stage: "rendering", lastProgressAt: now })),
+  );
+  check("a paused job is not active", !isActiveJob(asJob({ stage: "paused" })));
+  check("a complete job is not active", !isActiveJob(asJob({ stage: "complete" })));
+  check("a failed job is not active", !isActiveJob(asJob({ stage: "failed" })));
+  check(
+    "silence falls back through the stage clock",
+    silenceMs(asJob({ stageStartedAt: now - 20_000 }), now) === 20_000,
+  );
+  check(
+    "silence prefers lastProgressAt",
+    silenceMs(asJob({ lastProgressAt: now - 90_000, stageStartedAt: now }), now) === 90_000,
+  );
+  check(
+    "the quiet threshold is well below the stall threshold",
+    QUIET_THRESHOLD_MS < STALL_THRESHOLD_MS / 3,
+    `${QUIET_THRESHOLD_MS / 1000}s vs ${STALL_THRESHOLD_MS / 1000}s`,
+  );
+  check(
+    "the quiet threshold sits in the 60-90s band",
+    QUIET_THRESHOLD_MS >= 60_000 && QUIET_THRESHOLD_MS <= 90_000,
+  );
+  check("a fresh stamp reads 'just now'", fmtAgo(0) === "just now", fmtAgo(0));
+  check("seconds are shown", fmtAgo(12_000) === "12s ago", fmtAgo(12_000));
+  check("minutes are shown", fmtAgo(4 * 60_000) === "4m ago", fmtAgo(4 * 60_000));
+  check("hours are shown", fmtAgo(2 * 3_600_000) === "2h ago", fmtAgo(2 * 3_600_000));
 }
 
 console.log();

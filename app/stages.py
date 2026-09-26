@@ -134,6 +134,11 @@ class StageWorkspace:
 
     def write_json(self, stage: str, name: str, data: Any) -> Path:
         path = self.stage_dir(stage) / name
+        # Nested artifact names ("chunks/chunk_000.json") are used by the
+        # per-chunk caches. stage_dir() only creates the stage directory, so
+        # without this the write failed with FileNotFoundError on the very
+        # first cached chunk.
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)

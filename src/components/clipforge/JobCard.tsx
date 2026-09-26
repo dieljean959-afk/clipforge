@@ -7,7 +7,10 @@ import {
   Clock,
   Download,
   Loader2,
+  Pause,
+  Play,
   RotateCcw,
+  RefreshCw,
   Sparkles,
   Terminal,
   Trash2,
@@ -27,10 +30,14 @@ import { cn } from "@/lib/utils";
 import {
   STAGES,
   STAGE_LABELS,
+  QUIET_THRESHOLD_MS,
+  fmtAgo,
   fmtClock,
   fmtDate,
   fmtEta,
+  isActiveJob,
   overallStatus,
+  silenceMs,
   sourceLabel,
   type ClipStage,
   type JobDoc,
@@ -56,6 +63,17 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
  * 2s poll mirrors the progress cadence.
  */
 const STALL_THRESHOLD_MS = 600_000;
+
+/** Re-render once a second so "12s ago" actually counts up on its own. */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  return now;
+}
 
 function useStalled(job: JobDoc): boolean {
   const [stalled, setStalled] = useState(false);
@@ -83,12 +101,65 @@ function useStalled(job: JobDoc): boolean {
   return active && stalled;
 }
 
-export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => void }) {
+export function JobCard({
+  job,
+  onDeleted,
+  onCheckNow,
+}: {
+  job: JobDoc;
+  onDeleted?: () => void;
+  onCheckNow?: (jobId: string) => Promise<void> | void;
+}) {
   const failed = job.stage === "failed";
   const complete = job.stage === "complete";
+  const paused = job.stage === "paused";
   const activeIdx = STAGES.indexOf(job.stage as (typeof STAGES)[number]);
   const overall = overallStatus(job);
   const stalled = useStalled(job);
+  const [busy, setBusy] = useState<null | "pause" | "resume" | "check">(null);
+  const watching = isActiveJob(job);
+  const now = useNow(watching);
+  const quiet = watching && silenceMs(job, now) > QUIET_THRESHOLD_MS;
+
+  const doPause = async () => {
+    setBusy("pause");
+    try {
+      const r = await api.pauseJob(job._id);
+      toast(
+        r.state === "paused"
+          ? "Paused. Nothing was mid-write."
+          : "Pausing — stopping at the next safe checkpoint.",
+        { description: "Completed chunks and clips are kept; Resume picks up from here." },
+      );
+    } catch (e) {
+      toast.error(`Could not pause: ${e instanceof Error ? e.message : "unknown error"}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doResume = async () => {
+    setBusy("resume");
+    try {
+      await api.resumeJob(job._id);
+      toast.success("Resuming from the last completed checkpoint.", {
+        description: "Finished chunks and clips are not redone.",
+      });
+    } catch (e) {
+      toast.error(`Could not resume: ${e instanceof Error ? e.message : "unknown error"}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doCheck = async () => {
+    setBusy("check");
+    try {
+      await onCheckNow?.(job._id);
+    } finally {
+      setBusy(null);
+    }
+  };
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
 
@@ -278,6 +349,15 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
                 {job.progressDetail ?? `${STAGE_LABELS[job.stage as ClipStage]}...`}
               </span>
             </span>
+            {/* Liveness: a ticking "last updated Ns ago" so it is possible to
+                tell "stuck" from "just slow" without opening the logs. It
+                moves on its own every second, so a frozen bar is obvious. */}
+            <span
+              className="flex shrink-0 items-center gap-1 text-muted-foreground tabular-nums"
+              title="Time since the worker last reported progress"
+            >
+              updated {fmtAgo(silenceMs(job, now))}
+            </span>
             <span className="flex shrink-0 items-center gap-2 font-mono tabular-nums text-muted-foreground">
               {/* live ETA — measured once progress exists, RTF-prior before that */}
               {typeof job.stageEtaSec === "number" && (
@@ -323,6 +403,15 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
               </span>
             )}
           </div>
+          {quiet && !stalled && (
+            <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90">
+              No recent activity ({fmtAgo(silenceMs(job, now))}). The job may just be
+              inside one long unit of work — a single encode or transcription
+              window produces no progress lines for a while. Nothing is wrong
+              yet: the server kills and auto-retries a job only after{" "}
+              {STALL_THRESHOLD_MS / 60000} minutes of silence.
+            </div>
+          )}
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress
@@ -333,6 +422,50 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
               retries the job automatically once, resuming from the last completed
               clip.
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Manual control: pause/resume a live job, and force a poll so activity
+          can be confirmed without reloading the page. */}
+      {(watching || paused) && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {paused ? (
+            <Button size="sm" onClick={doResume} disabled={busy !== null}>
+              {busy === "resume" ? (
+                <Loader2 className="mr-1.5 size-3 animate-spin" />
+              ) : (
+                <Play className="mr-1.5 size-3" />
+              )}
+              Resume
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={doPause}
+              disabled={busy !== null || job.pauseRequested}
+            >
+              {busy === "pause" || job.pauseRequested ? (
+                <Loader2 className="mr-1.5 size-3 animate-spin" />
+              ) : (
+                <Pause className="mr-1.5 size-3" />
+              )}
+              {job.pauseRequested ? "Stopping…" : "Pause"}
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" onClick={doCheck} disabled={busy !== null}>
+            {busy === "check" ? (
+              <Loader2 className="mr-1.5 size-3 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-1.5 size-3" />
+            )}
+            Check now
+          </Button>
+          {paused && job.pausedStage && (
+            <span className="text-xs text-muted-foreground">
+              stopped at <span className="font-mono">{job.pausedStage}</span>
+            </span>
           )}
         </div>
       )}

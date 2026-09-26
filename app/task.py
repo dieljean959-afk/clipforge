@@ -34,6 +34,41 @@ from app.store import LocalStore
 _PRE_TAIL_STAGES = {"queued", "grabbing", "transcribing"}
 
 
+class JobPaused(Exception):
+    """The user paused this job; the pipeline stopped at a safe boundary.
+
+    Deliberately NOT a failure. Everything completed so far is on disk —
+    stage markers, cached transcript chunks, per-chunk detection results and
+    finished clips — so resuming continues from exactly here.
+    """
+
+
+class _PauseRequested(Exception):
+    """Internal signal raised at a unit boundary when a pause is pending."""
+
+
+class _StageChunkCache(llm.ChunkCache):
+    """Per-chunk detection results on disk, inside the job's own workspace.
+
+    Lives under `detect/chunks/` so it is namespaced by job and removed with
+    the workspace on delete. The `detect` DONE marker is only written once the
+    whole stage completes, so a partially-detected job keeps these chunks and
+    reuses them on resume.
+    """
+
+    def __init__(self, ws: StageWorkspace) -> None:
+        self._ws = ws
+
+    def get(self, index: int) -> list[dict[str, Any]] | None:
+        data = self._ws.read_json("detect", f"chunks/chunk_{index:03d}.json")
+        if isinstance(data, list):
+            return data
+        return None
+
+    def put(self, index: int, candidates: list[dict[str, Any]]) -> None:
+        self._ws.write_json("detect", f"chunks/chunk_{index:03d}.json", candidates)
+
+
 class Pipeline:
     def __init__(self, settings: Settings, store: LocalStore) -> None:
         self.settings = settings
@@ -124,6 +159,48 @@ class Pipeline:
         logger.info(f"[job {job_id}] {line}")
         self.store.append_job_log(job_id, line)
 
+    # ------------------------------------------------------------------ #
+    # cooperative pause
+    # ------------------------------------------------------------------ #
+
+    def pause_requested(self, job_id: str) -> bool:
+        """Has the user asked for this job to stop?
+
+        Read from the job document rather than a signal so it works across
+        processes: the API process sets the flag, the per-job child process
+        (which owns all the real work) sees it at its next safe boundary.
+        """
+        job = self.store.get_job(job_id)
+        return bool(job and job.get("pauseRequested"))
+
+    def _checkpoint(self, job_id: str, where: str) -> None:
+        """Stop here if a pause is pending. Called ONLY between units of work.
+
+        The point of a cooperative pause is that it never interrupts a write.
+        Every call site is a boundary: between transcript chunks, between
+        detection chunks, between rendered clips, between stage transitions.
+        """
+        if self.pause_requested(job_id):
+            raise _PauseRequested(where)
+
+    def mark_paused(self, job_id: str, where: str) -> None:
+        """Record a clean pause for the dashboard."""
+        job = self.store.get_job(job_id)
+        if job is None:
+            return
+        job.update({
+            "stage": "paused",
+            "pausedStage": where,
+            "pauseRequested": False,
+            "pausedAt": int(time.time() * 1000),
+            "interrupted": False,
+            "interruptReason": None,
+            "progressDetail": f"Paused by user at {where} — resume continues from here.",
+            "completedAt": None,
+        })
+        self.store.write_job(job)
+        self._log(job_id, f"PAUSED by user at {where} — nothing in flight; resume from here")
+
     def _write_caption_tracks(
         self, job_id: str, clip_index: int, cues: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
@@ -197,10 +274,24 @@ class Pipeline:
                 )
 
             src = self._stage_fetch(job, ws)
+            self._checkpoint(job_id, "fetch")
             transcript = self._stage_transcribe(job, src, ws)
+            self._checkpoint(job_id, "transcribing")
             candidates = self._stage_detect(job, transcript, ws)
+            self._checkpoint(job_id, "finding")
             self._stage_render(job, src, transcript, candidates, ws)
             self._finish(job_id, time.time() - t_start)
+        except subtitle.TranscriptionPaused as pause:
+            self.mark_paused(job_id, "transcribing")
+            self._log(job_id, f"transcription paused: {pause}")
+        except _PauseRequested as pause:
+            # A user-requested stop, not an error. Whatever completed is on
+            # disk; the job reports itself paused and resume picks it up from
+            # the same stage via the ordinary stage-marker resume.
+            self.mark_paused(job_id, str(pause) or "the current stage")
+        except llm.DetectionPaused as pause:
+            self.mark_paused(job_id, "finding")
+            self._log(job_id, f"detection paused: {pause}")
         except DispatchError as exc:
             # remote worker refused/unreachable — honest error, job stays failed
             self._fail(job_id, f"Could not hand the job to your worker: {exc}", self._detail(exc))
@@ -337,6 +428,7 @@ class Pipeline:
         transcript = subtitle.transcribe(
             src, self.settings, on_progress=on_progress,
             cache_dir=ws.stage_dir("transcribe") / "chunks",
+            should_pause=lambda: self.pause_requested(job_id),
         )
         # Record what this host actually achieved so the next job's ETA starts
         # from a measurement instead of the documented prior.
@@ -404,6 +496,11 @@ class Pipeline:
             max_clip_sec=opts.get("maxClipSec"),
             max_clips=opts.get("maxClips"),
             on_log=on_log,
+            # Per-chunk persistence: a pause or host restart during chunk 5 of
+            # 7 resumes at chunk 6 instead of re-running — and re-billing —
+            # all seven Groq calls.
+            chunk_cache=_StageChunkCache(ws),
+            should_pause=lambda: self.pause_requested(job_id),
         )
         ws.write_json("detect", "candidates.json", candidates)
         ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(candidates))
@@ -493,6 +590,10 @@ class Pipeline:
                 f"Rendering clip {idx + 1} of {total}",
                 unit_label="clips", units_done=idx, units_total=total,
             )
+            # Pause between clips, never during an encode. Everything already
+            # rendered is on disk with renderState="done", so a resume skips
+            # straight past it to this clip.
+            self._checkpoint(job_id, f"rendering (after clip {idx} of {total})")
 
             # ---- resume: a clip already rendered and present is skipped ---
             # Only when the burned-in result still matches this job's request:

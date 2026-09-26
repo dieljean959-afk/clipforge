@@ -449,7 +449,10 @@ class InProcessWorker:
         if self._stalled_job == job_id or job_id in self._stalled_jobs:
             # watchdog already failed it with a specific reason
             return
-        if stage in {"complete", "failed"}:
+        if stage in {"complete", "failed", "paused"}:
+            # A pause is a user decision, not a failure: never auto-retry it.
+            if stage == "paused":
+                return
             # A retryable failure (render deadline, stall watchdog) gets ONE
             # automatic second attempt before the user is told anything. Both
             # are environmental — a hung ffmpeg or a starved host — and the
@@ -550,6 +553,96 @@ class InProcessWorker:
             str(job.get(f) or "") for f in ("error", "errorDetail", "progressDetail")
         ).lower()
         return any(token in blob for token in cls.AUTO_RETRY_ERRORS)
+
+    def pause(self, job_id: str) -> dict[str, Any]:
+        """Ask a job to stop at its next safe boundary.
+
+        Cooperative, and deliberately so. A child process cannot be interrupted
+        part-way through writing an ffmpeg output or a stage artifact without
+        risking exactly the corruption the user is trying to avoid, so the flag
+        is polled by the pipeline between units of work (transcript chunks,
+        detection chunks, rendered clips) and the job stops itself.
+
+        The response says which it is: `paused` once the child has actually
+        stopped, `pausing` while it is still finishing the current unit. That
+        distinction matters — a single ffmpeg encode of a long clip can take
+        minutes, and claiming "paused" instantly would be a lie.
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.get("stage") in {"complete", "failed"}:
+            raise ValueError(f"job is {job.get('stage')} — nothing to pause")
+        job.update({
+            "pauseRequested": True,
+            "progressDetail": "Pause requested — stopping at the next safe checkpoint…",
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(
+            job_id,
+            "PAUSE requested — the job will stop between units of work "
+            "(no file is left half-written).",
+        )
+        # A job that is queued but has no live process can be stopped outright:
+        # nothing is in flight, so there is no write to interrupt. This matters
+        # because a host restart can leave a job marked "queued" before the boot
+        # reconciler enqueues it — reporting "pausing" there would leave the
+        # user waiting forever for a pause that never lands.
+        with self._lock:
+            in_pending = job_id in self._pending
+            if in_pending:
+                self._pending.remove(job_id)
+            running = self._current_job == job_id and self._current_proc is not None \
+                and self._current_proc.poll() is None
+        if in_pending or (job.get("stage") == "queued" and not running):
+            if in_pending:
+                self._promote_positions()
+            job = self.store.get_job(job_id) or job
+            job.update({
+                "stage": "paused",
+                "pausedStage": "queued",
+                "pauseRequested": False,
+                "pausedAt": int(time.time() * 1000),
+                "progressDetail": "Paused by user before it started — resume picks it up here.",
+            })
+            self.store.write_job(job)
+            self.store.append_job_log(job_id, "PAUSED while queued — nothing had started")
+            return {"state": "paused", "stage": "queued"}
+        return {"state": "pausing", "stage": job.get("stage")}
+
+    def resume(self, job_id: str) -> int:
+        """Resume a paused job. Reuses the ordinary stage-marker resume.
+
+        Nothing about the pipeline changes: the download, transcript chunks,
+        per-chunk detection results and finished clips are all still on disk, so
+        the runner picks up at the first incomplete stage — and inside a stage,
+        at the first unfinished chunk or clip.
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        job.update({
+            "stage": "queued",
+            "pauseRequested": False,
+            "pausedStage": None,
+            "progress": 0,
+            "error": None,
+            "errorDetail": None,
+            "completedAt": None,
+            "interrupted": False,
+            "interruptReason": None,
+            "failedStage": None,
+            "unitLabel": None,
+            "unitsDone": None,
+            "unitsTotal": None,
+            "progressDetail": "Resuming from the last completed checkpoint…",
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(
+            job_id,
+            "RESUME — continuing from cached stages/chunks; completed work is not redone.",
+        )
+        return self.enqueue(job_id)
 
     def _auto_retry(self, job_id: str, job: dict[str, Any], reason: str) -> bool:
         """Requeue a stalled/timed-out job once. True when a retry was started.

@@ -31,7 +31,25 @@ export function useJobs(intervalMs = 2000) {
     };
   }, [refresh, intervalMs]);
 
-  return { jobs, error, refresh };
+  // Force an immediate poll of ONE job, so "Check now" answers "is this
+  // specific job actually moving?" without waiting out the interval or
+  // re-fetching the whole list. Returns the fresh document so the caller can
+  // confirm what it saw.
+  const checkOne = useCallback(async (jobId: string): Promise<JobDto | null> => {
+    try {
+      const fresh = await api.getJob(jobId);
+      setJobs((prev) =>
+        prev ? prev.map((j) => (j._id === fresh._id ? fresh : j)) : prev,
+      );
+      setError(null);
+      return fresh;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "API unreachable");
+      return null;
+    }
+  }, []);
+
+  return { jobs, error, refresh, checkOne };
 }
 
 export function useClips(jobId: string | null, intervalMs = 2000) {

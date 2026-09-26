@@ -885,6 +885,27 @@ def delete_job(job_id: str) -> dict:
     return {"deleted": True, "cancelled": cancelled}
 
 
+@app.post("/api/jobs/{job_id}/pause")
+def pause_job(job_id: str) -> dict:
+    """Stop a job at its next safe boundary (never mid-write)."""
+    try:
+        return worker.pause(job_id)
+    except KeyError:
+        raise HTTPException(404, "job not found") from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.post("/api/jobs/{job_id}/resume")
+def resume_job(job_id: str) -> dict:
+    """Resume a paused job from its last completed checkpoint."""
+    try:
+        depth = worker.resume(job_id)
+    except KeyError:
+        raise HTTPException(404, "job not found") from None
+    return {"resumed": True, "queueDepth": depth}
+
+
 @app.post("/api/jobs/{job_id}/retry")
 def retry_job(job_id: str) -> dict:
     try:

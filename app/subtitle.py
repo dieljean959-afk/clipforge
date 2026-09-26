@@ -31,6 +31,14 @@ class TranscribeError(asr.AsrError):
     """Transcription failed. Subclasses AsrError so callers can catch either."""
 
 
+class TranscriptionPaused(Exception):
+    """User paused during transcription; stopped at a chunk boundary.
+
+    NOT a failure. Decoded chunks are cached on disk, so resuming reuses them
+    instead of running whisper over the whole file again.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # Anti-hallucination tuning
 #
@@ -367,6 +375,7 @@ def transcribe(
     settings: Settings,
     on_progress=None,
     cache_dir: Path | None = None,
+    should_pause=None,
 ) -> Transcript:
     """Word-level transcription through the configured ASR engine.
 
@@ -424,6 +433,14 @@ def transcribe(
     decode_wall = 0.0
     try:
         for idx, (w_start, w_end) in enumerate(windows):
+            # Pause between transcript chunks, never mid-decode. Every finished
+            # chunk is already cached below, so a resume reuses them and only
+            # decodes what is left.
+            if should_pause is not None and should_pause():
+                raise TranscriptionPaused(
+                    f"paused after chunk {idx}/{len(windows)} — "
+                    f"{resumed} chunk(s) already cached and will be reused"
+                )
             if on_progress and duration > 0:
                 on_progress(min(1.0, w_start / duration))
 

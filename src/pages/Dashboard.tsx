@@ -20,12 +20,12 @@ import { ExportDialog } from "@/components/clipforge/ExportDialog";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips } from "@/hooks/use-poll";
 import { api, type VerifyClipsDto } from "@/lib/api";
-import { fmtClock, fmtDate, sourceLabel } from "@/lib/clipforge";
+import { fmtAgo, fmtClock, fmtDate, sourceLabel } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
 
 export default function Dashboard() {
-  const { jobs, error: apiError, refresh: refreshJobs } = useJobs(2000);
+  const { jobs, error: apiError, refresh: refreshJobs, checkOne } = useJobs(2000);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [previewClip, setPreviewClip] = useState<ClipDto | null>(null);
   const [redetecting, setRedetecting] = useState<string | null>(null);
@@ -154,7 +154,24 @@ export default function Dashboard() {
             <h2 className="text-lg font-bold tracking-tight">In the forge</h2>
             <div className="mt-3 grid gap-3">
               {[...activeJobs, ...failedJobs].map((job) => (
-                <JobCard key={job._id} job={job} onDeleted={refreshJobs} />
+                <JobCard
+                  key={job._id}
+                  job={job}
+                  onDeleted={refreshJobs}
+                  onCheckNow={async (jobId) => {
+                    // "Check now" forces an immediate poll of THIS job instead
+                    // of waiting out the 2s interval, so activity can be
+                    // confirmed on demand rather than by reloading the page.
+                    const fresh = await checkOne(jobId);
+                    if (fresh) {
+                      toast.success(`Checked — ${fresh.stage} · updated ${
+                        typeof fresh.lastProgressAt === "number"
+                          ? fmtAgo(Date.now() - fresh.lastProgressAt)
+                          : "just now"
+                      }`);
+                    }
+                  }}
+                />
               ))}
             </div>
           </section>

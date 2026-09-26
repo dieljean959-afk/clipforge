@@ -14,7 +14,10 @@ export type ClipStage =
   | "finding"
   | "rendering"
   | "complete"
-  | "failed";
+  | "failed"
+  /** A user-requested stop at a safe boundary. Not a failure: resume picks
+      the job up from the same stage, reusing completed work. */
+  | "paused";
 
 export const STAGES: ClipStage[] = [
   "queued",
@@ -33,6 +36,7 @@ export const STAGE_LABELS: Record<ClipStage, string> = {
   rendering: "Rendering 9:16",
   complete: "Complete",
   failed: "Failed",
+  paused: "Paused",
 };
 
 export const STAGE_LOADING: Record<string, string> = {
@@ -54,7 +58,7 @@ export const PIPELINE_STAGES: ClipStage[] = [
   "rendering",
 ];
 
-export type OverallState = "queued" | "running" | "done" | "failed";
+export type OverallState = "queued" | "running" | "done" | "failed" | "paused";
 
 export interface OverallStatus {
   state: OverallState;
@@ -101,6 +105,20 @@ export function overallStatus(job: JobDoc): OverallStatus {
       total,
       percent: 100,
       label: where ? `Failed during ${where}` : "Failed",
+    };
+  }
+  if (job.stage === "paused") {
+    // A pause is a deliberate stop, not a failure and not "still running".
+    // It must never read as running, or the card shows a live spinner for a
+    // job that is deliberately idle until the user resumes it.
+    return {
+      state: "paused",
+      stageNumber: 0,
+      total,
+      percent: Math.min(99, Math.round(job.progress ?? 0)),
+      label: job.pausedStage
+        ? `Paused at ${STAGE_LABELS[job.pausedStage as ClipStage] ?? job.pausedStage}`
+        : "Paused by user",
     };
   }
   if (job.stage === "queued") {
@@ -152,6 +170,43 @@ export function fmtEta(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return "any moment";
   if (sec < 90) return `${Math.max(1, Math.round(sec))}s`;
   return `${Math.round(sec / 60)} min`;
+}
+
+/**
+ * Silence thresholds, in ms.
+ *
+ * DISTINCT on purpose, and deliberately far apart:
+ *
+ * - QUIET is the early "is anything happening?" signal. It is only a hint, not
+ *   a verdict: a single long ffmpeg encode legitimately produces no progress
+ *   line for a while, so this must not look like an error.
+ * - STALL is where the server-side watchdog has given up and killed the worker.
+ *   It mirrors CLIPFORGE_STALL_TIMEOUT_SEC.
+ */
+export const QUIET_THRESHOLD_MS = 75_000;
+export const STALL_THRESHOLD_MS = 600_000;
+
+/** True while a job is doing work we can meaningfully watch. */
+export function isActiveJob(job: JobDoc): boolean {
+  return job.stage !== "complete" && job.stage !== "failed" && job.stage !== "paused";
+}
+
+/** ms since the job last reported progress (falls back through its clocks). */
+export function silenceMs(job: JobDoc, now: number): number {
+  const last = job.lastProgressAt ?? job.stageStartedAt ?? job.createdAt;
+  if (typeof last !== "number") return 0;
+  return Math.max(0, now - last);
+}
+
+/** "just now" / "12s ago" / "4m ago" — the human-readable liveness stamp. */
+export function fmtAgo(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const s = Math.floor(ms / 1000);
+  if (s < 3) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
 }
 
 /** 00:01:23,500 (SRT timecode) */

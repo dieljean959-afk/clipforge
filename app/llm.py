@@ -52,6 +52,15 @@ class LlmNotConfigured(Exception):
     """Selected backend is unusable (no key / no server) — surface, never fall back."""
 
 
+class DetectionPaused(Exception):
+    """The user asked to pause, and detection stopped at a chunk boundary.
+
+    Not a failure. Completed chunks are already cached on disk, so resuming
+    continues from the next unfinished chunk rather than re-running — and
+    re-paying for — the whole transcript.
+    """
+
+
 class LlmError(Exception):
     """The selected backend's call failed after retries."""
 
@@ -613,6 +622,38 @@ def call_llm(chunk_text_prompt: str, settings: Settings) -> str:
     return call_groq(chunk_text_prompt, settings)
 
 
+class ChunkCache:
+    """Per-chunk detection cache (duck-typed: needs `get` and `put`).
+
+    Detection is the only stage that costs MONEY and takes minutes: a 15-minute
+    source is 7 Groq calls. Without a per-chunk cache, a host restart at chunk 5
+    threw away chunks 1-5 and re-paid for all 7 on the retry — which is both
+    slow and, on a free tier, how you run out of quota.
+
+    Keeping the interface this small means `detect_clips` stays free of
+    filesystem concerns and remains unit-testable with a dict.
+    """
+
+    def get(self, index: int) -> list[dict[str, Any]] | None:
+        raise NotImplementedError
+
+    def put(self, index: int, candidates: list[dict[str, Any]]) -> None:
+        raise NotImplementedError
+
+
+class DictChunkCache(ChunkCache):
+    """In-memory chunk cache (tests, and the no-persistence default)."""
+
+    def __init__(self) -> None:
+        self._data: dict[int, list[dict[str, Any]]] = {}
+
+    def get(self, index: int) -> list[dict[str, Any]] | None:
+        return self._data.get(index)
+
+    def put(self, index: int, candidates: list[dict[str, Any]]) -> None:
+        self._data[index] = candidates
+
+
 def detect_clips(
     words: list[dict],
     settings: Settings,
@@ -621,12 +662,19 @@ def detect_clips(
     max_clip_sec: int | None = None,
     max_clips: int | None = None,
     on_log=None,
+    chunk_cache: ChunkCache | None = None,
+    should_pause=None,
 ) -> list[dict[str, Any]]:
-    """Full detection: chunk → Gemini (word indices) → resolve timings → top-N.
+    """Full detection: chunk → LLM (word indices) → resolve timings → top-N.
 
     Returns MPT-style dicts: start, end, score, title, hook_text.
     Raises LlmNotConfigured when no key, LlmError when the API fails after
     retries. There is deliberately no heuristic fallback here.
+
+    `chunk_cache` persists each chunk's resolved candidates so a resume re-runs
+    only the chunks that never finished. `should_pause` is polled at each chunk
+    boundary — the one safe point in this stage — so a user-requested pause can
+    stop the job between API calls instead of mid-write.
     """
     if provider(settings) == PROVIDER_OLLAMA:
         # No API key by design. The only precondition is a reachable server.
@@ -674,15 +722,46 @@ def detect_clips(
         on_log(f"Detecting highlights on {len(chunks)} chunk(s) via {label}...")
 
     candidates: list[dict[str, Any]] = []
+    reused = 0
     for i, (start_index, chunk) in enumerate(chunks):
+        # Pause is honoured at a chunk boundary: never between the API call
+        # and the cache write, which is the window where a kill would lose
+        # work we already paid for.
+        if should_pause is not None and should_pause():
+            raise DetectionPaused(
+                f"paused after chunk {i}/{len(chunks)} — {reused} chunk(s) reused, "
+                f"{len(candidates)} candidate(s) kept"
+            )
+        cached = chunk_cache.get(i) if chunk_cache is not None else None
+        if cached is not None:
+            candidates.extend(cached)
+            reused += 1
+            if on_log:
+                on_log(
+                    f"Detection: chunk {i + 1}/{len(chunks)} → {len(cached)} candidates "
+                    f"(cached — not re-billed)"
+                )
+            logger.info(
+                f"[llm] chunk {i + 1}/{len(chunks)}: reusing {len(cached)} cached candidates"
+            )
+            continue
         prompt = build_prompt(chunk, cfg, start_index=start_index)
         text = call_llm(prompt, settings)
         parsed = parse_candidates(text)
         resolved = resolve_candidates(parsed, words, start_index, cfg)
+        # Persist BEFORE reporting progress, so a kill in the next instant
+        # still keeps this chunk.
+        if chunk_cache is not None:
+            chunk_cache.put(i, resolved)
         candidates.extend(resolved)
         if on_log:
             on_log(f"Detection: chunk {i + 1}/{len(chunks)} → {len(resolved)} candidates")
         logger.info(f"[llm] chunk {i + 1}/{len(chunks)}: {len(resolved)} candidates")
+    if reused:
+        logger.info(
+            f"[llm] detection resumed: reused {reused}/{len(chunks)} chunk(s) from cache, "
+            f"re-billed only the remainder"
+        )
 
     # keep only the top N by score
     candidates.sort(key=lambda c: c["score"], reverse=True)

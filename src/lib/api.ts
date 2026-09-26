@@ -41,6 +41,11 @@ export interface JobDto {
   /** Server estimate of seconds until this queued job starts. null when it is
       next in line with an idle worker — "any moment" is honest there. */
   queueEtaSec?: number | null;
+  /** Set while a user-requested pause is waiting for the next safe boundary. */
+  pauseRequested?: boolean;
+  /** Where the job stopped when paused, e.g. "finding" or "rendering (after clip 4 of 10)". */
+  pausedStage?: string | null;
+  pausedAt?: number | null;
   stageTimings?: { stage: string; sec: number }[];
   lastProgressAt?: number;
   slow?: boolean;
@@ -298,6 +303,16 @@ export const api = {
     ),
   retryJob: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/retry`, { method: "POST" }),
+  /** Cooperative stop at the next safe boundary. "pausing" means the current
+      unit of work (one chunk / one clip) is still finishing. */
+  pauseJob: (jobId: string) =>
+    request<{ state: "paused" | "pausing"; stage: string }>(`/api/jobs/${jobId}/pause`, {
+      method: "POST",
+    }),
+  resumeJob: (jobId: string) =>
+    request<{ resumed: boolean; queueDepth: number }>(`/api/jobs/${jobId}/resume`, {
+      method: "POST",
+    }),
   redetect: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/redetect`, { method: "POST" }),
   verifyClips: (jobId: string) =>
