@@ -355,6 +355,87 @@ suggesting a smaller batch, rather than being attempted.
 > is a per-model number and a mislabelled transcript makes it meaningless.
 > `python -m app.doctor` reports this as `whisper model fits host`.
 
+### Nothing hangs for 20 minutes, and one failure retries itself
+
+A job sat at "Rendering clip 10 of 10" for 20+ minutes with nothing
+happening, and another showed "Queued — waiting for a worker" at 0% behind a
+single worker. Four separate causes, all fixed:
+
+**A hung ffmpeg used to hold the only worker for 90 minutes.** The CPU render
+deadline was a flat `90 * 60`, sized when a wrong shared GPU deadline was
+causing "the render just stops" and nobody re-examined it. It is now
+`render_deadline_sec(clip_seconds)` — a 6-minute floor, a per-second-of-output
+allowance (6× realtime, measured at ~1× on this host), and a 30-minute
+ceiling, so a typical 50s clip gets **11 minutes** and nothing gets an hour.
+The stall watchdog also dropped from 20 minutes to 10.
+
+**The real failure was an external kill, and it did not retry.**
+`ffmpeg exited -9 (SIGKILL) — this was an EXTERNAL kill` is what this host
+actually produces when the container recycles mid-render. That error text was
+not in the retryable set, so the one failure most worth retrying silently did
+not. Retryable failures now get **one automatic requeue** before the user is
+told, and the set deliberately excludes bad URLs, missing keys and detection
+errors — those would just spend quota to reach the same error. The retry is
+cheap: the pipeline resumes from the last **completed** clip, so the download,
+the transcript and the paid detection call are all reused from disk.
+
+**ffmpeg was spawning 64 threads on a 1-CPU container.** ffmpeg sizes its
+thread pools from `nproc`, which inside a cgroup reports the *host's* cores —
+64 here, while the container is allowed 1. Every render was spawning ~64
+frame and ~64 slice threads to share one CPU. The encoder is now told the
+container's real allowance via `-threads/-filter_threads`, and on hardware
+encoders too. Measured on a real 1080×1920 clip: **10s → 4s (2.5× faster) for
+byte-identical output** (SSIM 0.9999). Less time per clip also means less
+chance of a render being caught by a container recycle.
+
+**A queued job claimed "~any moment" with a queue in front of it.** A queued
+job has no ETA of its own, and `fmtEta` turns a missing number into "any
+moment". The worker now computes `queueEtaSec` — the running job's remaining
+time plus the jobs ahead — and the card says `starts in ~4 min`, falling back
+to "any moment" only when there is genuinely nothing ahead.
+
+Resume from a host restart was already working and is confirmed on real data:
+the `zg50i-UmRwA` batch (`fd961148baa5`) was killed mid-render and clips 09
+and 10 are on disk, frame-accurate against their recorded cuts.
+
+> Queue depth is 1 worker on purpose. `hostlimits` narrows the pool because
+> each concurrent job loads its own ~660 MB Whisper model into 2.0 GiB of RAM;
+> a second worker would OOM rather than double throughput. So the fix is an
+> honest wait estimate, not more workers.
+
+### `/api/health` always answers, and never depends on a third party
+
+The dashboard showed a red **"API unreachable: HTTP 400"** banner directly
+above a fully populated status card — real CPU, RAM, disk, worker and provider
+numbers from the previous poll, with one transient failure claiming the API
+was gone. Two independent defects:
+
+**One failing sub-component could fail the whole endpoint.** `health()` called
+`system_stats()`, `disk_stats()`, the RTF store, whisper status and the key
+resolvers inline. Any one raising took down the entire payload. Every block is
+now built through `_block()`: a failure degrades that field to
+`{"error": ...}`, is listed in a new `degraded` array, sets `ok: false`, and
+the endpoint still returns 200 with everything else intact.
+
+**It was coupled to the AI provider.** `health()` embedded
+`detection_status()`, which for the ollama backend calls `ollama_status()` — an
+HTTP request with a 5s timeout. A third-party hiccup could stall our own
+health endpoint. `detection_status(probe=False)` now answers from
+configuration and key presence only and makes **no network call**; health uses
+it. **Groq is not the cause of your 400** — its readiness was always a local
+env lookup, never a vendor round trip, and that is now explicit and tested.
+
+The frontend was also lying by omission: `useHealth` treated any failed poll
+as fatal, so one blip blanked a card full of real readings. It now separates
+`error` (never responded) from `stale` (a poll failed, last good reading still
+shown), and the card renders a quiet amber note instead of a red banner.
+
+On the status code: 400 was never valid for this route — it is a GET with no
+parameters to reject. A health check returns **200 whenever the process
+answered at all**, with `ok`/`degraded` describing what is wrong. Returning
+503 for "the worker is busy" would teach clients to ignore the difference
+between "my server is broken" and "a job is running".
+
 ### The bitrate is adaptive, and it was measured
 
 A flat CRF is a *quality* setting, not a size policy. On a CPU-only host the
@@ -709,6 +790,7 @@ python3 tools/llm_provider_test.py     # Groq wire contract, 429 backoff, pacing
 python3 tools/caption_preset_test.py   # caption preset -> ASS style line + clip-relative timing
 python3 tools/encode_profile_test.py   # encoder/preset/deadline + adaptive bitrate logic
 python3 tools/live_watch.py            # verify the RUNNING site: waits, then checks every endpoint
+python3 tools/health_resilience_test.py # health never fails on a sub-block, never calls a vendor
 bun tools/backend_respawn_test.ts       # the backend supervisor recovers from a failed boot
 bun tools/overall_status_test.ts       # job Done/Failed/overall-progress indicator logic
 python3 -m app.doctor                  # hardware/engine/ffmpeg diagnostics

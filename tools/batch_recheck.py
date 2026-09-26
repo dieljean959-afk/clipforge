@@ -81,7 +81,19 @@ def verify_clips(job_id: str) -> None:
 
     total = 0.0
     for c in sorted(clips, key=lambda x: x.get("order", 0)):
-        name = Path(c["videoPath"]).name
+        # A job mid-retry legitimately has clips with no rendered file yet
+        # (renderState=pending). This tool exists to diagnose exactly that
+        # state, so crashing on it — "expected str, bytes or os.PathLike, not
+        # NoneType" — is useless. Report it and move on.
+        raw_path = c.get("videoPath")
+        if not raw_path:
+            check(
+                f"clip_{int(c.get('order', 0)) + 1:02d} is rendered",
+                False,
+                f"renderState={c.get('renderState')} — no videoPath yet",
+            )
+            continue
+        name = Path(raw_path).name
         vid = out_dir / name
         if not vid.exists():
             check(f"{name} exists", False, str(vid))

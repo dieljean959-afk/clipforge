@@ -47,10 +47,16 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
 };
 
 /**
- * Global stall watchdog: mirror the server's 20-minute silence watchdog so
- * the UI does not claim a long transcription is dead while it is progressing.
+ * Global stall watchdog: mirror the server's silence watchdog so the UI does
+ * not claim a long transcription is dead while it is progressing — and, just
+ * as importantly, does NOT stay silent for twice as long as the server will
+ * actually wait. The server's budget is 10 minutes (CLIPFORGE_STALL_TIMEOUT_SEC);
+ * the UI used to hold off for 20, so a job the server had already killed and
+ * auto-retried still showed a spinner with no explanation.
  * 2s poll mirrors the progress cadence.
  */
+const STALL_THRESHOLD_MS = 600_000;
+
 function useStalled(job: JobDoc): boolean {
   const [stalled, setStalled] = useState(false);
   const active =
@@ -64,7 +70,7 @@ function useStalled(job: JobDoc): boolean {
     const check = () => {
       const j = jobRef.current;
       const last = j.lastProgressAt ?? j.stageStartedAt ?? j.createdAt;
-      setStalled(Date.now() - last > 1_200_000);
+      setStalled(Date.now() - last > STALL_THRESHOLD_MS);
     };
     // first evaluation deferred a tick — no synchronous setState on mount
     const initial = setTimeout(check, 0);
@@ -305,15 +311,27 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
                 {job.etaSource !== "measured" && " (estimate)"}
               </span>
             )}
+            {/* A queued job's own ETA is meaningless (it hasn't started), so
+                the card used to fall through to "~any moment" even with two
+                jobs in front of it. Prefer the server's queue estimate, and
+                only say "any moment" when there is genuinely nothing ahead. */}
+            {job.stage === "queued" && (
+              <span className="text-primary/80">
+                {typeof job.queueEtaSec === "number" && job.queueEtaSec > 0
+                  ? `starts in ~${fmtEta(job.queueEtaSec)}`
+                  : "next up — no wait"}
+              </span>
+            )}
           </div>
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress
-              from the worker for 20 minutes at stage{" "}
+              from the worker for {STALL_THRESHOLD_MS / 60000} minutes at stage{" "}
               <span className="font-mono">{job.stage}</span>. Long videos can legitimately
               spend many minutes inside one transcription window — check the logs for
-              the exact stage. If it stays stuck, the server-side watchdog kills the
-              stuck worker and marks the job failed so you can retry.
+              the exact stage. If it stays stuck, the server kills the worker and
+              retries the job automatically once, resuming from the last completed
+              clip.
             </div>
           )}
         </div>

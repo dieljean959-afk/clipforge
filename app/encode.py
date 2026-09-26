@@ -32,6 +32,7 @@ from typing import Any
 
 from loguru import logger
 
+from app import hostlimits
 from app.config import Settings, ffmpeg_bin
 
 # --------------------------------------------------------------------------- #
@@ -44,9 +45,43 @@ RENDER_TIMEOUT_GPU_SEC = 20 * 60
 #: A single-CPU host can legitimately spend minutes per 9:16 clip. The old code
 #: reused the GPU deadline here, which is exactly what produced "the render
 #: just stops" on small hosts. This one is sized for slow-but-progressing.
-RENDER_TIMEOUT_CPU_SEC = 90 * 60
+#:
+#: It was then set to 90 minutes, which was worse: a hung ffmpeg held the ONLY
+#: worker slot for an hour and a half, and every other job sat at 0% behind it
+#: with a "~any moment" estimate. The deadline is now derived from the actual
+#: clip length by `render_deadline_sec()` — generous for slow-but-progressing
+#: work, but bounded, so a hang costs minutes rather than an hour.
+RENDER_TIMEOUT_CPU_SEC = 12 * 60
+#: Floor for the derived deadline, so a short clip still gets room for the
+#: process spawn, scene analysis and the burn-in pass.
+RENDER_DEADLINE_FLOOR_SEC = 6 * 60
+#: Ceiling, so a very long clip can never hold a worker slot indefinitely.
+RENDER_DEADLINE_CEILING_SEC = 30 * 60
+#: Wall-seconds of encode allowed per second of output. Measured on this host:
+#: a 1080x1920 60fps clip encodes at roughly 1x realtime with the ultrafast
+#: fallback, so 6x is a wide margin that still catches a real hang.
+RENDER_REALTIME_FACTOR = 6
 #: Probing ffmpeg for encoders/filters is quick but not instant on a loaded box.
 PROBE_TIMEOUT_SEC = 30
+
+
+def render_deadline_sec(clip_seconds: float, *, hardware: bool) -> int:
+    """Wall-clock budget for ONE clip render.
+
+    A flat deadline is the wrong shape in both directions. Too short and a
+    legitimately slow clip on a 1-CPU host is killed mid-encode; too long and
+    a hung ffmpeg pins the only worker slot for over an hour while the queue
+    behind it claims to be "any moment away".
+
+    So the budget scales with the work: a floor for fixed overhead, a
+    per-second-of-output allowance for the encode itself, and a hard ceiling.
+    """
+    if hardware:
+        # GPU encodes an order of magnitude faster than realtime; keep the
+        # historical, tighter deadline rather than the CPU budget.
+        return RENDER_TIMEOUT_GPU_SEC
+    raw = RENDER_DEADLINE_FLOOR_SEC + max(0.0, clip_seconds) * RENDER_REALTIME_FACTOR
+    return int(min(RENDER_DEADLINE_CEILING_SEC, max(RENDER_DEADLINE_FLOOR_SEC, round(raw))))
 
 #: x264 presets ordered fastest-first. CPU-only hosts get one of the first two.
 _PRESET_RANK = (
@@ -79,6 +114,28 @@ class EncoderChoice:
     #: alone, the old behaviour). Set by `for_output()`.
     maxrate_kbps: int = 0
     bufsize_kbps: int = 0
+    #: Thread count handed to the encoder. Derived from the CONTAINER's CPU
+    #: allowance, not from nproc — see `choose()`.
+    threads: int = 0
+
+    def threads_args(self) -> list[str]:
+        """`-threads` for the encoder and the filter graph.
+
+        Without this, ffmpeg sizes its thread pools from `nproc`, which inside
+        a container-limited host reports the *host's* core count. This host
+        reports 64 cores but is allowed 1, so every render was spawning ~64
+        frame threads and ~64 slice threads to share a single CPU: pure
+        context-switch overhead, several hundred MB of frame buffers, and a
+        much higher chance of being OOM-killed mid-clip (observed as
+        `ffmpeg exited -9 (SIGKILL)`).
+        """
+        if self.threads <= 0:
+            return []
+        return [
+            "-threads", str(self.threads),
+            "-filter_threads", str(self.threads),
+            "-filter_complex_threads", str(self.threads),
+        ]
 
     def for_output(self, width: int, height: int, fps: float) -> "EncoderChoice":
         """Size the encode to the output it is actually producing.
@@ -129,12 +186,14 @@ class EncoderChoice:
         cap: list[str] = []
         if self.maxrate_kbps > 0:
             cap = ["-maxrate", f"{self.maxrate_kbps}k", "-bufsize", f"{self.bufsize_kbps}k"]
+        thr = self.threads_args()
         if self.encoder == "h264_nvenc":
             return [
                 "-c:v", "h264_nvenc",
                 "-preset", "p4" if self.preset == "ultrafast" else "p5",
                 "-cq", str(self.crf),
                 "-b:v", "0",
+                *thr,
                 *cap,
                 "-pix_fmt", "yuv420p",
             ]
@@ -149,11 +208,13 @@ class EncoderChoice:
                 "-preset", "veryfast" if self.preset == "ultrafast" else "medium",
                 "-global_quality", str(self.crf),
                 "-look_ahead", "0",
+                *thr,
                 *cap,
                 "-pix_fmt", "yuv420p",
             ]
         return [
             "-c:v", "libx264", "-preset", self.preset, "-crf", str(self.crf),
+            *thr,
             *cap,
             "-pix_fmt", "yuv420p",
         ]
@@ -340,6 +401,19 @@ def choose(settings: Settings, *, force_software: bool = False) -> EncoderChoice
         crf=crf,
     )
 
+    # Thread count comes from the CONTAINER's allowance, never from nproc.
+    # Inside a cgroup-limited host nproc reports the host's cores (64 here)
+    # while the container is allowed 1 CPU, so an unbounded ffmpeg builds its
+    # thread pools from the wrong number entirely.
+    choice.threads = hostlimits.effective_cpus()
+    if choice.threads <= 0:
+        choice.threads = 1
+    if choice.threads < os.cpu_count():
+        choice.notes.append(
+            f"ffmpeg limited to {choice.threads} thread(s) — this container may use "
+            f"{choice.threads} of the {os.cpu_count()} cores the host reports"
+        )
+
     if encoder:
         # Hardware encodes fast enough that a slow preset is affordable, so the
         # user's quality settings are kept. Deadline stays the strict one.
@@ -353,7 +427,7 @@ def choose(settings: Settings, *, force_software: bool = False) -> EncoderChoice
         choice.degraded_from = requested
         choice.notes.append(note)
     choice.preset = preset
-    choice.timeout_sec = RENDER_TIMEOUT_CPU_SEC
+    choice.timeout_sec = RENDER_TIMEOUT_CPU_SEC  # replaced per clip by render_deadline_sec()
     choice.notes.append(
         f"CPU-only render deadline: {RENDER_TIMEOUT_CPU_SEC // 60} min "
         f"(hardware encoder absent — a single-vCPU host encodes 9:16 at ~0.1x realtime)"

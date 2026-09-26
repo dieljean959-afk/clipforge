@@ -65,18 +65,43 @@ def main() -> int:
 
     assert worker._check_watchdog_once() is True
     proc.wait(timeout=5)
-    failed = store.get_job(job_id)
-    assert failed and failed["stage"] == "failed"
-    assert "killed" in (failed.get("error") or "").lower()
-    assert "stall watchdog" in "\n".join(failed.get("logs", [])).lower()
+    stalled = store.get_job(job_id)
+    # A stall is environmental and often transient, so the watchdog now buys
+    # the job ONE automatic retry before the user is told anything. The job is
+    # requeued rather than left failed — this is the behaviour the dashboard
+    # used to make the user trigger by hand after a 20-minute wait.
+    assert stalled and stalled["stage"] == "queued", stalled["stage"]
+    assert stalled.get("autoRetryCount") == 1, stalled.get("autoRetryCount")
+    assert "auto-retry" in "\n".join(stalled.get("logs", [])).lower()
     assert worker._stalled_job == job_id
 
+    # The automatic retry must be exactly that: ONE. A second stall with no
+    # human in the loop would otherwise cycle forever.
+    stalled.update({"stage": "failed", "error": "Pipeline stalled — no progress for 600s at stage rendering."})
+    store.write_job(stalled)
+    assert worker._auto_retry(job_id, stalled, "second stall") is False
+    assert store.get_job(job_id)["stage"] == "failed"
+
+    # A non-retryable failure must NOT be retried: a bad URL or a missing key
+    # would just spend quota to reach the same error.
+    bad = store.get_job(job_id)
+    bad.update({"autoRetryCount": 0, "error": "Could not fetch video: not a video",
+                "stage": "failed"})
+    store.write_job(bad)
+    assert worker._auto_retry(job_id, bad, "bad url") is False
+    assert store.get_job(job_id)["stage"] == "failed"
+
     # Retry must queue a new attempt and preserve the completed-stage markers.
+    cur = store.get_job(job_id)
+    cur.update({"stage": "failed", "error": "Pipeline stalled — no progress for 600s at stage rendering."})
+    store.write_job(cur)
     depth = worker.retry(job_id)
-    assert depth == 1
+    assert depth == 1, depth
     retried = store.get_job(job_id)
     assert retried and retried["stage"] == "queued"
     assert retried.get("completedAt") is None
+    # The expensive stages are still cached, so a resume never re-downloads,
+    # re-transcribes or re-pays for detection.
     assert StageWorkspace(settings.app.paths.data_dir, job_id).first_incomplete() == "detect"
     assert ws.is_done("fetch") and ws.is_done("transcribe")
 

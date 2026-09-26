@@ -5,7 +5,7 @@
 // call setState synchronously during mount — the first update lands after the
 // browser has painted.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ClipDto, type HealthDto, type JobDto } from "@/lib/api";
 
 export function useJobs(intervalMs = 2000) {
@@ -78,17 +78,40 @@ export function useClips(jobId: string | null, intervalMs = 2000) {
 export function useHealth(intervalMs = 5000) {
   const [health, setHealth] = useState<HealthDto | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+  // A poll can fail while the PREVIOUS poll succeeded. The dashboard used to
+  // show a hard red "API unreachable: HTTP 400" banner directly above a fully
+  // populated status card — real CPU/RAM/disk/worker numbers rendered from the
+  // last good response, with one transient failure claiming the API was gone.
+  //
+  // So the two are separated: `error` means "we have never had a response"
+  // (genuinely unreachable, and the card has nothing to show), while `stale`
+  // means "a poll failed but we are still displaying the last good reading".
+  // A single bad poll must not alarm the user, and the last known state is
+  // more useful than a red banner.
+  const [stale, setStale] = useState<string | null>(null);
   // tried = first probe completed (ok or failed). Derived from state, never a
   // ref read during render.
   const [tried, setTried] = useState(false);
+  // Read inside the async callback only (never during render) to decide
+  // whether a failure is fatal or transient.
+  const haveData = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       const data = await api.health();
+      haveData.current = true;
       setHealth(data);
       setError(null);
+      setStale(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "API unreachable");
+      const msg = err instanceof Error ? err.message : "API unreachable";
+      if (haveData.current) {
+        // We are still showing the last good reading; keep it and note the
+        // blip instead of blanking the card with a false "unreachable".
+        setStale(msg);
+      } else {
+        setError(msg);
+      }
     } finally {
       setTried(true);
     }
@@ -103,5 +126,5 @@ export function useHealth(intervalMs = 5000) {
     };
   }, [refresh, intervalMs]);
 
-  return { health, error, tried, refresh };
+  return { health, error, stale, tried, refresh };
 }

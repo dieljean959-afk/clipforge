@@ -44,7 +44,14 @@ from app.config import ROOT, Settings
 from app.store import LocalStore
 
 # Seconds of progress silence before a running job is declared stalled.
-STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "1200"))
+# Was 1200 (20 min), which is what the dashboard was reporting verbatim: a job
+# sat at "Rendering clip 10 of 10" for twenty minutes with nothing happening.
+# The per-clip encode deadline in app.encode now bounds a hung ffmpeg at
+# 6-30 min depending on clip length; this is the coarser backstop for stages
+# that produce no progress lines at all. Kept above the longest legitimate
+# silent stretch (a long transcription window on 1 CPU) but well under the old
+# window, and a stall now earns one automatic retry before the user is told.
+STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "600"))
 
 # How many times a job killed by an EXTERNAL signal (SIGTERM/SIGKILL — host
 # restart, redeploy, scale-down) is auto-resumed before it is finally failed.
@@ -130,6 +137,20 @@ class InProcessWorker:
             thread.join(timeout=timeout)
 
     def enqueue(self, job_id: str) -> int:
+        # Never queue the same id twice. Retry, the boot reconciler and the
+        # auto-retry can all fire for one job, and a second entry means two
+        # child processes writing the same stage artifacts concurrently — the
+        # exact corruption the per-job process was introduced to prevent.
+        #
+        # Only `_pending` is consulted, deliberately. A job that is RUNNING is
+        # not in the queue, and `retry()` needs to be able to queue it: it kills
+        # the old process group first, but `_current_job` stays set until the
+        # supervisor reaps it, so treating "current" as "already queued" would
+        # silently swallow the retry and leave the job failed forever.
+        with self._lock:
+            if job_id in self._pending:
+                logger.info(f"[worker] job {job_id} is already queued — not enqueuing again")
+                return len(self._pending)
         self._queue.put(job_id)
         with self._lock:
             self._pending.append(job_id)
@@ -237,21 +258,77 @@ class InProcessWorker:
         with self._lock:
             return {job_id: pos for pos, job_id in enumerate(self._pending)}
 
+    def _queue_wait_estimate_sec(self, job_id: str, position: int) -> int | None:
+        """How long until this queued job plausibly starts.
+
+        The dashboard used to render "~any moment" for every queued job,
+        because a queued job has no ETA of its own and `fmtEta` turns a missing
+        number into "any moment". With one worker and a real queue in front of
+        you, that is the single most misleading thing the card can say.
+
+        So estimate it: whatever the running job still needs, plus the work of
+        the jobs queued ahead of this one. Returns None when there is genuinely
+        nothing to wait for (first in line, worker idle), which the UI can then
+        honestly call "any moment".
+        """
+        with self._lock:
+            pending = list(self._pending)
+        ahead = pending[:position]
+        running = [j for j, _ in self._targets() if j != job_id]
+        if not ahead and not running:
+            return None
+
+        total = 0.0
+        known = False
+        for jid in running + ahead:
+            other = self.store.get_job(jid)
+            if not other:
+                continue
+            remaining = self._remaining_estimate_sec(other)
+            if remaining is not None:
+                total += remaining
+                known = True
+        return int(total) if known else None
+
+    @staticmethod
+    def _remaining_estimate_sec(job: dict[str, Any]) -> float | None:
+        """Best available estimate of seconds left for one job."""
+        stage_left = job.get("stageEtaSec")
+        total_left = job.get("totalEtaSec")
+        if job.get("stage") == "queued":
+            return float(total_left) if isinstance(total_left, (int, float)) else None
+        if isinstance(stage_left, (int, float)) and stage_left > 0:
+            tail = job.get("totalEtaSec")
+            # stageEtaSec is the current stage; totalEtaSec already includes
+            # the stages after it, so prefer the larger, whole-job number.
+            if isinstance(tail, (int, float)) and tail > 0:
+                return float(max(stage_left, tail))
+            return float(stage_left)
+        if isinstance(total_left, (int, float)) and total_left > 0:
+            return float(total_left)
+        return None
+
     def _write_queue_position(self, job_id: str, position: int) -> None:
         """Persist the position so a client that never sees it move still knows."""
         job = self.store.get_job(job_id)
-        if job is None or job.get("queuePosition") == position:
+        if job is None:
+            return
+        wait = self._queue_wait_estimate_sec(job_id, position)
+        if job.get("queuePosition") == position and job.get("queueEtaSec") == wait:
             return
         job["queuePosition"] = position
-        job["progressDetail"] = (
-            "Queued — waiting behind 1 other job."
-            if position == 1
-            else (
-                f"Queued — waiting behind {position} other jobs."
-                if position > 1
-                else "Queued — starting now on the server worker."
+        # The wait estimate is part of the job's truth: the card shows it
+        # instead of inventing "any moment" for a job with a queue in front.
+        job["queueEtaSec"] = wait
+        if position == 0 and wait is None:
+            job["progressDetail"] = "Queued — starting now on the server worker."
+        else:
+            behind = "1 other job" if position == 1 else f"{position} other jobs"
+            job["progressDetail"] = (
+                f"Queued — waiting behind {behind}."
+                if position > 0
+                else "Queued — waiting for the current job to finish."
             )
-        )
         self.store.write_job(job)
 
     def _promote_positions(self) -> None:
@@ -373,6 +450,14 @@ class InProcessWorker:
             # watchdog already failed it with a specific reason
             return
         if stage in {"complete", "failed"}:
+            # A retryable failure (render deadline, stall watchdog) gets ONE
+            # automatic second attempt before the user is told anything. Both
+            # are environmental — a hung ffmpeg or a starved host — and the
+            # pipeline resumes from the last COMPLETED clip, so a retry is
+            # cheap: it does not repeat the download, transcription or the paid
+            # detection call, only the render that actually failed.
+            if self._auto_retry(job_id, job or {}, "stall/render deadline"):
+                return
             return
         # the child died without recording a terminal state (crash, OOM-kill,
         # SIGSEGV in native code...) — surface it instead of hanging
@@ -382,11 +467,11 @@ class InProcessWorker:
                 tail = "\n".join(runner_log.read_text(encoding="utf-8", errors="replace").splitlines()[-12:])
         except Exception:
             pass
-        # A negative return code means the child was SIGNALLED, not that it
         # failed. That is an external event (host restart/redeploy/scale-down),
         # so the job did not fail on its own merit — treat it as interrupted and
         # resumable. Without this, a host bounce permanently fails work whose
         # expensive stages are already cached on disk.
+        # A negative return code means the child was SIGNALLED, not that it
         if rc is not None and rc < 0 and self._note_interrupted(job, job_id, rc, stage, tail):
             return
 
@@ -435,6 +520,72 @@ class InProcessWorker:
             return False
         text = f"{job.get('error') or ''}\n{job.get('errorDetail') or ''}"
         return bool(_SIGNAL_BANNER.search(text))
+
+    #: Failures worth exactly one silent automatic retry. A hung ffmpeg and a
+    #: starved host are both environmental and often transient; making the user
+    #: click Retry for a hang that a second attempt would have cleared is a
+    #: poor trade. Everything else (a bad URL, a missing key, a genuinely broken
+    #: input) fails immediately — a retry would just spend quota to reach the
+    #: same error.
+    AUTO_RETRY_ERRORS = (
+        "render deadline",
+        "was killed",
+        "stalled",
+        "no progress",
+        "exceeded its",
+        # The failure this host actually produces most often. ffmpeg reports
+        # `exited -9 (SIGKILL) — this was an EXTERNAL kill` when the container
+        # is recycled or redeployed mid-render, so without these tokens the one
+        # failure most worth retrying silently did NOT retry.
+        "sigkill",
+        "external kill",
+        "terminated by a signal",
+        "interrupted",
+    )
+    AUTO_RETRY_BUDGET = 1
+
+    @classmethod
+    def _is_retryable(cls, job: dict[str, Any]) -> bool:
+        blob = " ".join(
+            str(job.get(f) or "") for f in ("error", "errorDetail", "progressDetail")
+        ).lower()
+        return any(token in blob for token in cls.AUTO_RETRY_ERRORS)
+
+    def _auto_retry(self, job_id: str, job: dict[str, Any], reason: str) -> bool:
+        """Requeue a stalled/timed-out job once. True when a retry was started.
+
+        The retry is a fresh child process, and the pipeline resumes from the
+        last COMPLETED clip — the download, the transcript and the (paid)
+        detection call are all cached on disk, so the second attempt only
+        redoes the render that actually failed.
+        """
+        used = int(job.get("autoRetryCount") or 0)
+        if used >= self.AUTO_RETRY_BUDGET or not self._is_retryable(job):
+            return False
+        job.update({
+            "autoRetryCount": used + 1,
+            "stage": "queued",
+            "progress": 0,
+            "error": None,
+            "errorDetail": None,
+            "completedAt": None,
+            "interrupted": False,
+            "interruptReason": None,
+            "failedStage": None,
+            "unitLabel": None,
+            "unitsDone": None,
+            "unitsTotal": None,
+            "progressDetail": "Auto-retrying once after a render stall/timeout…",
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(
+            job_id,
+            f"AUTO-RETRY 1/1: {reason} — requeueing automatically; the pipeline "
+            f"resumes from the last completed clip.",
+        )
+        logger.warning(f"[worker] auto-retrying job {job_id} after {reason}")
+        self.enqueue(job_id)
+        return True
 
     def _note_interrupted(self, job: dict[str, Any] | None, job_id: str, rc: int,
                           stage: str | None, tail: str) -> bool:
@@ -606,6 +757,10 @@ class InProcessWorker:
                 f"stall watchdog: no progress for {int(silent_for / 1000)}s at stage "
                 f"{job.get('stage')} — killed the stuck worker process",
             )
+            # Same rule as a render deadline: one silent automatic retry before
+            # the user is involved. The pipeline resumes from the last
+            # COMPLETED clip, so this costs only the render that hung.
+            self._auto_retry(job_id, job, "stall watchdog")
             killed_any = True
         return killed_any
 

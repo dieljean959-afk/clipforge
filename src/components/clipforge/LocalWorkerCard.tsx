@@ -58,7 +58,7 @@ function StatLine({
 }
 
 export function LocalWorkerCard({ className }: { className?: string }) {
-  const { health, error, refresh: refreshHealth } = useHealth(5000);
+  const { health, error, stale, refresh: refreshHealth } = useHealth(5000);
   const [rechecking, setRechecking] = useState(false);
   const [keyDialogOpen, setKeyDialogOpen] = useState(false);
   const [keyInput, setKeyInput] = useState("");
@@ -254,6 +254,17 @@ export function LocalWorkerCard({ className }: { className?: string }) {
           <span className="flex items-center gap-1.5 text-muted-foreground">
             <Loader2 className="size-3 animate-spin" />
             Checking server status…
+          </span>
+        ) : stale ? (
+          // A poll failed but the readings below are real and recent. Saying
+          // "API unreachable" here was wrong twice over: the API demonstrably
+          // answered, and it erased a fully populated status card.
+          <span
+            className="flex items-center gap-1.5 text-amber-300/90"
+            title={`Last poll failed: ${stale}. The values below are from the most recent successful read.`}
+          >
+            <span className="size-2 rounded-full bg-amber-400/70" />
+            last check failed ({stale}) — showing the most recent reading
           </span>
         ) : (
           <span className="flex items-center gap-1.5 font-semibold">

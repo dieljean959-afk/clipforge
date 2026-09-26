@@ -389,8 +389,14 @@ DETECTION_TRADEOFFS = {
 }
 
 
-def detection_status() -> dict:
-    """Which backend runs AI highlight detection, and is it actually usable."""
+def detection_status(probe: bool = True) -> dict:
+    """Which backend runs AI highlight detection, and is it actually usable.
+
+    `probe=False` answers from configuration and key presence only, making NO
+    network call. `/api/health` uses it, so a Groq or Ollama outage can never
+    stall or break our own health endpoint — a third-party hiccup must not be
+    able to take down the page that tells the user anything is wrong.
+    """
     active = llm_mod.provider(settings)
     out: dict = {
         "provider": active,
@@ -410,19 +416,32 @@ def detection_status() -> dict:
         "transcriptionEngine": subtitle_svc.engine_status(settings).engine,
     }
     if active == "ollama":
-        ok, reason = llm_mod.ollama_status(settings)
-        out["ready"] = ok
-        out["detail"] = reason
+        if not probe:
+            # No network call: report the configured target and let the
+            # dashboard / doctor do the actual reachability check.
+            out["ready"] = None
+            out["probed"] = False
+            out["detail"] = f"ollama configured at {settings.llm.ollama_url} (not probed by /api/health)"
+        else:
+            ok, reason = llm_mod.ollama_status(settings)
+            out["ready"] = ok
+            out["probed"] = True
+            out["detail"] = reason
     elif active == "groq":
         live = live_groq_key()
-        live.refresh(force=True)
+        # force=True re-reads the env each call, which is what makes a key
+        # saved after boot appear on the next poll. It is a local env lookup,
+        # never a request to Groq, so it is safe in the health path.
+        live.refresh(force=probe)
         out["ready"] = live.key is not None
+        out["probed"] = False
         out["detail"] = live.problem or (
             f"GROQ_API_KEY loaded from {live.source}" if live.key
             else "GROQ_API_KEY missing — add it in the Keys/API keys tab."
         )
     else:
         out["ready"] = settings.gemini_api_key is not None
+        out["probed"] = False
         out["detail"] = (
             f"GEMINI_API_KEY loaded from {live_gemini_key().source}"
             if settings.gemini_api_key else "GEMINI_API_KEY missing."
@@ -452,53 +471,122 @@ def set_detection_backend(body: DetectionIn) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    remote = hosting.remote_probe(settings) if settings.hosted.worker_url else None
-    worker_status = worker.status()
-    engine = subtitle_svc.engine_status(settings)
-    rtf_store = eta.store(settings.app.paths.data_dir)
-    rtf_value, rtf_source = rtf_store.effective_rtf(
-        engine.engine, engine.device, engine.model, engine.compute_type
-    )
+    """Liveness + status for the dashboard.
+
+    Two rules, both learned from a real "API unreachable: HTTP 400" banner:
+
+    1. **This endpoint never fails because a SUB-COMPONENT failed.** Every
+       block is built through `_safe`, so a disk probe, a shell stat, an RTF
+       read or a key lookup that raises degrades that one field to
+       `{"error": ...}` and still returns 200 with everything else. Before,
+       any single one of those could take down the whole payload, and the
+       dashboard's only way to describe "I could not read one number" was to
+       claim the entire API was unreachable.
+    2. **It does not depend on any third party being up.** In particular the
+       AI provider is consulted WITHOUT a network probe (`probe=False`).
+       `detection_status()` otherwise calls `ollama_status()`, which opens an
+       HTTP connection with a 5s timeout — so a third-party hiccup could stall
+       or break our own health endpoint. Groq/Gemini readiness here is key
+       PRESENCE only (an env lookup); whether the vendor is actually answering
+       is `/api/doctor`'s job, and detection reports it honestly when it runs.
+
+    A health check answers "is this process serving?", so the status is 200
+    whenever we got far enough to answer at all. It reports `ok: false` plus
+    `degraded` reasons when something is wrong, which is more useful than a
+    bare non-2xx — and 400 is never a valid response for this route.
+    """
+    def _safe(name: str, fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - isolation is the point
+            logger.warning("[health] block %r degraded: %s: %s", name, type(exc).__name__, exc)
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    degraded: list[str] = []
+
+    def _block(name: str, fn, *args, **kwargs):
+        out = _safe(name, fn, *args, **kwargs)
+        if isinstance(out, dict) and "error" in out and len(out) == 1:
+            degraded.append(name)
+        return out
+
+    remote = None
+    if settings.hosted.worker_url:
+        remote = _safe("remoteWorker", hosting.remote_probe, settings)
+    worker_status = _block("worker", worker.status)
+    engine = _block("whisper", subtitle_svc.engine_status, settings)
+    rtf_value, rtf_source = 0.0, "unavailable"
+    if not (isinstance(engine, dict) and "error" in engine):
+        rtf_store = _safe("rtfStore", eta.store, settings.app.paths.data_dir)
+        if rtf_store is not None and not (isinstance(rtf_store, dict) and "error" in rtf_store):
+            eff = _safe(
+                "rtf", rtf_store.effective_rtf,
+                engine.engine, engine.device, engine.model, engine.compute_type,
+            )
+            if eff and not (isinstance(eff, dict) and "error" in eff):
+                rtf_value, rtf_source = eff
     return {
-        "ok": True,
+        # The process answered, so it IS up. `ok` is false only when a part of
+        # the picture is missing, and `degraded` says which part.
+        "ok": not degraded,
+        "degraded": degraded,
         "version": "1.1.0",
         "worker": worker_status,
         "warmup": warmup,
-        "llm": {
-            "provider": llm_mod.provider(settings),
-            # LIVE re-resolution — a key saved in the platform after boot is
-            # picked up on the next health poll without restarting anything.
-            **live_gemini_key().status(),
-        },
-        "llmGroq": {
-            "provider": llm_mod.PROVIDER_GROQ,
-            **live_groq_key().status(),
-        },
-        "detection": detection_status(),
-        "whisper": {
-            # The RESOLVED engine/model/compute, not what config.toml asks for.
-            # The host-limit downgrade (medium -> small) has to be visible in the
-            # status label, otherwise the UI advertises a model that never loads.
-            "model": engine.model,
-            "compute": engine.compute_type,
-            "configuredModel": settings.whisper.model,
-            "engine": engine.engine,
-            "isWhisperx": engine.is_whisperx,
-        },
-        "asr": {
-            # Which engine is really transcribing, which model actually loads,
-            # and the RTF this host has measured — the same numbers the ETA is
-            # derived from.
-            **engine.as_dict(),
-            "estimatedRtf": round(rtf_value, 4),
-            "rtfSource": rtf_source,
-            "rtfHistory": rtf_store.snapshot(),
-            "host": hostlimits.limits(),
-            "hostDetail": hostlimits.describe(),
-        },
-        "system": hosting.system_stats(),
-        "encode": encode_mod.as_dict(encode_mod.choose(settings)),
-        "disk": disk_stats(),
+        "llm": _block(
+            "llm",
+            lambda: {
+                "provider": llm_mod.provider(settings),
+                # LIVE re-resolution — a key saved in the platform after boot is
+                # picked up on the next health poll without restarting anything.
+                **live_gemini_key().status(),
+            },
+        ),
+        "llmGroq": _block(
+            "llmGroq",
+            lambda: {
+                "provider": llm_mod.PROVIDER_GROQ,
+                **live_groq_key().status(),
+            },
+        ),
+        # probe=False: key presence only, never a vendor round trip. A Groq or
+        # Ollama outage must not be able to fail our own health endpoint.
+        "detection": _block("detection", detection_status, probe=False),
+        "whisper": _block(
+            "whisperDetail",
+            lambda: {
+                # The RESOLVED engine/model/compute, not what config.toml asks
+                # for. The host-limit downgrade (medium -> small) has to be
+                # visible in the status label, otherwise the UI advertises a
+                # model that never loads.
+                "model": engine.model,
+                "compute": engine.compute_type,
+                "configuredModel": settings.whisper.model,
+                "engine": engine.engine,
+                "isWhisperx": engine.is_whisperx,
+            },
+        ),
+        "asr": _block(
+            "asr",
+            lambda: {
+                # Which engine is really transcribing, which model actually
+                # loads, and the RTF this host has measured — the same numbers
+                # the ETA is derived from.
+                **engine.as_dict(),
+                "estimatedRtf": round(rtf_value, 4),
+                "rtfSource": rtf_source,
+                "rtfHistory": (
+                    rtf_store.snapshot()
+                    if rtf_store is not None and not (isinstance(rtf_store, dict) and "error" in rtf_store)
+                    else []
+                ),
+                "host": hostlimits.limits(),
+                "hostDetail": hostlimits.describe(),
+            },
+        ),
+        "system": _block("system", hosting.system_stats),
+        "encode": _block("encode", lambda: encode_mod.as_dict(encode_mod.choose(settings))),
+        "disk": _block("disk", disk_stats),
         "tailnetIp": hosting.tailnet_ip(),
         "limits": {
             "maxSourceMin": settings.hosted.max_source_min,

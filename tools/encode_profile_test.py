@@ -10,12 +10,13 @@ Run: python3 tools/encode_profile_test.py
 """
 from __future__ import annotations
 
+import os as _os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import encode  # noqa: E402
+from app import encode, hostlimits  # noqa: E402
 from app.config import load_config  # noqa: E402
 
 
@@ -43,14 +44,36 @@ def main() -> int:
     preset, note = encode.resolve_preset("superfast")
     check("superfast is left alone (the floor)", preset == "superfast" and note == "")
 
-    # --- 2. deadlines are per-mode, not shared ---------------------------
+    # --- 2. the per-clip deadline is derived and bounded ------------------
     print()
-    print("== 2. CPU fallback has its own, longer deadline")
-    check("CPU deadline is longer than the GPU one",
-          encode.RENDER_TIMEOUT_CPU_SEC > encode.RENDER_TIMEOUT_GPU_SEC,
-          f"cpu {encode.RENDER_TIMEOUT_CPU_SEC // 60}min > gpu {encode.RENDER_TIMEOUT_GPU_SEC // 60}min")
-    check("the CPU deadline is generous enough for a slow host",
-          encode.RENDER_TIMEOUT_CPU_SEC >= 60 * 60,
+    print("== 2. the render deadline scales with the clip and is bounded")
+    # This used to assert a flat 90-minute CPU deadline was "generous enough".
+    # It was not generous, it was unbounded: a hung ffmpeg held the only worker
+    # slot for an hour and a half and every other job sat at 0% behind it.
+    d = encode.render_deadline_sec
+    check("a zero-length clip still gets the full floor",
+          d(0, hardware=False) == encode.RENDER_DEADLINE_FLOOR_SEC,
+          f"{d(0, hardware=False) // 60} min")
+    check("a short clip never drops below the floor",
+          d(1, hardware=False) >= encode.RENDER_DEADLINE_FLOOR_SEC,
+          f"{d(1, hardware=False) // 60} min")
+    check("a longer clip gets a proportionally longer budget",
+          d(60, hardware=False) > d(10, hardware=False),
+          f"{d(10, hardware=False) // 60}min -> {d(60, hardware=False) // 60}min")
+    check("the budget is monotonic in clip length",
+          all(d(a, hardware=False) <= d(b, hardware=False) for a, b in ((5, 20), (20, 90), (90, 300))))
+    check("an absurdly long clip is still capped",
+          d(100_000, hardware=False) == encode.RENDER_DEADLINE_CEILING_SEC,
+          f"{d(100_000, hardware=False) // 60} min")
+    check("a typical clip lands in the 5-15 minute band the user asked for",
+          5 <= d(52, hardware=False) // 60 <= 15, f"{d(52, hardware=False) // 60} min")
+    check("no CPU clip can be given 90 minutes again",
+          d(1800, hardware=False) < 60 * 60, f"{d(1800, hardware=False) // 60} min")
+    check("the GPU deadline is unchanged",
+          d(52, hardware=True) == encode.RENDER_TIMEOUT_GPU_SEC,
+          f"{d(52, hardware=True) // 60} min")
+    check("the default CPU deadline is now minutes, not an hour and a half",
+          encode.RENDER_TIMEOUT_CPU_SEC <= 20 * 60,
           f"{encode.RENDER_TIMEOUT_CPU_SEC // 60} min")
 
     encode.reset_cache()
@@ -218,6 +241,49 @@ def main() -> int:
           "maxrate" in encode.summary(adaptive), encode.summary(adaptive))
     check("as_dict reports the ceiling",
           encode.as_dict(adaptive).get("maxrateKbps") == adaptive.maxrate_kbps)
+
+    # --- 8. the encoder is told how many CPUs it really has ------------
+    print()
+    print("== 8. ffmpeg threads come from the container, not from nproc")
+    # ffmpeg sizes its thread pools from nproc, which inside a cgroup-limited
+    # host reports the HOST's cores. This host reports 64 but is allowed 1, so
+    # every render was spawning ~64 frame + ~64 slice threads to share a
+    # single CPU. Measured on a real 1080x1920 clip: 10s -> 4s (2.5x faster)
+    # for byte-identical output (SSIM 0.9999).
+    settings = load_config(quiet=True)
+    cpu_choice = encode.choose(settings)
+    check("a thread count is always chosen", cpu_choice.threads >= 1, str(cpu_choice.threads))
+    check(
+        "it never exceeds the container's CPU allowance",
+        cpu_choice.threads <= max(1, hostlimits.effective_cpus()),
+        f"threads={cpu_choice.threads} cpus={hostlimits.effective_cpus()}",
+    )
+    check(
+        "it is NOT taken from nproc on a limited host",
+        cpu_choice.threads < _os.cpu_count() or hostlimits.effective_cpus() >= _os.cpu_count(),
+        f"threads={cpu_choice.threads} nproc={_os.cpu_count()}",
+    )
+    targs = cpu_choice.threads_args()
+    check("-threads is emitted", "-threads" in targs, " ".join(targs))
+    check("-filter_threads is emitted", "-filter_threads" in targs)
+    check("-filter_complex_threads is emitted", "-filter_complex_threads" in targs)
+    check("each thread count matches the allowance",
+          targs[targs.index("-threads") + 1] == str(cpu_choice.threads))
+    full = cpu_choice.for_output(1080, 1920, 60).ffmpeg_codec_args()
+    check("the thread limits reach the real ffmpeg command line", "-threads" in full, " ".join(full))
+    # The thread cap must reach the hardware paths too, or a GPU host would
+    # keep the unbounded pools. `threads` is set by choose(); constructing an
+    # EncoderChoice directly leaves it at 0 (no cap), which is the safe default.
+    check(
+        "thread limits apply to hardware encoders too (NVENC/QSV)",
+        all("-threads" in encode.EncoderChoice(encoder=n, hardware=True, crf=20, threads=1)
+            .for_output(1080, 1920, 60).ffmpeg_codec_args()
+            for n in ("h264_nvenc", "h264_qsv")),
+    )
+    check(
+        "an unset thread count emits nothing (no bogus -threads 0)",
+        encode.EncoderChoice(threads=0).threads_args() == [],
+    )
 
     print()
     if failures:

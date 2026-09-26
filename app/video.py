@@ -430,7 +430,19 @@ def render_clip(
             "-c:a", "aac", "-b:a", "160k",
             "-f", "mp4", str(dest),
         ]
-    _run(cmd, timeout=enc.timeout_sec, mode="gpu" if enc.hardware else "cpu")
+    # Per-CLIP deadline derived from the clip's own length, not one flat
+    # number for every render. A 90-minute ceiling meant a hung ffmpeg held
+    # the only worker slot for an hour and a half; a 6-30 minute window derived
+    # from the work still leaves generous room for slow-but-progressing
+    # encodes while turning a hang into a failure the supervisor can act on.
+    deadline = encode.render_deadline_sec(clip_dur, hardware=enc.hardware)
+    enc.timeout_sec = deadline
+    logger.info(
+        f"[video] {dest.name}: {clip_dur:.1f}s clip on a "
+        f"{'GPU' if enc.hardware else 'CPU-only'} host — "
+        f"encode deadline {deadline // 60} min"
+    )
+    _run(cmd, timeout=deadline, mode="gpu" if enc.hardware else "cpu")
 
     meta = probe(dest)
     took = time.time() - t0

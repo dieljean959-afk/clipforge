@@ -38,6 +38,9 @@ export interface JobDto {
   etaSource?: string | null;
   /** 0-based position in the waiting queue; null once a worker picks it up. */
   queuePosition?: number | null;
+  /** Server estimate of seconds until this queued job starts. null when it is
+      next in line with an idle worker — "any moment" is honest there. */
+  queueEtaSec?: number | null;
   stageTimings?: { stage: string; sec: number }[];
   lastProgressAt?: number;
   slow?: boolean;
