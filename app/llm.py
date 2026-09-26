@@ -5,15 +5,26 @@ hook_text}] with 429-aware exponential backoff. The model returns WORD
 INDICES, never timestamps — fragile float math is the LLM's weak spot, so we
 resolve the real start/end from Whisper's word-level timings afterwards.
 
-Two interchangeable backends, chosen by `[llm] provider` / CLIPFORGE_LLM_PROVIDER:
-  - gemini (default) — hosted. Overlaps local CPU work, so it is the fast path.
+Two interchangeable hosted backends plus a local one, chosen by `[llm]
+provider` / CLIPFORGE_LLM_PROVIDER:
+  - groq   (default) — OpenAI-compatible chat completions. Free tier is
+                       ~30 req/min, so calls are PACED client-side and 429s
+                       are retried with Retry-After-aware backoff.
+  - gemini           — hosted alternative, kept selectable as a fallback when
+                       the Groq quota is exhausted.
   - ollama           — self-hosted. Free and fully private, but it competes for
                        the SAME CPU as Whisper, so it runs sequentially and is
                        markedly slower. Requires no API key.
 
-Only transcript text is ever sent to either backend — never audio or video.
+The contract is deliberately narrow: every backend takes a prompt STRING and
+returns a reply STRING. `parse_candidates` is the only thing that knows what
+the reply looks like, which is what makes swapping providers safe.
+
+Only transcript text is ever sent to any backend — never audio or video.
 The key-missing case is surfaced loudly: no silent heuristic fallback exists
-in this module.
+in this module. Likewise there is NO automatic failover between providers:
+a 429 on Groq fails the stage visibly rather than quietly producing clips
+scored by a different model than the one the operator configured.
 """
 
 from __future__ import annotations
@@ -21,6 +32,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,11 +40,12 @@ from typing import Any
 
 from loguru import logger
 
-from app.config import GeminiConfig, Settings, live_gemini_key
+from app.config import GeminiConfig, Settings, live_gemini_key, live_groq_key
 
+PROVIDER_GROQ = "groq"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OLLAMA = "ollama"
-PROVIDERS = (PROVIDER_GEMINI, PROVIDER_OLLAMA)
+PROVIDERS = (PROVIDER_GROQ, PROVIDER_GEMINI, PROVIDER_OLLAMA)
 
 
 class LlmNotConfigured(Exception):
@@ -45,15 +58,17 @@ class LlmError(Exception):
 
 def provider(settings: Settings) -> str:
     """Which detection backend is active. Defaults to the hosted one."""
-    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_GEMINI)
+    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_GROQ)
 
 
 def provider_label(settings: Settings) -> str:
     """Human-readable backend name for logs and the dashboard."""
-    if provider(settings) == PROVIDER_OLLAMA:
-        model = settings.llm.ollama_model
-        return f"ollama ({model})"
-    return f"gemini ({settings.gemini.model})"
+    active = provider(settings)
+    if active == PROVIDER_OLLAMA:
+        return f"ollama ({settings.llm.ollama_model})"
+    if active == PROVIDER_GEMINI:
+        return f"gemini ({settings.gemini.model})"
+    return f"groq ({settings.groq.model})"
 
 
 # Model names rot: Google retires old flash models with a 404 that names the
@@ -380,11 +395,200 @@ def call_ollama(chunk_text_prompt: str, settings: Settings) -> str:
     return text
 
 
+def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
+    """Single Groq chat-completions call with pacing + 429-aware backoff.
+
+    TEXT ONLY: `chunk_text_prompt` is the numbered transcript built by
+    build_prompt(). No audio, no video, no file handles ever leave this call.
+
+    Two rate-limit defences, because the free tier is 30 req/min:
+      1. Pacing — a process-wide floor between Groq calls, so a 60-chunk
+         transcript never bursts into the limit in the first place.
+      2. Backoff — on a 429 we honour the server's Retry-After when it sends
+         one, else exponential + jitter, exactly like the Gemini path.
+
+    Uses urllib (stdlib) so the backend adds no Python dependency, matching
+    call_ollama. Returns the assistant message text; raises on failure.
+    """
+    cfg = settings.groq
+    api_key = settings.groq_api_key
+    if not api_key:
+        raise LlmNotConfigured("GROQ_API_KEY missing — add it in the Keys/API keys tab.")
+
+    body: dict[str, Any] = {
+        "model": cfg.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a video-clipping assistant. Reply with a single JSON "
+                    "object and nothing else — no prose, no markdown fence."
+                ),
+            },
+            {"role": "user", "content": chunk_text_prompt},
+        ],
+        "temperature": cfg.temperature,
+    }
+
+    last_err: Exception | None = None
+    for attempt in range(cfg.max_retries + 1):
+        _groq_wait_turn(cfg.min_interval_sec)
+        try:
+            data = _groq_post(body, api_key, cfg.base_url, cfg.timeout_sec)
+            text = _groq_reply_text(data)
+            if not text.strip():
+                raise LlmError("Groq returned an empty reply")
+            return text
+        except _GroqHttpError as exc:
+            msg = exc.detail
+            last_err = exc
+            # A model that no longer exists can never succeed on retry, and
+            # Groq does not name a replacement the way Google does. Fail with
+            # the exact reason rather than burning the retry budget.
+            if exc.status in (400, 404) and _groq_model_problem(msg):
+                raise LlmError(
+                    f"Groq rejected model {cfg.model!r}: {msg[:200]}. "
+                    f"Pick a current model from console.groq.com/docs/models and set "
+                    f"[groq] model in config.toml."
+                ) from exc
+            if attempt >= cfg.max_retries:
+                break
+            if exc.status == 429:
+                wait = exc.retry_after or min(60.0, (2 ** attempt) + random.random() * 2)
+                logger.warning(
+                    f"[llm] groq 429 rate limited (free tier ~30 rpm), "
+                    f"backing off {wait:.1f}s (attempt {attempt + 1})"
+                )
+            else:
+                wait = 2.0 * (attempt + 1)
+                logger.warning(
+                    f"[llm] groq error ({exc.status} {msg[:140]}), "
+                    f"retry {attempt + 1} in {wait:.0f}s"
+                )
+            time.sleep(wait)
+        except (TimeoutError, json.JSONDecodeError, LlmError) as exc:
+            last_err = exc
+            if attempt >= cfg.max_retries:
+                break
+            wait = 2.0 * (attempt + 1)
+            logger.warning(f"[llm] groq transport error ({exc}), retry {attempt + 1} in {wait:.0f}s")
+            time.sleep(wait)
+    raise LlmError(f"Groq failed after retries: {last_err}")
+
+
+class _GroqHttpError(Exception):
+    """A non-2xx from Groq, carrying the status and any Retry-After."""
+
+    def __init__(self, status: int, detail: str, retry_after: float | None = None) -> None:
+        super().__init__(f"HTTP {status}: {detail}")
+        self.status = status
+        self.detail = detail
+        self.retry_after = retry_after
+
+
+# Groq names a model that is gone in words like "decommissioned" / "no longer
+# available" / "does not exist". Matched loosely because the exact phrasing
+# has changed between API versions.
+_GROQ_MODEL_PROBLEM = re.compile(
+    r"decommissioned|no longer (?:available|supported|exists)|does not exist|is not a (?:valid|supported) model",
+    re.IGNORECASE,
+)
+
+
+def _groq_model_problem(msg: str) -> bool:
+    return bool(_GROQ_MODEL_PROBLEM.search(msg))
+
+
+_groq_lock = threading.Lock()
+_groq_last_call: float = 0.0
+
+
+def _groq_wait_turn(floor_sec: float) -> None:
+    """Block until the configured floor between Groq calls has elapsed.
+
+    Process-wide (not per-job) on purpose: a long transcript is many calls
+    and they must be paced against the ACCOUNT limit, not each other.
+    """
+    if floor_sec <= 0:
+        return
+    global _groq_last_call
+    with _groq_lock:
+        now = time.monotonic()
+        wait = _groq_last_call + floor_sec - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _groq_last_call = now
+
+
+def _groq_post(
+    body: dict[str, Any], api_key: str, base_url: str, timeout_sec: int
+) -> dict[str, Any]:
+    """POST to {base_url}/chat/completions and return the decoded JSON body."""
+    base = str(base_url).rstrip("/")
+    last_400 = ""
+    # Try with a JSON-mode hint first; not every Groq model accepts it, so a
+    # 400 that names response_format degrades to a plain call rather than
+    # failing the whole job over an output-formatting nicety.
+    for attempt_json_mode in (True, False):
+        req_body = dict(body)
+        if attempt_json_mode:
+            req_body["response_format"] = {"type": "json_object"}
+        req = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=json.dumps(req_body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw = ""
+            try:
+                raw = exc.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001 - body is best-effort context only
+                raw = ""
+            detail = raw or exc.reason or ""
+            retry_after: float | None = None
+            try:
+                if exc.headers is not None:
+                    hdr = exc.headers.get("Retry-After")
+                    if hdr:
+                        retry_after = float(hdr)
+            except (TypeError, ValueError):
+                retry_after = None
+            if exc.code == 400 and "response_format" in detail and attempt_json_mode:
+                last_400 = detail
+                continue
+            raise _GroqHttpError(exc.code, detail, retry_after) from exc
+    raise _GroqHttpError(400, last_400 or "groq rejected the request")
+
+
+def _groq_reply_text(data: dict[str, Any]) -> str:
+    """Pull the assistant message out of an OpenAI-shaped chat completion."""
+    choices = data.get("choices") or []
+    if not choices:
+        # Some gateway errors come back 200 with an error envelope.
+        err = data.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            raise _GroqHttpError(200, str(err["message"]))
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "")
+
+
 def call_llm(chunk_text_prompt: str, settings: Settings) -> str:
     """Dispatch one detection call to the configured backend."""
-    if provider(settings) == PROVIDER_OLLAMA:
+    active = provider(settings)
+    if active == PROVIDER_OLLAMA:
         return call_ollama(chunk_text_prompt, settings)
-    return call_gemini(chunk_text_prompt, settings)
+    if active == PROVIDER_GEMINI:
+        return call_gemini(chunk_text_prompt, settings)
+    return call_groq(chunk_text_prompt, settings)
 
 
 def detect_clips(
@@ -410,6 +614,17 @@ def detect_clips(
                 f"Ollama backend selected but unusable — {reason}. "
                 f"Run `ollama serve` and `ollama pull {settings.llm.ollama_model}`, "
                 f"or switch the detection backend back to the hosted one."
+            )
+    elif provider(settings) == PROVIDER_GROQ:
+        if not settings.groq_api_key:
+            live = live_groq_key()
+            live.refresh(force=True)
+            detail = live.problem or (
+                f"no key found under any supported name ({', '.join(live.status()['aliases'])})"
+            )
+            raise LlmNotConfigured(
+                f"GROQ_API_KEY missing — add it in the Keys/API keys tab (or .env), "
+                f"then hit Re-check. Detail: {detail}"
             )
     elif not settings.gemini_api_key:
         live = live_gemini_key()

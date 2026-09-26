@@ -17,6 +17,7 @@ import shutil
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -151,6 +152,14 @@ GEMINI_KEY_ALIASES = (
     "VITE_GEMINI_API_KEY",
 )
 
+# Groq is the DEFAULT detection backend (see [llm] provider). Gemini stays
+# fully wired as a selectable alternative — a free-tier 429 on one provider
+# should not need a redeploy to route around.
+GROQ_KEY_ALIASES = (
+    "GROQ_API_KEY",
+    "GROQ_KEY",
+)
+
 _PLACEHOLDER_VALUES = {
     "changeme", "change-me", "your-api-key", "your_api_key",
     "your-key-here", "<paste-key-here>", "none", "null", "todo", "xxx",
@@ -249,6 +258,48 @@ def _resolve_gemini_key(environ: dict[str, str]) -> tuple[str | None, str, str |
     return None, "", None
 
 
+def _resolve_groq_key(environ: dict[str, str]) -> tuple[str | None, str, str | None]:
+    """Find the Groq key under any supported name.
+
+    Same (key, source, problem) contract as _resolve_gemini_key, kept as a
+    separate function rather than a shared parameterised one so the Gemini
+    wording that the dashboard and key_flow tests assert on cannot drift.
+    Groq keys are `gsk_…`, so the prefix check is the mirror image of
+    Gemini's `AIza` check.
+    """
+    for name in GROQ_KEY_ALIASES:
+        value = (environ.get(name) or "").strip()
+        if not value:
+            continue
+        if value.startswith(_ENC_PREFIX):
+            if _empty_encrypted(value):
+                return None, f"{name} (empty)", (
+                    f"{name} is an EMPTY save — the platform stored an encrypted envelope "
+                    "with no key inside. Paste the full key (starts with gsk_) in the "
+                    "Keys/API keys tab again, then hit Re-check."
+                )
+            return None, f"{name} (encrypted)", (
+                f"{name} is stored in the platform's encrypted dotenvx format and could "
+                "not be decrypted inside the app — re-save it in the Keys/API keys tab, "
+                "then hit Re-check."
+            )
+        if value.lower() in _PLACEHOLDER_VALUES:
+            return None, f"{name} (placeholder)", (
+                f"{name} still contains placeholder text — paste the real Groq API key."
+            )
+        if " " in value:
+            return None, f"{name} (malformed)", (
+                f"{name} contains spaces — it should be the raw key with no quotes or spaces."
+            )
+        if not value.lower().startswith("gsk_") and len(value) < 20:
+            return value, f"{name} (short — verify)", (
+                f"{name} is only {len(value)} characters and does not start with gsk_ — "
+                "double-check the paste from console.groq.com/keys."
+            )
+        return value, name, None
+    return None, "", None
+
+
 def _as_list(value: object) -> list[object]:
     """Coerce a config value to a list.
 
@@ -297,8 +348,20 @@ class _LiveKeyState:
     the key was found (or why it was rejected). Never stores logs the secret.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        resolver: Callable[[dict[str, str]], tuple[str | None, str, str | None]] | None = None,
+        aliases: tuple[str, ...] = GEMINI_KEY_ALIASES,
+        label: str = "Gemini",
+    ) -> None:
         self._root = root
+        # Resolver/aliases/label default to Gemini so existing callers of
+        # live_gemini_key() behave exactly as before; Groq passes its own.
+        self._resolver = resolver or _resolve_gemini_key
+        self._aliases = aliases
+        self._label = label
         self._fingerprint: str | None = None
         self._lock = threading.Lock()
         self.key: str | None = None
@@ -322,9 +385,9 @@ class _LiveKeyState:
             # encrypted blob, placeholder, malformed), fall through to the
             # env-file contents — the file is fresher than the process env
             # (e.g. after the app itself rewrites .env.local).
-            key, source, problem = _resolve_gemini_key(os.environ)
+            key, source, problem = self._resolver(os.environ)
             if key is None:
-                fkey, fsource, fproblem = _resolve_gemini_key(file_values)
+                fkey, fsource, fproblem = self._resolver(file_values)
                 if fkey is not None:
                     key, source, problem = fkey, f"{fsource} (.env.local)", None
                 elif problem is None and fproblem is not None:
@@ -334,9 +397,9 @@ class _LiveKeyState:
             self.problem = problem
             self.lastCheckedAt = time.time()
             if key is not None:
-                logger.info(f"[config] Gemini key detected ({source})")
+                logger.info(f"[config] {self._label} key detected ({source})")
             elif problem:
-                logger.warning(f"[config] Gemini key rejected: {problem}")
+                logger.warning(f"[config] {self._label} key rejected: {problem}")
 
     def status(self) -> dict:
         self.refresh()
@@ -345,11 +408,12 @@ class _LiveKeyState:
             "source": self.source,
             "problem": self.problem,
             "lastCheckedAt": self.lastCheckedAt,
-            "aliases": list(GEMINI_KEY_ALIASES),
+            "aliases": list(self._aliases),
         }
 
 
 _live_key: _LiveKeyState | None = None
+_live_groq: _LiveKeyState | None = None
 
 
 def live_gemini_key() -> _LiveKeyState:
@@ -358,6 +422,16 @@ def live_gemini_key() -> _LiveKeyState:
     if _live_key is None:
         _live_key = _LiveKeyState(ROOT)
     return _live_key
+
+
+def live_groq_key() -> _LiveKeyState:
+    """Process-wide live Groq-key state (created on first use)."""
+    global _live_groq
+    if _live_groq is None:
+        _live_groq = _LiveKeyState(
+            ROOT, resolver=_resolve_groq_key, aliases=GROQ_KEY_ALIASES, label="Groq"
+        )
+    return _live_groq
 
 
 # --------------------------------------------------------------------------- #
@@ -416,10 +490,28 @@ def sync_gemini_env_for_delete() -> list[str]:
     popped — those are the copies _load_env_files injected. Platform secrets
     injected as real OS env (never via files) are left alone.
     """
+    return _sync_env_for_delete(GEMINI_KEY_ALIASES, "GEMINI_API_KEY")
+
+
+def sync_groq_env_after_save(value: str) -> None:
+    """Mirror a freshly written GROQ_API_KEY into the process env.
+
+    Same shadowing hazard as the Gemini path: the live resolver prefers OS
+    env, so a stale copy from an older .env.local would win over the new key.
+    """
+    os.environ["GROQ_API_KEY"] = value
+
+
+def sync_groq_env_for_delete() -> list[str]:
+    """Drop Groq key aliases from the process env before a file delete."""
+    return _sync_env_for_delete(GROQ_KEY_ALIASES, "GROQ_API_KEY")
+
+
+def _sync_env_for_delete(aliases: tuple[str, ...], primary: str) -> list[str]:
     _fingerprint, file_values = _fresh_env_snapshot(ROOT)
     dropped: list[str] = []
-    for name in GEMINI_KEY_ALIASES:
-        if name == "GEMINI_API_KEY" or name in file_values:
+    for name in aliases:
+        if name == primary or name in file_values:
             if os.environ.pop(name, None) is not None:
                 dropped.append(name)
     return dropped
@@ -497,6 +589,25 @@ class GeminiConfig:
 
 
 @dataclass
+class GroqConfig:
+    """Groq specifics for the chat-completions detection backend.
+
+    Groq speaks the OpenAI wire format, so this is just an endpoint + model +
+    the free tier's rate budget. `min_interval_sec` paces calls so a long
+    transcript (a 2h video is ~60 chunks) stays under the 30 requests/minute
+    free-tier ceiling instead of discovering it via 429s.
+    """
+
+    model: str = "openai/gpt-oss-120b"
+    base_url: str = "https://api.groq.com/openai/v1"
+    max_retries: int = 3
+    timeout_sec: int = 120
+    # 30 rpm -> 2.0s floor. Small headroom below the documented ceiling.
+    min_interval_sec: float = 2.1
+    temperature: float = 0.4
+
+
+@dataclass
 class LlmConfig:
     """Which backend runs the AI clip/highlight DETECTION stage.
 
@@ -505,13 +616,16 @@ class LlmConfig:
     scoring step is pluggable, because that is the one step a user may want
     to run fully offline on their own hardware.
 
-        gemini — hosted. Default. Fast: the call overlaps local CPU work.
+        groq   — hosted, default. OpenAI-compatible chat completions, ~30 rpm
+                 on the free tier, paced client-side so 429s are rare.
+        gemini — hosted alternative, kept as a selectable fallback for when
+                 the Groq quota is exhausted.
         ollama — self-hosted. Free and private, but it shares the same CPU
                  as Whisper, so detection runs sequentially AFTER the
                  transcript exists (no overlap) and is markedly slower.
     """
 
-    provider: str = "gemini"
+    provider: str = "groq"
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.1:8b"
     ollama_timeout_sec: int = 600
@@ -604,6 +718,7 @@ class Settings:
     app: AppConfig
     whisper: WhisperConfig
     gemini: GeminiConfig
+    groq: GroqConfig
     llm: LlmConfig
     translate: TranslateConfig
     subtitle: SubtitleConfig
@@ -619,6 +734,13 @@ class Settings:
         the process has already started.
         """
         state = live_gemini_key()
+        state.refresh()
+        return state.key
+
+    @property
+    def groq_api_key(self) -> str | None:
+        """LIVE Groq key — re-resolved whenever the env files change."""
+        state = live_groq_key()
         state.refresh()
         return state.key
 
@@ -707,13 +829,27 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     if gemini.min_clip_sec >= gemini.max_clip_sec:
         errors.append("gemini.min_clip_sec must be < gemini.max_clip_sec")
 
+    gq = raw.get("groq", {})
+    groq = GroqConfig(
+        model=str(os.getenv("GROQ_MODEL") or gq.get("model", "openai/gpt-oss-120b")),
+        base_url=str(
+            os.getenv("GROQ_BASE_URL") or gq.get("base_url", "https://api.groq.com/openai/v1")
+        ).strip().rstrip("/"),
+        max_retries=max(0, int(gq.get("max_retries", 3))),
+        timeout_sec=max(15, int(gq.get("timeout_sec", 120))),
+        min_interval_sec=max(0.0, float(gq.get("min_interval_sec", 2.1))),
+        temperature=float(gq.get("temperature", 0.4)),
+    )
+
     lc = raw.get("llm", {})
     provider = str(
-        os.getenv("CLIPFORGE_LLM_PROVIDER") or lc.get("provider", "gemini")
+        os.getenv("CLIPFORGE_LLM_PROVIDER") or lc.get("provider", "groq")
     ).strip().lower()
-    if provider not in {"gemini", "ollama"}:
-        errors.append(f'llm.provider "{provider}" is not one of gemini/ollama')
-        provider = "gemini"
+    if provider not in {"groq", "gemini", "ollama"}:
+        errors.append(
+            f'llm.provider "{provider}" is not one of groq/gemini/ollama'
+        )
+        provider = "groq"
     llm = LlmConfig(
         provider=provider,
         ollama_url=str(
@@ -828,6 +964,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         app=AppConfig(host=host, port=port, paths=paths),
         whisper=whisper,
         gemini=gemini,
+        groq=groq,
         llm=llm,
         translate=translate,
         subtitle=subtitle,
@@ -864,16 +1001,25 @@ def ffprobe_bin() -> str:
 
 def boot_banner(settings: Settings) -> None:
     """Print the fail-fast boot banner with the exact lines ops greps for."""
-    live = live_gemini_key()
+    settings = load_config(quiet=True)
+    active = settings.llm.provider
+    # Report the key for the ACTIVE backend. Groq is the default, so printing
+    # only Gemini made a fully-working deployment look unconfigured.
+    if active == "groq":
+        live: _LiveKeyState = live_groq_key()
+        env_name = "GROQ_API_KEY"
+    else:
+        live = live_gemini_key()
+        env_name = "GEMINI_API_KEY"
     live.refresh(force=True)
     key_loaded = live.key is not None
-    print(f"[boot] LLM: gemini | key loaded: {'YES' if key_loaded else 'NO'}")
-    print(f"[boot] Gemini key source: {live.source}")
+    print(f"[boot] LLM: {active} | key loaded: {'YES' if key_loaded else 'NO'}")
+    print(f"[boot] {active.capitalize()} key source: {live.source}")
     if not key_loaded:
         if live.problem:
-            print(f"[boot] Gemini key problem: {live.problem}")
+            print(f"[boot] {active.capitalize()} key problem: {live.problem}")
         print(
-            "[boot] AI detection offline — add GEMINI_API_KEY in the Keys/API keys tab "
+            f"[boot] AI detection offline — add {env_name} in the Keys/API keys tab "
             "(or .env), then hit Re-check on the dashboard"
         )
     env_files = _load_env_files(ROOT)

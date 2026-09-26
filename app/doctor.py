@@ -9,9 +9,12 @@ messages. Every check returns ok/warn/fail plus a `fix` hint.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -165,8 +168,10 @@ def check_llm(settings: Settings) -> list[Check]:
         return [Check(
             "detection backend", "ok" if ok else "fail", reason,
             "" if ok else "run `ollama serve` + `ollama pull <model>`, or switch "
-                          "[llm] provider back to gemini",
+                          "[llm] provider back to groq",
         )]
+    if llm_mod.provider(settings) == llm_mod.PROVIDER_GROQ:
+        return _check_groq(settings)
     live = live_gemini_key()
     live.refresh(force=True)
     status = live.status()
@@ -186,6 +191,49 @@ def check_llm(settings: Settings) -> list[Check]:
                                 "check the key + network; the backend self-heals retired models"))
     else:
         checks.append(Check("gemini API", "warn", "not tested (set CLIPFORGE_DOCTOR_LIVE=1 to test)",
+                            "run: CLIPFORGE_DOCTOR_LIVE=1 python -m app.doctor"))
+    return checks
+
+
+def _check_groq(settings: Settings) -> list[Check]:
+    """Groq key presence + optional live probe of the models endpoint.
+
+    The live probe is deliberately a GET /models rather than a chat call: it
+    costs no quota and still proves both the key AND network path work.
+    """
+    from app.config import live_groq_key  # noqa: PLC0415
+
+    live = live_groq_key()
+    live.refresh(force=True)
+    status = live.status()
+    if not status.get("keyLoaded"):
+        return [Check("groq key", "fail", status.get("problem") or status.get("source", "not found"),
+                      "set GROQ_API_KEY in the Keys tab (or .env)")]
+    checks = [Check("groq key", "ok", f"loaded from {status.get('source')}")]
+    if os.getenv("CLIPFORGE_DOCTOR_LIVE", "").lower() in {"1", "true", "yes"}:
+        base = str(settings.groq.base_url).rstrip("/")
+        req = urllib.request.Request(  # noqa: S310 - https base from config
+            f"{base}/models",
+            headers={"Authorization": f"Bearer {settings.groq_api_key or ''}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode("utf-8"))
+            ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict)]
+            want = settings.groq.model
+            note = ""
+            if ids and want not in ids:
+                note = f" (CONFIGURED MODEL NOT IN CATALOG — pick one of: {', '.join(ids[:6])})"
+            checks.append(Check("groq API", "ok" if not note else "warn",
+                                f"live call ok, {len(ids)} model(s) visible{note}"))
+        except urllib.error.HTTPError as exc:
+            checks.append(Check("groq API", "fail", f"live call failed: HTTP {exc.code}",
+                                "check the key + network"))
+        except Exception as exc:  # noqa: BLE001 - any transport error is a fail
+            checks.append(Check("groq API", "fail", f"live call failed: {exc}",
+                                "check the key + network"))
+    else:
+        checks.append(Check("groq API", "warn", "not tested (set CLIPFORGE_DOCTOR_LIVE=1 to test)",
                             "run: CLIPFORGE_DOCTOR_LIVE=1 python -m app.doctor"))
     return checks
 

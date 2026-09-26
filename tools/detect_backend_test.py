@@ -120,9 +120,13 @@ def main() -> int:
     # --- 1. selection / default -------------------------------------------
     print("== 1. backend selection")
     settings.llm.provider = "gemini"
-    check("default backend is the hosted one", llm.provider(settings) == "gemini")
+    check("config default is groq (fresh load)", load_config(quiet=True).llm.provider == "groq")
     check("hosted label names the configured model",
           settings.gemini.model in llm.provider_label(settings))
+    settings.llm.provider = "groq"
+    check("groq label names the configured model",
+          settings.groq.model in llm.provider_label(settings))
+    settings.llm.provider = "gemini"
 
     settings.llm.provider = "ollama"
     check("local backend selects ollama", llm.provider(settings) == "ollama")

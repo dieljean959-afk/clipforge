@@ -98,7 +98,6 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const warmup = health?.warmup;
   const warming = warmup?.stage === "loading_model";
   const warmupFailed = warmup?.stage === "failed";
-  const llmOk = health?.llm.keyLoaded === true;
   // The host-limit downgrade is invisible unless the label says so: the server
   // may load `small` while config.toml still asks for `medium`.
   const downgraded =
@@ -128,17 +127,28 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const maxMin = typeof health?.limits?.maxSourceMin === "number" ? health.limits.maxSourceMin : null;
   const retentionH = typeof health?.limits?.retentionHours === "number" ? health.limits.retentionHours : null;
 
-  // Live Gemini-key state from the server: where it found the key, or exactly
-  // why a present-but-unusable value was rejected (empty save, encrypted blob,
-  // placeholder, malformed).
-  const llm = health?.llm;
+  // AI highlight-DETECTION backend (Groq = hosted default, Gemini = fallback,
+  // Ollama = local). Separate from the ASR engine on purpose: switching this
+  // never touches faster-whisper, and the UI says so.
+  const detection = health?.detection;
+
+  // Live key state for the ACTIVE detection backend. Groq is the default, so
+  // this must follow the selected provider — showing Gemini's key while Groq
+  // is the one actually making calls would be a lie.
+  const activeProvider = detection?.provider ?? "groq";
+  const llm = activeProvider === "gemini" ? health?.llm : health?.llmGroq;
   const llmProblem = llm?.problem ?? null;
   const llmSource = typeof llm?.source === "string" ? llm.source : "";
-
-  // AI highlight-DETECTION backend (Gemini = hosted default, Ollama = local).
-  // Separate from the ASR engine on purpose: switching this never touches
-  // faster-whisper, and the UI says so.
-  const detection = health?.detection;
+  const llmEnvName = activeProvider === "gemini" ? "GEMINI_API_KEY" : "GROQ_API_KEY";
+  const llmKeyPrefix = activeProvider === "gemini" ? "AIza" : "gsk_";
+  const llmVendor = activeProvider === "gemini" ? "Google" : "Groq";
+  const llmKeyUrl =
+    activeProvider === "gemini"
+      ? "console.gemini.google.com/apikey"
+      : "console.groq.com/keys";
+  // Ollama needs no key: the local server's reachability IS the check.
+  const llmOk =
+    activeProvider === "ollama" ? detection?.ready === true : llm?.keyLoaded === true;
   const [switchingBackend, setSwitchingBackend] = useState(false);
   const switchBackend = async (provider: DetectionProvider) => {
     if (!detection || provider === detection.provider) return;
@@ -148,7 +158,9 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       toast.success(
         provider === "ollama"
           ? "AI detection switched to local Ollama — free and private, but slower (it shares the CPU with Whisper)."
-          : "AI detection switched to the hosted model — fastest, and it overlaps local CPU work.",
+          : provider === "groq"
+            ? "AI detection switched to Groq — OpenAI-compatible, ~30 req/min on the free tier, and calls are paced below that."
+            : "AI detection switched to Gemini — use it as a fallback when the Groq quota is spent.",
       );
       void refreshHealth();
     } catch (err) {
@@ -162,10 +174,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
     setRechecking(true);
     try {
       const status = await api.reloadSecrets();
-      if (status.keyLoaded) {
-        toast.success(`Gemini key detected (${status.source}) — AI detection is live.`);
-      } else if (status.problem) {
-        toast.error(status.problem);
+      const active = activeProvider === "gemini" ? status : status.groq;
+      if (active?.keyLoaded) {
+        toast.success(`${llmVendor} key detected (${active.source}) — AI detection is live.`);
+      } else if (active?.problem) {
+        toast.error(active.problem);
       } else {
         toast.error("No key found — use 'Set key' to save one right here.");
       }
@@ -187,12 +200,15 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const saveKey = async () => {
     const raw = keyInput.trim();
     if (raw.length < 20) {
-      toast.error("That looks too short for a Google API key (they start with AIza and are ~39 chars).");
+      toast.error(
+        `That looks too short for a ${llmVendor} API key (they start with ${llmKeyPrefix}).`,
+      );
       return;
     }
     setSavingKey(true);
     try {
-      const status = await api.setGeminiKey(raw);
+      const status =
+        activeProvider === "gemini" ? await api.setGeminiKey(raw) : await api.setGroqKey(raw);
       toast.success(
         `Key saved and live. Verify it: starts ${status.storedShape.first6}, ends ${status.storedShape.last4} (${status.storedShape.length} chars).`,
       );
@@ -208,7 +224,8 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const removeKey = async () => {
     setSavingKey(true);
     try {
-      const status = await api.deleteGeminiKey();
+      const status =
+        activeProvider === "gemini" ? await api.deleteGeminiKey() : await api.deleteGroqKey();
       toast.info(`Key removed (${status.linesRemoved} line(s) cleaned). AI detection is offline until a new key is set.`);
       setKeyDialogOpen(false);
       void refreshHealth();
@@ -374,8 +391,8 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               )}
               title={
                 llmOk
-                  ? `Gemini key loaded on the server (${llmSource})`
-                  : llmProblem ?? "No GEMINI_API_KEY on the server yet"
+                  ? `${llmVendor} key loaded on the server (${llmSource})`
+                  : llmProblem ?? `No ${llmEnvName} on the server yet`
               }
             >
               {llmOk ? <HardDrive className="size-3" /> : <KeyRound className="size-3" />}
@@ -391,7 +408,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                   ? "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
                   : "border-amber-400/50 text-amber-300 hover:bg-amber-400/15",
               )}
-              title="Set or replace the Gemini API key — saved directly into the server's env"
+              title={`Set or replace the ${llmVendor} API key — saved directly into the server's env`}
             >
               <Pencil className="size-3" />
               {llmOk ? "Replace key" : "Set key"}
@@ -424,7 +441,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 "flex cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground transition hover:border-primary/50 hover:text-foreground",
                 runningDoctor && "cursor-wait opacity-60",
               )}
-              title="Run environment diagnostics (ffmpeg build, GPU, ASR engine, Gemini key, disk)"
+              title="Run environment diagnostics (ffmpeg build, GPU, ASR engine, LLM key, disk)"
             >
               {runningDoctor ? (
                 <Loader2 className="size-3 animate-spin" />
@@ -475,27 +492,29 @@ export function LocalWorkerCard({ className }: { className?: string }) {
           ) : (
             <>
               Click <span className="font-semibold">Set key</span> above to paste your
-              Gemini API key (get one free at aistudio.google.com/apikey) — it is saved
+              {` ${llmVendor} API key`} (get one free at {llmKeyUrl}) — it is saved
               directly on the server and AI detection turns on instantly.
             </>
           )}
         </p>
       )}
 
-      {/* Gemini key manager dialog */}
+      {/* LLM key manager dialog (follows the active detection backend) */}
       <Dialog open={keyDialogOpen} onOpenChange={setKeyDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <KeyRound className="size-4 text-primary" />
-              Gemini API key
+              {`${llmVendor} API key`}
             </DialogTitle>
             <DialogDescription>
-              {llmOk
-                ? `A key is active (source: ${llmSource}). Saving replaces it; removing takes AI detection offline.`
-                : llmProblem
-                  ? `Current state: ${llmProblem}`
-                  : "No key saved yet. Paste one below — it starts with AIza."}
+              {activeProvider === "ollama"
+                ? "Ollama runs locally and needs no API key. Switch the detection backend to groq or gemini to use a hosted key here."
+                : llmOk
+                  ? `A key is active (source: ${llmSource}). Saving replaces it; removing takes AI detection offline.`
+                  : llmProblem
+                    ? `Current state: ${llmProblem}`
+                    : `No key saved yet. Paste one below — it starts with ${llmKeyPrefix}.`}
             </DialogDescription>
           </DialogHeader>
 

@@ -43,7 +43,9 @@ language = "en"
 batch_size = 8
 
 [gemini]
-# Free-tier friendly flash model. GEMINI_API_KEY comes from .env.
+# FALLBACK detection model. Kept wired so the provider can be switched in the
+# dashboard without a redeploy when the Groq quota is exhausted.
+# GEMINI_API_KEY comes from .env.
 # Model names rot: Google retires old ones with a 404 naming the replacement —
 # the backend parses that error and self-heals to the recommended model.
 model = "gemini-3.6-flash"
@@ -54,22 +56,52 @@ max_clips = 10
 # 429 backoff retries before giving up (free tier = 15 RPM).
 max_retries = 3
 
+[groq]
+# DEFAULT detection model. Groq speaks the OpenAI chat-completions wire format,
+# so this is a plain HTTP POST with an Authorization: Bearer header.
+# GROQ_API_KEY comes from the Keys/API keys tab (console.groq.com/keys).
+#
+# Verify this is still a current model before relying on it — Groq deprecates
+# models and the app will NOT guess a replacement for you; it fails loudly with
+# the exact API error so you can pick one from console.groq.com/docs/models.
+model = "openai/gpt-oss-120b"
+# Overridable with GROQ_BASE_URL (used by the test suite to point at a local
+# OpenAI-compatible stub instead of the real API).
+base_url = "https://api.groq.com/openai/v1"
+# 429 backoff retries before giving up.
+max_retries = 3
+# Per-call HTTP ceiling. Detection chunks are ~120s of transcript each.
+timeout_sec = 120
+# FREE TIER IS ~30 REQUESTS/MINUTE. Calls are paced against this floor
+# process-wide so a long transcript (a 2h video is ~60 chunks) never bursts
+# into the limit; 429s are still retried, with Retry-After honoured.
+# 2.1s => ~28 rpm, just under the ceiling.
+min_interval_sec = 2.1
+temperature = 0.4
+
 [llm]
 # Which backend runs AI clip/highlight DETECTION — NOT transcription.
 # Transcription is always faster-whisper (see [whisper] above); this choice
 # never changes the ASR engine.
 #
-#   gemini (default) — hosted. Fastest: the request overlaps local CPU work.
-#                      Needs GEMINI_API_KEY (Keys/API keys tab).
+#   groq   (default) — hosted, OpenAI-compatible. ~30 req/min on the free tier;
+#                      requests are paced client-side so 429s are rare. Needs
+#                      GROQ_API_KEY (Keys/API keys tab).
+#   gemini           — hosted fallback for when the Groq quota is spent.
+#                      Needs GEMINI_API_KEY.
 #   ollama           — self-hosted. Free and fully private (the transcript
 #                      never leaves the machine) and needs no API key, but it
 #                      shares the SAME CPU as Whisper, so detection runs
 #                      sequentially after the transcript exists and is markedly
 #                      slower. Requires `ollama serve` + the model pulled.
 #
-# Env overrides: CLIPFORGE_LLM_PROVIDER, OLLAMA_URL, OLLAMA_MODEL.
+# There is NO automatic failover between these: a quota error fails the stage
+# loudly rather than silently scoring clips with a model you did not pick.
+#
+# Env overrides: CLIPFORGE_LLM_PROVIDER, OLLAMA_URL, OLLAMA_MODEL,
+#                GROQ_MODEL, GROQ_BASE_URL.
 # The dashboard shows the active backend and its tradeoff, and can switch it.
-provider = "gemini"
+provider = "groq"
 
 # Only read when provider = "ollama".
 ollama_url = "http://127.0.0.1:11434"

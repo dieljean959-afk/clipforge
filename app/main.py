@@ -32,9 +32,12 @@ from app.config import (
     ffmpeg_bin,
     ffprobe_bin,
     live_gemini_key,
+    live_groq_key,
     load_config,
     sync_gemini_env_after_save,
     sync_gemini_env_for_delete,
+    sync_groq_env_after_save,
+    sync_groq_env_for_delete,
     write_env_var,
 )
 from app.download import probe_url
@@ -347,12 +350,15 @@ def verify_clips(jobId: str | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# detection backend (Gemini = hosted default, Ollama = local/free/private)
+# detection backend (Groq = hosted default, Gemini = fallback, Ollama = local)
 # --------------------------------------------------------------------------- #
 
 # Shown verbatim in the UI so the tradeoff is visible BEFORE the user picks.
 DETECTION_TRADEOFFS = {
-    "gemini": "Hosted. Fastest — the call overlaps local CPU work. Needs a Gemini API key.",
+    "groq": "Hosted, OpenAI-compatible chat completions. Free tier is ~30 requests "
+            "per minute; the app paces calls below that and retries 429s, so "
+            "quota errors are rare. Needs a Groq API key.",
+    "gemini": "Hosted fallback for when the Groq quota is spent. Needs a Gemini API key.",
     "ollama": "Fully local, free and private: your transcript never leaves the machine. "
               "Slower — it shares the same CPU as Whisper, so it runs sequentially "
               "after the transcript exists instead of alongside it.",
@@ -367,10 +373,11 @@ def detection_status() -> dict:
         "label": llm_mod.provider_label(settings),
         "tradeoff": DETECTION_TRADEOFFS.get(active, ""),
         "options": [
-            {"value": p, "label": p, "tradeoff": DETECTION_TRADEOFFS[p]}
+            {"value": p, "label": p, "tradeoff": DETECTION_TRADEOFFS.get(p, "")}
             for p in llm_mod.PROVIDERS
         ],
         "models": {
+            "groq": settings.groq.model,
             "gemini": settings.gemini.model,
             "ollama": settings.llm.ollama_model,
         },
@@ -382,6 +389,20 @@ def detection_status() -> dict:
         ok, reason = llm_mod.ollama_status(settings)
         out["ready"] = ok
         out["detail"] = reason
+    elif active == "groq":
+        live = live_groq_key()
+        live.refresh(force=True)
+        out["ready"] = live.key is not None
+        out["detail"] = live.problem or (
+            f"GROQ_API_KEY loaded from {live.source}" if live.key
+            else "GROQ_API_KEY missing — add it in the Keys/API keys tab."
+        )
+    else:
+        out["ready"] = settings.gemini_api_key is not None
+        out["detail"] = (
+            f"GEMINI_API_KEY loaded from {live_gemini_key().source}"
+            if settings.gemini_api_key else "GEMINI_API_KEY missing."
+        )
     return out
 
 
@@ -420,10 +441,14 @@ def health() -> dict:
         "worker": worker_status,
         "warmup": warmup,
         "llm": {
-            "provider": "gemini",
+            "provider": llm_mod.provider(settings),
             # LIVE re-resolution — a key saved in the platform after boot is
             # picked up on the next health poll without restarting anything.
             **live_gemini_key().status(),
+        },
+        "llmGroq": {
+            "provider": llm_mod.PROVIDER_GROQ,
+            **live_groq_key().status(),
         },
         "detection": detection_status(),
         "whisper": {
@@ -493,8 +518,14 @@ def reload_secrets() -> dict:
     live = live_gemini_key()
     live.refresh(force=True)
     status = live.status()
+    groq_live = live_groq_key()
+    groq_live.refresh(force=True)
     logger.info(f"[config] secrets re-checked — key loaded: {status['keyLoaded']} ({status['source']})")
-    return status
+    return {
+        **status,
+        "groq": groq_live.status(),
+        "activeProvider": llm_mod.provider(settings),
+    }
 
 
 class SetKeyIn(BaseModel):
@@ -539,6 +570,48 @@ def remove_gemini_key() -> dict:
     live.refresh(force=True)
     logger.info(
         f"[config] GEMINI_API_KEY deleted via dashboard "
+        f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
+    )
+    return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
+
+
+@app.post("/api/settings/groq-key")
+def set_groq_key(body: SetKeyIn) -> dict:
+    """Save/replace GROQ_API_KEY in .env.local.
+
+    Mirrors set_gemini_key so a phone-only operator can paste a key from
+    console.groq.com/keys without a terminal. Returns the live status plus a
+    verification shape (first 6 / last 4 chars only — never the key).
+    """
+    raw = body.key.strip()
+    if raw.lower().startswith("encrypted:"):
+        raise HTTPException(400, "That looks like an encrypted blob — paste the raw gsk_... key.")
+    if " " in raw:
+        raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
+    write_env_var("GROQ_API_KEY", raw)
+    # Mirror into the process env: the live resolver prefers OS env, so a stale
+    # copy from an older .env.local would otherwise shadow the new value.
+    sync_groq_env_after_save(raw)
+    live = live_groq_key()
+    live.refresh(force=True)
+    status = live.status()
+    logger.info("[config] GROQ_API_KEY updated via dashboard — verification: "
+                f"{raw[:6]}…{raw[-4:]} ({len(raw)} chars)")
+    return {
+        **status,
+        "storedShape": {"first6": raw[:6], "last4": raw[-4:], "length": len(raw)},
+    }
+
+
+@app.delete("/api/settings/groq-key")
+def remove_groq_key() -> dict:
+    """Delete GROQ_API_KEY from .env.local."""
+    dropped = sync_groq_env_for_delete()
+    removed = delete_env_var("GROQ_API_KEY")
+    live = live_groq_key()
+    live.refresh(force=True)
+    logger.info(
+        f"[config] GROQ_API_KEY deleted via dashboard "
         f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
     )
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}

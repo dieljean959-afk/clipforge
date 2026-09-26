@@ -3,7 +3,7 @@
 
 import type { ClipStage } from "@/lib/clipforge";
 
-export type DetectionProvider = "gemini" | "ollama";
+export type DetectionProvider = "groq" | "gemini" | "ollama";
 
 /** Which backend scores the viral moments (NOT the ASR engine). */
 export interface DetectionDto {
@@ -166,6 +166,8 @@ export interface HealthDto {
   };
   warmup: { stage: string; detail: string; startedAt: number | null };
   llm: KeyStatusDto;
+  /** Live GROQ_API_KEY state — the key for the DEFAULT detection backend. */
+  llmGroq?: KeyStatusDto;
   detection?: DetectionDto;
   // Resolved engine/model/compute (already host-limit adjusted). The raw
   // config.toml request, when it differs, is `configuredModel`.
@@ -295,8 +297,27 @@ export const api = {
   verifyClips: (jobId: string) =>
     request<VerifyClipsDto>(`/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`),
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),
-  /** Force the server to re-read env files and re-resolve the Gemini key. */
-  reloadSecrets: () => request<KeyStatusDto>("/api/settings/reload-secrets", { method: "POST" }),
+  /** Force the server to re-read env files and re-resolve the LLM keys. */
+  reloadSecrets: () =>
+    request<KeyStatusDto & { groq?: KeyStatusDto; activeProvider?: string }>(
+      "/api/settings/reload-secrets",
+      { method: "POST" },
+    ),
+  /** Save/replace GROQ_API_KEY in the backend's env file. */
+  setGroqKey: (key: string) =>
+    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+      "/api/settings/groq-key",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      },
+    ),
+  /** Delete GROQ_API_KEY from the backend's env file. */
+  deleteGroqKey: () =>
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/groq-key", {
+      method: "DELETE",
+    }),
   /** Save/replace GEMINI_API_KEY in the backend's env file (missing Edit button). */
   setGeminiKey: (key: string) =>
     request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(

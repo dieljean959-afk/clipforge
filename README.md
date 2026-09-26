@@ -26,23 +26,43 @@ viral clips". See [LICENSE](LICENSE).
    0–100. Only transcript **text** is ever sent — never audio or video. No
    key? The UI says exactly that — no fake heuristics.
 
-   Two interchangeable backends, chosen in `config.toml` `[llm] provider`
+   Interchangeable backends, chosen in `config.toml` `[llm] provider`
    (or `CLIPFORGE_LLM_PROVIDER`), switchable from the dashboard:
 
    | Backend | Speed | Cost / privacy | Needs |
    |---|---|---|---|
-   | `gemini` (default) | **Fastest** — the request overlaps local CPU work | Hosted API, free tier | `GEMINI_API_KEY` |
+   | `groq` (default) | **Fast** — the request overlaps local CPU work | Hosted API, OpenAI-compatible, ~30 req/min free tier (calls are paced below that) | `GROQ_API_KEY` |
+   | `gemini` | **Fast** | Hosted fallback, used when the Groq quota is spent | `GEMINI_API_KEY` |
    | `ollama` | **Slower** — it shares the same CPU as Whisper, so it runs sequentially after the transcript exists | **Free and fully private** — the transcript never leaves the machine | `ollama serve` + the model pulled, no API key |
 
    This choice affects **detection only**. Transcription is always
    faster-whisper/WhisperX, and the dashboard says so next to the toggle.
 
-   **Model rot self-heals:** if Google retires the configured Gemini model,
-   the server parses the replacement model name out of the API error, retries
-   the request, and persists the new model to `config.toml` `[gemini]` —
-   no manual edit, no failed jobs.
+   There is deliberately **no automatic failover between providers**. A
+   quota error fails the stage loudly rather than silently scoring clips
+   with a model the operator did not pick — the same "no silent fallback"
+   rule the rest of this module follows.
 
-### Gemini key is detected LIVE
+   **Groq specifics.** Groq speaks the OpenAI chat-completions wire format,
+   so the client is a plain `POST {base_url}/chat/completions` with an
+   `Authorization: Bearer $GROQ_API_KEY` header — no new Python dependency
+   (stdlib `urllib`, same as the Ollama client). Two defences against the
+   30 req/min free tier: a process-wide floor between calls
+   (`[groq] min_interval_sec`, default 2.1s ≈ 28 rpm) so a 60-chunk
+   transcript never bursts into the limit, and 429 handling that honours the
+   server's `Retry-After` when present and otherwise backs off exponentially
+   with jitter. `GROQ_BASE_URL` repoints the client, which is how
+   `tools/llm_provider_test.py` tests it against a local stub.
+
+   **Model rot does NOT self-heal on Groq.** Google names the replacement
+   model in its 404, so Gemini can auto-migrate; Groq does not. A retired
+   model therefore fails immediately (no retry burn) with the exact API error
+   and a pointer to `console.groq.com/docs/models`. Set `[groq] model` and
+   re-run. `python -m app.doctor` with `CLIPFORGE_DOCTOR_LIVE=1` lists the
+   models your key can actually see and warns if the configured one is not
+   among them.
+
+### Detection keys are detected LIVE
 
 The key is **never snapshotted at boot**. The backend re-reads the env files
 whenever they change on disk (and on every health poll), so a key saved in
@@ -50,10 +70,170 @@ the platform's Keys/API keys tab — even minutes after the app started — is
 picked up automatically. The dashboard status chip shows exactly where the
 key was found, or precisely why a present-but-unusable value was rejected
 (encrypted blob, placeholder text, malformed paste), and a **Re-check**
-button forces an immediate re-read with the result in a toast. Supported
-names: `GEMINI_API_KEY` (canonical), plus `GOOGLE_API_KEY`,
-`GOOGLE_GENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_KEY`,
-`VITE_GEMINI_API_KEY`.
+button forces an immediate re-read with the result in a toast. The chip
+follows the **active** detection backend, so it never shows Gemini's key
+state while Groq is the one actually making calls.
+
+Supported names: `GROQ_API_KEY` (canonical) or `GROQ_KEY`; `GEMINI_API_KEY`
+(canonical), plus `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY`,
+`GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_KEY`, `VITE_GEMINI_API_KEY`.
+
+Because the platform's Keys tab has no edit for an existing variable, the
+app exposes in-dashboard **Set / Replace / Remove** for both
+(`POST|DELETE /api/settings/groq-key`, `.../gemini-key`) so a key can be
+pasted from a phone with no terminal. Set and delete both mirror into the
+process env, because the live resolver prefers OS env and a stale copy from
+an older `.env.local` would otherwise shadow the new value.
+
+---
+
+## The working pipeline, exactly
+
+Every command below is the one the code actually runs, extracted from
+`app/download.py`, `app/subtitle.py`, `app/llm.py` and `app/video.py` — not
+a reconstruction. The end-to-end reference run is the `O0yDqRwmSE` batch
+(`data/jobs/c57d7782c548.json`): 974 words, 930.17s of audio, 10 clips,
+349.61s of total output, `stage=complete`, `error=None`.
+
+### 1. Download — yt-dlp (Python API, not a shell command)
+
+`app/download.py: download()`. There is no `yt-dlp` CLI invocation; the
+options are passed as a dict:
+
+```python
+ydl_opts = {
+    "format": f"bv*[height<={max_height}]+ba/b[height<={max_height}]",
+    "merge_output_format": "mp4",
+    "outtmpl": str(dest_dir / "source.%(ext)s"),
+    "noplaylist": True,
+    "quiet": True, "no_warnings": True,
+    "retries": 3,
+    "progress_hooks": [_hook],
+}
+# plus "cookiesfrombrowser" when [download] cookies_from_browser is set
+```
+
+Equivalent CLI, if you want to reproduce it by hand:
+
+```bash
+yt-dlp -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 \
+       -o "source.%(ext)s" --no-playlist --retries 3 "<URL>"
+```
+
+Failure policy: on error, `pip install -U yt-dlp` is run, the module is
+reloaded, and the fetch is retried **once**. Both failures surface the exact
+yt-dlp message (that is what the `not-a-video.mp4` test job shows).
+
+### 2. Transcribe — faster-whisper, word-level timings
+
+Confirmed from the artifact itself:
+
+```
+$ python -c "import json;print(json.load(open('data/work/c57d7782c548/transcribe/words.json')))"
+{'duration': 930.167, 'model': 'medium', 'engine': 'faster-whisper', 'rtf': 0.1217}
+```
+
+**Yes — 974 words, faster-whisper, and yes, those word timings drive clip
+boundary detection.** The file holds 974 `{start, end, word}` entries
+(first: `0.16→0.30 'Y'`, last: `929.92→930.08 'bro'`).
+
+Note the recorded `model` is `medium` while the host actually ran `small`:
+the 2.0 GiB container cannot hold `medium` (it needs ~2.4 GiB and gets
+OOM-killed), so `app/hostlimits.py` downgrades at boot. `rtf 0.1217` is the
+measured real-time factor. Health and the dashboard report the **resolved**
+model, not the configured one.
+
+### 3. Detect — the LLM returns WORD INDICES, not timestamps
+
+This is the load-bearing design decision. The model never does time math:
+
+```python
+# app/llm.py — transcript chunked to ~120s, each word numbered
+candidates = [{"start_word": int, "end_word": int,
+               "score": 0-100, "title": str, "hook_text": str}, ...]
+# then, against the SAME faster-whisper words:
+start = words[start_word]["start"]
+end   = words[end_word]["end"]
+```
+
+So the clip boundaries are exactly faster-whisper word boundaries. If
+transcription changes, the cuts move with it — there is no second,
+independent source of timing. `tools/llm_provider_test.py` asserts this
+resolves end-to-end through the real parser.
+
+### 4. Crop + render — ONE encode pass
+
+`app/video.py: render_clip()`. The full command, with `-ss` **before** `-i`
+(input-side seek — no intermediate file):
+
+```bash
+ffmpeg -y -ss <start> -i source.mp4 -t <dur> \
+  -vf "<crop-pan>,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[,silence-trim],subtitles=clip_NN.ass" \
+  <codec_args> -c:a aac -b:a 160k -f mp4 clip_NN.mp4
+```
+
+- **crop-pan** — `crop_pan_filter()` emits a time-interpolated `x` so
+  MediaPipe face tracking follows the speaker. A window marked `"cut": True`
+  makes `x` **snap** instead of interpolating, because the subject genuinely
+  jumps at a shot boundary and a smooth pan through it would be a lie.
+  With no windows: `crop=<crop_w>:ih:(in_w-crop_w)/2:0` (honest centre crop).
+- **codec_args** — from `app/encode.py`; on this 1-vCPU/2-GiB host the
+  functional encoder probe finds no usable VA-API/QSV, so it falls back to
+  `libx264` with the preset clamped to `ultrafast`.
+- **-c:a aac -b:a 160k** — the source audio is *not* pre-extracted any more,
+  so it is re-encoded rather than copied.
+
+**One pass, not two.** The original code cut each segment into a throwaway
+`.tmp.mp4` and then re-encoded that into the real output. Measured on real
+1080p60: 173s of a 246.5s clip (70%) producing a file that was `unlink()`ed
+at function end. Removing it took clip 5 from ~204s to **75.6s** (0.54x
+realtime), a ~2.7x speedup, and is what let a 10-clip job finish inside a
+host-restart window. `tools/e2e_render_test.py` monkeypatches `video._run` and
+**fails if a render ever makes more than one video encode pass** or writes a
+`.tmp.mp4` again.
+
+### 5. Captions — ASS built per clip, burned with libass
+
+`app/subtitle.py: write_ass()` writes `data/work/<job>/captions/clip_NN.ass`
+and ffmpeg burns it with the `subtitles=` filter. There is no `drawtext` path.
+
+Timing is **clip-relative**: `build_ass_events(cues, settings,
+start_offset=<clip start>)` subtracts the clip start, so a cue at 10.0s of
+the source becomes `0:00:00.00` in a clip that starts at 10.0s.
+
+The real `clip_05.ass` from the reference batch (21 `Dialogue` lines):
+
+```ini
+PlayResX: 1080
+PlayResY: 1920
+Style: ClipForge,Arial Black,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,
+       -1,0,0,0,100,100,0,0,1,2,2,2,60,60,268,1
+Dialogue: 0,0:00:00.00,0:00:02.23,ClipForge,,0,0,0,,What did
+Dialogue: 0,0:00:02.23,0:00:02.45,ClipForge,,0,0,0,,he say?
+```
+
+> **Correction worth flagging:** that style line is **not** "Bold pop
+> (default)". Font size 48, black outline, `MarginV 268` (= `1920 ×
+> (1 − 0.86)`) is the **`lower_third`** preset. The job was submitted with
+> `options.captionPreset = "lower_third"`, so the render is correct — the
+> render faithfully used the style that was actually selected. But nothing
+> asserted that mapping, so a wrong style would have been indistinguishable
+> from a right one. `tools/caption_preset_test.py` now checks every preset's
+> size/colour/outline/shadow/border against its `Style:` line, that an
+> omitted preset resolves to `bold_pop`, and that the clip-relative offset is
+> applied to both cue start and end.
+
+**Bold pop (default)** is `font_size 68`, primary `#FFFFFF`, secondary and
+outline `#39FF14`, `outline_width 5`, `shadow 1`, baseline at 78% height,
+and carries the pop animation on each cue:
+
+```ini
+{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)\t(90,140,\fscx100\fscy100)}
+```
+
+If the ffmpeg build has no libass, `render_clip()` falls back to rendering
+each cue as a transparent PNG and compositing with `overlay` — captions are
+never silently dropped.
 4. **Renders** the clips — FFmpeg cuts each segment frame-accurately,
    MediaPipe face-tracking follows the speaker into the 9:16 crop (when
    installed), Silero VAD trims dead air (when installed), and ASS captions
@@ -353,7 +533,9 @@ The UI asks you to confirm this before every job.
 python3 tools/compile_check.py   # compile + undefined-name check every backend module
 python3 tools/transcribe_unit_test.py  # chunking, repetition, engine logic, .wav.part regression
 python3 tools/asr_engine_test.py       # mocked queue/retry + ETA checks
-python3 tools/detect_backend_test.py   # Gemini vs Ollama detection, text-only payloads
+python3 tools/detect_backend_test.py   # provider dispatch, text-only payloads
+python3 tools/llm_provider_test.py     # Groq wire contract, 429 backoff, pacing, key handling
+python3 tools/caption_preset_test.py   # caption preset -> ASS style line + clip-relative timing
 python3 tools/encode_profile_test.py   # encoder/preset/deadline degradation logic
 bun tools/overall_status_test.ts       # job Done/Failed/overall-progress indicator logic
 python3 -m app.doctor                  # hardware/engine/ffmpeg diagnostics
@@ -361,7 +543,20 @@ curl localhost:8000/api/health         # worker/warmup/LLM/system status
 curl "localhost:8000/api/dev/verify-clips?jobId=<id>"   # ffprobe every rendered clip
 python3 tools/smoke_test.py      # API + worker + honest failure paths
 python3 tools/e2e_render_test.py # real ffmpeg: cut → crop → captions → thumbnail
+python3 tools/batch_recheck.py <jobId> --detect  # ffprobe every clip + rerun detection
 ```
+
+`tools/batch_recheck.py <jobId>` re-verifies a finished batch from its own
+artifacts: it ffprobes every rendered clip and checks the **frame count**
+(not just the rounded duration) against the recorded cut, confirms every
+thumbnail exists, and re-sums the total against the job's `totalClipsSec`.
+`--detect` additionally re-runs the detection stage on the batch's **real**
+faster-whisper transcript through the configured provider, which is the
+end-to-end proof for an LLM provider swap: it exercises chunking, the wire
+contract and the word-index → real-timestamp resolution on production data.
+Without `GROQ_API_KEY` it falls back to a local OpenAI-compatible stub and
+prints a loud warning that the real api.groq.com round trip was **not**
+tested — add the key and re-run to complete the check.
 
 `tools/transcribe_unit_test.py` includes a **live** regression for the
 `.wav.part` extraction bug: it runs real ffmpeg to a `source.wav.part` temp
