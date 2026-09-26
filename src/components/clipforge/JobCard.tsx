@@ -326,7 +326,7 @@ export function JobCard({ job, onDeleted }: { job: JobDoc; onDeleted?: () => voi
             <span>{job.totalClipsSec}s total</span>
           )}
           <span>
-            {job.detectedSource === "gemini" ? "AI-detected" : "Detection failed"}
+            {job.detectedSource ? `AI-detected via ${job.detectedSource}` : "Detection failed"}
           </span>
           {job.downloadSource && <span>via {job.downloadSource}</span>}
           {job.transcriptWordCount !== undefined && job.transcriptWordCount !== null && (

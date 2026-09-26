@@ -7,11 +7,14 @@ pre-download (explicit, with progress) → worker thread starts.
 
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -169,6 +172,11 @@ def _boot() -> None:
             "progress": 0,
             "progressDetail": "Queued — resuming from cached stages after a restart.",
             "completedAt": None,
+            # The attempt that died left its error behind. A resumed job is not
+            # failing any more, and a queued job advertising "AI detection
+            # failed: HTTP 429" is a contradiction the dashboard would repeat.
+            "error": None,
+            "errorDetail": None,
             # Unit counters describe work in the CURRENT attempt. Left over
             # from the run that died, a queued job rendered "10 of 10 clips"
             # next to a 0% progress bar.
@@ -899,19 +907,17 @@ def redetect_job(job_id: str) -> dict:
     job = store.get_job(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    # Precondition depends on the ACTIVE detection backend: the local Ollama
-    # path needs no key, it needs a running server.
-    if llm_mod.provider(settings) == llm_mod.PROVIDER_OLLAMA:
-        ok, reason = llm_mod.ollama_status(settings)
-        if not ok:
-            raise HTTPException(400, f"AI detection offline — {reason}")
-    elif settings.gemini_api_key is None:
-        live = live_gemini_key()
-        live.refresh(force=True)
+    # Reuse the same readiness logic the dashboard shows, rather than a
+    # Gemini-only check left over from before Groq existed. Asking the user to
+    # "add GEMINI_API_KEY" when Groq is the active provider was wrong twice
+    # over: it named the wrong key, and it refused outright for anyone who had
+    # only ever set a Groq key.
+    status = detection_status()
+    if not status.get("ready"):
+        provider = status.get("provider", "detection")
         raise HTTPException(
             400,
-            live.problem
-            or "AI detection offline — add GEMINI_API_KEY in the Keys/API keys tab (or .env), then hit Re-check on the dashboard.",
+            f"AI detection offline — {status.get('detail') or f'the {provider} backend is not ready'}",
         )
     src = store.find_source_file(job_id)
     if src is None:
@@ -1058,40 +1064,85 @@ class ZipRequest(BaseModel):
     clipIds: list[str] = Field(min_length=1, max_length=32)
 
 
+# Export used to build the whole archive in an io.BytesIO and return
+# buf.getvalue() — which also copies it. A full batch is 10 clips at ~80MB, so
+# a single "Export all" held ~800MB resident, and the 32-clip request ceiling
+# implied 2.5GB. This host has 2.0 GiB total and a Whisper model loaded, so
+# exporting a batch could OOM the server and take every running job with it.
+# The archive is now written to disk and streamed, and oversized requests are
+# refused with an honest limit instead of being attempted.
+MAX_EXPORT_BYTES = 1_500_000_000  # 1.5 GB of source MP4s
+
+
 @app.post("/api/export/zip")
-def export_zip(body: ZipRequest) -> Response:
+def export_zip(body: ZipRequest):
     """ZIP of REAL rendered MP4s + captions.txt — no metadata-only exports."""
-    import io
     import zipfile
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
-        included = 0
-        for cid in body.clipIds:
-            clip = store.get_clip(cid)
-            if clip is None or not clip.get("videoPath"):
-                continue
-            p = Path(clip["videoPath"])
-            if not p.exists():
-                continue
-            zf.write(p, f"clips/{clip['order'] + 1:02d}-{clip.get('title', 'clip')[:40] or 'clip'}.mp4")
-            included += 1
-        first_clip = store.get_clip(body.clipIds[0]) if body.clipIds else None
-        job_id = first_clip["jobId"] if first_clip else None
-        job = store.get_job(job_id) if job_id else None
-        zf.writestr("captions.txt", (job or {}).get("captionsTxt") or "")
-        zf.writestr(
-            "README.txt",
-            "ClipForge export — 9:16 1080x1920 H.264/AAC\n"
-            "Only clip content you own or have permission to use.\n",
-        )
-    if included == 0:
+    members: list[tuple[Path, str]] = []
+    total = 0
+    skipped: list[str] = []
+    for cid in body.clipIds:
+        clip = store.get_clip(cid)
+        if clip is None or not clip.get("videoPath"):
+            skipped.append(cid)
+            continue
+        p = Path(clip["videoPath"])
+        if not p.exists():
+            skipped.append(cid)
+            continue
+        size = p.stat().st_size
+        if total + size > MAX_EXPORT_BYTES:
+            raise HTTPException(
+                413,
+                f"Export is {total // (1024 * 1024)} MB of MP4s and the next clip "
+                f"would pass the {MAX_EXPORT_BYTES // (1024 * 1024)} MB limit — "
+                "export fewer clips at a time, or download them individually.",
+            )
+        total += size
+        title = str(clip.get("title") or "clip")[:40]
+        members.append((p, f"clips/{int(clip.get('order', 0)) + 1:02d}-{title}.mp4"))
+
+    if not members:
         raise HTTPException(404, "no rendered clips to export")
-    return Response(
-        content=buf.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="clipforge-export.zip"'},
-    )
+
+    first_clip = store.get_clip(body.clipIds[0]) if body.clipIds else None
+    job_id = first_clip["jobId"] if first_clip else None
+    job = store.get_job(job_id) if job_id else None
+
+    # ZIP_STORED: H.264 is already compressed, so deflating would burn CPU for
+    # ~0% gain. The point of writing to disk is that peak memory stays flat no
+    # matter how large the batch is.
+    fd, tmp_name = tempfile.mkstemp(prefix="clipforge-export-", suffix=".zip")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
+            for src, arcname in members:
+                zf.write(src, arcname)
+            zf.writestr("captions.txt", (job or {}).get("captionsTxt") or "")
+            zf.writestr(
+                "README.txt",
+                "ClipForge export — 9:16 1080x1920 H.264/AAC\n"
+                "Only clip content you own or have permission to use.\n",
+            )
+        return FileResponse(
+            tmp_path,
+            media_type="application/zip",
+            filename="clipforge-export.zip",
+            background=BackgroundTask(_unlink_quietly, tmp_path),
+        )
+    except BaseException:
+        _unlink_quietly(tmp_path)
+        raise
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Remove the temp export once it has been streamed to the client."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("[export] could not remove temp archive %s", path)
 
 
 # --------------------------------------------------------------------------- #

@@ -159,6 +159,27 @@ def main() -> int:
         store.write_job(job9)
         check(store.get_job("j9")["unitsDone"] is None, "cleared unit counters persist")
 
+        # ---- 10. an error stops being true when the job moves on ------
+        # Observed live: a job that hit "AI detection failed: Groq HTTP 429"
+        # went on to resume and render, but carried the error the whole way —
+        # so a job mid-render advertised a failure that had already been
+        # recovered from. The invariant is: a job that is not stage="failed"
+        # carries no error.
+        task_src = (Path(__file__).resolve().parents[1] / "app" / "task.py").read_text(encoding="utf-8")
+        prog_body = task_src.split("def _progress(", 1)[-1].split("\n    def ", 1)[0]
+        finish_body = task_src.split("def _finish(", 1)[-1].split("\n    def ", 1)[0]
+        check(
+            prog_body.count('job["error"] = None') >= 1,
+            "_progress clears a stale error when the stage changes",
+        )
+        check('"error": None' in finish_body, "_finish clears the error on success")
+        check(
+            prog_body.find('job["error"] = None') > prog_body.find("if prev_stage != stage"),
+            "the error is cleared on the stage-change branch, not unconditionally",
+        )
+        for name, body in (("_boot()", boot), ("retry()", retry_body)):
+            check('"error": None' in body, f"{name} clears the stale error")
+
         # ---- a real stored job round-trips honestly -------------------
         store.write_job({**queued, "_id": "real", "source": "s", "title": "t"})
         back = store.get_job("real")

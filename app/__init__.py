@@ -3,7 +3,7 @@
 Service modules:
 - task: pipeline orchestration (in-process worker thread)
 - download: yt-dlp fetcher + upload ingest
-- llm: Gemini clip detection
+- llm: AI clip detection (Groq by default, Gemini fallback, Ollama local)
 - subtitle: WhisperX (or batched faster-whisper) transcription + ASS caption authoring
 - video: ffmpeg/MoviePy 9:16 rendering, face reframe, silence trim
 - vad: Silero VAD silence detection

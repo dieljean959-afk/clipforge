@@ -54,6 +54,27 @@ viral clips". See [LICENSE](LICENSE).
    with jitter. `GROQ_BASE_URL` repoints the client, which is how
    `tools/llm_provider_test.py` tests it against a local stub.
 
+   **Naming follows the provider, never a hardcoded one.** The switch to Groq
+   left a few Gemini-shaped assumptions behind, all of which are now covered by
+   `tools/llm_provider_test.py`:
+
+   - `/api/jobs/{id}/redetect` checked `settings.gemini_api_key` and refused
+     with *"add GEMINI_API_KEY"*. For anyone who had only ever set a Groq key
+     it was simply broken. It now reuses the same `detection_status()`
+     readiness the dashboard shows, so the message names the provider actually
+     in use.
+   - The pipeline's offline failure message overrode the exception's own
+     provider-accurate text with a hardcoded Gemini string. It now surfaces
+     the exception, which already says `GROQ_API_KEY missing…` or
+     `ollama server unreachable…`.
+   - `detectedSource` was written as the literal `"gemini"` no matter which
+     backend ran, so a Groq-detected batch was filed as Gemini work. It now
+     records `llm.provider(...)` and the card reads *"AI-detected via groq"*.
+     This one was a **landmine**: the dashboard inferred success from
+     `detectedSource === "gemini"`, so correcting the provenance without
+     fixing the UI would have relabelled every successful job
+     *"Detection failed"*.
+
    **Model rot does NOT self-heal on Groq.** Google names the replacement
    model in its 404, so Gemini can auto-migrate; Groq does not. A retired
    model therefore fails immediately (no retry burn) with the exact API error
@@ -299,6 +320,33 @@ a tombstone that `write_job()` honours, so a late write is a logged no-op.
 `create_clips()` also stopped raising `KeyError: '_id'` when the job it was
 writing metadata for had just been deleted.
 
+> **A recovered job stops saying it failed.** Observed live: a job that hit
+> `AI detection failed: Groq failed after retries: HTTP 429` was later resumed
+> by the boot reconciler and spent its entire render still carrying that
+> error. `_finish()` never cleared it either, so a job could finish as
+> `stage: "complete"` while its API payload still reported a detection
+> failure — a contradiction that outlives the job in every response. The
+> invariant is now: **a job that is not `stage="failed"` carries no error.**
+> `_progress()` clears it on each stage change, and `_finish()`, `_boot()` and
+> `retry()` all clear it on the way to a fresh attempt.
+
+### Export must not be able to OOM the server
+
+`POST /api/export/zip` built the whole archive in an `io.BytesIO` and returned
+`buf.getvalue()` — a second full copy. A batch is 10 vertical clips at ~80 MB,
+so one "Export all" held **~800 MB resident**, and the 32-clip request ceiling
+implied 2.5 GB. This host has 2.0 GiB usable with a Whisper model loaded, so a
+read-only convenience feature could OOM-kill the API process and take every
+running job with it.
+
+The archive is now written to a temp file and streamed back via
+`FileResponse`, cleaned up by a `BackgroundTask`. Peak memory is flat whatever
+the batch size — `tools/export_memory_test.py` measures it, and a 2 MB archive
+grows the heap by ~5 KB. `ZIP_STORED` is kept deliberately: H.264 is already
+compressed, so deflating would burn CPU for no gain. Requests above
+`MAX_EXPORT_BYTES` (1.5 GB) are refused with a 413 explaining the limit and
+suggesting a smaller batch, rather than being attempted.
+
 > **The stored transcript names the model that actually ran.** `hostlimits`
 > downgrades a model that cannot fit the container, so `config.toml` saying
 > `medium` on a 2 GiB host means a `small` model did the work. `transcribe()`
@@ -452,7 +500,7 @@ How it behaves, and why:
 |---|---|
 | **Timing** | Never touched. Only `cue["text"]` is replaced, so a bad translation can reword a caption but can never desynchronise it. |
 | **Source track** | `source_lang` is copied **verbatim** from the transcript, never round-tripped through a translator. |
-| **Engine** | Reuses the `[llm]` provider (gemini or ollama) — no new dependency, no extra key, no model download. |
+| **Engine** | Reuses the `[llm]` provider (groq, gemini or ollama) — no new dependency, no extra key, no model download. |
 | **Whisper cannot do this** | Its `task="translate"` targets **English only**, so it covers 1 of the 12 languages. Do not fold this into the ASR path. |
 | **Line width** | Per-script, not global: 42 chars for Latin/Cyrillic, 40 for Arabic/Devanagari, **18** for full-width CJK. A single global limit overflows badly in Japanese. |
 | **Overflow** | An over-long cue is **flagged** and kept in full — never truncated. Losing subtitle text silently is worse than a long line. |
@@ -611,6 +659,7 @@ python3 tools/batch_recheck.py <jobId> --detect  # ffprobe every clip + rerun de
 python3 tools/resume_invalidation_test.py  # a moved cut must not reuse the old render
 python3 tools/queue_truthfulness_test.py  # a queued job must look queued
 python3 tools/delete_cancels_test.py       # deleting a job must actually stop it
+python3 tools/export_memory_test.py        # zip export must not OOM the server
 ```
 
 `tools/batch_recheck.py <jobId>` re-verifies a finished batch from its own
@@ -633,7 +682,8 @@ by more than 20 ms invalidates the render and clears every stale media field.
 
 `tools/queue_truthfulness_test.py` and `tools/delete_cancels_test.py` guard the
 two honesty rules below — a queued job must look queued, and deleting a job
-must actually stop it.
+must actually stop it. `tools/export_memory_test.py` guards the export path
+against buffering a whole batch in RAM.
 
 `tools/transcribe_unit_test.py` includes a **live** regression for the
 `.wav.part` extraction bug: it runs real ffmpeg to a `source.wav.part` temp

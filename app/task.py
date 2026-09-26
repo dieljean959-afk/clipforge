@@ -83,6 +83,15 @@ class Pipeline:
                 })
             job["stageTimings"] = timings[-12:]
             job["stageStartedAt"] = now_ms
+            # Moving into a new stage means the job is alive again, so any
+            # error left by the attempt that died stops being true. Without
+            # this, a job that failed detection with a 429 and later resumed
+            # spent its whole render advertising "AI detection failed" beside a
+            # live progress bar.
+            if job.get("error") is not None:
+                logger.info(f"[job {job_id}] clearing stale error on stage change -> {stage}")
+            job["error"] = None
+            job["errorDetail"] = None
         if prior_eta_sec is not None:
             self._prior_eta_sec = float(prior_eta_sec)
 
@@ -196,7 +205,11 @@ class Pipeline:
             # remote worker refused/unreachable — honest error, job stays failed
             self._fail(job_id, f"Could not hand the job to your worker: {exc}", self._detail(exc))
         except llm.LlmNotConfigured as exc:
-            self._fail(job_id, "AI detection offline — add GEMINI_API_KEY to .env", self._detail(exc))
+            # The exception already names the right backend and variable
+            # ("GROQ_API_KEY missing…", "ollama server unreachable…"). A
+            # hardcoded "add GEMINI_API_KEY" overrode it and sent users hunting
+            # for a key that was never the one being used.
+            self._fail(job_id, f"AI detection offline — {exc}", self._detail(exc))
         except llm.LlmError as exc:
             self._fail(job_id, f"AI detection failed: {exc}", self._detail(exc))
         except download.DownloadError as exc:
@@ -462,7 +475,14 @@ class Pipeline:
                 logger.warning(f"[job {job_id}] VAD failed, skipping silence trim: {exc}")
                 speech = []
 
-        clips = self.store.create_clips(job_id, candidates, detected_source="gemini")
+        # Record which backend actually produced these candidates. This used to
+        # be the literal "gemini" regardless of provider, so a Groq-detected
+        # batch was filed as Gemini work — and the dashboard, which infers
+        # success from that string, was one provider rename away from labelling
+        # every successful job "Detection failed".
+        clips = self.store.create_clips(
+            job_id, candidates, detected_source=llm.provider(self.settings)
+        )
         total = len(clips)
         captions_txt_parts: list[str] = []
 
@@ -614,6 +634,11 @@ class Pipeline:
             # A completed job is no longer interrupted, whatever it survived.
             "interrupted": False,
             "interruptReason": None,
+            # ...and it is certainly no longer carrying the error that killed
+            # an earlier attempt. stage="complete" with an error string is a
+            # contradiction, and it outlives the job in every API response.
+            "error": None,
+            "errorDetail": None,
         })
         if resumes:
             # Worth stating plainly: the result is real, but it took extra

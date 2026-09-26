@@ -238,8 +238,8 @@ export default function Dashboard() {
                     </span>
                   )}
                   <span>
-                    {selectedJob.detectedSource === "gemini"
-                      ? "AI-detected"
+                    {selectedJob.detectedSource
+                      ? `AI-detected via ${selectedJob.detectedSource}`
                       : "Detection failed"}
                   </span>
                   {selectedJob.transcriptWordCount != null && (

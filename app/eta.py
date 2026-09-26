@@ -194,9 +194,9 @@ def estimate(
 def tail_estimate_sec(clip_count: int | None = None, clip_seconds: float = 0.0) -> float:
     """Rough cost of the stages AFTER transcription (detection + renders).
 
-    Deliberately coarse and labelled as an estimate in the UI: one Gemini call
-    plus one ffmpeg render per clip. Encoding dominates the render, so it scales
-    with the total clip runtime, not the source length.
+    Deliberately coarse and labelled as an estimate in the UI: one detection
+    call plus one ffmpeg render per clip. Encoding dominates the render, so it
+    scales with the total clip runtime, not the source length.
     """
     clips = max(1, int(clip_count or 8))
     return 20.0 + clips * 12.0 + clip_seconds * 0.6

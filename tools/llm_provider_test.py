@@ -15,6 +15,7 @@ Run:  python tools/llm_provider_test.py
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import time
@@ -374,6 +375,66 @@ def test_provider_roster() -> None:
           "groq" in llm_mod.provider_label(s))
 
 
+def test_no_gemini_shaped_strings():
+    """A missing-key error must name the provider actually in use.
+
+    Two places hardcoded GEMINI_API_KEY after the Groq migration: the
+    /redetect precondition, which refused outright for anyone with only a
+    Groq key, and the pipeline's offline failure message, which overrode the
+    exception's own provider-accurate text. Both sent users hunting for a key
+    that was never the one being used.
+    """
+    root = Path(__file__).resolve().parents[1] / "app"
+    main_src = (root / "main.py").read_text(encoding="utf-8")
+    task_src = (root / "task.py").read_text(encoding="utf-8")
+    llm_src = (root / "llm.py").read_text(encoding="utf-8")
+
+    redetect = main_src.split("def redetect_job(", 1)[-1].split("\n@app.", 1)[0]
+    # Strip comments before grepping: the fix's own comment explains that the
+    # old string was wrong, and a naive substring check then fails on the
+    # explanation of the fix.
+    redetect_code = "\n".join(
+        ln for ln in redetect.splitlines() if not ln.lstrip().startswith("#")
+    )
+    task_code = "\n".join(
+        ln for ln in task_src.splitlines() if not ln.lstrip().startswith("#")
+    )
+    check("/redetect no longer checks a Gemini key",
+          "gemini_api_key" not in redetect_code and "live_gemini_key" not in redetect_code)
+    check("/redetect reuses the provider-aware readiness check",
+          "detection_status()" in redetect_code)
+    check("/redetect surfaces the active provider's own reason",
+          re.search(r"status\.get\(\s*['\"]detail['\"]", redetect_code) is not None)
+    check("the pipeline's offline error no longer hardcodes GEMINI_API_KEY",
+          "GEMINI_API_KEY" not in task_code)
+    check("the pipeline surfaces the exception's own provider-accurate message",
+          re.search(r"AI detection offline\s*—\s*\{exc\}", task_code) is not None)
+
+    check("llm.py names GROQ_API_KEY when it is missing",
+          "GROQ_API_KEY missing" in llm_src)
+    check("llm.py still names GEMINI_API_KEY for the fallback",
+          "GEMINI_API_KEY" in llm_src)
+
+    # Provenance must name the provider that actually ran. The literal
+    # "gemini" was written unconditionally, so a Groq-detected batch was
+    # filed as Gemini work — and the dashboard inferred success from that
+    # exact string, so correcting the provenance without fixing the UI would
+    # have labelled every successful job "Detection failed".
+    task_render = task_src.split("def _stage_render(", 1)[-1]
+    check("the pipeline no longer hardcodes detectedSource=gemini",
+          'detected_source="gemini"' not in task_render)
+    check("detectedSource records the provider that actually ran",
+          "detected_source=llm.provider(" in task_render)
+    for ui in ("src/components/clipforge/JobCard.tsx", "src/pages/Dashboard.tsx"):
+        ui_src = (Path(__file__).resolve().parents[1] / ui).read_text(encoding="utf-8")
+        check(f"{Path(ui).name} no longer infers success from the string 'gemini'",
+              'detectedSource === "gemini"' not in ui_src)
+        check(f"{Path(ui).name} treats ANY provider as a successful detection",
+              re.search(r"detectedSource\s*\n?\s*\?", ui_src) is not None)
+        check(f"{Path(ui).name} still shows the honest failure label",
+              "Detection failed" in ui_src)
+
+
 def main() -> int:
     print("LLM provider tests (groq contract / rate limits / key handling)")
     test_user_agent_is_sent()
@@ -386,6 +447,7 @@ def main() -> int:
     test_missing_key()
     test_detect_clips_end_to_end()
     test_provider_roster()
+    test_no_gemini_shaped_strings()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
