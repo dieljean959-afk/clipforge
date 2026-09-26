@@ -243,6 +243,43 @@ never silently dropped.
 Thumbnails are real first frames, previews stream the real files, downloads
 serve real MP4s, and "Export all" zips the real renders with `captions.txt`.
 
+### Resume must not ship a stale render
+
+Retrying a job reuses clip documents **by index** so finished renders
+survive. That is only sound while the cut is unchanged. A re-detection may
+well return a different window at the same index — clip 3 is simply no
+longer the same three seconds — and if the old encode is kept, the job
+reports success while serving the previous video under the new metadata.
+
+This was not theoretical. The Groq re-run of `c57d7782c548` produced fresh
+cuts; `create_clips` kept `renderState="done"`; all ten renders were skipped;
+and `tools/batch_recheck.py` then found frame counts up to 2× off (clip 5
+wanted 20.35s and measured 40.87s). Ten wrong videos, zero reported errors.
+
+So reuse is now conditional on the cut actually matching:
+
+- `LocalStore._cut_moved()` compares the stored window to the new candidate
+  with 20 ms of slack (float noise from word-index rounding is not a move).
+  Any real move resets `renderState` to `pending` and clears `videoPath`,
+  `thumbPath`, `media*`, `cropBox`, `captionCues` and `silenceCuts`.
+- `running` and `failed` are unfinished work, not results: both go back to
+  `pending` and the stale `mediaError` is dropped.
+- The render-skip in `task.py` additionally requires the recorded
+  `captionPreset` to match the requested one — captions are burned into the
+  pixels, not stored beside them, so a style change must re-encode.
+
+`tools/resume_invalidation_test.py` (34 checks) locks all of this down,
+including that an unchanged cut still resumes instantly and keeps its clip id,
+so download links stay stable.
+
+> **The stored transcript names the model that actually ran.** `hostlimits`
+> downgrades a model that cannot fit the container, so `config.toml` saying
+> `medium` on a 2 GiB host means a `small` model did the work. `transcribe()`
+> records `loaded.model_name` — the resolved model — and logs the downgrade
+> instead of labelling the transcript with the configured value, because RTF
+> is a per-model number and a mislabelled transcript makes it meaningless.
+> `python -m app.doctor` reports this as `whisper model fits host`.
+
 ## Deployment: how the backend is hosted
 
 There is **no local setup** for the hosted app. The platform runs one managed
@@ -544,6 +581,7 @@ curl "localhost:8000/api/dev/verify-clips?jobId=<id>"   # ffprobe every rendered
 python3 tools/smoke_test.py      # API + worker + honest failure paths
 python3 tools/e2e_render_test.py # real ffmpeg: cut → crop → captions → thumbnail
 python3 tools/batch_recheck.py <jobId> --detect  # ffprobe every clip + rerun detection
+python3 tools/resume_invalidation_test.py  # a moved cut must not reuse the old render
 ```
 
 `tools/batch_recheck.py <jobId>` re-verifies a finished batch from its own
@@ -556,7 +594,13 @@ end-to-end proof for an LLM provider swap: it exercises chunking, the wire
 contract and the word-index → real-timestamp resolution on production data.
 Without `GROQ_API_KEY` it falls back to a local OpenAI-compatible stub and
 prints a loud warning that the real api.groq.com round trip was **not**
-tested — add the key and re-run to complete the check.
+tested — add the key and re-run to complete the check. On the reference
+batch it reports `✓ this was a REAL api.groq.com round trip`.
+
+`tools/resume_invalidation_test.py` guards the resume path described in
+[Resume must not ship a stale render](#resume-must-not-ship-a-stale-render):
+an unchanged cut still resumes and keeps its clip id, while a cut that moved
+by more than 20 ms invalidates the render and clears every stale media field.
 
 `tools/transcribe_unit_test.py` includes a **live** regression for the
 `.wav.part` extraction bug: it runs real ffmpeg to a `source.wav.part` temp

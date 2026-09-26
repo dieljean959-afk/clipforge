@@ -514,16 +514,26 @@ def transcribe(
         logger.info(f"[subtitle] overlap dedup removed {dropped} duplicate words")
 
     rtf = (decode_wall / decoded_seconds) if decoded_seconds > 0 else None
+    # Record the model that ACTUALLY decoded this audio, not the configured
+    # one. hostlimits downgrades a model that cannot fit the container, so
+    # labelling a `small` run as `medium` makes the stored transcript lie
+    # about which model produced it (and about RTF, which is per-model).
+    ran_model = loaded.model_name or settings.whisper.model
+    if ran_model != settings.whisper.model:
+        logger.info(
+            f"[subtitle] configured model '{settings.whisper.model}' was downgraded to "
+            f"'{ran_model}' for this host"
+        )
     transcript = Transcript(
         words=words_out,
         duration=duration,
-        model_size=settings.whisper.model,
+        model_size=ran_model,
         engine=loaded.engine,
         rtf=round(rtf, 4) if rtf is not None else None,
     )
     logger.info(
         f"[subtitle] transcribed {len(words_out)} words across {len(windows)} chunk(s), "
-        f"{transcript.duration:.1f}s of audio"
+        f"{transcript.duration:.1f}s of audio, model '{ran_model}'"
         + (f", RTF {rtf:.3f} ({loaded.engine})" if rtf is not None else "")
     )
     return transcript

@@ -78,6 +78,7 @@ class _Stub:
                         "path": self.path,
                         "auth": self.headers.get("Authorization"),
                         "contentType": self.headers.get("Content-Type"),
+                        "userAgent": self.headers.get("User-Agent"),
                         "body": body,
                     })
                 data = json.dumps(payload).encode("utf-8")
@@ -162,6 +163,47 @@ def _words(n: int = 400) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # tests
 # --------------------------------------------------------------------------- #
+
+def test_user_agent_is_sent() -> None:
+    """Cloudflare bans Python-urllib/3.x at the edge with 403 / error 1010.
+
+    This is a signature ban applied BEFORE the key is checked, so a perfectly
+    valid key still fails. Verified against the live API: urllib default ->
+    403/1010, an explicit UA -> 401. The header must therefore be present, and
+    must not be the urllib default.
+    """
+    print("\n[groq] User-Agent — Cloudflare 1010 guard")
+    with _Stub([(200, _reply(_candidates(1, 40)), None)]) as stub:
+        s, orig = _with_key(_settings(stub.base_url), "gsk_test_key_0123456789")
+        try:
+            llm_mod.call_groq("prompt", s)
+        finally:
+            _restore(orig)
+        ua = stub.requests[0].get("userAgent") or ""
+        check("sends a User-Agent header", bool(ua), repr(ua))
+        check("User-Agent is not the Cloudflare-banned urllib default",
+              not ua.lower().startswith("python-urllib"), ua)
+        check("User-Agent is the shared constant", ua == llm_mod.GROQ_USER_AGENT, ua)
+
+    # And a 403/1010 must fail fast with an explanation, not "bad key".
+    with _Stub([(403, {"error": {"message": "error code: 1010"}}, None)]) as stub:
+        s, orig = _with_key(_settings(stub.base_url), "gsk_test_key_0123456789")
+        try:
+            err = None
+            try:
+                llm_mod.call_groq("prompt", s)
+            except llm_mod.LlmError as exc:
+                err = str(exc)
+        finally:
+            _restore(orig)
+        check("403/1010 raises LlmError", err is not None, str(err))
+        check("1010 error says it is NOT a bad key",
+              "not a bad api key" in (err or "").lower(), str(err))
+        check("1010 error names the User-Agent actually sent",
+              llm_mod.GROQ_USER_AGENT in (err or ""), str(err))
+        check("1010 made only ONE call (edge blocks are not transient)",
+              len(stub.requests) == 1, str(len(stub.requests)))
+
 
 def test_wire_contract() -> None:
     print("\n[groq] wire contract — endpoint, auth, model, JSON reply")
@@ -334,6 +376,7 @@ def test_provider_roster() -> None:
 
 def main() -> int:
     print("LLM provider tests (groq contract / rate limits / key handling)")
+    test_user_agent_is_sent()
     test_wire_contract()
     test_429_retry_with_retry_after()
     test_429_exhaustion()

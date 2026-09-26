@@ -494,7 +494,27 @@ def doctor() -> dict:
     """Actionable environment diagnostics (ffmpeg build, GPU, model, API, disk)."""
     from app.doctor import run_doctor
 
-    return run_doctor(settings)
+    try:
+        return run_doctor(settings)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never 500
+        # These probes shell out to ffmpeg and touch the network, so any one of
+        # them can raise on a loaded or throttled host. A diagnostics page that
+        # returns a bare 500 tells the user nothing, which is exactly when they
+        # need it most: report the failure as a check instead of an exception.
+        logger.exception("[doctor] diagnostics failed")
+        return {
+            "ok": False,
+            "summary": {"fail": 1, "warn": 0, "ok": 0},
+            "checks": [
+                {
+                    "name": "doctor",
+                    "status": "fail",
+                    "detail": f"Diagnostics could not complete: {exc}",
+                    "fix": "Re-check once the host is idle, or run "
+                           "`.venv/bin/python -m app.doctor` for the full report.",
+                }
+            ],
+        }
 
 
 @app.get("/api/caption-presets")

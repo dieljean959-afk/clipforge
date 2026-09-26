@@ -215,6 +215,13 @@ class LocalStore:
 
         On retry/resume existing docs are reused so rendered clips survive;
         only the detection fields are refreshed.
+
+        Reuse is only safe while the cut is UNCHANGED. A re-detection can
+        return a different window at the same index (clip 3 is no longer the
+        same three seconds), and blindly keeping renderState="done" would
+        leave the previous encode on disk under the new metadata: the job
+        reports success while shipping the old video. So any material move of
+        the cut invalidates the render and the clip is encoded again.
         """
         docs: list[dict[str, Any]] = []
         existing = self.list_clips(job_id)
@@ -241,8 +248,29 @@ class LocalStore:
                 # resume: keep the id, rendered file paths and renderState so
                 # already-rendered clips are skipped, not re-rendered
                 doc = dict(base)
-                if doc.get("renderState") == "running":
+                # "running" means a worker died mid-encode; "failed" means the
+                # encode raised. Both are unfinished work, not results: put them
+                # back in the queue and drop the stale error so the next attempt
+                # starts clean.
+                if doc.get("renderState") in ("running", "failed"):
                     doc["renderState"] = "pending"
+                    doc["mediaError"] = None
+                # ...but only while the cut still matches what was encoded.
+                if self._cut_moved(base, c):
+                    doc.update({
+                        "videoPath": None,
+                        "thumbPath": None,
+                        "mediaBytes": None,
+                        "mediaWidth": None,
+                        "mediaHeight": None,
+                        "mediaDurationSec": None,
+                        "mediaError": None,
+                        "renderState": "pending",
+                        "renderMs": None,
+                        "captionCues": [],
+                        "silenceCuts": [],
+                        "cropBox": None,
+                    })
             doc.update({
                 "jobId": job_id,
                 "order": i,
@@ -261,6 +289,21 @@ class LocalStore:
             job["detectedSource"] = detected_source
             self.write_job(job)
         return docs
+
+    @staticmethod
+    def _cut_moved(base: dict[str, Any], cand: dict[str, Any]) -> bool:
+        """True when a new candidate no longer covers the same window.
+
+        Half a frame of slack absorbs float noise from word-index rounding;
+        anything larger is a genuinely different clip.
+        """
+        try:
+            return (
+                abs(float(base["start"]) - float(cand["start"])) > 0.02
+                or abs(float(base["end"]) - float(cand["end"])) > 0.02
+            )
+        except (KeyError, TypeError, ValueError):
+            return True
 
     def write_clip(self, clip: dict[str, Any]) -> None:
         path = self._clip_path(clip["_id"])

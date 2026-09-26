@@ -475,8 +475,15 @@ class Pipeline:
             )
 
             # ---- resume: a clip already rendered and present is skipped ---
+            # Only when the burned-in result still matches this job's request:
+            # same cut (enforced upstream in create_clips) and same caption
+            # style, which is rendered into the pixels, not stored beside it.
             out_path = self.settings.app.paths.outputs_dir / job_id / f"clip_{idx + 1:02d}.mp4"
-            if clip_doc.get("renderState") == "done" and out_path.exists():
+            if (
+                clip_doc.get("renderState") == "done"
+                and out_path.exists()
+                and clip_doc.get("captionPreset", preset) == preset
+            ):
                 self._log(job_id, f"resume: clip {idx + 1} already rendered — skipping")
                 self._progress(
                     job_id, "rendering", (idx + 1) / max(1, total),

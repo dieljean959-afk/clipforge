@@ -202,6 +202,7 @@ def _check_groq(settings: Settings) -> list[Check]:
     costs no quota and still proves both the key AND network path work.
     """
     from app.config import live_groq_key  # noqa: PLC0415
+    from app.llm import GROQ_USER_AGENT  # noqa: PLC0415 - same edge-block guard
 
     live = live_groq_key()
     live.refresh(force=True)
@@ -214,7 +215,12 @@ def _check_groq(settings: Settings) -> list[Check]:
         base = str(settings.groq.base_url).rstrip("/")
         req = urllib.request.Request(  # noqa: S310 - https base from config
             f"{base}/models",
-            headers={"Authorization": f"Bearer {settings.groq_api_key or ''}"},
+            headers={
+                "Authorization": f"Bearer {settings.groq_api_key or ''}",
+                # Same Cloudflare 1010 signature ban as the chat call — without
+                # this the probe reports a bogus "bad key" for a good key.
+                "User-Agent": GROQ_USER_AGENT,
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310

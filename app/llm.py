@@ -395,6 +395,13 @@ def call_ollama(chunk_text_prompt: str, settings: Settings) -> str:
     return text
 
 
+# Cloudflare (in front of api.groq.com) bans the default Python-urllib
+# User-Agent with "403 Forbidden: error code: 1010" — a request-signature
+# ban applied at the edge, so the API key is never even checked. Any
+# non-Python-urllib UA gets through. Never remove this.
+GROQ_USER_AGENT = "ClipForge/1.1 (+https://github.com/harry0703/MoneyPrinterTurbo)"
+
+
 def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
     """Single Groq chat-completions call with pacing + 429-aware backoff.
 
@@ -453,6 +460,14 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
                 ) from exc
             if attempt >= cfg.max_retries:
                 break
+            if exc.status == 403 and "1010" in msg:
+                # Cloudflare edge ban on the request signature, NOT a bad key.
+                # Retrying cannot help, so fail immediately with the real cause.
+                raise LlmError(
+                    "Groq returned 403 / Cloudflare error 1010. This is NOT a bad API key "
+                    f"— Cloudflare blocked the request before it reached Groq. "
+                    f"Sent User-Agent: {GROQ_USER_AGENT!r}."
+                ) from exc
             if exc.status == 429:
                 wait = exc.retry_after or min(60.0, (2 ** attempt) + random.random() * 2)
                 logger.warning(
@@ -540,6 +555,13 @@ def _groq_post(
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
+                # REQUIRED. api.groq.com sits behind Cloudflare, which returns
+                # "HTTP 403: error code: 1010" — a signature ban on the
+                # default `Python-urllib/3.x` User-Agent — BEFORE the request
+                # reaches Groq, so a perfectly valid key still fails. Verified:
+                # urllib default -> 403/1010, an explicit UA -> 401 (reaches
+                # the API). Do not remove this header.
+                "User-Agent": GROQ_USER_AGENT,
             },
             method="POST",
         )
