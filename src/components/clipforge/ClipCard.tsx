@@ -158,7 +158,60 @@ export function ClipCard({
             .srt
           </Button>
         </div>
+        <CaptionTracks clip={clip} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Sidecar caption tracks, one chip per language. Rendered only when the job
+ * actually produced them ([translate] enabled), so an untranslated job shows
+ * nothing extra rather than an empty section.
+ */
+function CaptionTracks({ clip }: { clip: ClipDto }) {
+  const tracks = clip.translationTracks ?? [];
+  if (tracks.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-border/60 pt-2">
+      <span className="pr-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        Subtitles
+      </span>
+      {tracks.map((track) => {
+        const file = track.files?.srt ?? track.files?.vtt;
+        if (track.error || !file) {
+          return (
+            <span
+              key={track.lang}
+              title={track.error ?? "track unavailable"}
+              className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive"
+            >
+              {track.lang}
+            </span>
+          );
+        }
+        return (
+          <a
+            key={track.lang}
+            href={`/api/clips/${clip._id}/tracks/${encodeURIComponent(file)}`}
+            download
+            title={
+              track.source
+                ? `${track.lang} — original transcript`
+                : `${track.lang} translation${track.cached ? " (cached)" : ""}`
+            }
+            className={cn(
+              "rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors",
+              track.source
+                ? "border-primary/40 bg-primary/10 text-primary"
+                : "border-border text-muted-foreground hover:border-primary/40 hover:text-foreground",
+            )}
+          >
+            {track.lang}
+            {track.source ? "*" : ""}
+          </a>
+        );
+      })}
     </div>
   );
 }

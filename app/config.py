@@ -29,6 +29,8 @@ except ModuleNotFoundError:  # Python 3.10 dev/test environments
 
 from dotenv import load_dotenv
 
+from app import translate as translate_mod  # no cycle: translate imports lazily
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # --------------------------------------------------------------------------- #
@@ -245,6 +247,23 @@ def _resolve_gemini_key(environ: dict[str, str]) -> tuple[str | None, str, str |
             )
         return value, name, None
     return None, "", None
+
+
+def _as_list(value: object) -> list[object]:
+    """Coerce a config value to a list.
+
+    TOML gives real arrays, but env overrides and hand-edited single-line
+    values arrive as comma-separated strings — accept both rather than failing
+    on a scalar with a confusing error.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    text = str(value).strip()
+    if not text:
+        return []
+    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 def _load_env_files(root: Path) -> list[str]:
@@ -500,6 +519,32 @@ class LlmConfig:
 
 
 @dataclass
+class TranslateConfig:
+    """Multi-language caption tracks (sidecar SRT/VTT).
+
+    Translation reuses the [llm] provider, so there is no separate backend and
+    no extra dependency. Whisper's own ``task="translate"`` is NOT used here:
+    it targets English only, so it would cover just one of the target languages.
+    """
+
+    enabled: bool = False
+    #: The language the transcript is actually in. This track is copied
+    #: VERBATIM and never machine-translated — round-tripping the original
+    #: through a translator would silently reword the source captions.
+    source_lang: str = "en"
+    #: Target language codes. The source language appears first.
+    languages: list[str] = field(default_factory=lambda: ["en"])
+    #: Brand/product/speaker terms that must survive translation verbatim.
+    glossary: list[str] = field(default_factory=list)
+    #: Cues per translation request. Batching carries dialogue context; keeping
+    #: it bounded means one malformed reply costs one batch, not the whole job.
+    batch_size: int = 30
+    max_lines: int = 2
+    #: Emit .srt, .vtt, or both.
+    formats: list[str] = field(default_factory=lambda: ["srt", "vtt"])
+
+
+@dataclass
 class SubtitleConfig:
     font: str
     font_fallbacks: list[str] = field(default_factory=list)
@@ -560,6 +605,7 @@ class Settings:
     whisper: WhisperConfig
     gemini: GeminiConfig
     llm: LlmConfig
+    translate: TranslateConfig
     subtitle: SubtitleConfig
     video: VideoConfig
     download: DownloadConfig
@@ -678,6 +724,35 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         ollama_keep_alive=str(lc.get("ollama_keep_alive", "30m")),
     )
 
+    tr = raw.get("translate", {})
+    wanted = [c for c in _as_list(tr.get("languages", []))]
+    if not wanted:
+        wanted = ["en"]
+    normalized = translate_mod.normalize_codes(wanted)
+    unknown = [c for c in wanted if str(c).strip().lower() not in translate_mod.LANGS]
+    if unknown:
+        errors.append(
+            f"translate.languages contains unsupported code(s): {', '.join(map(str, unknown))}"
+        )
+    formats = [str(f).strip().lower() for f in _as_list(tr.get("formats", ["srt", "vtt"]))]
+    formats = [f for f in formats if f in {"srt", "vtt"}] or ["srt"]
+    language_hint = str(w.get("language", "auto")).strip().lower()
+    source_lang = str(tr.get("source_lang", "") or "").strip().lower()
+    if not source_lang or source_lang not in translate_mod.LANGS:
+        # Fall back to the transcription language hint, and only then to en.
+        source_lang = language_hint if language_hint in translate_mod.LANGS else "en"
+    translate = TranslateConfig(
+        enabled=bool(tr.get("enabled", False)) or str(
+            os.getenv("CLIPFORGE_TRANSLATE", "")
+        ).strip().lower() in {"1", "true", "yes"},
+        source_lang=source_lang,
+        languages=normalized or ["en"],
+        glossary=[str(t).strip() for t in _as_list(tr.get("glossary", [])) if str(t).strip()],
+        batch_size=max(1, min(200, int(tr.get("batch_size", 30)))),
+        max_lines=max(1, min(4, int(tr.get("max_lines", 2)))),
+        formats=formats,
+    )
+
     s = raw.get("subtitle", {})
     outline = str(s.get("outline_color", "#39FF14"))
     if not outline.startswith("#") or len(outline) not in (4, 7):
@@ -754,6 +829,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         whisper=whisper,
         gemini=gemini,
         llm=llm,
+        translate=translate,
         subtitle=subtitle,
         video=video,
         download=download,

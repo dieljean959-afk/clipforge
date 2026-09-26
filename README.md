@@ -123,6 +123,45 @@ benchmark.
 WhisperX `large-v3` RTF before/after, have not been measured. A 1-vCPU/2-GiB
 sandbox encodes at ~0.1x realtime and is not a valid measurement of either.
 
+### Multi-language caption tracks
+
+`[translate]` writes **sidecar** subtitle files next to each clip — separate
+from the burned-in ASS captions, which style the on-screen text:
+
+```
+outputs/<job>/clip01_en.srt  clip01_fr.srt  clip01_ja.srt  …  (and .vtt)
+```
+
+Off by default (each language costs one LLM call per batch of cues). Enable and
+pick languages in `config.toml`:
+
+```toml
+[translate]
+enabled = true
+source_lang = "en"
+languages = ["en", "fr", "es", "pt", "de", "ru", "it", "ja", "ko", "zh", "ar", "hi"]
+glossary = ["ClipForge"]
+```
+
+How it behaves, and why:
+
+| | |
+|---|---|
+| **Timing** | Never touched. Only `cue["text"]` is replaced, so a bad translation can reword a caption but can never desynchronise it. |
+| **Source track** | `source_lang` is copied **verbatim** from the transcript, never round-tripped through a translator. |
+| **Engine** | Reuses the `[llm]` provider (gemini or ollama) — no new dependency, no extra key, no model download. |
+| **Whisper cannot do this** | Its `task="translate"` targets **English only**, so it covers 1 of the 12 languages. Do not fold this into the ASR path. |
+| **Line width** | Per-script, not global: 42 chars for Latin/Cyrillic, 40 for Arabic/Devanagari, **18** for full-width CJK. A single global limit overflows badly in Japanese. |
+| **Overflow** | An over-long cue is **flagged** and kept in full — never truncated. Losing subtitle text silently is worse than a long line. |
+| **Positional integrity** | A reply with the wrong number of lines is a hard error. Padding or truncating would shift every following caption. |
+| **Glossary** | Terms are requested verbatim, and a term present in the source but missing from the output is logged. A term the speaker never said cannot raise a false alarm. |
+| **Failure isolation** | One language failing yields a missing track and a log line; the other eleven still write, and the render still succeeds. |
+| **Resume** | An existing non-empty track is reused, so Retry does not re-pay for the same translations. |
+
+Tracks are downloadable per clip (`GET /api/clips/{id}/tracks/{file}`, served by
+matching against recorded paths, never by joining user input) and appear as
+language chips on each clip card in the dashboard.
+
 ### Subprocess support
 
 The pipeline uses `subprocess` **inside the backend process** (ffmpeg/ffprobe

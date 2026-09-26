@@ -24,7 +24,7 @@ from typing import Any
 
 from loguru import logger
 
-from app import asr, download, encode, eta, llm, reframe, subtitle, vad, video
+from app import asr, download, encode, eta, llm, reframe, subtitle, translate, vad, video
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
@@ -114,6 +114,26 @@ class Pipeline:
     def _log(self, job_id: str, line: str) -> None:
         logger.info(f"[job {job_id}] {line}")
         self.store.append_job_log(job_id, line)
+
+    def _write_caption_tracks(
+        self, job_id: str, clip_index: int, cues: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Write per-language SRT/VTT sidecars for one clip.
+
+        Deliberately never raises: the render has already succeeded by the time
+        this runs, so a translation failure must degrade to a missing track and
+        a visible log line, not a failed job. Each language is independent, so
+        one bad batch cannot take the other eleven down with it.
+
+        The output file doubles as a resume cache — a re-render (Resume/Retry)
+        reuses an existing non-empty track instead of paying for the same LLM
+        calls twice.
+        """
+        return translate.write_tracks(
+            self.settings.app.paths.outputs_dir / job_id,
+            clip_index, cues, self.settings,
+            log=lambda line: self._log(job_id, line),
+        )
 
     @staticmethod
     def _srt_time(sec: float) -> str:
@@ -488,6 +508,9 @@ class Pipeline:
             # silence cuts for this clip
             cuts_for_clip = vad.silence_cuts_for_clip(speech, c0, c1, self.settings) if speech else []
 
+            # ---- sidecar multi-language tracks (SRT/VTT) -------------------
+            tracks = self._write_caption_tracks(job_id, idx + 1, cues)
+
             # ---- stage: captions (ASS per clip, preset-aware) --------------
             ass_path = ws.stage_dir("captions") / f"clip_{idx + 1:02d}.ass"
             subtitle.write_ass(
@@ -522,6 +545,7 @@ class Pipeline:
                     "silenceCuts": cuts_for_clip,
                     "captionCues": cues,
                     "captionPreset": preset,
+                    "translationTracks": tracks,
                 })
                 self.store.write_clip(clip_doc)
                 captions_txt_parts.append(

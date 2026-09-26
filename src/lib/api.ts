@@ -88,6 +88,21 @@ export interface ClipDto {
   mediaError?: string | null;
   renderState: "pending" | "running" | "done" | "failed";
   renderMs?: number | null;
+  /** Sidecar caption tracks written by [translate], one record per language. */
+  translationTracks?: TranslationTrack[] | null;
+}
+
+export interface TranslationTrack {
+  /** ISO-639-1 code, e.g. "fr". */
+  lang: string;
+  /** True for the original transcript, which is never machine-translated. */
+  source?: boolean;
+  /** True when the track was reused from a previous run. */
+  cached?: boolean;
+  /** Present when this language failed; the other languages still wrote. */
+  error?: string;
+  /** Format -> filename, e.g. { srt: "clip01_fr.srt", vtt: "clip01_fr.vtt" }. */
+  files?: Record<string, string>;
 }
 
 export interface SystemStatsDto {

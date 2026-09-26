@@ -834,6 +834,41 @@ def clip_srt(clip_id: str) -> Response:
     return Response("\n".join(lines), media_type="text/plain")
 
 
+@app.get("/api/clips/{clip_id}/tracks/{filename}")
+def clip_track(clip_id: str, filename: str) -> FileResponse:
+    """Download one translated caption track (.srt/.vtt) for a clip.
+
+    The requested name is MATCHED against the paths this clip recorded, never
+    joined onto a directory — so a crafted filename like ``../../.env`` cannot
+    escape the output folder. Only files the pipeline itself wrote are served.
+    """
+    clip = store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "clip not found")
+    tracks = clip.get("translationTracks") or []
+    if not tracks:
+        raise HTTPException(
+            404,
+            "no caption tracks for this clip — enable [translate] in config.toml and re-render",
+        )
+    wanted = Path(filename).name
+    for track in tracks:
+        for ext, recorded in (track.get("files") or {}).items():
+            if Path(recorded).name != wanted:
+                continue
+            p = Path(recorded)
+            if not p.exists():
+                raise HTTPException(404, f"track file missing on disk: {p.name}")
+            media = "text/vtt" if ext == "vtt" else "application/x-subrip"
+            return FileResponse(
+                p, media_type=media, filename=p.name,
+                headers={"Content-Disposition": f'attachment; filename="{p.name}"'},
+            )
+    if any(t.get("error") for t in tracks):
+        raise HTTPException(404, f"caption track '{wanted}' failed to translate for this clip")
+    raise HTTPException(404, f"no such caption track on this clip: {wanted}")
+
+
 def _srt_time(sec: float) -> str:
     ms = max(0, round(sec * 1000))
     h, rem = divmod(ms, 3_600_000)

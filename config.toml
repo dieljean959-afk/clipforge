@@ -80,6 +80,45 @@ ollama_keep_alive = "30m"
 # ~60 chunks, so this must exceed a single slow generation comfortably.
 ollama_timeout_sec = 600
 
+[translate]
+# Multi-language caption tracks, written as sidecar files next to each clip:
+#   outputs/<job>/clip01_fr.srt / clip01_fr.vtt ...
+#
+# These are SEPARATE from the burned-in ASS captions above — the ASS path
+# styles on-screen text, this path exports downloadable subtitle tracks.
+#
+# Translation reuses the [llm] provider (gemini or ollama), so enabling this
+# needs no new dependency and no extra API key. Note: Whisper's built-in
+# translate task is NOT used — it only targets English, so it cannot produce
+# the non-English tracks below.
+#
+# Off by default: it adds one LLM call per language per batch of cues.
+enabled = false
+
+# Target languages, emitted in this order. "en" is the source/original track
+# and is written straight from the transcript, never machine-translated.
+# Supported: en fr es pt de ru it ja ko zh ar hi
+languages = ["en"]
+
+# Brand / product / speaker names that must survive translation verbatim.
+# A term is only checked when it actually appears in the source line, and any
+# miss is logged rather than silently rewritten, so drift is visible.
+# Example: glossary = ["ClipForge", "OpenAI"]
+glossary = []
+
+# Cues per translation request. Batched so the model sees dialogue context;
+# bounded so one malformed reply costs a batch rather than the whole job.
+batch_size = 30
+
+# Max lines per cue on screen. Line WIDTH is per-language and built in (42 for
+# Latin/Cyrillic, 40 for Arabic/Devanagari, 18 for full-width CJK) — a single
+# global number would overflow badly in CJK.
+max_lines = 2
+
+# Emit both sidecar formats. Drop one to halve the files written.
+formats = ["srt", "vtt"]
+
+
 [subtitle]
 # ASS style: bold white with thick neon-green outline, word pop-in.
 font = "Arial Black"
