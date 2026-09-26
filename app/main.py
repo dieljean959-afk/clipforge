@@ -14,12 +14,12 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from app import encode as encode_mod
 from app import eta, hosting, hostlimits

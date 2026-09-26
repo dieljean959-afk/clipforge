@@ -74,6 +74,42 @@ for p in sorted(Path("app").glob("*.py")):
         continue
     print(f"OK   {p}")
 
+# ---------------------------------------------------------------------------
+# IMPORT the app, not just compile it.
+#
+# Compiling proves the file parses. It says nothing about whether the names
+# resolve at runtime, which is exactly the gap that let a broken import ship:
+#
+#     from fastapi.background import BackgroundTask   # ImportError
+#
+# compiled fine, passed the undefined-name AST scan, passed every other suite —
+# and made the whole backend fail to start, so the site served 500 on every
+# request. Only actually importing `app.main` and building the FastAPI object
+# catches that class of mistake.
+# ---------------------------------------------------------------------------
+try:
+    import contextlib
+    import importlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        main_mod = importlib.import_module("app.main")
+    app_obj = getattr(main_mod, "app", None)
+    if app_obj is None:
+        failed += 1
+        print("FAIL app.main imported but exposes no `app` object")
+    else:
+        routes = len(getattr(app_obj, "routes", []))
+        if routes < 10:
+            failed += 1
+            print(f"FAIL app.main built an app with only {routes} routes")
+        else:
+            print(f"OK   app.main imports and builds the ASGI app ({routes} routes)")
+except Exception as exc:  # noqa: BLE001 - this is the whole point of the check
+    failed += 1
+    print(f"FAIL app.main could not be imported: {type(exc).__name__}: {exc}")
+
 if failed:
     print(f"\n{failed} module(s) failed")
 sys.exit(1 if failed else 0)
