@@ -132,6 +132,11 @@ def _settings(base_url: str, key: str | None = "gsk_test_key_0123456789", **groq
     s.llm.provider = "groq"
     s.groq.base_url = base_url
     s.groq.min_interval_sec = groq.pop("min_interval_sec", 0.0)
+    # The production client paces itself against a per-minute TOKEN budget so a
+    # long source cannot walk into a 429 mid-detection. These tests make a
+    # handful of small calls back to back against a local stub, so the pacer
+    # would just add 50s of sleeping to a suite that should be instant. Off.
+    s.groq.tokens_per_min = 0
     s.groq.max_retries = groq.pop("max_retries", 3)
     for k, v in groq.items():
         setattr(s.groq, k, v)

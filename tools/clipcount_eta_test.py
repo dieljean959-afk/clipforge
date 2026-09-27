@@ -170,6 +170,20 @@ def section_plan() -> None:
               for s in ("queued", "grabbing", "transcribing", "finding", "reframing",
                         "rendering", "exporting", "complete", "failed")))
 
+    # Recorded timings are rewritten on every stage change, so an already-mapped
+    # name is fed back through the mapper. Without the identity case a whole job's
+    # history collapses into one "fetch" row (12 rows, 269 s — the first E2E run).
+    check("mapping a plan stage again does not move it",
+          all(eta.plan_stage_for(eta.plan_stage_for(s)) == eta.plan_stage_for(s)
+              for s in ("queued", "transcribing", "finding", "reframing", "rendering",
+                        *eta.STAGE_ORDER)))
+    check("a plan stage is returned unchanged, not defaulted to fetch",
+          [eta.plan_stage_for(s) for s in eta.STAGE_ORDER] == list(eta.STAGE_ORDER),
+          str([eta.plan_stage_for(s) for s in eta.STAGE_ORDER]))
+    check("a real stage name survives a round trip through the plan",
+          eta.plan_stage_for("transcribing") == "transcribe"
+          and eta.plan_stage_for(eta.plan_stage_for("transcribing")) == "transcribe")
+
 
 def section_units() -> None:
     print("\n[5] per-unit extrapolation for the clip loop")

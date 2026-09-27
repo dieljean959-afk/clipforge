@@ -158,6 +158,45 @@ def cmd_retry() -> int:
     return 0
 
 
+def cmd_seed_candidates() -> int:
+    """Assemble candidates from whatever detection chunks are already cached.
+
+    Both free AI tiers ran out mid-detection (Groq's 200k tokens/day, Gemini
+    free's 20 requests/day), so the last three chunks cannot be billed today.
+    Everything downstream of detection is unaffected by that, and it is the
+    half this test has not exercised yet, so the cached chunks are merged with
+    the SAME gate and cap the real detect stage would have applied, written as
+    the stage's normal output, and the pipeline continues into reframe+render.
+    """
+    from app import clipcount
+
+    jid = job_id()
+    if not jid:
+        return 1
+    settings, store = load()
+    from app.stages import StageWorkspace
+
+    ws = StageWorkspace(settings.app.paths.data_dir, jid)
+    chunk_dir = ws.stage_dir("detect") / "chunks"
+    files = sorted(chunk_dir.glob("*.json")) if chunk_dir.exists() else []
+    if not files:
+        print("no cached chunks to seed from")
+        return 1
+    candidates: list[dict] = []
+    for f in files:
+        candidates.extend(json.loads(f.read_text(encoding="utf-8")))
+    job = store.get_job(jid) or {}
+    target = int(job.get("clipTarget") or 23)
+    floor = float(settings.gemini.min_score)
+    top, above, below = clipcount.gate(candidates, target, floor)
+    ws.write_json("detect", "candidates.json", top)
+    ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(top))
+    print(f"seeded {len(top)} candidate(s) from {len(files)} cached chunk(s): "
+          f"{len(candidates)} found, {above} above the {floor:.0f} floor, {below} below, "
+          f"cap {target}")
+    return 0
+
+
 def cmd_logs() -> int:
     jid = job_id()
     if not jid:
@@ -266,6 +305,8 @@ def main() -> int:
         return cmd_status()
     if cmd == "retry":
         return cmd_retry()
+    if cmd == "seed":
+        return cmd_seed_candidates()
     if cmd == "logs":
         return cmd_logs()
     if cmd == "verify":

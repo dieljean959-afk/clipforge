@@ -27,7 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import subtitle  # noqa: E402
 from app.config import Paths, load_config  # noqa: E402
+from app.stages import StageWorkspace  # noqa: E402
 from app.store import LocalStore  # noqa: E402
 from app.task import Pipeline  # noqa: E402
 
@@ -315,6 +317,39 @@ def section_no_stale_writes(store, pipeline) -> None:
           "_patch_job still applies its own fields")
     check(pipeline._patch_job("nope-not-a-job", x=1) == {},
           "_patch_job on a deleted job does not raise")
+
+    # A resumed job reuses the cached candidates, so the "N found / M above the
+    # floor" explanation has to be rebuilt from them. It was left blank, which
+    # hid exactly the number a user needs to decide whether to move the cap.
+    job2 = store.create_job("upload", "resume.mp4")
+    jid2 = job2["_id"]
+    pipeline._patch_job(jid2, durationSec=3273.0)
+    cached = [
+        {"start": 1.0, "end": 30.0, "score": 94.0, "title": "a"},
+        {"start": 31.0, "end": 60.0, "score": 88.0, "title": "b"},
+        {"start": 61.0, "end": 90.0, "score": 42.0, "title": "c"},
+    ]
+    ws = StageWorkspace(pipeline.settings.app.paths.data_dir, jid2)
+    ws.write_json("detect", "candidates.json", cached)
+    ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(cached))
+    check(store.get_job(jid2).get("clipsAboveScore") is None,
+          "a fresh job has no count explanation yet")
+    out = pipeline._stage_detect(store.get_job(jid2), subtitle.Transcript(), ws)
+    resumed = store.get_job(jid2)
+    check(len(out) == 3 and resumed.get("clipTarget") == 3,
+          "the resume path returns the cached candidates")
+    check(resumed.get("clipsAboveScore") == 2 and resumed.get("clipsBelowScore") == 1,
+          f"and splits them by the score floor (got {resumed.get('clipsAboveScore')}/"
+          f"{resumed.get('clipsBelowScore')})")
+    check(resumed.get("clipScoreFloor") == pipeline.settings.gemini.min_score,
+          "and reports the floor it used")
+    check(resumed.get("candidatesDetected") == 3,
+          "and does not leave the found-count blank")
+    pipeline._patch_job(jid2, candidatesDetected=45)
+    pipeline._stage_detect(store.get_job(jid2), subtitle.Transcript(), ws)
+    check(store.get_job(jid2).get("candidatesDetected") == 45,
+          "a pre-gate count that was already recorded is not overwritten")
+    store.delete_job(jid2)
 
     src = (Path(__file__).resolve().parents[1] / "app" / "task.py").read_text(encoding="utf-8")
     stage_src = src.split("def _stage_detect")[1].split("\n    def ")[0]

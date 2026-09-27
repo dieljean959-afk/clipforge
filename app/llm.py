@@ -372,8 +372,29 @@ def call_gemini(chunk_text_prompt: str, settings: Settings) -> str:
             if attempt >= settings.gemini.max_retries:
                 break
             if rate_limited:
-                wait = min(60.0, (2 ** attempt) + random.random() * 2)
-                logger.warning(f"[llm] 429 rate limited, backing off {wait:.1f}s (attempt {attempt + 1})")
+                # Google states the wait explicitly — "Please retry in
+                # 47.352748833s", and a structured RetryInfo.retryDelay — so
+                # honour it as a floor. The old fixed 1+2+3s backoff spent the
+                # whole retry budget against a per-minute quota that needed
+                # 47s, and turned a recoverable 429 into a failed job.
+                asked = _retry_hint(msg)
+                if asked is None:
+                    m = re.search(r"retryDelay'?\"?\s*:\s*'?\"?(\d+)", msg)
+                    if m:
+                        asked = float(m.group(1))
+                if asked is not None and asked > MAX_INLINE_RATE_LIMIT_WAIT:
+                    raise LlmError(
+                        f"Gemini quota needs {asked / 60:.0f} minutes before it will "
+                        f"accept another call — that is a daily limit, not a burst "
+                        f"one. {msg[:220]}"
+                    )
+                fallback = min(60.0, (2 ** attempt) * 2.0 + random.random() * 2)
+                wait = max(asked or 0.0, fallback)
+                logger.warning(
+                    f"[llm] 429 rate limited"
+                    f"{f', provider asked for {asked:.0f}s' if asked else ''}"
+                    f" — backing off {wait:.1f}s (attempt {attempt + 1})"
+                )
                 time.sleep(wait)
             else:
                 # Model retirement is not a transient error: retrying with the
@@ -521,11 +542,11 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
         # 8k-token/min one, which is the limit that actually stops a long
         # source. Reacting to a 429 instead means the rejected call was still
         # spent, and the retry after a 15s wait usually meets the next one.
-        token_wait = _groq_token_wait(est, GROQ_TOKEN_BUDGET)
+        token_wait = _groq_token_wait(est, cfg.tokens_per_min)
         if token_wait > 0:
             logger.info(
                 f"[llm] groq token budget: waiting {token_wait:.0f}s before a "
-                f"~{est}-token call ({GROQ_TOKEN_BUDGET}/min self-imposed)"
+                f"~{est}-token call ({cfg.tokens_per_min}/min self-imposed)"
             )
             time.sleep(token_wait)
         _groq_record_tokens(est)
@@ -571,7 +592,7 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
                     # remaining attempts, and produces a failure an hour later
                     # with no useful reason. Better to stop now and say so.
                     raise LlmError(
-                        f"{label} rate limit needs {asked / 60:.0f} minutes before it "
+                        f"Groq rate limit needs {asked / 60:.0f} minutes before it "
                         f"will accept another call — this is a daily quota, not a "
                         f"burst one. {msg[:220]}"
                     )
@@ -598,12 +619,14 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
     raise LlmError(f"Groq failed after retries: {last_err}")
 
 
-#: "Please try again in 15.6375s" / "retry after 30 seconds" — providers that
-#: rate-limit by TOKENS tell you the wait in prose rather than a header, and
-#: the number is the whole difference between backing off enough and burning
-#: every retry against a limit that has not reset yet.
+#: Providers that rate-limit by TOKENS state the wait in prose rather than a
+#: header, and the number is the whole difference between backing off enough
+#: and burning every retry against a limit that has not reset yet. The phrasings
+#: differ per provider: Groq says "Please try again in 15.6375s", Google says
+#: "Please retry in 47.352748833s" and also ships a structured RetryInfo.
 _RETRY_HINT = re.compile(
-    r"try again in\s*([0-9]+(?:\.[0-9]+)?)\s*s|retry after\s*([0-9]+(?:\.[0-9]+)?)\s*s",
+    r"(?:try again in|retry in|retry after|try again after)\s*"
+    r"([0-9]+(?:\.[0-9]+)?)\s*(?:s\b|sec|secs|seconds?)",
     re.IGNORECASE,
 )
 
@@ -614,7 +637,7 @@ def _retry_hint(detail: str) -> float | None:
     if not m:
         return None
     try:
-        return max(0.0, float(m.group(1) or m.group(2)))
+        return max(0.0, float(m.group(1)))
     except (TypeError, ValueError):
         return None
 
@@ -651,6 +674,7 @@ _groq_token_ledger: list[tuple[float, int]] = []
 #: will spend. Groq's free tier allows 8000 tokens/min for this model; leaving
 #: a quarter of it unused costs a little wall time and removes essentially all
 #: of the 429s, which cost far more (a retried call is a re-billed call).
+#: Overridable per deployment via [groq] tokens_per_min.
 GROQ_TOKEN_BUDGET = 6000
 
 #: Longest a single retry may sleep in-line. Past this the limit is a daily

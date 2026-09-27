@@ -121,7 +121,11 @@ class Pipeline:
             self._prior_eta_sec = None
             timings = list(job.get("stageTimings") or [])
             prev_start = job.get("stageStartedAt")
-            if prev_stage and prev_start:
+            # Only record a hand-off when it crosses a PLAN stage. The raw names
+            # differ for steps the user thinks of as one ("fetch" -> "grabbing"
+            # is both "Downloading"), and splitting on those wrote the same
+            # stage twice with a zero-length row in between.
+            if prev_stage and prev_start and eta.plan_stage_for(prev_stage) != eta.plan_stage_for(stage):
                 timings.append({
                     "stage": prev_stage,
                     "sec": round(max(0.0, (now_ms - prev_start) / 1000), 1),
@@ -131,7 +135,18 @@ class Pipeline:
                 {"stage": eta.plan_stage_for(t.get("stage")), "sec": t.get("sec"), "at": t.get("at")}
                 for t in timings[-12:]
             ]
-            job["stageStartedAt"] = now_ms
+            # A stage being RE-ENTERED (a resume, a host restart, a paused job)
+            # must not restart its clock. Resetting `stageStartedAt` to now made
+            # a resumed render report "0.2 min left" with nine clips still to
+            # encode, because the elapsed it was dividing was only the seconds
+            # since the restart. Wind the clock back over what the stage has
+            # already spent so "measured" stays measured across the seam.
+            spent = sum(
+                float(t.get("sec") or 0.0)
+                for t in job["stageTimings"]
+                if t.get("stage") == eta.plan_stage_for(stage)
+            )
+            job["stageStartedAt"] = now_ms - int(spent * 1000) if spent > 0 else now_ms
             # Moving into a new stage means the job is alive again, so any
             # error left by the attempt that died stops being true. Without
             # this, a job that failed detection with a 429 and later resumed
@@ -544,7 +559,23 @@ class Pipeline:
             if cached:
                 self._log(job_id, f"resume: reusing {len(cached)} detected candidates")
                 self._progress(job_id, "finding", 100, "Reusing AI clip selection")
-                self._patch_job(job_id, clipTarget=len(cached))
+                # Re-derive the count explanation from the candidates we are
+                # actually returning. Without this a resumed job showed an
+                # empty "N found, M scored above the floor" line, which is the
+                # one number that tells the user whether to move the cap.
+                # `detected` is not recoverable here — the pre-gate total is
+                # not stored — so it is left alone rather than invented.
+                floor = float(self.settings.gemini.min_score)
+                scores = [float(c.get("score") or 0.0) for c in cached]
+                patch: dict[str, Any] = {
+                    "clipTarget": len(cached),
+                    "clipsAboveScore": sum(1 for s in scores if s >= floor),
+                    "clipsBelowScore": sum(1 for s in scores if s < floor),
+                    "clipScoreFloor": floor,
+                }
+                if job.get("candidatesDetected") is None:
+                    patch["candidatesDetected"] = len(cached)
+                self._patch_job(job_id, **patch)
                 return cached
 
         opts = job.get("options", {}) or {}

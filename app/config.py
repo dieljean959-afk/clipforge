@@ -602,8 +602,8 @@ class GroqConfig:
 
     Groq speaks the OpenAI wire format, so this is just an endpoint + model +
     the free tier's rate budget. `min_interval_sec` paces calls so a long
-    transcript (a 2h video is ~60 chunks) stays under the 30 requests/minute
-    free-tier ceiling instead of discovering it via 429s.
+    transcript (a 2h video is ~20 bounded chunks) stays under the 30
+    requests/minute free-tier ceiling instead of discovering it via 429s.
     """
 
     model: str = "openai/gpt-oss-120b"
@@ -613,6 +613,13 @@ class GroqConfig:
     # 30 rpm -> 2.0s floor. Small headroom below the documented ceiling.
     min_interval_sec: float = 2.1
     temperature: float = 0.4
+    # Self-imposed share of the account's tokens-per-minute allowance. The
+    # client paces itself to this so a long source does not walk into a 429
+    # part way through detection — and, more to the point, does not walk into
+    # it having already spent most of a DAILY token budget. 0 disables the
+    # token pacer and leaves only the per-request floor, which is the right
+    # setting for a key on a much larger tier.
+    tokens_per_min: int = 6000
 
 
 @dataclass
@@ -921,6 +928,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         timeout_sec=max(15, int(gq.get("timeout_sec", 120))),
         min_interval_sec=max(0.0, float(gq.get("min_interval_sec", 2.1))),
         temperature=float(gq.get("temperature", 0.4)),
+        tokens_per_min=max(0, int(gq.get("tokens_per_min", 6000))),
     )
 
     lc = raw.get("llm", {})

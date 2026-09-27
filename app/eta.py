@@ -227,6 +227,7 @@ STAGE_LABELS: dict[str, str] = {
 _STAGE_ALIASES = {
     "fetch": "fetch",
     "queued": "fetch",
+    "grabbing": "fetch",
     "transcribing": "transcribe",
     "finding": "detect",
     "detecting": "detect",
@@ -237,8 +238,17 @@ _STAGE_ALIASES = {
 
 
 def plan_stage_for(stage: str | None) -> str:
-    """Map a job stage name onto the plan's stage name."""
-    return _STAGE_ALIASES.get(str(stage or ""), "fetch")
+    """Map a job stage name onto the plan's stage name.
+
+    IDEMPOTENT, and it has to be: the recorded stage timings are rewritten on
+    every stage change, so an already-mapped name is fed back through this
+    function. Without the identity case, "transcribe" and "render" are not in
+    the alias table, fall through to the "fetch" default, and a job's entire
+    history silently becomes one 269-second "fetch" — which is exactly what
+    the first end-to-end run reported.
+    """
+    name = str(stage or "")
+    return name if name in STAGE_ORDER else _STAGE_ALIASES.get(name, "fetch")
 
 
 def eta_from_units(elapsed_sec: float, done: float | None, total: float | None) -> float | None:
