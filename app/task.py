@@ -677,6 +677,10 @@ class Pipeline:
                     "cropBox": crop_windows[0] if crop_windows else None,
                     "silenceCuts": cuts_for_clip,
                     "captionCues": cues,
+                    # Surfaced in the UI so a clip with [muttering] placeholders
+                    # says so, instead of the count silently changing what the
+                    # captions say with no visible reason.
+                    "uncertainCues": sum(1 for c in cues if c.get("uncertain")),
                     "captionPreset": preset,
                     "translationTracks": tracks,
                 })

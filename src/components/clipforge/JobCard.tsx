@@ -13,7 +13,6 @@ import {
   RefreshCw,
   Sparkles,
   Terminal,
-  Trash2,
   Clapperboard,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,6 +25,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
+import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
 import { cn } from "@/lib/utils";
 import {
   STAGES,
@@ -172,16 +172,6 @@ export function JobCard({
     }
   };
 
-  const removeJob = async () => {
-    try {
-      await api.deleteJob(job._id);
-      toast.success("Job deleted.");
-      onDeleted?.();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Delete failed.");
-    }
-  };
-
   const retryJob = async () => {
     try {
       await api.retryJob(job._id);
@@ -220,15 +210,7 @@ export function JobCard({
             View logs
           </Button>
           {complete && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-8 cursor-pointer gap-1.5 text-xs text-muted-foreground hover:text-destructive"
-              onClick={() => void removeJob()}
-            >
-              <Trash2 className="size-3.5" />
-              Delete
-            </Button>
+            <ConfirmDeleteJob job={job} onDeleted={() => onDeleted?.()} />
           )}
           {failed && (
             <Button

@@ -120,11 +120,50 @@ def resolved_model(settings: Any) -> tuple[str, str | None]:
 
 @dataclass(frozen=True)
 class AsrWord:
-    """One word with absolute (source-relative) timings in seconds."""
+    """One word with absolute (source-relative) timings in seconds.
+
+    ``conf`` is the model's OWN confidence in this token, 0..1: faster-whisper
+    exposes it per word as ``Word.probability``, and where that is unavailable
+    (WhisperX forced-alignment) we fall back to ``exp(avg_logprob)`` of the
+    segment the word came from. It defaults to 1.0 so a transcript written
+    before this field existed reads as "never measured" rather than as
+    "certain" — see the note in subtitle.words_to_cues, which is where the
+    number actually decides anything.
+    """
 
     start: float
     end: float
     word: str
+    conf: float = 1.0
+
+
+def _segment_confidence(seg: Any) -> float:
+    """``exp(avg_logprob)`` for one decoded segment, clamped to 0..1.
+
+    Whisper reports the mean per-token log probability; exponentiating it puts
+    it on the same 0..1 scale as the per-word probability, so a cue can be
+    judged by one rule regardless of which engine produced it. Accepts both
+    engine shapes (faster-whisper objects, WhisperX dicts). A missing or
+    non-numeric value returns 1.0 — no measurement, so do not invent doubt.
+    """
+    import math  # local: only this helper needs it
+
+    raw = seg.get("avg_logprob") if isinstance(seg, dict) else getattr(seg, "avg_logprob", None)
+    try:
+        return min(1.0, max(0.0, math.exp(float(raw))))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _word_confidence(word: Any, seg_conf: float) -> float:
+    """Per-token probability when the engine gives one, else the segment's."""
+    try:
+        prob = float(getattr(word, "probability", None))
+    except (TypeError, ValueError):
+        return seg_conf
+    if prob <= 0.0:
+        return seg_conf
+    return min(1.0, max(0.0, prob))
 
 
 def _spec(name: str) -> bool:
@@ -273,11 +312,15 @@ class LoadedEngine:
         )
         words: list[AsrWord] = []
         for seg in segments:
+            seg_conf = _segment_confidence(seg)
             for w in (seg.words or []):
                 text = (w.word or "").strip()
                 if not text:
                     continue
-                words.append(AsrWord(start=float(w.start), end=float(w.end), word=text))
+                words.append(AsrWord(
+                    start=float(w.start), end=float(w.end), word=text,
+                    conf=_word_confidence(w, seg_conf),
+                ))
             if on_segment is not None:
                 try:
                     on_segment(float(seg.end))
@@ -349,6 +392,10 @@ class LoadedEngine:
         words: list[AsrWord] = []
         interpolated = 0
         for seg in aligned:
+            # WhisperX aligns timings but does not emit per-token
+            # probabilities, so the segment's own confidence is the finest
+            # signal available. It is still far better than guessing.
+            seg_conf = _segment_confidence(seg)
             seg_words = seg.get("words") or []
             if seg_words:
                 for w in seg_words:
@@ -362,7 +409,9 @@ class LoadedEngine:
                         # and count it so the warning is honest about scope.
                         start, end = _interpolate_span(seg, seg_words, w)
                         interpolated += 1
-                    words.append(AsrWord(start=float(start), end=float(end), word=text))
+                    words.append(AsrWord(
+                        start=float(start), end=float(end), word=text, conf=seg_conf,
+                    ))
             else:
                 # no alignment data at all for this segment — spread its words
                 words.extend(_segment_fallback(seg))
@@ -440,8 +489,9 @@ def _segment_fallback(seg: dict) -> list[AsrWord]:
     if not tokens or end <= start:
         return []
     span = (end - start) / len(tokens)
+    conf = _segment_confidence(seg)
     return [
-        AsrWord(start=start + i * span, end=start + (i + 1) * span, word=tok)
+        AsrWord(start=start + i * span, end=start + (i + 1) * span, word=tok, conf=conf)
         for i, tok in enumerate(tokens)
     ]
 

@@ -455,8 +455,8 @@ check("Copy caption label unchanged", "Copy caption" in card)
 # assert the STRUCTURE that prevents the overflow instead.
 
 
-def div_block_from(src: str, anchor: str) -> str:
-    """The balanced <div>...</div> opened by the div carrying `anchor`.
+def div_block_from(src: str, anchor: str, tag: str = "div") -> str:
+    """The balanced ``<tag>...</tag>`` opened by the element carrying `anchor`.
 
     Returns "" when the anchor is gone, so a regression reports as FAILED checks
     rather than a traceback: a crashed suite reads like a broken harness, and
@@ -464,16 +464,19 @@ def div_block_from(src: str, anchor: str) -> str:
     """
     if anchor not in src:
         return ""
-    start = src.rindex("<div", 0, src.index(anchor))
+    open_tag, close_tag = f"<{tag}", f"</{tag}>"
+    # rindex for the anchor too: a label often appears in a doc comment above
+    # the element it describes, and the element is what we want to read.
+    start = src.rindex(open_tag, 0, src.rindex(anchor))
     depth = 0
     i = start
     while i < len(src):
-        if src.startswith("<div", i):
+        if src.startswith(open_tag, i):
             depth += 1
-        elif src.startswith("</div>", i):
+        elif src.startswith(close_tag, i):
             depth -= 1
             if depth == 0:
-                return src[start : i + 6]
+                return src[start : i + len(close_tag)]
         i += 1
     return src[start:]
 
@@ -509,6 +512,85 @@ check("TS min discovery matches Python", "MIN_DISCOVERY = 2" in ts_src)
 check("TS caption cap matches Python", "MAX_CAPTION_CHARS = 150" in ts_src)
 
 # --------------------------------------------------------------------------- #
+# Share via... vs Post to... — two different things, two different words.
+# --------------------------------------------------------------------------- #
+menu = (ROOT / "src" / "components" / "clipforge" / "PostMenu.tsx").read_text()
+share_row = div_block_from(menu, "Share via...", "DropdownMenuItem")
+# JSX wraps prose across lines, so match against a whitespace-collapsed copy:
+# "share\n  sheet" is the same sentence a reader sees as "share sheet".
+share_flat = " ".join(share_row.split())
+check("the share-sheet action is labelled 'Share via...'", "Share via..." in menu)
+check(
+    "the old ambiguous label is gone ('Share sheet / download instead' next to "
+    "'Post to...' is exactly the confusion this replaces)",
+    "Share sheet / download instead" not in menu,
+)
+check("the posting trigger still says 'Post to...'", "Post to..." in menu)
+check(
+    "the share row says what it actually does (share sheet + burned-in captions)",
+    "share sheet" in share_flat and "captions burned in" in share_flat,
+)
+check(
+    "the two paths are described as different",
+    "Different from posting above" in share_row,
+)
+check(
+    "the share row is marked as needing no account",
+    "no account needed" in share_row,
+)
+# The shared bytes must be the finished render, via the same endpoint the MP4
+# button uses — never a source file or a proxy.
+check("sharing uses the real download endpoint", "api.clipDownloadUrl(clip._id)" in menu)
+check("the MP4 button and the share path hit the same endpoint",
+      "/download" in (ROOT / "src" / "lib" / "clip-export.ts").read_text())
+check("the shared file is named after the clip, not 'clip-1.mp4'",
+      "clipFileName(clip)" in menu and "`clip-${clip.order + 1}.mp4`" not in menu)
+check("the clip is fetched once, not twice (an 80 MB clip was downloaded twice "
+      "on every fallback)",
+      menu.count("api.clipDownloadUrl(clip._id)") == 1)
+
+# --------------------------------------------------------------------------- #
+# Delete a batch: one path, one confirmation, nothing else touched.
+# --------------------------------------------------------------------------- #
+delete_ui = (ROOT / "src" / "components" / "clipforge" / "ConfirmDeleteJob.tsx").read_text()
+dash = (ROOT / "src" / "pages" / "Dashboard.tsx").read_text()
+jobcard = (ROOT / "src" / "components" / "clipforge" / "JobCard.tsx").read_text()
+check("a confirmation dialog exists", "AlertDialogContent" in delete_ui)
+check("the dialog asks before deleting",
+      "This permanently deletes" in delete_ui and "cannot be undone" in delete_ui)
+check("the dialog offers both answers",
+      "AlertDialogCancel" in delete_ui and "Cancel" in delete_ui
+      and "Yes, delete" in delete_ui)
+cancel_row = div_block_from(delete_ui, "Cancel</AlertDialogCancel>", "AlertDialogCancel")
+yes_row = div_block_from(delete_ui, "Yes, delete", "AlertDialogAction")
+check("the Cancel button is in the dialog", "Cancel" in cancel_row)
+check("Cancel does not delete (the whole point of the dialog)",
+      "remove" not in cancel_row and "deleteJob" not in cancel_row)
+check("only the Yes action performs the delete",
+      "remove()" in yes_row and delete_ui.count("void remove()") == 1)
+check("the API is called from exactly one place", delete_ui.count("api.deleteJob") == 1)
+check("the batch pill carries a delete control", 'iconOnly' in dash and "ConfirmDeleteJob" in dash)
+check("the pill delete is a separate control from the pill's select button",
+      "<ConfirmDeleteJob" in dash and dash.count("setSelectedJobId(job._id)") == 1)
+check("deleting the open batch clears the selection",
+      "setSelectedJobId(null)" in dash)
+check("the job card uses the same confirmed delete", "<ConfirmDeleteJob" in jobcard)
+check("the job card has no unconfirmed delete left", "api.deleteJob" not in jobcard)
+check("the icon inside the pill stops the pill's own click",
+      "stopPropagation" in delete_ui)
+check("the server endpoint is a real DELETE on one job",
+      '@app.delete("/api/jobs/{job_id}")' in
+      (ROOT / "app" / "main.py").read_text())
+
+# --------------------------------------------------------------------------- #
+# Unclear speech: the card says so instead of hiding it.
+# --------------------------------------------------------------------------- #
+check("the clip DTO carries the uncertain-cue count", "uncertainCues" in
+      (ROOT / "src" / "lib" / "api.ts").read_text())
+check("the card shows an 'unclear captions' chip", "unclear caption" in card)
+check("the chip only appears when there is one to report",
+      "(clip.uncertainCues ?? 0) > 0" in card)
+
 print(f"\n{'=' * 60}")
 if FAILURES:
     print(f"{len(FAILURES)} FAILED ({PASSED} passed):")

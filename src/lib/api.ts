@@ -93,7 +93,15 @@ export interface ClipDto {
   hookText: string;
   transcript: string;
   hashtags: string[];
-  captionCues: { start: number; end: number; text: string }[];
+  captionCues: {
+    start: number;
+    end: number;
+    text: string;
+    /** True when the model was unsure and the text is a [muttering]/[inaudible] marker. */
+    uncertain?: boolean;
+  }[];
+  /** Cues replaced by a placeholder because the model was not confident. */
+  uncertainCues?: number | null;
   silenceCuts?: { start: number; end: number }[] | null;
   aspect: string;
   videoPath: string | null;

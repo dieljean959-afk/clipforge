@@ -152,6 +152,60 @@ def section_whisperx_compat(settings) -> None:
             str(words),
         )
         check(f"{label} WhisperX reports progress", bool(progress), str(progress))
+        # A segment with no avg_logprob must NOT be treated as doubtful: the
+        # rule exists to label real uncertainty, and a missing metric is not
+        # evidence of any.
+        check(
+            f"{label} WhisperX words default to full confidence when nothing was measured",
+            all(w.conf == 1.0 for w in words),
+            str([w.conf for w in words]),
+        )
+
+    # ---- per-token confidence plumbing ---------------------------------
+    print("== 1c. confidence plumbing (low-confidence captions)")
+    import math
+
+    from app import subtitle  # noqa: PLC0415 - only this section needs it
+
+    obj_seg = SimpleNamespace(avg_logprob=-1.2, words=[
+        SimpleNamespace(word="clear", start=0.0, end=0.5, probability=0.98),
+        SimpleNamespace(word="huh", start=0.5, end=1.0, probability=0.21),
+        # An engine build that does not fill probability at all.
+        SimpleNamespace(word="nopro", start=1.0, end=1.4),
+    ])
+    check(
+        "exp(avg_logprob) is the segment fallback (0.30)",
+        abs(asr._segment_confidence(obj_seg) - math.exp(-1.2)) < 1e-6,
+        str(asr._segment_confidence(obj_seg)),
+    )
+    check(
+        "WhisperX's dict segments are read too",
+        abs(asr._segment_confidence({"avg_logprob": -1.2}) - math.exp(-1.2)) < 1e-6,
+    )
+    check(
+        "a missing avg_logprob means 'not measured', not 'doubtful'",
+        asr._segment_confidence(SimpleNamespace()) == 1.0,
+    )
+    check(
+        "a per-word probability wins over the segment value",
+        abs(asr._word_confidence(obj_seg.words[0], 0.3) - 0.98) < 1e-6,
+    )
+    check(
+        "a word with no probability falls back to its segment",
+        abs(asr._word_confidence(obj_seg.words[2], 0.3) - 0.3) < 1e-6,
+    )
+    check(
+        "a zero probability is treated as 'not filled in', not as certain-zero",
+        abs(asr._word_confidence(SimpleNamespace(probability=0.0), 0.44) - 0.44) < 1e-6,
+    )
+    check(
+        "AsrWord without a conf reads as unmeasured (1.0), never as a guess",
+        asr.AsrWord(start=0.0, end=1.0, word="x").conf == 1.0,
+    )
+    check(
+        "as_dict() carries the confidence for the caption layer",
+        "conf" in subtitle.Word(start=0.0, end=1.0, word="x", conf=0.5).as_dict(),
+    )
 
 
 # --------------------------------------------------------------------------- #

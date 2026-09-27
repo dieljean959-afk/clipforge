@@ -172,6 +172,86 @@ def main() -> int:
     check("literal braces are neutralised", "{" not in body.replace(r"{\fad", ""),
           repr(body))
 
+    print("\n[6] unclear speech is labelled, not guessed")
+    def w(text, start, end, conf):
+        return {"word": text, "start": start, "end": end, "conf": conf}
+
+    clear = [w("I", 0.0, 0.3, 0.99), w("wrote", 0.3, 0.7, 0.95),
+             w("my", 0.7, 0.9, 0.92), w("song", 0.9, 1.3, 0.90)]
+    murky = [w("what", 2.0, 2.4, 0.31), w("what", 2.4, 2.8, 0.22),
+             w("Charlotte", 3.0, 3.6, 0.19), w("Wayne's", 3.6, 4.0, 0.25)]
+    muddled = [w("bro", 5.0, 5.4, 0.40), w("no", 5.4, 5.8, 0.42)]
+    cues = subtitle.words_to_cues(clear + murky + muddled, words_per_cue=2)
+
+    shown = [c["text"] for c in cues]
+    check("confident speech is untouched", "I wrote" in shown and "my song" in shown,
+          str(shown))
+    check("near-random output becomes [inaudible]",
+          subtitle.PLACEHOLDER_INAUDIBLE in shown, str(shown))
+    check("mumbled-but-real output becomes [muttering]",
+          subtitle.PLACEHOLDER_MUTTERING in shown, str(shown))
+    flagged = [c for c in cues if c.get("uncertain")]
+    check("only the low-confidence cues are flagged", len(flagged) == 3, str(len(flagged)))
+    check("the guess is never shown but is never lost either",
+          all(" ".join(x["word"] for x in c["words"]) for c in flagged)
+          and not any("Charlotte" in c["text"] for c in flagged),
+          str([c["text"] for c in flagged]))
+    check("a flagged cue keeps its real timings",
+          [(c["start"], c["end"]) for c in flagged] == [(2.0, 2.8), (3.0, 4.0), (5.0, 5.8)],
+          str([(c["start"], c["end"]) for c in flagged]))
+    check("the confidence is recorded on the cue",
+          all("confidence" in c for c in flagged))
+
+    # Back-compat: a transcript cached before conf existed must pass through
+    # untouched. Relabelling every old batch as doubtful would be a lie.
+    legacy = [{"word": "hello", "start": 0.0, "end": 0.5},
+              {"word": "there", "start": 0.5, "end": 1.0}]
+    legacy_cues = subtitle.words_to_cues(legacy, words_per_cue=2)
+    check("a transcript with no conf field is passed through unchanged",
+          legacy_cues[0]["text"] == "hello there" and not legacy_cues[0].get("uncertain"),
+          str(legacy_cues[0]))
+    check("cue_confidence reports 'not measured' rather than guessing",
+          subtitle.cue_confidence(legacy) is None)
+
+    # MEAN, not MIN: one weak token inside a clean sentence must not blank it.
+    spike = [w("I", 0.0, 0.3, 0.99), w("TWO", 0.3, 0.6, 0.41),
+             w("really", 0.6, 0.9, 0.97), w("wrote", 0.9, 1.3, 0.95)]
+    spike_cues = subtitle.words_to_cues(spike, words_per_cue=4)
+    check("a single weak token does not blank a clear line",
+          "I TWO really wrote" in [c["text"] for c in spike_cues],
+          str([c["text"] for c in spike_cues]))
+
+    # The threshold is a parameter, so it can be tuned without a code change.
+    check("the threshold is configurable per call",
+          any(c["text"] == "Charlotte Wayne's"
+              for c in subtitle.words_to_cues(murky, words_per_cue=2,
+                                              confidence_threshold=0.05)))
+    check("setting it to 0 disables the rule entirely",
+          all(not c.get("uncertain")
+              for c in subtitle.words_to_cues(clear + murky, words_per_cue=2,
+                                              confidence_threshold=0.0)))
+    check("the two tiers are in the documented order",
+          subtitle.INAUDIBLE_BELOW < subtitle.LOW_CONFIDENCE < 1.0)
+
+    # Karaoke must not leak the garbled words through the per-word path.
+    k_uncertain = subtitle.build_ass_events(flagged, s, 0.0, "karaoke")
+    check("karaoke does not print a flagged cue's guessed words",
+          "Charlotte" not in k_uncertain, k_uncertain)
+    check("karaoke still shows the placeholder",
+          subtitle.PLACEHOLDER_INAUDIBLE in k_uncertain, k_uncertain)
+    k_clear = subtitle.build_ass_events(
+        subtitle.words_to_cues(clear, words_per_cue=2), s, 0.0, "karaoke")
+    check("karaoke is unaffected for confident cues", r"\k" in k_clear, k_clear)
+
+    # An uncertain cue is a marker of doubt, not a sentence — translating it
+    # would invite a confident invented line in another language.
+    from app import translate as translate_mod
+    tr = translate_mod.translate_cues(
+        [dict(flagged[0], text=subtitle.PLACEHOLDER_INAUDIBLE), dict(clear[0])][:1],
+        "es", s, call=lambda text, lang: f"TRANSLATED<{text}>")
+    check("an uncertain cue is never sent to a translator",
+          tr and tr[0]["text"] == subtitle.PLACEHOLDER_INAUDIBLE, str(tr))
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

@@ -137,9 +137,19 @@ class Word:
     start: float
     end: float
     word: str
+    # The model's own confidence in this token (0..1). Absent on transcripts
+    # written before this field existed, which is why every consumer treats a
+    # missing value as 1.0 — "never measured" must not silently become
+    # "measured and certain".
+    conf: float = 1.0
 
     def as_dict(self) -> dict:
-        return {"start": self.start, "end": self.end, "word": self.word}
+        return {
+            "start": self.start,
+            "end": self.end,
+            "word": self.word,
+            "conf": round(float(self.conf), 3),
+        }
 
 
 @dataclass
@@ -572,14 +582,75 @@ def _hex_to_ass(hex_color: str) -> str:
     return f"&H00{b}{g}{r}".upper()
 
 
+#: Mean per-word confidence below which a cue is treated as a GUESS rather
+#: than a transcription, and the text is replaced instead of shown.
+#:
+#: Calibrated on this app's own batches (tools/uncertainty_demo.py), and on the
+#: CUE rather than the segment, because the cue is the unit the rule decides
+#: on. Measured cue-mean word probability on two real windows:
+#:
+#:   clear single talker    median 0.87   (only 2 of 24 cues below 0.45, and
+#:                                      both were genuinely truncated: "it
+#:                                      like", "ain't...")
+#:   music + rap + overlap  median 0.66   (cues at 0.16-0.44 were the
+#:                                      "What what what what Charlotte
+#:                                      Wayne's do I'm like wait wait what
+#:                                      code" stretch; correct text in the
+#:                                      same clip sat at 0.47-0.60)
+#:
+#: 0.45 sits in the gap between those two groups. It was deliberately NOT set
+#: at 0.60: measured on per-SEGMENT means that looked safe, but at cue level
+#: 0.60 replaced 44% of a clip's captions, most of them correct — the rule has
+#: to be as conservative as its worst false positive, not as bold as its best
+#: true one.
+LOW_CONFIDENCE = 0.45
+
+#: Below this the output is not "unclear speech", it is noise the model
+#: invented; a different placeholder says so honestly.
+INAUDIBLE_BELOW = 0.30
+
+PLACEHOLDER_MUTTERING = "[muttering]"
+PLACEHOLDER_INAUDIBLE = "[inaudible]"
+
+
+def cue_confidence(words: list[dict]) -> float | None:
+    """Mean confidence of a cue's words, or None if it was never measured.
+
+    The MEAN, not the minimum: a single 0.45 token inside an otherwise clean
+    sentence is a common artifact (a name, a number) and blanking the whole cue
+    for it would be worse than the doubt. Averaging asks the question the
+    viewer is actually asking — is this line intelligible at all?
+    """
+    vals = [float(w.get("conf")) for w in words if w.get("conf") is not None]
+    if not vals:
+        return None
+    return sum(vals) / len(vals)
+
+
+def _placeholder_for(conf: float) -> str:
+    return PLACEHOLDER_INAUDIBLE if conf < INAUDIBLE_BELOW else PLACEHOLDER_MUTTERING
+
+
 def words_to_cues(
     words: list[dict],
     *,
     words_per_cue: int = 2,
     max_chars: int = 24,
     max_duration: float = 2.2,
+    confidence_threshold: float = LOW_CONFIDENCE,
 ) -> list[dict]:
-    """Group word timings into caption cues of ~2-3 words."""
+    """Group word timings into caption cues of ~2-3 words.
+
+    A cue whose words the model was unsure about is rendered as a placeholder
+    (``[muttering]`` / ``[inaudible]``) instead of the guess. Showing a wrong
+    caption is worse than showing none: the viewer reads it as fact, and burned
+    into the video it cannot be corrected at all. The original words stay on the
+    cue, so nothing is lost for the transcript, search or re-render.
+
+    A cue built from words that carry no ``conf`` (any transcript cached before
+    this existed) is passed through untouched — there is no evidence of doubt,
+    and inventing doubt would relabel good captions on every old batch.
+    """
     cues: list[dict] = []
     current: list[dict] = []
     for w in words:
@@ -587,21 +658,31 @@ def words_to_cues(
         text = " ".join(x["word"] for x in current)
         dur = w["end"] - current[0]["start"]
         if len(current) >= words_per_cue or len(text) >= max_chars or dur >= max_duration:
-            cues.append({
-                "start": current[0]["start"],
-                "end": w["end"],
-                "text": text,
-                "words": list(current),
-            })
+            cues.append(_make_cue(current[0]["start"], w["end"], text, current,
+                                  confidence_threshold))
             current = []
     if current:
-        cues.append({
-            "start": current[0]["start"],
-            "end": current[-1]["end"],
-            "text": " ".join(x["word"] for x in current),
-            "words": list(current),
-        })
+        cues.append(_make_cue(current[0]["start"], current[-1]["end"],
+                              " ".join(x["word"] for x in current), current,
+                              confidence_threshold))
     return cues
+
+
+def _make_cue(
+    start: float, end: float, text: str, words: list[dict], threshold: float
+) -> dict:
+    conf = cue_confidence(words)
+    cue = {
+        "start": start,
+        "end": end,
+        "text": text,
+        "words": list(words),
+    }
+    if conf is not None and conf < threshold:
+        cue["text"] = _placeholder_for(conf)
+        cue["uncertain"] = True
+        cue["confidence"] = round(conf, 3)
+    return cue
 
 
 def build_ass_header(
@@ -670,7 +751,7 @@ def build_ass_events(
     for c in cues:
         start = _ass_time(c["start"] - start_offset)
         end = _ass_time(c["end"] - start_offset)
-        if p.karaoke and c.get("words"):
+        if p.karaoke and c.get("words") and not c.get("uncertain"):
             # A cue whose words are all blank still has to render as text —
             # an empty Dialogue line is a caption that shows nothing.
             text = _karaoke_tags(c) or c["text"]

@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
   Copy,
   Download,
+  EarOff,
   Flame,
   Loader2,
   Scissors,
@@ -115,6 +116,17 @@ export function ClipCard({
           {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
             ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`}
         </p>
+        {/* Says out loud that some captions are markers, not transcriptions —
+            otherwise [muttering] in the video looks like a bug. */}
+        {(clip.uncertainCues ?? 0) > 0 && (
+          <p
+            className="flex items-center gap-1 text-[10px] text-amber-300/90"
+            title={`${clip.uncertainCues} caption line(s) were unclear speech, so they show [muttering]/[inaudible] instead of a guess.`}
+          >
+            <EarOff className="size-3" />
+            {clip.uncertainCues} unclear caption{clip.uncertainCues === 1 ? "" : "s"}
+          </p>
+        )}
         {/* Primary actions. flex-wrap so nothing can ever be pushed outside a
             narrow card: a 4th button here previously pushed MP4 and .srt off
             the edge where they still existed in the DOM but were unreachable. */}

@@ -17,6 +17,7 @@ import { JobCard } from "@/components/clipforge/JobCard";
 import { ClipCard, ScoreBadge } from "@/components/clipforge/ClipCard";
 import { ClipPreview } from "@/components/clipforge/ClipPreview";
 import { ExportDialog } from "@/components/clipforge/ExportDialog";
+import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips } from "@/hooks/use-poll";
 import { api, type VerifyClipsDto } from "@/lib/api";
@@ -212,6 +213,13 @@ export default function Dashboard() {
                   Re-detect with AI
                 </Button>
                 <ExportDialog job={selectedJob} clips={clips} />
+                <ConfirmDeleteJob
+                  job={selectedJob}
+                  onDeleted={(id) => {
+                    if (selectedJobId === id) setSelectedJobId(null);
+                    void refreshJobs();
+                  }}
+                />
               </div>
             )}
           </div>
@@ -228,19 +236,35 @@ export default function Dashboard() {
             <>
               <div className="mt-3 flex flex-wrap gap-2">
                 {doneJobs.map((job) => (
-                  <button
+                  <span
                     key={job._id}
-                    type="button"
-                    onClick={() => setSelectedJobId(job._id)}
                     className={cn(
-                      "cursor-pointer rounded-full border px-3 py-1.5 text-xs font-medium transition",
+                      "inline-flex items-center rounded-full border text-xs font-medium transition",
                       effectiveJobId === job._id
                         ? "border-primary/60 bg-primary/10 text-primary"
                         : "border-border text-muted-foreground hover:text-foreground",
                     )}
                   >
-                    {sourceLabel(job).slice(0, 36)} · {job.clipCount ?? 0} clips
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedJobId(job._id)}
+                      className="cursor-pointer px-3 py-1.5"
+                    >
+                      {sourceLabel(job).slice(0, 36)} · {job.clipCount ?? 0} clips
+                    </button>
+                    {/* Delete lives INSIDE the pill, next to the batch it
+                        belongs to. It opens a confirmation and never deletes
+                        on the same tap. */}
+                    <ConfirmDeleteJob
+                      job={job}
+                      iconOnly
+                      className="mr-1.5"
+                      onDeleted={(id) => {
+                        if (selectedJobId === id) setSelectedJobId(null);
+                        void refreshJobs();
+                      }}
+                    />
+                  </span>
                 ))}
               </div>
 

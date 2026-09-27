@@ -18,7 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { api, type ClipDto, type SocialPlatformDto, type SocialSlug } from "@/lib/api";
-import { buildPostCaption } from "@/lib/clip-export";
+import { buildPostCaption, clipFileName } from "@/lib/clip-export";
 import { cn } from "@/lib/utils";
 
 /** One tint per platform so the menu is scannable, not four identical rows. */
@@ -48,43 +48,52 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
   }, []);
 
   /**
-   * The share-sheet fallback. Every platform that cannot post right now still
-   * gets a one-tap path: hand the file to the OS share sheet (or download it on
-   * desktop), which is exactly the behaviour that existed before posting was
-   * added. Nothing here can fail because a platform is un-approved.
+   * "Share via..." — the OS share sheet, NOT a social connector.
+   *
+   * Deliberately a different thing from "Post to...":
+   *   Post to...  uses our OAuth connectors, uploads straight to the platform
+   *               and needs that platform configured and approved.
+   *   Share via... hands the same file to Android/iOS/desktop to send however
+   *               the user likes, with no account and no approval.
+   *
+   * The file is the REAL rendered clip — the same /api/clips/<id>/download
+   * endpoint the MP4 button uses, so it is the finished 1080x1920 H.264 with
+   * the burned-in captions, never the source video or a proxy. It is fetched
+   * ONCE and reused for the download fallback: a 10-clip batch is 80 MB a
+   * piece, and the old code downloaded the file twice on every fallback.
    */
-  const shareInstead = async () => {
+  const shareVia = async () => {
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
+    const name = clipFileName(clip);
     const nav = navigator as Navigator & {
       canShare?: (data: ShareData) => boolean;
       share?: (data: ShareData) => Promise<void>;
     };
+    let blob: Blob;
     try {
       const res = await fetch(api.clipDownloadUrl(clip._id));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const file = new File([await res.blob()], `clip-${clip.order + 1}.mp4`, {
-        type: "video/mp4",
-      });
+      blob = await res.blob();
+    } catch {
+      toast.error("Could not load the clip — try the MP4 button.");
+      return;
+    }
+    try {
+      const file = new File([blob], name, { type: "video/mp4" });
       if (nav.canShare?.({ files: [file] })) {
         await nav.share!({ files: [file], text: caption, title: clip.title });
-        toast.success("Shared.");
+        toast.success(`Shared ${name} through your share sheet.`);
         return;
       }
     } catch {
-      // No share sheet, or the user dismissed it -- fall through to download.
+      // The user dismissed the sheet, or the platform has no share target.
     }
-    try {
-      const res = await fetch(api.clipDownloadUrl(clip._id));
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `clip-${clip.order + 1}.mp4`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      toast.success("Downloaded — paste the caption into the app.");
-    } catch {
-      toast.error("Download failed.");
-    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast.success(`Downloaded ${name} — no share sheet on this device.`);
   };
 
   const connect = async (slug: SocialSlug) => {
@@ -135,7 +144,11 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
           variant="outline"
           className="h-7 w-full cursor-pointer gap-1.5 text-xs"
           disabled={!rendered}
-          title={rendered ? "Post this clip" : "No rendered MP4 yet"}
+          title={
+            rendered
+              ? "Post this clip straight to a platform through our connection"
+              : "No rendered MP4 yet"
+          }
         >
           <Send className="size-3.5" />
           Post to...
@@ -165,7 +178,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
                   if (busyNow) return;
                   if (canPost) void post(p.slug, p.label);
                   else if (p.status === "not_connected") void connect(p.slug);
-                  else void shareInstead();
+                  else void shareVia();
                 }}
                 className="flex-col items-start gap-0.5 py-2"
               >
@@ -205,9 +218,21 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
           })
         )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={(e) => (e.preventDefault(), void shareInstead())}>
-          <Share2 className="size-3.5" />
-          Share sheet / download instead
+        <DropdownMenuItem
+          onSelect={(e) => (e.preventDefault(), void shareVia())}
+          className="flex-col items-start gap-0.5 py-2"
+        >
+          <span className="flex w-full items-center gap-2 text-sm">
+            <Share2 className="size-3.5" />
+            <span className="font-medium">Share via...</span>
+            <span className="ml-auto text-[10px] text-muted-foreground">
+              no account needed
+            </span>
+          </span>
+          <span className="pl-6 text-[10px] leading-tight text-muted-foreground">
+            Sends the rendered MP4 (captions burned in) to this phone&apos;s share
+            sheet. Different from posting above.
+          </span>
         </DropdownMenuItem>
         <DropdownMenuItem asChild>
           <a href="/api/social/accounts" target="_blank" rel="noreferrer" className="text-xs">

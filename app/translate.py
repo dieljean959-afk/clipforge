@@ -303,11 +303,28 @@ def translate_cues(cues: Sequence[dict], lang: str, settings: Any,
     """Return cues with translated text and byte-identical timings.
 
     ``cues`` are ``{"start": float, "end": float, "text": str}`` (clip-relative).
+
+    An uncertain cue carries a ``[muttering]`` / ``[inaudible]`` placeholder
+    rather than a transcription. It is passed through untranslated on purpose:
+    those markers mean "this could not be made out", which is true in every
+    language, and handing them to an LLM invites a confident invented
+    translation of a line nobody can hear.
     """
     out: list[dict] = []
+    pending: list[int] = []  # indexes into `out` still waiting for a translation
     for offset in range(0, len(cues), batch_size):
         window = list(cues[offset:offset + batch_size])
-        texts = [str(c.get("text", "")) for c in window]
+        to_translate = [c for c in window if not c.get("uncertain")]
+        for cue in window:
+            out.append({
+                "start": cue["start"],
+                "end": cue["end"],
+                "text": str(cue.get("text", "")) if cue.get("uncertain") else "",
+            })
+            if not cue.get("uncertain"):
+                pending.append(len(out) - 1)
+        if not to_translate:
+            continue
         # Neighbouring cues as context: cheap, and markedly improves how natural
         # the phrasing is versus translating each line in isolation.
         before = [str(c.get("text", "")) for c in cues[max(0, offset - 3):offset]]
@@ -318,9 +335,12 @@ def translate_cues(cues: Sequence[dict], lang: str, settings: Any,
         if after:
             context += "following lines: " + json.dumps(after, ensure_ascii=False)
 
-        translated = translate_texts(texts, lang, settings, glossary, call=call, context=context.strip())
-        for cue, text in zip(window, translated):
-            out.append({"start": cue["start"], "end": cue["end"], "text": text})
+        translated = translate_texts(
+            [str(c.get("text", "")) for c in to_translate],
+            lang, settings, glossary, call=call, context=context.strip(),
+        )
+        for idx, text in zip(pending[-len(translated):] if translated else [], translated):
+            out[idx]["text"] = text
     return out
 
 
