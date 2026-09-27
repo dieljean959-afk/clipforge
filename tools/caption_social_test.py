@@ -455,6 +455,19 @@ check("Copy caption label unchanged", "Copy caption" in card)
 # assert the STRUCTURE that prevents the overflow instead.
 
 
+def code_only(src: str) -> str:
+    """Source with whole-line `//` comments removed.
+
+    The comments in these files deliberately NAME the bugs they prevent
+    ("DropdownMenu opens on pointerdown..."), so a naive substring check finds
+    the explanation and calls it the bug. Checks about what the CODE does read
+    this instead.
+    """
+    return "\n".join(
+        line for line in src.splitlines() if not line.strip().startswith("//")
+    )
+
+
 def div_block_from(src: str, anchor: str, tag: str = "div") -> str:
     """The balanced ``<tag>...</tag>`` opened by the element carrying `anchor`.
 
@@ -515,7 +528,7 @@ check("TS caption cap matches Python", "MAX_CAPTION_CHARS = 150" in ts_src)
 # Share via... vs Post to... — two different things, two different words.
 # --------------------------------------------------------------------------- #
 menu = (ROOT / "src" / "components" / "clipforge" / "PostMenu.tsx").read_text()
-share_row = div_block_from(menu, "Share via...", "DropdownMenuItem")
+share_row = div_block_from(menu, "Share via...", "button")
 # JSX wraps prose across lines, so match against a whitespace-collapsed copy:
 # "share\n  sheet" is the same sentence a reader sees as "share sheet".
 share_flat = " ".join(share_row.split())
@@ -581,6 +594,80 @@ check("the icon inside the pill stops the pill's own click",
 check("the server endpoint is a real DELETE on one job",
       '@app.delete("/api/jobs/{job_id}")' in
       (ROOT / "app" / "main.py").read_text())
+
+# --------------------------------------------------------------------------- #
+# The post/share panel must open reliably and must never pin itself.
+#
+# The version this replaced was a Radix DropdownMenu with `preventDefault()` on
+# every row — on purpose, so the menu stayed open during a post. Radix menus
+# are modal: while one is open the body carries a scroll lock and
+# pointer-events:none. Keeping one open therefore blocked the page underneath,
+# which is exactly "the panel is stuck to the bottom and I cannot scroll to
+# clip 10". A floating popper anchored near the bottom of a phone viewport
+# also had nowhere to go but overlap the list.
+# --------------------------------------------------------------------------- #
+sheet_ui = (ROOT / "src" / "components" / "ui" / "sheet.tsx").read_text()
+# The whole panel, anchored on a node inside it: the <SheetContent opening tag
+# is the anchor we want to LOCATE, so it cannot also be the opening tag we read.
+sheet_block = div_block_from(menu, "SheetTitle", "Sheet")
+
+check("the panel is a Sheet, not a floating dropdown", "<SheetContent" in menu)
+check("the old floating dropdown is gone from the post menu (a popper menu is "
+      "what pinned to the bottom)", "DropdownMenu" not in code_only(menu))
+check("the sheet opens from the bottom of the screen",
+      'side="bottom"' in menu)
+check("nothing can keep the panel open after a tap (preventDefault on a row is "
+      "what held the modal layer over the page)", "preventDefault" not in code_only(menu))
+check("every action row dismisses the sheet first (the platform list AND the "
+      "share row must both close it)", menu.count("setOpen(false)") == 2)
+_menu_code = code_only(menu)
+check("the dismiss happens BEFORE the action is kicked off (close first, then "
+      "upload, or a slow post pins the sheet open)",
+      "void post(p.slug" in _menu_code
+      and "setOpen(false)" in _menu_code
+      and _menu_code.index("setOpen(false)") < _menu_code.index("void post(p.slug"))
+check("the trigger is a plain button, not a pointerdown-driven trigger (a tap "
+      "the browser read as a scroll opened and closed the menu at once)",
+      "onClick={() => setOpen(true)}" in menu and "DropdownMenuTrigger" not in menu)
+check("the panel is scrollable rather than taller than the screen",
+      "max-h-[88vh]" in menu and "overflow-y-auto" in menu)
+check("the sheet provides a close (X) button", "SheetPrimitive.Close" in sheet_ui)
+check("the sheet provides a tap-outside overlay", "SheetOverlay" in sheet_ui)
+check("the sheet has an accessible title", "SheetTitle" in menu)
+
+# Tied to the clip that was tapped: the title in the panel comes from the same
+# `clip` prop the trigger lives next to, and no module-level state carries a
+# clip between cards.
+check("the panel shows the clip it belongs to", "<SheetTitle" in sheet_block
+      and "clip.title" in sheet_block)
+check("no shared/global state holds the open clip",
+      "useState<ClipDto" not in menu and "globalThis" not in menu
+      and "createContext" not in menu)
+check("each card owns its own open state", "const [open, setOpen] = useState(false)" in menu)
+
+# 10 cards used to fire 10 identical /api/social/accounts requests, and each
+# one could land on a different state — including an endless spinner.
+_menu_code_full = code_only(menu)
+check("connection status is fetched once and shared (one call, one in-flight "
+      "promise every card awaits)",
+      _menu_code_full.count("socialAccounts()") == 1
+      and "inflight ??=" in _menu_code_full
+      and "return inflight" in _menu_code_full)
+check("the fetch only happens when the panel is opened",
+      "if (!open) return;" in menu)
+check("a failed lookup is not cached forever (a user on a phone gets to try again)",
+      "must not be cached" in menu and ".catch(" in code_only(menu))
+
+# Nothing in the clip grid may pin itself over the list either.
+dash_src = (ROOT / "src" / "pages" / "Dashboard.tsx").read_text()
+clip_grid = div_block_from(dash_src, "grid grid-cols-2 gap-4", "div")
+check("the clip grid is not inside a fixed-height scroller (a height cap on the "
+      "grid is what makes clip 10 unreachable)",
+      "overflow-hidden" not in clip_grid and "max-h-" not in clip_grid)
+check("the page itself is allowed to scroll (min-h, not a locked height)",
+      'className="min-h-screen' in dash_src)
+check("no fixed overlay is rendered over the clip grid",
+      "fixed inset-0" not in dash_src and "fixed inset-0" not in card)
 
 # --------------------------------------------------------------------------- #
 # Unclear speech: the card says so instead of hiding it.

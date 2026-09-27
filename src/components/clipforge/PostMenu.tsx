@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Check,
@@ -10,13 +10,12 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { api, type ClipDto, type SocialPlatformDto, type SocialSlug } from "@/lib/api";
 import { buildPostCaption, clipFileName } from "@/lib/clip-export";
 import { cn } from "@/lib/utils";
@@ -32,20 +31,56 @@ const TINTS: Record<SocialSlug, string> = {
 /** Platforms with no extra approval step get a calmer hint. */
 const NO_FUSS: ReadonlySet<SocialSlug> = new Set(["youtube"]);
 
+/**
+ * Connection status is the same for every clip on the page, but this component
+ * is mounted once per card — a 10-clip batch used to fire ten identical
+ * requests, and each one could land on a different state. One shared promise,
+ * cached briefly, is both cheaper and the reason the sheet never opens to an
+ * endless "Checking connections...".
+ */
+const PLATFORMS_TTL_MS = 30_000;
+let cachedPlatforms: { at: number; value: SocialPlatformDto[] } | null = null;
+let inflight: Promise<SocialPlatformDto[]> | null = null;
+
+function loadPlatforms(): Promise<SocialPlatformDto[]> {
+  const now = Date.now();
+  if (cachedPlatforms && now - cachedPlatforms.at < PLATFORMS_TTL_MS) {
+    return Promise.resolve(cachedPlatforms.value);
+  }
+  inflight ??= api
+    .socialAccounts()
+    .then((r) => {
+      cachedPlatforms = { at: Date.now(), value: r.platforms };
+      return r.platforms;
+    })
+    .catch(() => {
+      // A failed lookup must not be cached: the user is on a phone and the
+      // next tap should be able to try again.
+      return [] as SocialPlatformDto[];
+    })
+    .finally(() => {
+      inflight = null;
+    });
+  return inflight;
+}
+
 export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean }) {
+  const [open, setOpen] = useState(false);
   const [platforms, setPlatforms] = useState<SocialPlatformDto[] | null>(null);
   const [busy, setBusy] = useState<SocialSlug | null>(null);
+  const live = useRef(true);
 
+  // Fetched when the sheet is first opened, not on mount: a card the user
+  // never taps should cost nothing, and nothing should be able to leave the
+  // sheet stuck on a spinner.
   useEffect(() => {
-    let live = true;
-    api
-      .socialAccounts()
-      .then((r) => live && setPlatforms(r.platforms))
-      .catch(() => live && setPlatforms([]));
+    if (!open) return;
+    live.current = true;
+    loadPlatforms().then((p) => live.current && setPlatforms(p));
     return () => {
-      live = false;
+      live.current = false;
     };
-  }, []);
+  }, [open]);
 
   /**
    * "Share via..." — the OS share sheet, NOT a social connector.
@@ -136,111 +171,154 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
     }
   };
 
+  const caption = buildPostCaption(clip.hookText, clip.hashtags);
+
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 w-full cursor-pointer gap-1.5 text-xs"
-          disabled={!rendered}
-          title={
-            rendered
-              ? "Post this clip straight to a platform through our connection"
-              : "No rendered MP4 yet"
-          }
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7 w-full cursor-pointer gap-1.5 text-xs"
+        disabled={!rendered}
+        title={
+          rendered
+            ? "Post this clip straight to a platform, or share it to another app"
+            : "No rendered MP4 yet"
+        }
+        // A plain onClick, not a Radix trigger: DropdownMenu opens on
+        // pointerdown, and on a touch screen a tap that the browser also reads
+        // as a scroll would open and immediately close it again. The user saw
+        // that as "sometimes nothing happens".
+        onClick={() => setOpen(true)}
+      >
+        <Send className="size-3.5" />
+        Post to...
+      </Button>
+
+      <Sheet open={open} onOpenChange={setOpen}>
+        <SheetContent
+          side="bottom"
+          className="max-h-[88vh] gap-3 overflow-y-auto p-4 sm:max-w-md sm:self-end sm:justify-self-end"
         >
-          <Send className="size-3.5" />
-          Post to...
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-72">
-        <DropdownMenuLabel className="text-xs text-muted-foreground">
-          Caption: {buildPostCaption(clip.hookText, clip.hashtags).split("\n")[0] || "(empty)"}
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {platforms === null ? (
-          <DropdownMenuItem disabled>
-            <Loader2 className="size-3.5 animate-spin" /> Checking connections...
-          </DropdownMenuItem>
-        ) : (
-          platforms.map((p) => {
-            const busyNow = busy === p.slug;
-            const canPost = p.connected;
-            return (
-              <DropdownMenuItem
-                key={p.slug}
-                disabled={busyNow}
-                onSelect={(e) => {
-                  // A click that must start a flow or fire a post must not
-                  // also close the menu.
-                  e.preventDefault();
-                  if (busyNow) return;
-                  if (canPost) void post(p.slug, p.label);
-                  else if (p.status === "not_connected") void connect(p.slug);
-                  else void shareVia();
-                }}
-                className="flex-col items-start gap-0.5 py-2"
-              >
-                <span className="flex w-full items-center gap-2 text-sm">
-                  {busyNow ? (
-                    <Loader2 className="size-3.5 animate-spin" />
-                  ) : canPost ? (
-                    <Send className={cn("size-3.5", TINTS[p.slug])} />
-                  ) : (
-                    <TriangleAlert className="size-3.5 text-muted-foreground" />
-                  )}
-                  <span className="font-medium">{p.label}</span>
-                  <span className="ml-auto text-[10px] text-muted-foreground">
-                    {canPost ? (
-                      <span className="flex items-center gap-1 text-primary">
-                        <Check className="size-3" />
-                        {p.accountName || "connected"}
-                      </span>
-                    ) : p.status === "not_connected" ? (
-                      "connect"
-                    ) : NO_FUSS.has(p.slug) ? (
-                      "not set up"
-                    ) : (
-                      "needs approval"
-                    )}
-                  </span>
+          {/* Sheet affordance: the grabber is decorative only. */}
+          <div
+            aria-hidden
+            className="mx-auto h-1 w-10 shrink-0 rounded-full bg-muted-foreground/40"
+          />
+          <SheetHeader className="text-left">
+            <SheetTitle className="text-base">{clip.title}</SheetTitle>
+            <SheetDescription className="text-xs">
+              Caption: {caption.split("\n")[0] || "(empty)"}
+              {caption.includes("\n") ? (
+                <span className="mt-1 block text-muted-foreground">
+                  {caption.split("\n").slice(1).join(" ")}
                 </span>
-                {!canPost && (
-                  <span className="pl-6 text-[10px] leading-tight text-muted-foreground">
-                    {p.status === "not_connected"
-                      ? "Click to connect."
-                      : `${p.headline} — downloads instead.`}
-                  </span>
-                )}
-              </DropdownMenuItem>
-            );
-          })
-        )}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={(e) => (e.preventDefault(), void shareVia())}
-          className="flex-col items-start gap-0.5 py-2"
-        >
-          <span className="flex w-full items-center gap-2 text-sm">
-            <Share2 className="size-3.5" />
-            <span className="font-medium">Share via...</span>
-            <span className="ml-auto text-[10px] text-muted-foreground">
-              no account needed
-            </span>
-          </span>
-          <span className="pl-6 text-[10px] leading-tight text-muted-foreground">
-            Sends the rendered MP4 (captions burned in) to this phone&apos;s share
-            sheet. Different from posting above.
-          </span>
-        </DropdownMenuItem>
-        <DropdownMenuItem asChild>
-          <a href="/api/social/accounts" target="_blank" rel="noreferrer" className="text-xs">
-            <ExternalLink className="size-3.5" />
-            Connection status
-          </a>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+              ) : null}
+            </SheetDescription>
+          </SheetHeader>
+
+          <div className="flex flex-col gap-1 pb-1">
+            {platforms === null ? (
+              <p className="flex items-center gap-2 rounded-lg border border-border px-3 py-2.5 text-sm text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" />
+                Checking connections...
+              </p>
+            ) : (
+              platforms.map((p) => {
+                const busyNow = busy === p.slug;
+                const canPost = p.connected;
+                return (
+                  <button
+                    key={p.slug}
+                    type="button"
+                    disabled={busyNow}
+                    onClick={() => {
+                      // Close FIRST, act second. The old dropdown kept itself
+                      // open on purpose (preventDefault on every row), which
+                      // held Radix's modal layer over the page: the body stayed
+                      // scroll-locked and un-tappable, so the rest of the
+                      // batch could not be reached. Every action now dismisses
+                      // the sheet, and progress is reported by a toast instead
+                      // of by a panel that must be swiped away.
+                      setOpen(false);
+                      if (busyNow) return;
+                      if (canPost) void post(p.slug, p.label);
+                      else if (p.status === "not_connected") void connect(p.slug);
+                      else void shareVia();
+                    }}
+                    className="flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-accent/40 disabled:opacity-50"
+                  >
+                    <span className="flex w-full items-center gap-2 text-sm">
+                      {busyNow ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : canPost ? (
+                        <Send className={cn("size-3.5", TINTS[p.slug])} />
+                      ) : (
+                        <TriangleAlert className="size-3.5 text-muted-foreground" />
+                      )}
+                      <span className="font-medium">Post to {p.label}</span>
+                      <span className="ml-auto text-[10px] text-muted-foreground">
+                        {canPost ? (
+                          <span className="flex items-center gap-1 text-primary">
+                            <Check className="size-3" />
+                            {p.accountName || "connected"}
+                          </span>
+                        ) : p.status === "not_connected" ? (
+                          "connect"
+                        ) : NO_FUSS.has(p.slug) ? (
+                          "not set up"
+                        ) : (
+                          "needs approval"
+                        )}
+                      </span>
+                    </span>
+                    {!canPost && (
+                      <span className="pl-6 text-[10px] leading-tight text-muted-foreground">
+                        {p.status === "not_connected"
+                          ? "Click to connect."
+                          : `${p.headline} — shares the file instead.`}
+                      </span>
+                    )}
+                  </button>
+                );
+              })
+            )}
+
+            <div className="my-1 h-px bg-border" />
+
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                void shareVia();
+              }}
+              className="flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-accent/40"
+            >
+              <span className="flex w-full items-center gap-2 text-sm">
+                <Share2 className="size-3.5" />
+                <span className="font-medium">Share via...</span>
+                <span className="ml-auto text-[10px] text-muted-foreground">
+                  no account needed
+                </span>
+              </span>
+              <span className="pl-6 text-[10px] leading-tight text-muted-foreground">
+                Sends the rendered MP4 (captions burned in) to this phone&apos;s share
+                sheet. Different from posting above.
+              </span>
+            </button>
+
+            <a
+              href="/api/social/accounts"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-muted-foreground transition hover:text-foreground"
+            >
+              <ExternalLink className="size-3.5" />
+              Connection status
+            </a>
+          </div>
+        </SheetContent>
+      </Sheet>
+    </>
   );
 }
