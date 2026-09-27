@@ -670,6 +670,14 @@ class SubtitleConfig:
     pop_animation: bool = True
     # Default caption style preset: bold_pop | karaoke | lower_third | boxed
     preset: str = "bold_pop"
+    # --- unclear speech ------------------------------------------------
+    # A caption cue whose mean per-word confidence is below `low_confidence`
+    # is shown as [muttering] instead of the model's guess, and below
+    # `inaudible_below` as [inaudible]. Both are 0..1; `low_confidence = 0`
+    # turns the behaviour off entirely. Defaults are measured, not guessed --
+    # see subtitle.LOW_CONFIDENCE for the measurements behind 0.45.
+    low_confidence: float = 0.45
+    inaudible_below: float = 0.30
 
 
 @dataclass
@@ -936,11 +944,35 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         position_y=min(0.95, max(0.3, float(s.get("position_y", 0.78)))),
         pop_animation=bool(s.get("pop_animation", True)),
         preset=str(s.get("preset", "bold_pop")),
+        low_confidence=float(s.get("low_confidence", 0.45)),
+        inaudible_below=float(s.get("inaudible_below", 0.30)),
     )
     if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed"}:
         errors.append(
             f'subtitle.preset "{subtitle.preset}" is not one of '
             "bold_pop/karaoke/lower_third/boxed"
+        )
+    for name, value in (("low_confidence", subtitle.low_confidence),
+                        ("inaudible_below", subtitle.inaudible_below)):
+        if not 0.0 <= value <= 1.0:
+            # A confidence is a probability. Silently clamping `low_confidence
+            # = 5` to 1.0 would leave it meaning "flag absolutely everything"
+            # and, paired with a clamped inaudible tier, produce a config
+            # error about the ORDERING of two numbers the user never intended.
+            # Saying "this must be 0..1" is the useful message.
+            errors.append(
+                f"subtitle.{name} must be between 0 and 1 (got {value}) — "
+                "it is a confidence, not a percentage"
+            )
+    if subtitle.low_confidence > 0 and subtitle.inaudible_below >= subtitle.low_confidence:
+        # Caught here rather than at render time: a mis-ordered pair silently
+        # disables the [inaudible] tier (nothing can be below a lower bar than
+        # the flag itself), and the user would have no idea why. Skipped when
+        # low_confidence is 0 — that is the documented "off" switch, and
+        # inaudible_below is then irrelevant, so it must not block it.
+        errors.append(
+            f"subtitle.inaudible_below ({subtitle.inaudible_below}) must be BELOW "
+            f"subtitle.low_confidence ({subtitle.low_confidence})"
         )
 
     v = raw.get("video", {})

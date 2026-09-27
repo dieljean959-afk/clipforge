@@ -170,6 +170,24 @@ pop_animation = true
 # Default caption style preset: bold_pop | karaoke | lower_third | boxed
 # (per-job override: pick a style on the dashboard form)
 preset = "bold_pop"
+# --- unclear speech -------------------------------------------------------
+# Whisper reports its own confidence per word. A caption cue whose MEAN
+# confidence falls below `low_confidence` is rendered as "[muttering]" instead
+# of the guess, and below `inaudible_below` as "[inaudible]" — a wrong caption
+# burned into a video is worse than an admitted gap, because the viewer reads
+# it as fact and it cannot be corrected after posting.
+#
+# 0.45 is measured, not guessed: on a clean single talker the median cue scored
+# 0.87 (only the genuinely truncated lines fell under it), while a
+# music/rap/overlap clip scored 0.66 with its garbled stretch at 0.16-0.44.
+#
+# Raise it to blank fewer lines (0.55 flags only near-nonsense); lower it to
+# flag more (0.35 is aggressive). Set low_confidence = 0 to turn the behaviour
+# off and always show the transcription.
+low_confidence = 0.45
+# Must stay BELOW low_confidence — a mis-ordered pair is a config error, not a
+# silently disabled tier.
+inaudible_below = 0.30
 
 [video]
 width = 1080

@@ -252,6 +252,112 @@ def main() -> int:
     check("an uncertain cue is never sent to a translator",
           tr and tr[0]["text"] == subtitle.PLACEHOLDER_INAUDIBLE, str(tr))
 
+    # ---- the thresholds are config, not constants ---------------------
+    print("\n[7] unclear-speech thresholds come from config.toml")
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    # Aliased: a bare `load_config` here would shadow the module-level import
+    # the earlier sections use.
+    from app.config import ConfigError as _ConfigError
+    from app.config import load_config as _load_config
+
+    repo = Path(__file__).resolve().parents[1]
+    shipped = _load_config(repo, quiet=True)
+    check("config.toml ships the calibrated 0.45",
+          shipped.subtitle.low_confidence == 0.45, str(shipped.subtitle.low_confidence))
+    check("config.toml ships the 0.30 inaudible tier",
+          shipped.subtitle.inaudible_below == 0.30, str(shipped.subtitle.inaudible_below))
+    check("the shipped values match the module defaults they replace",
+          shipped.subtitle.low_confidence == subtitle.LOW_CONFIDENCE
+          and shipped.subtitle.inaudible_below == subtitle.INAUDIBLE_BELOW)
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="cf-config-"))
+    try:
+        shutil.copy(repo / "config.toml", tmp_root / "config.toml")
+
+        def with_thresholds(low: str, inaudible: str | None = None):
+            text = (tmp_root / "config.toml").read_text(encoding="utf-8")
+            text = re.sub(r"^low_confidence = .*$", f"low_confidence = {low}",
+                          text, flags=re.M)
+            if inaudible is not None:
+                text = re.sub(r"^inaudible_below = .*$", f"inaudible_below = {inaudible}",
+                              text, flags=re.M)
+            (tmp_root / "config.toml").write_text(text, encoding="utf-8")
+            return _load_config(tmp_root, quiet=True)
+
+        # 0.80 must flag the "own every" cue that 0.45 leaves alone: a value
+        # that never changes the output is a value that is not wired up.
+        strict = with_thresholds("0.80")
+        strict_words = [w("own", 0.0, 0.4, 0.62), w("every", 0.4, 0.8, 0.52)]
+        check("a raised threshold flags more lines",
+              strict.subtitle.low_confidence == 0.80
+              and subtitle.words_to_cues(
+                  strict_words, words_per_cue=2,
+                  confidence_threshold=strict.subtitle.low_confidence,
+              )[0].get("uncertain"))
+        check("the same words stay clean at the shipped threshold",
+              not subtitle.words_to_cues(
+                  strict_words, words_per_cue=2,
+                  confidence_threshold=subtitle.LOW_CONFIDENCE)[0].get("uncertain"))
+
+        # 0 disables the whole behaviour, and must stay a legal way to say so
+        # even though it inverts the normal ordering of the two numbers.
+        off = with_thresholds("0.0")
+        check("low_confidence = 0 turns the behaviour off (and is legal)",
+              off.subtitle.low_confidence == 0.0
+              and not any(c.get("uncertain") for c in subtitle.words_to_cues(
+                  clear + murky + muddled, words_per_cue=2,
+                  confidence_threshold=off.subtitle.low_confidence,
+                  inaudible_threshold=off.subtitle.inaudible_below)))
+
+        # The inaudible tier is tunable independently. Wrapped so a config
+        # regression reports as a FAILED check instead of aborting the suite —
+        # a crashed suite stops describing the bug it was written to catch.
+        try:
+            tiers = with_thresholds("0.90", "0.85")
+            tiered = subtitle.words_to_cues(
+                murky, words_per_cue=2,
+                confidence_threshold=tiers.subtitle.low_confidence,
+                inaudible_threshold=tiers.subtitle.inaudible_below)
+            check("inaudible_below is tuned separately from low_confidence",
+                  all(c["text"] == subtitle.PLACEHOLDER_INAUDIBLE for c in tiered),
+                  str([c["text"] for c in tiered]))
+        except _ConfigError as exc:
+            check("inaudible_below is tuned separately from low_confidence",
+                  False, str(exc)[:120])
+
+        # A mis-ordered pair is a config error, not a silently dead tier.
+        try:
+            with_thresholds("0.40", "0.60")
+            check("inaudible_below above low_confidence is rejected", False,
+                  "load_config accepted an impossible pair")
+        except _ConfigError as exc:
+            check("inaudible_below above low_confidence is rejected",
+                  "inaudible_below" in str(exc) and "low_confidence" in str(exc))
+
+        for name, bad in (("low_confidence", "5.0"), ("inaudible_below", "-1")):
+            try:
+                with_thresholds("0.45", bad) if name == "inaudible_below" \
+                    else with_thresholds(bad)
+                check(f"{name} outside 0..1 is rejected", False,
+                      "load_config accepted a nonsense confidence")
+            except _ConfigError as exc:
+                check(f"{name} outside 0..1 is rejected with a useful message",
+                      name in str(exc) and "between 0 and 1" in str(exc))
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    # The render stage must actually read the config rather than the defaults.
+    task_src = (repo / "app" / "task.py").read_text(encoding="utf-8")
+    check("the render stage passes the configured threshold",
+          "confidence_threshold=self.settings.subtitle.low_confidence" in task_src)
+    check("the render stage passes the configured inaudible tier",
+          "inaudible_threshold=self.settings.subtitle.inaudible_below" in task_src)
+    check("no hardcoded threshold is left in the render path",
+          "confidence_threshold=0.45" not in task_src)
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

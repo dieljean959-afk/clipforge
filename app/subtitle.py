@@ -627,8 +627,8 @@ def cue_confidence(words: list[dict]) -> float | None:
     return sum(vals) / len(vals)
 
 
-def _placeholder_for(conf: float) -> str:
-    return PLACEHOLDER_INAUDIBLE if conf < INAUDIBLE_BELOW else PLACEHOLDER_MUTTERING
+def _placeholder_for(conf: float, inaudible_threshold: float = INAUDIBLE_BELOW) -> str:
+    return PLACEHOLDER_INAUDIBLE if conf < inaudible_threshold else PLACEHOLDER_MUTTERING
 
 
 def words_to_cues(
@@ -638,6 +638,7 @@ def words_to_cues(
     max_chars: int = 24,
     max_duration: float = 2.2,
     confidence_threshold: float = LOW_CONFIDENCE,
+    inaudible_threshold: float = INAUDIBLE_BELOW,
 ) -> list[dict]:
     """Group word timings into caption cues of ~2-3 words.
 
@@ -659,17 +660,18 @@ def words_to_cues(
         dur = w["end"] - current[0]["start"]
         if len(current) >= words_per_cue or len(text) >= max_chars or dur >= max_duration:
             cues.append(_make_cue(current[0]["start"], w["end"], text, current,
-                                  confidence_threshold))
+                                  confidence_threshold, inaudible_threshold))
             current = []
     if current:
         cues.append(_make_cue(current[0]["start"], current[-1]["end"],
                               " ".join(x["word"] for x in current), current,
-                              confidence_threshold))
+                              confidence_threshold, inaudible_threshold))
     return cues
 
 
 def _make_cue(
-    start: float, end: float, text: str, words: list[dict], threshold: float
+    start: float, end: float, text: str, words: list[dict],
+    threshold: float, inaudible_threshold: float,
 ) -> dict:
     conf = cue_confidence(words)
     cue = {
@@ -679,7 +681,7 @@ def _make_cue(
         "words": list(words),
     }
     if conf is not None and conf < threshold:
-        cue["text"] = _placeholder_for(conf)
+        cue["text"] = _placeholder_for(conf, inaudible_threshold)
         cue["uncertain"] = True
         cue["confidence"] = round(conf, 3)
     return cue

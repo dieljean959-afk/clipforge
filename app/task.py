@@ -620,6 +620,11 @@ class Pipeline:
             cue_words = [w.as_dict() for w in transcript.words if w.end > c0 and w.start < c1]
             cues = subtitle.words_to_cues(
                 cue_words, words_per_cue=self.settings.subtitle.words_per_cue,
+                # Configured, not hardcoded: [subtitle] low_confidence /
+                # inaudible_below in config.toml. The module defaults only apply
+                # when those keys are absent.
+                confidence_threshold=self.settings.subtitle.low_confidence,
+                inaudible_threshold=self.settings.subtitle.inaudible_below,
             )
             for cue in cues:
                 cue["start"] -= c0
