@@ -24,7 +24,19 @@ from typing import Any
 
 from loguru import logger
 
-from app import asr, download, encode, eta, llm, reframe, subtitle, translate, vad, video
+from app import (
+    asr,
+    caption_style,
+    download,
+    encode,
+    eta,
+    llm,
+    reframe,
+    subtitle,
+    translate,
+    vad,
+    video,
+)
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
@@ -520,11 +532,18 @@ class Pipeline:
     ) -> None:
         job_id = job["_id"]
         opts = job.get("options", {}) or {}
-        preset = opts.get("captionPreset") or self.settings.subtitle.preset
+        # The caption knobs the dashboard can change are re-read ONCE, here.
+        # Resolving per job (not per clip, not per request) is what keeps a
+        # batch internally consistent: someone saving a new burst length while
+        # ten clips are encoding changes the NEXT job, not clip 7 of this one.
+        # The shared settings object is never mutated, so clearing an override
+        # really does go back to config.toml.
+        settings = caption_style.resolve(self.settings)
+        preset = opts.get("captionPreset") or settings.subtitle.preset
         # One style for the WHOLE batch, decided once and fingerprinted so a
         # later style edit re-encodes every clip instead of leaving the batch
         # half old, half new.
-        style_id = subtitle.style_fingerprint(self.settings, preset)
+        style_id = subtitle.style_fingerprint(settings, preset)
         src_meta = video.probe(src)
 
         # ---- stage: reframe (shot detection + crop windows per clip) ------
@@ -629,10 +648,10 @@ class Pipeline:
             # Fillers/stutters are dropped from the DISPLAYED text only; the
             # stored transcript keeps every word, so the .txt, the search index
             # and a later re-render are unaffected.
-            if self.settings.subtitle.strip_fillers or self.settings.subtitle.strip_stutters:
+            if settings.subtitle.strip_fillers or settings.subtitle.strip_stutters:
                 cue_words, dropped = subtitle.strip_fillers(
                     cue_words,
-                    drop_stutters=self.settings.subtitle.strip_stutters,
+                    drop_stutters=settings.subtitle.strip_stutters,
                 )
                 if dropped:
                     self._log(
@@ -651,14 +670,14 @@ class Pipeline:
                     # Short bursts, cut on the speaker's own pauses. The target
                     # length and the hard cap are both config; a pause always
                     # wins, which is what makes the rhythm follow the speech.
-                    words_per_cue=self.settings.subtitle.words_per_cue,
-                    max_words=self.settings.subtitle.words_per_cue_max,
-                    pause_sec=self.settings.subtitle.pause_sec,
+                    words_per_cue=settings.subtitle.words_per_cue,
+                    max_words=settings.subtitle.words_per_cue_max,
+                    pause_sec=settings.subtitle.pause_sec,
                     # Configured, not hardcoded: [subtitle] low_confidence /
                     # inaudible_below in config.toml. The module defaults only
                     # apply when those keys are absent.
-                    confidence_threshold=self.settings.subtitle.low_confidence,
-                    inaudible_threshold=self.settings.subtitle.inaudible_below,
+                    confidence_threshold=settings.subtitle.low_confidence,
+                    inaudible_threshold=settings.subtitle.inaudible_below,
                 )
             for cue in cues:
                 cue["start"] -= c0
@@ -681,7 +700,7 @@ class Pipeline:
             # ---- stage: captions (ASS per clip, preset-aware) --------------
             ass_path = ws.stage_dir("captions") / f"clip_{idx + 1:02d}.ass"
             subtitle.write_ass(
-                cues, self.settings, ass_path, 1080, 1920, preset_key=preset,
+                cues, settings, ass_path, 1080, 1920, preset_key=preset,
             )
             if idx == 0:
                 self._log(job_id, f"caption style: {preset}")

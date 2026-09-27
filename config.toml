@@ -173,6 +173,12 @@ words_per_cue_max = 4
 # the boundaries land where the speaker actually pauses instead of every N
 # words. Raise it for captions that hold together across short breaths.
 pause_sec = 0.30
+# Colour the word being spoken is painted in. Leave empty to keep the preset's
+# own accent (Bold pop = neon green, Lower-third = white). Overridable from
+# the dashboard's "Caption style" dialog, which stores its choice in
+# data/caption_style.json and takes effect on the next render — these file
+# values are the fallback, so clearing the override comes back here.
+highlight_color = ""
 # Remove unambiguous vocal fillers ("um", "uh", "hmm") and adjacent stutters
 # ("the the") from the DISPLAYED captions only. The audio is never modified —
 # a clip is a straight cut of the source, so cutting a spoken "um" out of the

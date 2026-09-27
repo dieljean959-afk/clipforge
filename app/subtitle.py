@@ -19,7 +19,7 @@ import json
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from loguru import logger
@@ -131,11 +131,19 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
 }
 
 
-def get_preset(key: str | None) -> CaptionPreset:
-    """Resolve a preset by key, falling back to the default (never raises)."""
-    if not key:
-        return CAPTION_PRESETS["bold_pop"]
-    return CAPTION_PRESETS.get(key, CAPTION_PRESETS["bold_pop"])
+def get_preset(key: str | None, highlight_color: str | None = None) -> CaptionPreset:
+    """Resolve a preset by key, falling back to the default (never raises).
+
+    `highlight_color` replaces the preset's own accent — the colour the word
+    being spoken is painted in. Empty or absent keeps the preset's accent, so
+    picking "Karaoke fill" still looks like karaoke fill and a preset switch
+    does not quietly inherit a colour chosen for a different one.
+    """
+    preset = CAPTION_PRESETS.get(key or "", CAPTION_PRESETS["bold_pop"])
+    color = (highlight_color or "").strip()
+    if not color or color == preset.secondary:
+        return preset
+    return replace(preset, secondary=color)
 
 
 @dataclass
@@ -797,7 +805,12 @@ def words_to_cues(
             text = " ".join(str(x["word"]) for x in current + [w])
             dur = float(w.get("end") or 0.0) - current[0]["start"]
             if (
-                gap >= pause_sec
+                # `pause_sec = 0` means "never cut on a pause", NOT "cut on
+                # every one": a gap is never negative, so `gap >= 0` is always
+                # true and the burst collapsed to one word per caption — the
+                # exact clunky output the burst settings exist to avoid. The
+                # zero case has to be excluded explicitly.
+                (pause_sec > 0 and gap >= pause_sec)
                 or len(current) + 1 > max_words
                 or len(current) >= words_per_cue
                 or len(text) > max_chars
@@ -831,7 +844,7 @@ def _make_cue(
 
 
 def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
-    """Short hash of everything that decides how a caption LOOKS.
+    """Short hash of everything that decides what a caption LOOKS like.
 
     The preset key alone is not enough: font, size, colours, outline and
     vertical position also come from ``[subtitle]``, so changing any of them
@@ -839,12 +852,22 @@ def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
     rendered one wears the new — the exact per-clip drift this guards against.
     The render stage stores this next to each clip and re-encodes when it
     changes, so a style edit lands on the whole batch at once.
+
+    The RHYTHM knobs belong here too, not just the looks: burst length, the
+    pause that ends a burst and the filler filter all change the words and
+    their times, which are burned into the pixels just as firmly as the colour.
+    Leaving them out meant a burst length saved from the dashboard produced a
+    new style that fingerprinted IDENTICALLY to the old one, so "Re-render
+    captions" skipped every clip and the change appeared to do nothing.
     """
-    p = get_preset(preset_key)
+    p = get_preset(preset_key, settings.subtitle.highlight_color)
+    sub = settings.subtitle
     payload = "|".join(str(v) for v in (
         preset_key or "bold_pop", p.label, p.font_size, p.primary, p.secondary,
         p.outline_color, p.outline_width, p.shadow, p.box, p.karaoke, p.highlight,
-        p.pop, p.position_y, settings.subtitle.font, settings.subtitle.font_fallbacks,
+        p.pop, p.position_y, sub.font, sub.font_fallbacks,
+        sub.words_per_cue, sub.words_per_cue_max, round(sub.pause_sec, 3),
+        sub.strip_fillers, sub.strip_stutters,
     ))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
@@ -852,7 +875,7 @@ def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
 def build_ass_header(
     settings: Settings, width: int, height: int, preset_key: str | None = None
 ) -> str:
-    p = get_preset(preset_key)
+    p = get_preset(preset_key, settings.subtitle.highlight_color)
     font = settings.subtitle.font
     primary = _hex_to_ass(p.primary)
     secondary = _hex_to_ass(p.secondary)
@@ -918,7 +941,7 @@ def build_ass_events(
     cues: list[dict], settings: Settings, start_offset: float = 0.0,
     preset_key: str | None = None,
 ) -> str:
-    p = get_preset(preset_key)
+    p = get_preset(preset_key, settings.subtitle.highlight_color)
     # The word-highlight path needs per-word timings; both the default style and
     # the karaoke style use it, the others keep their flat rendering.
     highlight = (p.karaoke or p.highlight)

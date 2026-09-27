@@ -688,6 +688,11 @@ class SubtitleConfig:
     # see subtitle.LOW_CONFIDENCE for the measurements behind 0.45.
     low_confidence: float = 0.45
     inaudible_below: float = 0.30
+    # Colour the word being spoken is painted in. Empty means "use the
+    # preset's own accent", which is what keeps a preset change intact: the
+    # Lower-third style ships a white accent, Bold pop a neon green, and
+    # overriding both to the same colour would erase that difference.
+    highlight_color: str = ""
 
 
 @dataclass
@@ -806,6 +811,22 @@ def _load_toml(path: Path) -> dict:
             return tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"config.toml is not valid TOML: {exc}") from exc
+
+
+def _hex_or_blank(value: object, name: str, errors: list[str]) -> str:
+    """A hex colour, or "" meaning 'use the preset default'.
+
+    The empty case is the common one: most installs never set a highlight
+    colour, and demanding one would turn a blank config line into a boot
+    failure.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not text.startswith("#") or len(text) not in (4, 7):
+        errors.append(f'{name} "{text}" must be a hex colour like #39FF14, or left empty')
+        return ""
+    return text
 
 
 def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
@@ -960,6 +981,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         inaudible_below=float(s.get("inaudible_below", 0.30)),
         strip_fillers=bool(s.get("strip_fillers", True)),
         strip_stutters=bool(s.get("strip_stutters", True)),
+        highlight_color=_hex_or_blank(s.get("highlight_color", ""), "subtitle.highlight_color", errors),
     )
     if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed"}:
         errors.append(

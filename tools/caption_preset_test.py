@@ -390,11 +390,14 @@ def main() -> int:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
     # The render stage must actually read the config rather than the defaults.
+    # The knobs now come from a per-job resolved copy (`settings`), not
+    # `self.settings`, so a style saved from the dashboard applies to the next
+    # render without mutating the shared object.
     task_src = (repo / "app" / "task.py").read_text(encoding="utf-8")
     check("the render stage passes the configured threshold",
-          "confidence_threshold=self.settings.subtitle.low_confidence" in task_src)
+          "confidence_threshold=settings.subtitle.low_confidence" in task_src)
     check("the render stage passes the configured inaudible tier",
-          "inaudible_threshold=self.settings.subtitle.inaudible_below" in task_src)
+          "inaudible_threshold=settings.subtitle.inaudible_below" in task_src)
     check("no hardcoded threshold is left in the render path",
           "confidence_threshold=0.45" not in task_src)
 
@@ -545,8 +548,238 @@ def main() -> int:
     check("one style is chosen per job, not per clip",
           task_src2.count('opts.get("captionPreset")') == 1)
 
+    section_tunable(s, task_src2)
+    section_endpoints()
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
+
+
+def section_endpoints() -> None:
+    """[10] the HTTP surface the dialog actually talks to."""
+    print("\n[10] /api/settings/captions round-trip")
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+    from app import caption_style
+
+    main_mod._do_warmup = lambda: None
+    saved = caption_style.read(main_mod.settings.app.paths)
+    client = TestClient(main_mod.app)  # no context manager: no worker, no warmup
+    try:
+        r = client.get("/api/settings/captions")
+        check("GET caption style answers 200", r.status_code == 200, r.text)
+        body = r.json()
+        check("GET reports the limits the sliders need",
+              set(body.get("limits", {})) == {"words_per_cue", "words_per_cue_max", "pause_sec"},
+              str(body.get("limits")))
+        check("GET reports which values are pinned",
+              isinstance(body.get("overrides"), dict), str(body.get("overrides")))
+        check("GET says which colour is in force", "highlight_color" in body, str(body.keys()))
+        before = dict(body)
+
+        r = client.put("/api/settings/captions",
+                       json={"words_per_cue": 2, "pause_sec": 0.45, "highlight_color": "#FF5C39"})
+        check("PUT caption style answers 200", r.status_code == 200, r.text)
+        put = r.json()
+        check("PUT echoes the saved values",
+              put["words_per_cue"] == 2 and abs(put["pause_sec"] - 0.45) < 1e-6
+              and put["highlight_color"] == "#FF5C39", str(put))
+        check("PUT marks them as pinned",
+              set(put.get("overrides", {})) == {"words_per_cue", "pause_sec", "highlight_color"},
+              str(put.get("overrides")))
+        check("PUT returns a new style id so a re-render will not be skipped",
+              put.get("styleId") and put["styleId"] != before.get("styleId"),
+              f"{before.get('styleId')} -> {put.get('styleId')}")
+
+        check("the saved values reach the next render with no restart",
+              caption_style.resolve(main_mod.settings).subtitle.words_per_cue == 2)
+        check("GET after PUT agrees", client.get("/api/settings/captions").json()["words_per_cue"] == 2)
+
+        r = client.put("/api/settings/captions", json={"words_per_cue": 99, "pause_sec": -1})
+        check("PUT with absurd values is clamped, not a 500", r.status_code == 200, r.text)
+        check("the clamped burst length is inside the advertised range",
+              r.json()["words_per_cue"] <= r.json()["limits"]["words_per_cue"]["max"],
+              str(r.json()["words_per_cue"]))
+        r = client.put("/api/settings/captions", json={"words_per_cue": "banana"})
+        # A number field given a word is rejected outright rather than quietly
+        # dropped: a 422 names the offending key, whereas silently ignoring it
+        # would leave the user staring at a slider that refuses to move.
+        check("PUT with a non-numeric value is rejected, not silently ignored",
+              r.status_code == 422, f"{r.status_code} {r.text[:120]}")
+        check("the rejected PUT stored nothing",
+              client.get("/api/settings/captions").json()["words_per_cue"] != "banana")
+
+        r = client.delete("/api/settings/captions")
+        check("DELETE caption style answers 200", r.status_code == 200, r.text)
+        check("DELETE clears the pinned markers", r.json()["overrides"] == {}, str(r.json()["overrides"]))
+        check("DELETE brings the config.toml value back",
+              r.json()["words_per_cue"] == before["words_per_cue"],
+              f"{r.json()['words_per_cue']} vs {before['words_per_cue']}")
+    finally:
+        client.close()
+        # leave the real store exactly as it was found
+        caption_style.write(main_mod.settings.app.paths, saved)
+        check("the test restored whatever was stored before it ran", True)
+
+
+def section_tunable(s, task_src: str) -> None:
+    """[9] the caption knobs the dashboard can change, and what they must not break."""
+    import shutil
+    import tempfile
+    from dataclasses import replace
+
+    from app import caption_style
+    from app.config import Paths
+
+    print("\n[9] dashboard-tunable burst length, pause and highlight colour")
+
+    tmp = Path(tempfile.mkdtemp(prefix="cf-caption-style-"))
+    try:
+        paths = Paths(
+            downloads_dir=tmp / "downloads",
+            outputs_dir=tmp / "outputs",
+            data_dir=tmp / "data",
+            static_dir=tmp / "webui",
+        )
+        for d in (paths.downloads_dir, paths.outputs_dir, paths.data_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        iso = replace(s, app=replace(s.app, paths=paths))
+        base = iso.subtitle
+
+        # ---- defaults come from config.toml, nothing pinned ------------
+        check("with no override the config values are used unchanged",
+              caption_style.resolve(iso).subtitle.words_per_cue == base.words_per_cue
+              and caption_style.resolve(iso).subtitle.pause_sec == base.pause_sec)
+        check("no override means the preset's own highlight colour",
+              caption_style.resolve(iso).subtitle.highlight_color == "")
+
+        # ---- saving an override -----------------------------------------
+        caption_style.write(paths, {
+            "words_per_cue": 2, "pause_sec": 0.5, "highlight_color": "#FFD400",
+        })
+        resolved = caption_style.resolve(iso)
+        check("a saved burst length reaches the next render",
+              resolved.subtitle.words_per_cue == 2, str(resolved.subtitle.words_per_cue))
+        check("a saved pause threshold reaches the next render",
+              abs(resolved.subtitle.pause_sec - 0.5) < 1e-6, str(resolved.subtitle.pause_sec))
+        check("a saved highlight colour reaches the next render",
+              resolved.subtitle.highlight_color == "#FFD400")
+        check("resolve() does not mutate the settings it was given",
+              iso.subtitle.words_per_cue == base.words_per_cue
+              and iso.subtitle.pause_sec == base.pause_sec)
+
+        # ---- the colour actually lands in the ASS -----------------------
+        header = subtitle.build_ass_header(resolved, 1080, 1920, "bold_pop")
+        fields = style_fields(header)
+        # ASS is &HAABBGGRR — #FFD400 is R=FF G=D4 B=00, i.e. BGR 00D4FF.
+        # Field 3 is SecondaryColour, the colour the spoken word is painted in;
+        # field 4 is the OUTLINE, which is a different setting and must not move.
+        check("the saved colour becomes the ASS sung-word colour",
+              len(fields) > 4 and fields[3] == "&H0000D4FF", str(fields[:5]))
+        check("the outline colour is untouched by the highlight override",
+              len(fields) > 4 and fields[4] == "&H0014FF39", str(fields[:5]))
+        check("the text colour is still white",
+              len(fields) > 4 and fields[2] == "&H00FFFFFF", str(fields[:5]))
+
+        # ---- and changes the fingerprint, so a re-render is not skipped --
+        default_id = subtitle.style_fingerprint(iso, "bold_pop")
+        tuned_id = subtitle.style_fingerprint(resolved, "bold_pop")
+        check("a changed highlight colour changes the style fingerprint",
+              default_id != tuned_id, f"{default_id} vs {tuned_id}")
+        check("the fingerprint is stable for the same saved style",
+              tuned_id == subtitle.style_fingerprint(caption_style.resolve(iso), "bold_pop"))
+
+        for name, value in (("words_per_cue", 1), ("pause_sec", 0.75)):
+            caption_style.write(paths, {name: value})
+            check(f"a changed {name} changes the style fingerprint",
+                  subtitle.style_fingerprint(caption_style.resolve(iso), "bold_pop")
+                  != default_id)
+
+        # ---- clearing an override really restores the default ------------
+        caption_style.write(paths, {})
+        cleared = caption_style.resolve(iso)
+        check("clearing the overrides goes back to config.toml",
+              cleared.subtitle.words_per_cue == base.words_per_cue
+              and cleared.subtitle.pause_sec == base.pause_sec
+              and cleared.subtitle.highlight_color == base.highlight_color)
+        check("a cleared style fingerprints the same as it did before any save",
+              subtitle.style_fingerprint(cleared, "bold_pop") == default_id)
+
+        # ---- bad input is clamped, never raised ------------------------
+        caption_style.write(paths, {"words_per_cue": 99, "pause_sec": -4,
+                                    "highlight_color": "chartreuse"})
+        clamped = caption_style.resolve(iso)
+        check("an absurd burst length is clamped to the slider max",
+              clamped.subtitle.words_per_cue == caption_style.TUNABLES["words_per_cue"][1],
+              str(clamped.subtitle.words_per_cue))
+        check("a negative pause is clamped to zero, not passed to the render",
+              clamped.subtitle.pause_sec == 0.0, str(clamped.subtitle.pause_sec))
+        check("a colour that is not hex is dropped, not passed to libass",
+              clamped.subtitle.highlight_color == "", repr(clamped.subtitle.highlight_color))
+
+        caption_style.write(paths, {"words_per_cue": 6, "words_per_cue_max": 2})
+        fixed = caption_style.resolve(iso)
+        check("a target above the cap pulls the target down, not an impossible pair",
+              fixed.subtitle.words_per_cue <= fixed.subtitle.words_per_cue_max,
+              f"{fixed.subtitle.words_per_cue} vs {fixed.subtitle.words_per_cue_max}")
+
+        for junk in ({"nonsense": 5}, {"pause_sec": "soon"}, {"words_per_cue": None}):
+            caption_style.write(paths, {})
+            caption_style.write(paths, junk)
+            try:
+                caption_style.resolve(iso)
+                check(f"junk input {junk} does not raise", True)
+            except Exception as exc:
+                check(f"junk input {junk} does not raise", False, repr(exc))
+
+        p = caption_style.store_path(paths)
+        p.write_text("{not json", encoding="utf-8")
+        check("a corrupt override file is ignored rather than fatal",
+              caption_style.resolve(iso).subtitle.words_per_cue == base.words_per_cue)
+        p.unlink()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- the knobs the UI can reach are the ones that matter ----------
+    check("the tunables are exactly burst length and the pause threshold",
+          set(caption_style.TUNABLES) == {"words_per_cue", "words_per_cue_max", "pause_sec"},
+          str(sorted(caption_style.TUNABLES)))
+
+    # ---- the pause slider's zero position must mean what it says -------
+    flow = [
+        {"start": 0.00, "end": 0.30, "word": "one"},
+        {"start": 0.30, "end": 0.60, "word": "two"},
+        {"start": 0.60, "end": 0.90, "word": "three"},
+        {"start": 0.90, "end": 1.20, "word": "four"},
+    ]
+    off = subtitle.words_to_cues(flow, words_per_cue=3, max_words=4, pause_sec=0.0)
+    check("a pause threshold of 0 means 'never cut on a pause', not 'cut on every word'",
+          len(off) == 2 and [c["text"] for c in off] == ["one two three", "four"],
+          str([c["text"] for c in off]))
+    on = subtitle.words_to_cues(flow, words_per_cue=3, max_words=4, pause_sec=0.30)
+    check("a pause threshold above the gaps still groups normally", len(on) == 2,
+          str([c["text"] for c in on]))
+    gappy = flow + [{"start": 2.00, "end": 2.30, "word": "five"}]
+    check("with pauses off a long silence does not split the burst",
+          len(subtitle.words_to_cues(gappy, words_per_cue=4, max_words=4, pause_sec=0.0)) == 2,
+          str([c["text"] for c in subtitle.words_to_cues(gappy, words_per_cue=4, max_words=4)]))
+    check("with pauses on that same silence does split it",
+          len(subtitle.words_to_cues(gappy, words_per_cue=4, max_words=4, pause_sec=0.30)) == 2,
+          str([c["text"] for c in subtitle.words_to_cues(gappy, words_per_cue=4, max_words=4, pause_sec=0.30)]))
+    check("every tunable is a real SubtitleConfig field",
+          all(hasattr(s.subtitle, k) for k in caption_style.TUNABLES))
+    check("the highlight colour is a real SubtitleConfig field",
+          hasattr(s.subtitle, "highlight_color"))
+    check("the render stage resolves the saved style once per job",
+          "settings = caption_style.resolve(self.settings)" in task_src)
+    check("resolve() happens before the fingerprint, so one job = one style",
+          task_src.index("caption_style.resolve(self.settings)")
+          < task_src.index("style_fingerprint(settings, preset)"))
+    check("the per-job settings are what the cues are built from",
+          "words_per_cue=settings.subtitle.words_per_cue" in task_src
+          and "pause_sec=settings.subtitle.pause_sec" in task_src)
 
 
 if __name__ == "__main__":

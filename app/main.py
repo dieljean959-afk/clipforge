@@ -22,8 +22,8 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+from app import caption_style, eta, hosting, hostlimits
 from app import encode as encode_mod
-from app import eta, hosting, hostlimits
 from app import llm as llm_mod
 from app import subtitle as subtitle_svc
 from app import video as video_svc
@@ -794,6 +794,57 @@ def remove_groq_key() -> dict:
         f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
     )
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
+
+
+# --------------------------------------------------------------------------- #
+# caption style
+# --------------------------------------------------------------------------- #
+
+class CaptionStyleIn(BaseModel):
+    # All optional: the dialog sends the whole set it knows about, and a
+    # missing key means "stop overriding this one".
+    words_per_cue: float | None = None
+    words_per_cue_max: float | None = None
+    pause_sec: float | None = None
+    highlight_color: str | None = None
+
+
+@app.get("/api/settings/captions")
+def get_caption_style() -> dict:
+    """The caption knobs, merged over config.toml, plus which are overridden."""
+    return caption_style.effective(settings)
+
+
+@app.put("/api/settings/captions")
+def put_caption_style(body: CaptionStyleIn) -> dict:
+    """Save the caption knobs the dashboard exposes.
+
+    Saving does NOT re-encode anything: a clip's captions are burned into its
+    pixels, so the change lands on the next render. The style fingerprint
+    covers these values, which is what makes the existing "Re-render captions"
+    button re-encode instead of skipping a clip it thinks is already styled
+    correctly.
+
+    No restart is needed and the running process is not mutated: the render
+    stage re-reads the stored file when a job starts (caption_style.resolve).
+    """
+    stored = caption_style.write(
+        settings.app.paths, body.model_dump(exclude_none=True)
+    )
+    return {
+        **caption_style.effective(settings),
+        "saved": stored,
+        "styleId": subtitle_svc.style_fingerprint(
+            caption_style.resolve(settings), settings.subtitle.preset
+        ),
+    }
+
+
+@app.delete("/api/settings/captions")
+def reset_caption_style() -> dict:
+    """Drop every override and go back to config.toml."""
+    caption_style.write(settings.app.paths, {})
+    return caption_style.effective(settings)
 
 
 # --------------------------------------------------------------------------- #

@@ -5,6 +5,29 @@ import type { ClipStage } from "@/lib/clipforge";
 
 export type DetectionProvider = "groq" | "gemini" | "ollama";
 
+/** The caption look knobs the dashboard can change. */
+export interface CaptionStyleDto {
+  /** Target burst length in words; a pause or the cap still ends a burst sooner. */
+  words_per_cue: number;
+  /** Hard cap on a burst. Always >= words_per_cue. */
+  words_per_cue_max: number;
+  /** A gap of at least this many seconds before the next word ends the burst. */
+  pause_sec: number;
+  /** "" means the preset's own accent colour. */
+  highlight_color: string;
+  /** Which of these are pinned here rather than inherited from config.toml. */
+  overrides: Record<string, number | string>;
+  limits: Record<string, { min: number; max: number; step: number }>;
+}
+
+/** A partial save: an omitted key stops overriding that one value. */
+export type CaptionStyleUpdate = Partial<
+  Pick<
+    CaptionStyleDto,
+    "words_per_cue" | "words_per_cue_max" | "pause_sec" | "highlight_color"
+  >
+>;
+
 /** Which backend scores the viral moments (NOT the ASR engine). */
 export interface DetectionDto {
   provider: DetectionProvider;
@@ -410,6 +433,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ provider }),
     }),
+  /** The caption knobs, merged over config.toml, plus which ones are pinned. */
+  captionStyle: () => request<CaptionStyleDto>("/api/settings/captions"),
+  /** Save the caption knobs. Takes effect on the next render, not this one. */
+  saveCaptionStyle: (values: CaptionStyleUpdate) =>
+    request<CaptionStyleDto & { saved: Record<string, unknown>; styleId: string }>(
+      "/api/settings/captions",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      },
+    ),
+  /** Drop every override and fall back to config.toml. */
+  resetCaptionStyle: () =>
+    request<CaptionStyleDto>("/api/settings/captions", { method: "DELETE" }),
   listClips: (jobId: string) => request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>
     requestBlob("/api/export/zip", {

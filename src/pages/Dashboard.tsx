@@ -18,6 +18,7 @@ import { ClipCard, ScoreBadge } from "@/components/clipforge/ClipCard";
 import { ClipPreview } from "@/components/clipforge/ClipPreview";
 import { ExportDialog } from "@/components/clipforge/ExportDialog";
 import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
+import { CaptionStyleDialog } from "@/components/clipforge/CaptionStyleDialog";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips } from "@/hooks/use-poll";
 import { api, type VerifyClipsDto } from "@/lib/api";
@@ -220,7 +221,13 @@ export default function Dashboard() {
         {/* completed jobs */}
         <section className="mt-10">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-lg font-bold tracking-tight">Your batches</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-bold tracking-tight">Your batches</h2>
+              {/* Caption style is global, not per batch, so it lives out here
+                  rather than inside the selected-job toolbar — it has to be
+                  reachable before the first batch exists. */}
+              <CaptionStyleDialog />
+            </div>
             {selectedJob && (
               <div className="flex items-center gap-2">
                 <Button
