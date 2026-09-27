@@ -8,6 +8,7 @@ pre-download (explicit, with progress) → worker thread starts.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -878,11 +879,13 @@ async def upload_job(
     except Exception as exc:
         final.unlink(missing_ok=True)
         store.delete_job(job_id)
+        shutil.rmtree(dest_dir, ignore_errors=True)
         raise HTTPException(400, f"Could not read the uploaded video: {exc}") from exc
     max_seconds = settings.hosted.max_source_min * 60
     if uploaded_meta["duration"] > max_seconds:
         final.unlink(missing_ok=True)
         store.delete_job(job_id)
+        shutil.rmtree(dest_dir, ignore_errors=True)
         raise HTTPException(
             413,
             f"Video is {uploaded_meta['duration'] / 60:.0f} min — this plan "
@@ -925,9 +928,16 @@ def delete_job(job_id: str) -> dict:
     ok = store.delete_job(job_id)
     if not ok:
         raise HTTPException(404, "job not found")
-    # stage mirrors (per-chunk transcript caches, the extracted audio WAV) are
-    # not part of the job store and would otherwise accumulate forever
+    # Everything that job wrote to disk. The downloaded source (hundreds of MB
+    # for a long video) and the rendered clips are NOT in the job store, so
+    # without this a manual delete only freed a few KB of JSON and the disk
+    # stayed full — the retention sweeper already does exactly this.
     remove_workspace(settings.app.paths.data_dir, job_id)
+    for d in (
+        settings.app.paths.downloads_dir / job_id,
+        settings.app.paths.outputs_dir / job_id,
+    ):
+        shutil.rmtree(d, ignore_errors=True)
     return {"deleted": True, "cancelled": cancelled}
 
 

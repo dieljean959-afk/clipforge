@@ -303,6 +303,7 @@ def main() -> int:
     from app.config import load_config as _load_config
 
     repo = Path(__file__).resolve().parents[1]
+    subtitle_src = (repo / "app" / "subtitle.py").read_text(encoding="utf-8")
     shipped = _load_config(repo, quiet=True)
     check("config.toml ships the calibrated 0.45",
           shipped.subtitle.low_confidence == 0.45, str(shipped.subtitle.low_confidence))
@@ -396,6 +397,153 @@ def main() -> int:
           "inaudible_threshold=self.settings.subtitle.inaudible_below" in task_src)
     check("no hardcoded threshold is left in the render path",
           "confidence_threshold=0.45" not in task_src)
+
+    # ---- 1. word-level timestamps are the foundation ------------------
+    print("\n[8] word-level timing, short bursts, highlight, fillers")
+    check("the decode asks faster-whisper for WORD timestamps",
+          subtitle.WHISPER_KWARGS.get("word_timestamps") is True,
+          str(subtitle.WHISPER_KWARGS.get("word_timestamps")))
+    engine_src = (repo / "app" / "asr.py").read_text(encoding="utf-8")
+    check("the engine really passes word_timestamps=True",
+          engine_src.count("word_timestamps=True") >= 1)
+    check("words carry per-word timings, not one span per segment",
+          all(k in subtitle.Word.__dataclass_fields__ for k in ("start", "end", "word")))
+
+    # ---- 2. short bursts cut on real pauses ---------------------------
+    def timed(pairs):
+        out, t = [], 0.0
+        for text, dur in pairs:
+            out.append({"word": text, "start": round(t, 2), "end": round(t + dur, 2),
+                        "conf": 0.95})
+            t += dur
+        return out
+
+    # "one two" then a 0.6s breath, then "three four five" with no pause.
+    paused = timed([("one", 0.2), ("two", 0.2), ("three", 0.2), ("four", 0.2),
+                    ("five", 0.2)])
+    # insert a 0.6s breath after "two": shift every later word (BOTH ends) by it
+    for w in paused[2:]:
+        w["start"] += 0.6
+        w["end"] += 0.6
+    bursts = subtitle.words_to_cues(paused, words_per_cue=3, max_words=4, pause_sec=0.30)
+    texts = [c["text"] for c in bursts]
+    check("a pause ends the burst even mid-sentence",
+          texts[0] == "one two" and "three four five" in texts, str(texts))
+    check("bursts stay inside the configured cap",
+          all(len(c["words"]) <= 4 for c in bursts),
+          str([len(c["words"]) for c in bursts]))
+    check("bursts are short (1..max_words), never a whole sentence",
+          all(1 <= len(c["words"]) <= 4 for c in bursts))
+    tight = subtitle.words_to_cues(timed([(f"w{i}", 0.2) for i in range(12)]),
+                                  words_per_cue=3, max_words=4, pause_sec=0.30)
+    check("a fast run of speech still breaks into short bursts",
+          len(tight) == 4 and all(len(c["words"]) == 3 for c in tight),
+          str([c["text"] for c in tight]))
+    check("bursts start on their first word and end on their last",
+          all(abs(c["start"] - c["words"][0]["start"]) < 1e-6 for c in bursts)
+          and all(c["end"] >= c["words"][-1]["end"] - 1e-6
+                  and c["end"] - c["words"][-1]["end"] <= subtitle.MIN_CUE_SEC
+                  for c in bursts),
+          str([(c["start"], c["end"]) for c in bursts]))
+    check("the cap is honoured even if the target is higher",
+          all(len(c["words"]) <= 3
+              for c in subtitle.words_to_cues(timed([(f"w{i}", 0.2) for i in range(9)]),
+                                              words_per_cue=3, max_words=3)))
+
+    # ---- 3. progressive word highlight in the DEFAULT style ------------
+    default_preset = subtitle.get_preset("bold_pop")
+    check("the default style highlights word by word", default_preset.highlight)
+    hl_cue = {"start": 0.0, "end": 1.0, "text": "Hello there",
+              "words": [{"word": "Hello", "start": 0.0, "end": 0.5},
+                        {"word": "there", "start": 0.5, "end": 1.0}]}
+    hl = subtitle.build_ass_events([hl_cue], s, 0.0, "bold_pop")
+    check("the default style emits per-word \\k tags", hl.count("\\k") == 2, hl)
+    check("the default style keeps its scale-pop entrance",
+          r"\fscx" in hl, hl)
+    check("the pop block comes first so \\k still drives the fill",
+          hl.index("\\fscx") < hl.index("\\k"), hl)
+    check("the highlighted word is the accent colour (SecondaryColour)",
+          subtitle._hex_to_ass(default_preset.secondary)
+          in subtitle.build_ass_header(s, 1080, 1920, "bold_pop"),
+          "the \\k fill uses SecondaryColour, so it must be the accent")
+    check("the flat styles stay flat (no highlight where it was not asked for)",
+          not subtitle.get_preset("lower_third").highlight
+          and not subtitle.get_preset("boxed").highlight)
+
+    # ---- 4. fillers and stutters (displayed text only) ----------------
+    noisy = timed([("um", 0.15), ("I", 0.15), ("I", 0.15), ("think", 0.2),
+                   ("uh", 0.15), ("yeah", 0.2)])
+    kept, dropped = subtitle.strip_fillers(noisy)
+    check("fillers are dropped from the displayed text",
+          [w["word"] for w in kept] == ["I", "think", "yeah"], str([w["word"] for w in kept]))
+    check("the removed count is reported", dropped == 3, str(dropped))
+    check("an adjacent stutter collapses to one word", "I I" not in
+          " ".join(w["word"] for w in kept))
+    kept2, _ = subtitle.strip_fillers(noisy, drop_stutters=False)
+    check("stutter removal can be turned off",
+          [w["word"] for w in kept2] == ["I", "I", "think", "yeah"],
+          str([w["word"] for w in kept2]))
+    spread = timed([("very", 0.2), ("very", 0.2)])
+    spread[1]["start"] += 0.9  # a real pause between them: not a stutter
+    spread[1]["end"] += 0.9
+    check("a repeated word across a pause is NOT treated as a stutter",
+          len(subtitle.strip_fillers(spread)[0]) == 2)
+    check("real words that merely start with 'u' are kept",
+          " ".join(w["word"] for w in subtitle.strip_fillers(
+              timed([("up", 0.2), ("uh", 0.2), ("us", 0.2)]))[0]) == "up us")
+    all_filler = subtitle.words_to_cues(
+        subtitle.strip_fillers(timed([("um", 0.2), ("uh", 0.2)]))[0])
+    check("a window of nothing but fillers produces no caption at all",
+          all_filler == [], str(all_filler))
+    task_src2 = (repo / "app" / "task.py").read_text(encoding="utf-8")
+    check("fillers are stripped for display only, never from the transcript",
+          "strip_fillers(" in task_src2
+          and "cue_words = [w.as_dict() for w in transcript.words" in task_src2
+          and not any(op in task_src2 for op in ("mute", "silence_fill", "atrim")))
+    check("no audio-processing call crept in (audio is never cut)",
+          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
+          "the ASS filter chain must not carry any audio edit")
+
+    # ---- zero-length word timings are repaired -----------------------
+    zero = [{"word": "a", "start": 1.0, "end": 1.0},
+            {"word": "b", "start": 1.0, "end": 1.0},
+            {"word": "c", "start": 2.0, "end": 2.5}]
+    fixed = subtitle.normalize_word_timings(zero)
+    check("zero-length words get a real span",
+          all(w["end"] > w["start"] for w in fixed), str(fixed))
+    check("normalising never invents time past the next word",
+          fixed[-1]["end"] <= 2.5, str(fixed))
+    zc = subtitle.words_to_cues(subtitle.normalize_word_timings(zero))
+    check("no caption can flash for a single frame",
+          all(c["end"] - c["start"] >= subtitle.MIN_CUE_SEC for c in zc), str(zc))
+
+    # ---- 5. confidence still integrates with the new chunking ---------
+    murky_words = [{"word": "what", "start": 0.0, "end": 0.4, "conf": 0.20},
+                   {"word": "what", "start": 0.4, "end": 0.8, "conf": 0.22}]
+    murky_words = subtitle.normalize_word_timings(murky_words)
+    mc = subtitle.words_to_cues(murky_words, words_per_cue=3, max_words=4)
+    check("low-confidence bursts are still flagged under the new chunking",
+          mc and mc[0].get("uncertain") and mc[0]["text"] == subtitle.PLACEHOLDER_INAUDIBLE,
+          str(mc))
+    check("a flagged burst never shows its guessed words in the render",
+          "what" not in subtitle.build_ass_events(mc, s, 0.0, "bold_pop"))
+    check("the placeholder survives the word-highlight path",
+          subtitle.PLACEHOLDER_INAUDIBLE in subtitle.build_ass_events(mc, s, 0.0, "bold_pop"))
+
+    # ---- 6. one style for the whole batch -----------------------------
+    check("a style fingerprint exists and differs per preset",
+          subtitle.style_fingerprint(s, "bold_pop")
+          != subtitle.style_fingerprint(s, "karaoke"))
+    check("the fingerprint is stable for the same settings",
+          subtitle.style_fingerprint(s, "bold_pop")
+          == subtitle.style_fingerprint(s, "bold_pop"))
+    check("the render stage stores it on every clip",
+          "style_id = subtitle.style_fingerprint" in task_src2
+          and '"captionStyle": style_id' in task_src2)
+    check("a changed style re-encodes instead of being skipped",
+          'clip_doc.get("captionStyle", style_id) == style_id' in task_src2)
+    check("one style is chosen per job, not per clip",
+          task_src2.count('opts.get("captionPreset")') == 1)
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

@@ -132,6 +132,26 @@ def main() -> int:
             "create_clips on a deleted job leaves the job deleted",
         )
 
+        # ---- 9. the delete endpoint reclaims DISK --------------------
+        # A manual delete removed the JSON record and the stage workspace but
+        # left downloads/<id> (the source video, 300+ MB) and outputs/<id> (the
+        # rendered MP4s) on disk. On a 4 GB host that filled the disk while the
+        # dashboard showed nothing to delete, and the disk preflight then
+        # rejected every NEW job with a 507. The retention sweeper already
+        # removed both dirs; the manual path has to do the same.
+        main_src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        delete_fn = main_src.split("def delete_job(")[1].split("\n@app.")[0]
+        check(
+            "downloads_dir / job_id" in delete_fn and "outputs_dir / job_id" in delete_fn,
+            "deleting a job also removes its downloads/ and outputs/ folders",
+        )
+        check(
+            "shutil.rmtree" in delete_fn,
+            "the delete path actually frees the bytes (shutil.rmtree)",
+        )
+
     print()
     if FAILS:
         print(f"{CHECKS - len(FAILS)} passed, {len(FAILS)} FAILED")

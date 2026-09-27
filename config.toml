@@ -161,8 +161,25 @@ font_size = 68
 # Neon green outline, matching the reference style.
 outline_color = "#39FF14"
 outline_width = 5
-# Words visible at once (2-3 per the reference style).
-words_per_cue = 2
+# --- caption bursts ---------------------------------------------------------
+# How many words a caption shows at once. A burst also ends early on a pause
+# below, so the real range is 1..words_per_cue_max: fast speech gives 3-4 word
+# bursts, hesitant speech gives 1-2. Short bursts are what makes captions
+# readable on a 9:16 phone.
+words_per_cue = 3
+# Hard cap per burst. words_per_cue cannot exceed this.
+words_per_cue_max = 4
+# A gap of at least this many seconds before the next word ends the burst, so
+# the boundaries land where the speaker actually pauses instead of every N
+# words. Raise it for captions that hold together across short breaths.
+pause_sec = 0.30
+# Remove unambiguous vocal fillers ("um", "uh", "hmm") and adjacent stutters
+# ("the the") from the DISPLAYED captions only. The audio is never modified —
+# a clip is a straight cut of the source, so cutting a spoken "um" out of the
+# soundtrack would pull every later word out of sync with the lips. The stored
+# transcript keeps every word.
+strip_fillers = true
+strip_stutters = true
 # Vertical anchor as a fraction of frame height (lower third).
 position_y = 0.78
 # Pop/scale animation on each word group.

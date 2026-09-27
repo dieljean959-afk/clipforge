@@ -521,6 +521,10 @@ class Pipeline:
         job_id = job["_id"]
         opts = job.get("options", {}) or {}
         preset = opts.get("captionPreset") or self.settings.subtitle.preset
+        # One style for the WHOLE batch, decided once and fingerprinted so a
+        # later style edit re-encodes every clip instead of leaving the batch
+        # half old, half new.
+        style_id = subtitle.style_fingerprint(self.settings, preset)
         src_meta = video.probe(src)
 
         # ---- stage: reframe (shot detection + crop windows per clip) ------
@@ -604,6 +608,7 @@ class Pipeline:
                 clip_doc.get("renderState") == "done"
                 and out_path.exists()
                 and clip_doc.get("captionPreset", preset) == preset
+                and clip_doc.get("captionStyle", style_id) == style_id
             ):
                 self._log(job_id, f"resume: clip {idx + 1} already rendered — skipping")
                 self._progress(
@@ -618,14 +623,43 @@ class Pipeline:
 
             # caption cues from word timings inside this window
             cue_words = [w.as_dict() for w in transcript.words if w.end > c0 and w.start < c1]
-            cues = subtitle.words_to_cues(
-                cue_words, words_per_cue=self.settings.subtitle.words_per_cue,
-                # Configured, not hardcoded: [subtitle] low_confidence /
-                # inaudible_below in config.toml. The module defaults only apply
-                # when those keys are absent.
-                confidence_threshold=self.settings.subtitle.low_confidence,
-                inaudible_threshold=self.settings.subtitle.inaudible_below,
-            )
+            # ~1 word in 10 arrives with start == end; a zero span means a
+            # flickering highlight and a cue that can flash for one frame.
+            cue_words = subtitle.normalize_word_timings(cue_words)
+            # Fillers/stutters are dropped from the DISPLAYED text only; the
+            # stored transcript keeps every word, so the .txt, the search index
+            # and a later re-render are unaffected.
+            if self.settings.subtitle.strip_fillers or self.settings.subtitle.strip_stutters:
+                cue_words, dropped = subtitle.strip_fillers(
+                    cue_words,
+                    drop_stutters=self.settings.subtitle.strip_stutters,
+                )
+                if dropped:
+                    self._log(
+                        job_id,
+                        f"clip {idx + 1}: dropped {dropped} filler/stutter word(s) from "
+                        "the captions (audio untouched)",
+                    )
+            if not cue_words:
+                # A clip window that is nothing but "um, uh, like" has no words
+                # worth captioning. Emitting an empty Dialogue line would put a
+                # blank caption on screen for the whole clip.
+                cues = []
+            else:
+                cues = subtitle.words_to_cues(
+                    cue_words,
+                    # Short bursts, cut on the speaker's own pauses. The target
+                    # length and the hard cap are both config; a pause always
+                    # wins, which is what makes the rhythm follow the speech.
+                    words_per_cue=self.settings.subtitle.words_per_cue,
+                    max_words=self.settings.subtitle.words_per_cue_max,
+                    pause_sec=self.settings.subtitle.pause_sec,
+                    # Configured, not hardcoded: [subtitle] low_confidence /
+                    # inaudible_below in config.toml. The module defaults only
+                    # apply when those keys are absent.
+                    confidence_threshold=self.settings.subtitle.low_confidence,
+                    inaudible_threshold=self.settings.subtitle.inaudible_below,
+                )
             for cue in cues:
                 cue["start"] -= c0
                 cue["end"] -= c0
@@ -687,6 +721,7 @@ class Pipeline:
                     # captions say with no visible reason.
                     "uncertainCues": sum(1 for c in cues if c.get("uncertain")),
                     "captionPreset": preset,
+                    "captionStyle": style_id,
                     "translationTracks": tracks,
                 })
                 self.store.write_clip(clip_doc)

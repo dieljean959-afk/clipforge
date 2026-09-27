@@ -14,6 +14,7 @@ captions must export either way.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import threading
@@ -94,6 +95,11 @@ class CaptionPreset:
     box: bool = False     # opaque box behind text (ASS BorderStyle=3)
     karaoke: bool = False # word-by-word fill (ASS \k) instead of cue-level pop
     pop: bool = False     # scale-pop animation per cue
+    # Progressive word-by-word highlight. Same ASS mechanism as `karaoke` (the
+    # sung part takes SecondaryColour) but the default style also keeps its
+    # scale-pop entrance, which is the look Opus-style captions ship with:
+    # short bursts, the word being spoken lit up as it is spoken.
+    highlight: bool = False
     position_y: float = 0.78
 
 
@@ -102,7 +108,7 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         key="bold_pop", label="Bold pop (default)",
         font_size=68, primary="#FFFFFF", secondary="#39FF14",
         outline_color="#39FF14", outline_width=5, shadow=1,
-        pop=True, position_y=0.78,
+        pop=True, highlight=True, position_y=0.78,
     ),
     "karaoke": CaptionPreset(
         key="karaoke", label="Karaoke fill",
@@ -631,16 +637,137 @@ def _placeholder_for(conf: float, inaudible_threshold: float = INAUDIBLE_BELOW) 
     return PLACEHOLDER_INAUDIBLE if conf < inaudible_threshold else PLACEHOLDER_MUTTERING
 
 
+# --------------------------------------------------------------------------- #
+# Filler words and stutters
+#
+# These are removed from the DISPLAYED TEXT only. The audio is never touched:
+# a clip is a straight cut of the source, so dropping a spoken "um" from the
+# soundtrack would need a time-stretch that pulls every later word out of sync
+# with the lips. A caption that says "so I was like yeah" while the speaker
+# says "so I was um like yeah" is what every tool in this space does, and it
+# costs nothing in lip-sync.
+#
+# Deliberately conservative: "like", "so", "just" and "well" are real words
+# far more often than fillers, and blanking them turns real speech into
+# nonsense. Only unambiguous vocal fillers are in the list.
+# --------------------------------------------------------------------------- #
+
+FILLER_WORDS = frozenset({
+    "um", "umm", "uh", "uhh", "uhm", "erm", "er", "ah", "eh", "hmm", "hm",
+    "mhm", "mm", "mmh", "uhhuh", "huh", "huhhuh", "ummm", "hmmmm",
+})
+
+#: Two identical words count as a stutter only if this little time separates
+#: them. "the the" is one; "very ... very good" with a beat between is emphasis
+#: and must survive.
+STUTTER_GAP_SEC = 0.15
+
+
+def _norm_token(word: str) -> str:
+    """Lowercase, strip punctuation and the possessive — for filler matching only."""
+    return word.strip().strip(".,!?;:'\"()[]…").lower()
+
+
+def is_filler(word: str) -> bool:
+    return _norm_token(word) in FILLER_WORDS
+
+
+def strip_fillers(
+    words: list[dict], *, drop_stutters: bool = True
+) -> tuple[list[dict], int]:
+    """Return (kept words, how many were removed) for caption display.
+
+    Two passes:
+      1. unambiguous fillers ("um", "uh", "hmm") — they carry no meaning and
+         Opus-style captions drop them;
+      2. an immediately repeated identical word ("the the", "I I mean") — a
+         stutter, dropped once. Only ADJACENT repeats count, so a genuine
+         "very very good" spread across a pause survives.
+    """
+    kept: list[dict] = []
+    removed = 0
+    for w in words:
+        if is_filler(str(w.get("word", ""))):
+            removed += 1
+            continue
+        if drop_stutters and kept:
+            prev = _norm_token(str(kept[-1].get("word", "")))
+            gap = float(w.get("start") or 0.0) - float(kept[-1].get("end") or 0.0)
+            # A stutter is a RAPID repetition. Requiring the two to be adjacent
+            # in TIME as well as in the list is what stops "very ... very good"
+            # (deliberate emphasis, spoken with a beat between) from losing a
+            # word — collapsing on adjacency alone silently deletes real speech.
+            if prev and prev == _norm_token(str(w.get("word", ""))) and gap < STUTTER_GAP_SEC:
+                # Keep the LONGER timing of the pair so the highlight does not
+                # jump backwards if the stutter was held longer.
+                if float(w.get("end") or 0) > float(kept[-1].get("end") or 0):
+                    kept[-1]["end"] = w["end"]
+                removed += 1
+                continue
+        kept.append(w)
+    return kept, removed
+
+
+#: Shortest caption a viewer can read. Also the floor for a cue whose words
+#: all report a zero-length span.
+MIN_CUE_SEC = 0.12
+
+
+def normalize_word_timings(words: list[dict], min_dur: float = 0.08) -> list[dict]:
+    """Give zero/negative-length words a real span, without overlapping the next.
+
+    faster-whisper emits start == end for roughly one word in ten on this
+    content (a chunk-boundary artifact — 116 of 1194 words in the zg50i-UmRwA
+    batch). A zero-length word produces a zero-length ``\\k`` tag (clamped to
+    1cs, so the highlight flickers) and can leave a whole cue with start == end,
+    which renders as a caption that flashes for one frame or not at all.
+
+    The span is taken from the gap up to the next word, so nothing is invented
+    outside the silence that was actually recorded.
+    """
+    out: list[dict] = []
+    for i, w in enumerate(words):
+        start = float(w.get("start") or 0.0)
+        end = float(w.get("end") or 0.0)
+        if end - start < min_dur:
+            nxt = words[i + 1] if i + 1 < len(words) else None
+            limit = float(nxt.get("start") or 0.0) if nxt else start + min_dur
+            if limit - start >= min_dur:
+                end = limit
+            elif limit > start:
+                # Several words share one timestamp; split what there is.
+                end = start + max(0.04, (limit - start) / 2)
+            else:
+                end = start + min_dur
+        out.append({**w, "start": start, "end": end})
+    return out
+
+
 def words_to_cues(
     words: list[dict],
     *,
-    words_per_cue: int = 2,
+    words_per_cue: int = 3,
+    max_words: int = 4,
     max_chars: int = 24,
     max_duration: float = 2.2,
+    pause_sec: float = 0.30,
     confidence_threshold: float = LOW_CONFIDENCE,
     inaudible_threshold: float = INAUDIBLE_BELOW,
 ) -> list[dict]:
-    """Group word timings into caption cues of ~2-3 words.
+    """Group word timings into SHORT bursts, cut on natural pauses.
+
+    A burst ends at whichever comes first:
+      * a pause of ``pause_sec`` or more before the next word (the speaker
+        actually breathed — carrying the caption across that gap is what makes
+        captions feel detached from the speech),
+      * ``max_words`` words,
+      * ``words_per_cue`` words (the target burst length),
+      * ``max_chars`` of text, or ``max_duration`` seconds of speech.
+
+    Pauses come from the word timings, so the boundaries land where the speech
+    lands rather than every N words. With `words_per_cue=3`/`max_words=4` a
+    fast run of speech gives 3-4 word bursts and a hesitant one gives 1-2,
+    which is the short-burst rhythm this style is for.
 
     A cue whose words the model was unsure about is rendered as a placeholder
     (``[muttering]`` / ``[inaudible]``) instead of the guess. Showing a wrong
@@ -654,18 +781,31 @@ def words_to_cues(
     """
     cues: list[dict] = []
     current: list[dict] = []
-    for w in words:
-        current.append(w)
-        text = " ".join(x["word"] for x in current)
-        dur = w["end"] - current[0]["start"]
-        if len(current) >= words_per_cue or len(text) >= max_chars or dur >= max_duration:
-            cues.append(_make_cue(current[0]["start"], w["end"], text, current,
-                                  confidence_threshold, inaudible_threshold))
-            current = []
-    if current:
+
+    def flush() -> None:
+        if not current:
+            return
         cues.append(_make_cue(current[0]["start"], current[-1]["end"],
-                              " ".join(x["word"] for x in current), current,
-                              confidence_threshold, inaudible_threshold))
+                              " ".join(str(x["word"]) for x in current),
+                              current, confidence_threshold, inaudible_threshold))
+        current.clear()
+
+    for w in words:
+        start = float(w.get("start") or 0.0)
+        if current:
+            gap = start - float(current[-1].get("end") or 0.0)
+            text = " ".join(str(x["word"]) for x in current + [w])
+            dur = float(w.get("end") or 0.0) - current[0]["start"]
+            if (
+                gap >= pause_sec
+                or len(current) + 1 > max_words
+                or len(current) >= words_per_cue
+                or len(text) > max_chars
+                or dur > max_duration
+            ):
+                flush()
+        current.append(w)
+    flush()
     return cues
 
 
@@ -673,6 +813,9 @@ def _make_cue(
     start: float, end: float, text: str, words: list[dict],
     threshold: float, inaudible_threshold: float,
 ) -> dict:
+    # Backstop for a cue whose last word reports a zero span: a caption that
+    # flashes for one frame is worse than one that lingers a beat.
+    end = max(float(end), float(start) + MIN_CUE_SEC)
     conf = cue_confidence(words)
     cue = {
         "start": start,
@@ -685,6 +828,25 @@ def _make_cue(
         cue["uncertain"] = True
         cue["confidence"] = round(conf, 3)
     return cue
+
+
+def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
+    """Short hash of everything that decides how a caption LOOKS.
+
+    The preset key alone is not enough: font, size, colours, outline and
+    vertical position also come from ``[subtitle]``, so changing any of them
+    leaves every already-rendered clip wearing the old style while a newly
+    rendered one wears the new — the exact per-clip drift this guards against.
+    The render stage stores this next to each clip and re-encodes when it
+    changes, so a style edit lands on the whole batch at once.
+    """
+    p = get_preset(preset_key)
+    payload = "|".join(str(v) for v in (
+        preset_key or "bold_pop", p.label, p.font_size, p.primary, p.secondary,
+        p.outline_color, p.outline_width, p.shadow, p.box, p.karaoke, p.highlight,
+        p.pop, p.position_y, settings.subtitle.font, settings.subtitle.font_fallbacks,
+    ))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
 def build_ass_header(
@@ -757,14 +919,27 @@ def build_ass_events(
     preset_key: str | None = None,
 ) -> str:
     p = get_preset(preset_key)
+    # The word-highlight path needs per-word timings; both the default style and
+    # the karaoke style use it, the others keep their flat rendering.
+    highlight = (p.karaoke or p.highlight)
     lines: list[str] = []
     for c in cues:
         start = _ass_time(c["start"] - start_offset)
         end = _ass_time(c["end"] - start_offset)
-        if p.karaoke and c.get("words") and not c.get("uncertain"):
+        if highlight and c.get("words") and not c.get("uncertain"):
             # A cue whose words are all blank still has to render as text —
             # an empty Dialogue line is a caption that shows nothing.
-            text = _karaoke_tags(c) or c["text"]
+            tagged = _karaoke_tags(c)
+            # The pop entrance is layered on top of the word tags rather than
+            # replacing them, so the default style keeps its scale-in AND the
+            # word being spoken lights up. \k must stay last in the chain: it is
+            # what actually drives the fill colour over time.
+            text = tagged or c["text"].replace("{", "(").replace("}", ")")
+            if tagged and p.pop:
+                text = (
+                    r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
+                    r"\t(90,140,\fscx100\fscy100)}" + text
+                )
         else:
             text = c["text"].replace("{", "(").replace("}", ")")
             if p.pop:

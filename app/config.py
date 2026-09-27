@@ -665,7 +665,17 @@ class SubtitleConfig:
     font_size: int = 68
     outline_color: str = "#39FF14"
     outline_width: int = 5
-    words_per_cue: int = 2
+    words_per_cue: int = 3
+    # Hard cap on a caption burst. A burst also ends early on a pause, so the
+    # real range is 1..max_words.
+    words_per_cue_max: int = 4
+    # A gap of at least this long before the next word ends the burst. This is
+    # what makes the captions land on the speech instead of every N words.
+    pause_sec: float = 0.30
+    # Remove unambiguous vocal fillers ("um", "uh", "hmm") and adjacent
+    # stutters from the DISPLAYED captions. The audio is never modified.
+    strip_fillers: bool = True
+    strip_stutters: bool = True
     position_y: float = 0.78
     pop_animation: bool = True
     # Default caption style preset: bold_pop | karaoke | lower_third | boxed
@@ -940,12 +950,16 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         font_size=max(20, int(s.get("font_size", 68))),
         outline_color=outline,
         outline_width=max(0, int(s.get("outline_width", 5))),
-        words_per_cue=max(1, int(s.get("words_per_cue", 2))),
+        words_per_cue=max(1, int(s.get("words_per_cue", 3))),
+        words_per_cue_max=max(1, int(s.get("words_per_cue_max", 4))),
+        pause_sec=min(3.0, max(0.0, float(s.get("pause_sec", 0.30)))),
         position_y=min(0.95, max(0.3, float(s.get("position_y", 0.78)))),
         pop_animation=bool(s.get("pop_animation", True)),
         preset=str(s.get("preset", "bold_pop")),
         low_confidence=float(s.get("low_confidence", 0.45)),
         inaudible_below=float(s.get("inaudible_below", 0.30)),
+        strip_fillers=bool(s.get("strip_fillers", True)),
+        strip_stutters=bool(s.get("strip_stutters", True)),
     )
     if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed"}:
         errors.append(
@@ -964,6 +978,12 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
                 f"subtitle.{name} must be between 0 and 1 (got {value}) — "
                 "it is a confidence, not a percentage"
             )
+    if subtitle.words_per_cue > subtitle.words_per_cue_max:
+        # Otherwise `max_words` is dead config and the real cap is the target.
+        errors.append(
+            f"subtitle.words_per_cue ({subtitle.words_per_cue}) cannot be greater than "
+            f"subtitle.words_per_cue_max ({subtitle.words_per_cue_max})"
+        )
     if subtitle.low_confidence > 0 and subtitle.inaudible_below >= subtitle.low_confidence:
         # Caught here rather than at render time: a mis-ordered pair silently
         # disables the [inaudible] tier (nothing can be below a lower bar than
