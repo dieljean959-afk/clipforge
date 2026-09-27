@@ -1055,6 +1055,60 @@ def register_worker(body: RegisterWorkerIn) -> dict:
     return {"ok": True, "workerUrl": settings.hosted.worker_url}
 
 
+@app.post("/api/jobs/{job_id}/retranscribe")
+def retranscribe_job(job_id: str) -> dict:
+    """Re-run transcription (and detection) for a finished batch.
+
+    The repair path for anything wrong with WHAT WAS HEARD: a transcription
+    made before word confidence was recorded, a better model, a threshold
+    change. Unlike /rerender, which reuses the cached words, this invalidates
+    the transcript — so every clip is re-encoded afterwards and the .srt files
+    are rewritten from the new cues.
+
+    It also re-runs detection, because the cuts are derived from the words:
+    keeping candidates scored against a transcript that no longer exists would
+    leave word indices pointing at the wrong places. That costs one AI call per
+    batch, which the alternative (stale cues over new words) is not worth.
+    """
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.get("stage") in {"queued", "grabbing", "transcribing", "finding", "rendering"}:
+        raise HTTPException(409, "this job is still running — wait for it to finish")
+    if store.find_source_file(job_id) is None:
+        raise HTTPException(400, "source file no longer on disk — re-submit the URL to transcribe again")
+    if not store.list_clips(job_id):
+        raise HTTPException(400, "this batch has no clips")
+
+    # "transcribe" and everything after it: detect, reframe, captions, export.
+    # "fetch" stays done, so the video is not downloaded a second time.
+    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
+    ws.clear_from("transcribe")
+    for clip in store.list_clips(job_id):
+        clip["renderState"] = "pending"
+        store.write_clip(clip)
+    job.update({
+        "stage": "queued",
+        "progress": 0,
+        "progressDetail": "Re-transcribing — the source is reused, words are re-decoded with confidence scores.",
+        "error": None,
+        "errorDetail": None,
+        "completedAt": None,
+        "transcriptWordCount": None,
+        "unitLabel": None,
+        "unitsDone": None,
+        "unitsTotal": None,
+    })
+    store.write_job(job)
+    store.append_job_log(
+        job_id,
+        "re-transcribe requested — transcript and detection invalidated; the "
+        "downloaded source is reused, so nothing is fetched again",
+    )
+    worker.enqueue(job_id)
+    return {"queued": True, "resumesAt": ws.first_incomplete()}
+
+
 @app.post("/api/jobs/{job_id}/rerender")
 def rerender_job(job_id: str) -> dict:
     """Re-encode a finished batch with fresh captions, reusing the transcript.

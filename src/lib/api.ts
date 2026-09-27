@@ -361,6 +361,12 @@ export const api = {
     request<{ queued: boolean; clipsReset: number }>(`/api/jobs/${jobId}/rerender`, {
       method: "POST",
     }),
+  /**
+   * Re-decode the audio (and re-score the cuts), then re-encode. The repair
+   * path for anything wrong with WHAT WAS HEARD rather than how it looks.
+   */
+  retranscribe: (jobId: string) =>
+    request<{ queued: boolean }>(`/api/jobs/${jobId}/retranscribe`, { method: "POST" }),
   verifyClips: (jobId: string) =>
     request<VerifyClipsDto>(`/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`),
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),

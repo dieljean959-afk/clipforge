@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { BadgeCheck, Captions, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { AudioLines, BadgeCheck, Captions, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -86,6 +86,25 @@ export default function Dashboard() {
       toast.error(err instanceof Error ? err.message : "Re-render failed.");
     } finally {
       setRerendering(null);
+    }
+  };
+
+  // Re-decode the audio with word confidence, then re-score and re-encode.
+  // Slower than a re-render (it re-transcribes) but it is the only thing that
+  // can change WHAT WAS HEARD, which is what the [muttering] markers depend on.
+  const [retranscribing, setRetranscribing] = useState<string | null>(null);
+  const runRetranscribe = async (jobId: string) => {
+    setRetranscribing(jobId);
+    try {
+      await api.retranscribe(jobId);
+      toast.info(
+        "Re-transcribing — the source is reused, the audio is re-decoded with confidence scores, then every clip is re-encoded.",
+      );
+      void refreshJobs();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Re-transcribe failed.");
+    } finally {
+      setRetranscribing(null);
     }
   };
 
@@ -231,6 +250,22 @@ export default function Dashboard() {
                     <Sparkles className="size-3.5 text-primary" />
                   )}
                   Re-detect with AI
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="cursor-pointer gap-1.5 text-xs"
+                  disabled={
+                    retranscribing !== null || rerendering !== null || redetecting !== null
+                  }
+                  onClick={() => void runRetranscribe(selectedJob._id)}
+                >
+                  {retranscribing === selectedJob._id ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <AudioLines className="size-3.5 text-primary" />
+                  )}
+                  Re-transcribe
                 </Button>
                 <Button
                   size="sm"
