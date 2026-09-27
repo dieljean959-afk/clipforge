@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -45,6 +45,18 @@ from app.config import (
 )
 from app.download import probe_url
 from app.hosting import RetentionCleaner, disk_stats
+from app.social import (
+    PLATFORMS,
+    AccountStore,
+    NeedsReconnect,
+    NotConfigured,
+    PostRejected,
+    SocialError,
+    describe_all,
+    redirect_uri,
+)
+from app.social import base as social_base
+from app.social import post_video as social_post
 from app.stages import StageWorkspace, remove_workspace
 from app.store import LocalStore
 from app.worker import InProcessWorker
@@ -106,7 +118,7 @@ def _do_warmup() -> None:
 
 
 def _boot() -> None:
-    global settings, store, worker, retention
+    global settings, store, worker, retention, accounts
     try:
         settings = load_config()
     except ConfigError as exc:
@@ -121,6 +133,7 @@ def _boot() -> None:
     store = LocalStore(settings.app.paths)
     worker = InProcessWorker(settings, store)
     retention = RetentionCleaner(settings, store)
+    accounts = AccountStore(settings.app.paths.data_dir)
 
     # --- crash recovery ---------------------------------------------------
     # Three things are recoverable, and they are not the same thing:
@@ -1104,6 +1117,164 @@ def clip_download(clip_id: str) -> FileResponse:
         filename=f"{clip['order'] + 1:02d}-{safe}.mp4",
         headers={"Content-Disposition": f'attachment; filename="{clip["order"] + 1:02d}-{safe}.mp4"'},
     )
+
+
+# --------------------------------------------------------------------------- #
+# "Post to..." -- purely additive. Nothing in this section can affect, delay or
+# block a download; the existing MP4/SRT/captions.txt paths above are untouched.
+# --------------------------------------------------------------------------- #
+
+#: CSRF state -> the PKCE verifier it was minted with. In-process and
+#: short-lived by design: a verifier is only needed for the few seconds between
+#: the redirect out and the callback back, and keeping it out of a file means
+#: there is no on-disk secret to leak or clean up.
+_OAUTH_PENDING: dict[str, dict] = {}
+_OAUTH_TTL_SEC = 600
+_oauth_lock = threading.Lock()
+
+
+def _prune_oauth(now: float) -> None:
+    stale = [k for k, v in _OAUTH_PENDING.items() if now - v["createdAt"] > _OAUTH_TTL_SEC]
+    for key in stale:
+        _OAUTH_PENDING.pop(key, None)
+
+
+@app.get("/api/social/accounts")
+def social_accounts() -> dict:
+    """Per-platform readiness + the approval reality, for the Settings panel.
+
+    Returns no tokens -- only whether an account is connected and what it is
+    called. The UI uses ``gate`` to decide whether to offer Connect, explain the
+    approval requirement, or fall back to download.
+    """
+    with _oauth_lock:
+        _prune_oauth(time.time())
+    return {"platforms": describe_all(settings.social, accounts)}
+
+
+@app.post("/api/social/{slug}/connect")
+def social_connect(slug: str) -> dict:
+    if slug not in ("youtube", "x", "tiktok", "instagram"):
+        raise HTTPException(404, f"unknown platform {slug!r}")
+    cfg = settings.social
+    mod = PLATFORMS[slug]
+    status, reason = mod.readiness(cfg, accounts)
+    if status == "needs_app":
+        # 409, not 404: the platform is real, the credentials are what is missing.
+        raise HTTPException(409, reason)
+    state = social_base.new_state()
+    verifier, _ = social_base.pkce_pair()
+    with _oauth_lock:
+        _prune_oauth(time.time())
+        _OAUTH_PENDING[state] = {
+            "slug": slug,
+            "verifier": verifier,
+            "createdAt": time.time(),
+        }
+    url = mod.authorize_url(
+        cfg, redirect_uri=redirect_uri(cfg, slug), state=state, code_verifier=verifier
+    )
+    return {"authUrl": url, "state": state}
+
+
+@app.get("/api/social/{slug}/callback")
+def social_callback(slug: str, request: Request) -> RedirectResponse:
+    """OAuth redirect target. Lands the user back in Settings either way."""
+    dest = f"{settings.social.public_url.rstrip('/')}/?settings=1&social={slug}"
+    params = dict(request.query_params)
+    code = params.get("code")
+    state = params.get("state", "")
+    if params.get("error"):
+        return RedirectResponse(f"{dest}&social_error={params['error']}")
+    with _oauth_lock:
+        pending = _OAUTH_PENDING.pop(state, None)
+    if not pending or pending["slug"] != slug:
+        # No/expired/mismatched state: treat as a CSRF failure, do not exchange.
+        return RedirectResponse(f"{dest}&social_error=invalid_state")
+    mod = PLATFORMS[slug]
+    try:
+        record = mod.exchange_code(
+            settings.social,
+            code=code or "",
+            redirect_uri=redirect_uri(settings.social, slug),
+            code_verifier=pending["verifier"],
+        )
+    except SocialError as exc:
+        return RedirectResponse(f"{dest}&social_error={str(exc)[:160]}")
+    accounts.save(slug, record)
+    return RedirectResponse(f"{dest}&social_ok={slug}")
+
+
+@app.post("/api/social/{slug}/disconnect")
+def social_disconnect(slug: str) -> dict:
+    if slug not in ("youtube", "x", "tiktok", "instagram"):
+        raise HTTPException(404, f"unknown platform {slug!r}")
+    removed = accounts.delete(slug)
+    return {"disconnected": removed, "platforms": describe_all(settings.social, accounts)}
+
+
+def social_error_status(exc: Exception) -> int:
+    """Map a SocialError to the HTTP status the UI branches on.
+
+    The three cases need different words in the toast, so they get different
+    statuses: "needs an app / needs review" (offer download), "reconnect
+    account" (offer a connect button), and "the platform refused this clip"
+    (offer an edit). Collapsing them into one 500 would make all three read as
+    the same useless failure.
+    """
+    if isinstance(exc, NotConfigured):
+        return 409
+    if isinstance(exc, NeedsReconnect):
+        return 401
+    if isinstance(exc, PostRejected):
+        return 422
+    return 502
+
+
+class PostClipBody(BaseModel):
+    platform: str
+    caption: str | None = None
+    title: str = ""
+    privacy: str = ""
+
+
+@app.post("/api/clips/{clip_id}/post")
+def clip_post(clip_id: str, body: PostClipBody) -> dict:
+    """Publish one rendered clip to one connected platform.
+
+    Status mapping is deliberate so the UI can say something true:
+      409 not configured  -> "needs an app / needs review", offer download
+      401 needs reconnect -> "Failed -- reconnect account"
+      422 rejected       -> "the platform refused this clip"
+    """
+    clip = store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "clip not found")
+    if not clip.get("videoPath") or not Path(clip["videoPath"]).exists():
+        raise HTTPException(409, "this clip has no rendered MP4 to post yet")
+    if body.platform not in ("youtube", "x", "tiktok", "instagram"):
+        raise HTTPException(404, f"unknown platform {body.platform!r}")
+
+    # The caption is the same short line + hashtag block the clipboard copies.
+    from app.caption_format import build_post_caption
+
+    caption = (
+        body.caption.strip()
+        if body.caption is not None
+        else build_post_caption(clip.get("hookText", ""), clip.get("hashtags", []))
+    )
+    try:
+        return social_post(
+            body.platform,
+            settings.social,
+            accounts,
+            video_path=clip["videoPath"],
+            caption=caption,
+            title=body.title or clip.get("title", ""),
+            privacy=body.privacy,
+        )
+    except SocialError as exc:
+        raise HTTPException(social_error_status(exc), str(exc)) from exc
 
 
 @app.get("/api/clips/{clip_id}/srt")

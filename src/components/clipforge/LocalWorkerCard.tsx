@@ -27,6 +27,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { useHealth } from "@/hooks/use-poll";
+import { SocialAccounts } from "./SocialAccounts";
 import { api, type DetectionProvider } from "@/lib/api";
 import { fmtBytes } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
@@ -509,6 +510,12 @@ export function LocalWorkerCard({ className }: { className?: string }) {
           )}
         </p>
       )}
+
+      {/* Connected social accounts. Purely additive: the download/export paths
+          above are untouched, so hiding this entirely changes nothing else. */}
+      <div className="mt-3 border-t border-border pt-3">
+        <SocialAccounts />
+      </div>
 
       {/* LLM key manager dialog (follows the active detection backend) */}
       <Dialog open={keyDialogOpen} onOpenChange={setKeyDialogOpen}>

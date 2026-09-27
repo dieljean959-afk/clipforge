@@ -271,6 +271,36 @@ async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
   return await res.blob();
 }
 
+export interface SocialPlatformDto {
+  slug: SocialSlug;
+  label: string;
+  /** needs_app | not_connected | connected -- what the UI should offer next. */
+  status: "needs_app" | "not_connected" | "connected";
+  /** Plain-language reason for `status`, safe to show as-is. */
+  reason: string;
+  accountName: string;
+  connected: boolean;
+  /** none | payment | audit | app_review -- how hard approval actually is. */
+  gate: "none" | "payment" | "audit" | "app_review";
+  headline: string;
+  detail: string;
+  docs: string;
+}
+
+export type SocialSlug = "youtube" | "x" | "tiktok" | "instagram";
+
+export interface PostResultDto {
+  platform: SocialSlug;
+  id: string;
+  url: string;
+  privacy: string;
+  /** TikTok only: an unaudited app can only publish privately. */
+  audited?: boolean;
+  note?: string;
+  postedAt: number;
+  captionLength: number;
+}
+
 export const api = {
   health: () => request<HealthDto>("/api/health"),
   doctor: () => request<DoctorReport>("/api/doctor"),
@@ -370,4 +400,27 @@ export const api = {
   clipDownloadUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/download`,
   clipSrtUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/srt`,
   jobCaptionsUrl: (jobId: string) => `${BASE}/api/jobs/${jobId}/captions.txt`,
+
+  // --- "Post to..." (additive; none of this affects the download paths) ----
+  socialAccounts: () =>
+    request<{ platforms: SocialPlatformDto[] }>("/api/social/accounts"),
+  /** Begin OAuth. Resolves to the provider's consent URL to open in a tab. */
+  socialConnect: (slug: SocialSlug) =>
+    request<{ authUrl: string; state: string }>(`/api/social/${slug}/connect`, {
+      method: "POST",
+    }),
+  socialDisconnect: (slug: SocialSlug) =>
+    request<{ disconnected: boolean; platforms: SocialPlatformDto[] }>(
+      `/api/social/${slug}/disconnect`,
+      { method: "POST" },
+    ),
+  postClip: (
+    clipId: string,
+    body: { platform: SocialSlug; caption?: string; title?: string; privacy?: string },
+  ) =>
+    request<PostResultDto>(`/api/clips/${clipId}/post`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };

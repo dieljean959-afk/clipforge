@@ -808,6 +808,59 @@ dispatch mode — pull them from `GET /agent/output/{jobId}/{clip}.mp4`.
 | `config.toml` | Whisper model/precision, Gemini limits, subtitle style (font, size, outline color/width, words per cue, position), output size/quality, reframe & silence trim toggles, yt-dlp settings, `[hosted]` limits + dispatch |
 | Platform env (Keys/API keys) | `GEMINI_API_KEY`, `YT_DLP_COOKIES_FROM_BROWSER`, `WORKER_URL`, `WORKER_TOKEN`, `TAILSCALE_ONLY`, `TAILSCALE_AUTHKEY`, `CLIPFORGE_MAX_SOURCE_MIN`, `CLIPFORGE_RETENTION_HOURS`, optional `FFMPEG_PATH` / `FFPROBE_PATH` |
 
+## Post to social (optional, additive)
+
+Every finished clip grows a **Post to...** button *next to* the existing MP4
+button. The download, SRT and `captions.txt` paths are **unchanged** — nothing in
+this section can block or alter them. Tokens live in `data/accounts/<platform>.json`
+at mode `0600`; the browser only ever sees whether an account is connected and
+what it is called.
+
+### Which platforms you can actually use today
+
+They are **not** symmetric, and the difference is the whole point of the table.
+
+| Platform | Gate | What you have to do | Result |
+|---|---|---|---|
+| **YouTube Shorts** | none | Enable YouTube Data API v3 in a Google Cloud project, add an OAuth client, paste `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET` | **Works.** No App Review. Default quota is 10,000 units/day and a Short costs 1,600 — about 6/day, raisable self-serve |
+| **X** | payment | Create a developer app, enable billing, paste `X_CLIENT_ID` / `X_CLIENT_SECRET` | Works once billing is on. X moved to pay-per-use in 2025; free-tier posting is no longer reliably available. This is a payment step, not a queue |
+| **TikTok** | audit | Create the app, paste `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` | **Works, but posts land PRIVATE.** Unaudited clients are forced to `SELF_ONLY` and capped at 5 users per rolling 24h. Add `TIKTOK_APP_AUDITED=true` after passing the Direct Post audit |
+| **Instagram Reels** | app review | Meta app + `instagram_content_publish` (Advanced Access) | **Not usable yet.** Needs App Review: a screencast plus a business/creator IG account, typically days to weeks. Until then it falls back to download |
+
+The approval reality lives in one readable block in `app/social/__init__.py`
+(`APPROVAL_NOTES`) and is served verbatim to the UI, so the settings panel and
+the docs cannot drift apart.
+
+### What happens when a platform can't post
+
+It falls back rather than failing: the "Post to..." menu offers **Share sheet /
+download instead**, which is the behaviour that existed before posting was added.
+The connect endpoint answers **409** for a platform with no credentials and
+**401** for a revoked token, so the toast can say *"Failed — reconnect Instagram
+in Settings"* instead of a bare status code. A clip with no rendered MP4 is
+refused with **409** before any network call is attempted.
+
+### Environment variables
+
+`YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `X_CLIENT_ID`,
+`X_CLIENT_SECRET`, `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `META_APP_ID`,
+`META_APP_SECRET`, and `CLIPFORGE_PUBLIC_URL` (must match the redirect URI
+registered with each provider). Every one is optional — a missing credential only
+disables that one platform.
+
+### Post captions
+
+Each clip carries **one line of caption plus a 5–7 tag block**: 2–3 discovery
+tags (`#fyp`, `#foryou`, `#viral`) and 2–4 content tags mined from that clip's
+own transcript. "Copy caption" copies exactly that — the title and the 300-word
+transcript are deliberately gone, because pasting them under a clip is what made
+the old copy unusable. The full text is still one SRT download away.
+
+The rules are enforced in **both** `app/caption_format.py` and
+`src/lib/clipforge.ts` rather than trusted to the model, so a sloppy reply still
+produces a well-formed block, and clips rendered before this change copy in the
+new format.
+
 ## Running it yourself (dev)
 
 Requirements: **Python 3.11+** and **ffmpeg/ffprobe** on PATH. The hosted
@@ -842,6 +895,7 @@ python3 tools/asr_engine_test.py       # mocked queue/retry + ETA checks
 python3 tools/detect_backend_test.py   # provider dispatch, text-only payloads
 python3 tools/llm_provider_test.py     # Groq wire contract, 429 backoff, pacing, key handling
 python3 tools/caption_preset_test.py   # caption preset -> ASS style line + clip-relative timing
+python3 tools/caption_social_test.py   # post-caption rules + social readiness/OAuth/error mapping
 python3 tools/encode_profile_test.py   # encoder/preset/deadline + adaptive bitrate logic
 python3 tools/live_watch.py            # verify the RUNNING site: waits, then checks every endpoint
 python3 tools/health_resilience_test.py # health never fails on a sub-block, never calls a vendor

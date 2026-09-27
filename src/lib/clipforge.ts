@@ -261,3 +261,67 @@ export function scoreBand(score: number): "hot" | "warm" | "mild" {
   if (score >= 70) return "warm";
   return "mild";
 }
+
+// --------------------------------------------------------------------------
+// Post-caption shape. Mirrors app/caption_format.py -- the clipboard text, the
+// text shown in the composer preview, and the text a post submits must all be
+// identical, and the Python side owns the same rules for clips rendered there.
+// --------------------------------------------------------------------------
+
+/** Discovery tags earn reach. Kept in sync with DISCOVERY_TAGS in Python. */
+export const DISCOVERY_TAGS = ["#fyp", "#foryou", "#viral"] as const;
+
+const MAX_TAGS = 7;
+const MIN_TAGS = 5;
+const MAX_DISCOVERY = 3;
+const MIN_DISCOVERY = 2;
+export const MAX_CAPTION_CHARS = 150;
+
+/** Normalise one tag to a bare lowercase `#word`, or "" if it carries no tag. */
+export function cleanTag(raw: unknown): string {
+  const text = String(raw ?? "").trim().replace(/^#+/, "").toLowerCase();
+  const cleaned = text.replace(/[^0-9a-z]+/g, "");
+  return cleaned ? `#${cleaned}` : "";
+}
+
+/**
+ * Dedupe, enforce the 2-3 discovery / 2-4 content mix, cap at 7.
+ *
+ * Relevance over volume: a shortfall is topped up from the discovery tags only,
+ * never with generic filler like #love or #explore that would suit any video.
+ */
+export function normalizeHashtags(tags: unknown): string[] {
+  if (!Array.isArray(tags)) return [...DISCOVERY_TAGS];
+
+  const seen = new Set<string>();
+  const content: string[] = [];
+  const discovery: string[] = [];
+  for (const raw of tags) {
+    const tag = cleanTag(raw);
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
+    (DISCOVERY_TAGS as readonly string[]).includes(tag)
+      ? discovery.push(tag)
+      : content.push(tag);
+  }
+
+  if (discovery.length > MAX_DISCOVERY) {
+    content.unshift(...discovery.splice(MAX_DISCOVERY));
+  }
+  for (const tag of DISCOVERY_TAGS) {
+    if (discovery.length >= MIN_DISCOVERY && discovery.length + content.length >= MIN_TAGS) {
+      break;
+    }
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    discovery.push(tag);
+  }
+  return [...discovery, ...content].slice(0, MAX_TAGS);
+}
+
+/** Collapse to a single line, trimmed on a word boundary. */
+export function shortenCaption(raw: unknown, limit = MAX_CAPTION_CHARS): string {
+  const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) return text;
+  return text.slice(0, limit).replace(/\s+\S*$/, "").replace(/[\s,.;:\-–—]+$/, "");
+}

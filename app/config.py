@@ -714,6 +714,36 @@ class HostedConfig:
 
 
 @dataclass
+class SocialConfig:
+    """OAuth app credentials + readiness for the "Post to..." connectors.
+
+    Every platform needs its own developer app and its own approval process, and
+    they are NOT symmetric -- see PLATFORM_NOTES. Credentials are read live from
+    the environment (the platform's Environment vars UI) so a user can add a
+    platform without a code change and without the process restarting.
+
+    Nothing here is a secret we mint; these are the user's own registered apps.
+    A missing client id simply means that platform reports `needs_app` and the UI
+    falls back to download + share sheet, rather than the whole feature being
+    blocked behind the slowest approval.
+    """
+
+    public_url: str = "http://127.0.0.1:5173"
+    request_timeout_sec: int = 180
+    # Chunk size for the resumable uploads X and TikTok require for video.
+    upload_chunk_bytes: int = 4 * 1024 * 1024
+
+    youtube_client_id: str = ""
+    youtube_client_secret: str = ""
+    x_client_id: str = ""
+    x_client_secret: str = ""
+    tiktok_client_key: str = ""
+    tiktok_client_secret: str = ""
+    meta_app_id: str = ""
+    meta_app_secret: str = ""
+
+
+@dataclass
 class Settings:
     app: AppConfig
     whisper: WhisperConfig
@@ -725,6 +755,7 @@ class Settings:
     video: VideoConfig
     download: DownloadConfig
     hosted: HostedConfig
+    social: SocialConfig
 
     @property
     def gemini_api_key(self) -> str | None:
@@ -850,6 +881,8 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
             f'llm.provider "{provider}" is not one of groq/gemini/ollama'
         )
         provider = "groq"
+    sc = raw.get("social", {})
+
     llm = LlmConfig(
         provider=provider,
         ollama_url=str(
@@ -971,6 +1004,28 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         video=video,
         download=download,
         hosted=hosted,
+        social=SocialConfig(
+            public_url=str(
+                os.getenv("CLIPFORGE_PUBLIC_URL")
+                or sc.get("public_url")
+                or "http://127.0.0.1:5173"
+            ).rstrip("/"),
+            request_timeout_sec=max(
+                30, int(os.getenv("CLIPFORGE_SOCIAL_TIMEOUT") or sc.get("request_timeout_sec", 180))
+            ),
+            upload_chunk_bytes=max(
+                262144,
+                int(os.getenv("CLIPFORGE_UPLOAD_CHUNK_BYTES") or sc.get("upload_chunk_bytes", 4 * 1024 * 1024)),
+            ),
+            youtube_client_id=(os.getenv("YOUTUBE_CLIENT_ID") or "").strip(),
+            youtube_client_secret=(os.getenv("YOUTUBE_CLIENT_SECRET") or "").strip(),
+            x_client_id=(os.getenv("X_CLIENT_ID") or os.getenv("TWITTER_CLIENT_ID") or "").strip(),
+            x_client_secret=(os.getenv("X_CLIENT_SECRET") or os.getenv("TWITTER_CLIENT_SECRET") or "").strip(),
+            tiktok_client_key=(os.getenv("TIKTOK_CLIENT_KEY") or "").strip(),
+            tiktok_client_secret=(os.getenv("TIKTOK_CLIENT_SECRET") or "").strip(),
+            meta_app_id=(os.getenv("META_APP_ID") or os.getenv("FACEBOOK_APP_ID") or "").strip(),
+            meta_app_secret=(os.getenv("META_APP_SECRET") or os.getenv("FACEBOOK_APP_SECRET") or "").strip(),
+        ),
     )
 
 

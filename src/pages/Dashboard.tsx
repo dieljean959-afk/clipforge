@@ -366,7 +366,7 @@ export default function Dashboard() {
                     }
                   }}
                 >
-                  Copy caption + hashtags
+                  Copy caption
                 </Button>
                 <Button
                   variant="outline"

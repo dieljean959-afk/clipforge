@@ -225,3 +225,39 @@ tailscale_only = false
 # job cannot stall the jobs behind it. Each parallel transcription holds its
 # own model in RAM (~1.5GB each for medium int8) — lower this on a small host.
 worker_concurrency = 2
+
+[social]
+# "Post to..." — entirely optional and additive. Every platform needs its own
+# OAuth app, and the approval effort is NOT the same for each, so each one
+# degrades to the download/share-sheet path until it is usable. A missing
+# credential here disables that one platform and nothing else.
+#
+# Full matrix of what each platform requires (see app/social/__init__.py for
+# the same table the UI renders):
+#   youtube   — no approval. Google Cloud project + OAuth client. ~6 Shorts/day
+#               on the default 10,000 unit/day quota (1,600 units each).
+#   x         — needs a BILLING-enabled developer account (pay-per-use since 2025).
+#   tiktok    — works, but an unaudited app can only post PRIVATE (SELF_ONLY) and
+#               is capped at 5 users per rolling 24h.
+#   instagram — needs Meta App Review for instagram_content_publish (days–weeks).
+#
+# Credentials come from the environment (the platform's Environment vars UI),
+# not from this file, so they are never written to the repo:
+#   YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET
+#   X_CLIENT_ID / X_CLIENT_SECRET
+#   TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET
+#   META_APP_ID / META_APP_SECRET
+#   TIKTOK_APP_AUDITED=true   (only after passing the Direct Post audit)
+#   CLIPFORGE_PUBLIC_URL       (must match the redirect URI registered with each
+#                              provider; used to build /api/social/<p>/callback)
+
+# Where the provider sends the user back to. Must match the redirect URI
+# registered with Google / X / TikTok / Meta exactly.
+public_url = "http://127.0.0.1:5173"
+
+# Per-request ceiling for a video upload. A 50s clip on a slow link can take a
+# while; this is a backstop, not a target.
+request_timeout_sec = 180
+
+# Chunk size for the resumable uploads X and TikTok require for video.
+upload_chunk_bytes = 4194304

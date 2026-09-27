@@ -40,6 +40,7 @@ from typing import Any
 
 from loguru import logger
 
+from app.caption_format import finalize_clip_caption, normalize_hashtags, shorten_caption
 from app.config import GeminiConfig, Settings, live_gemini_key, live_groq_key
 
 PROVIDER_GROQ = "groq"
@@ -113,13 +114,23 @@ BY WORD INDEX RANGE — do NOT output timestamps, the indices are the contract.
 Timing window: clips must be {cfg.min_clip_sec}-{cfg.max_clip_sec} seconds long
 (as shown next to each word). Pick {cfg.max_clips} best candidates max — fewer
 is fine. Do NOT invent indices that are not in the transcript. Score 0-100 for
-hook strength, pacing and emotional energy. hook_text is a short punchy phrase
-that would work as the opening caption. hashtags: 3-6 short tags for the
-platform.
+hook strength, pacing and emotional energy.
+
+hook_text is the POST CAPTION: ONE line, under 150 characters, no newlines, no
+repetition of the title, no "in this video..." preamble. It must work on its own
+as the line a viewer reads under the clip.
+
+hashtags: 5 to 7 tags total, mixing exactly:
+  - 2-3 discovery tags from: #fyp #foryou #viral
+  - 2-4 CONTENT tags naming what this specific clip is actually about, drawn
+    from the transcript. Generic filler that would suit any video (#love,
+    #instagood, #explore) is forbidden -- every tag must be one you would only
+    use for THIS clip. No duplicates, lowercase, no punctuation.
 
 Return ONLY a JSON array (no prose, no markdown fences):
 [{{"start_word": 120, "end_word": 310, "score": 92, "title": "Short punchy title",
-   "hook_text": "WAIT FOR IT", "hashtags": ["#viral", "#podcast"]}}]
+   "hook_text": "one line of post copy",
+   "hashtags": ["#fyp", "#foryou", "#viral", "#<topic>", "#<topic>"]}}]
 
 {transcript_text}
 """.strip()
@@ -152,10 +163,11 @@ def parse_candidates(text: str) -> list[dict[str, Any]]:
                 "end_word": end_word,
                 "score": max(0.0, min(100.0, score)),
                 "title": str(item.get("title", "Untitled clip"))[:120],
-                "hook_text": str(item.get("hook_text", ""))[:200],
-                "hashtags": [
-                    str(t) for t in (item.get("hashtags") or []) if str(t).strip()
-                ][:8],
+                # The prompt asks for one line of copy and 5-7 tags; these two
+                # calls enforce that rather than trusting the reply, which is
+                # routinely multi-line and over-tagged.
+                "hook_text": shorten_caption(item.get("hook_text", "")),
+                "hashtags": normalize_hashtags(item.get("hashtags")),
             }
         )
     return out
@@ -193,15 +205,20 @@ def resolve_candidates(
         if end - start < 1.0:
             continue
         quote = " ".join(words[j]["word"] for j in range(si, ei + 1))[:300]
+        # Applied HERE rather than in parse_candidates: this is the first point
+        # where the clip's real transcript text exists, and the content-tag
+        # top-up is mined from it. Doing it earlier could only pad with generic
+        # discovery tags.
+        hook_text, hashtags = finalize_clip_caption(c["hook_text"], c["hashtags"], quote)
         out.append(
             {
                 "start": start,
                 "end": end,
                 "score": c["score"],
                 "title": c["title"],
-                "hook_text": c["hook_text"],
+                "hook_text": hook_text,
                 "transcript": quote,
-                "hashtags": c["hashtags"],
+                "hashtags": hashtags,
             }
         )
     return out

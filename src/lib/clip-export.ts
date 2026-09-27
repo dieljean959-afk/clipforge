@@ -3,7 +3,11 @@
 // The ZIP carries the REAL rendered MP4s — no metadata-only exports.
 
 import { downloadBlob, downloadText } from "@/lib/zip";
-import { fmtSrtTime } from "@/lib/clipforge";
+import {
+  fmtSrtTime,
+  normalizeHashtags,
+  shortenCaption,
+} from "@/lib/clipforge";
 import type { ClipDto, JobDto } from "@/lib/api";
 
 /** Build and download the SRT for one clip. */
@@ -14,18 +18,17 @@ export function buildClipSrt(clip: ClipDto) {
   downloadText(srt, `clip-${clip.order + 1}.srt`);
 }
 
-/** Copy "title + hook + transcript + hashtags" metadata to the clipboard. */
+/**
+ * Copy the post caption: ONE line of copy, a blank line, then the hashtag
+ * block. The full transcript deliberately left out -- it is what the SRT
+ * download is for, and pasting 300 words of transcript under a clip is what
+ * made the old copy unusable.
+ *
+ * The rules are enforced here too, not just in the Python prompt, so a clip
+ * rendered before this change still copies in the new format.
+ */
 export async function copyClipMeta(clip: ClipDto) {
-  const text = [
-    clip.title,
-    "",
-    clip.hookText,
-    "",
-    clip.transcript,
-    "",
-    clip.hashtags.join(" "),
-  ].join("\n");
-  await navigator.clipboard.writeText(text);
+  await navigator.clipboard.writeText(buildPostCaption(clip.hookText, clip.hashtags));
 }
 
 /** Render the whole job's captions.txt (one SRT block per clip). */
@@ -45,6 +48,17 @@ export function buildCaptionsTxt(job: JobDto, clips: ClipDto[]): string {
 }
 
 /** Filename stem for a clip inside export archives. */
+/**
+ * The exact text a user pastes into a platform composer, and the text every
+ * "Post to..." action submits. One line + hashtag block, mirrors
+ * app/caption_format.py so the clipboard and the posted caption never drift.
+ */
+export function buildPostCaption(caption: string, tags: string[]): string {
+  const line = shortenCaption(caption);
+  const block = normalizeHashtags(tags).join(" ");
+  return [line, block].filter(Boolean).join("\n\n");
+}
+
 export function clipFileStem(clip: ClipDto): string {
   const safe = clip.title
     .toLowerCase()

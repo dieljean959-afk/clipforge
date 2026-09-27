@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ClipPreview } from "./ClipPreview";
+import { PostMenu } from "./PostMenu";
 import { buildClipSrt, copyClipMeta, downloadClipMp4 } from "@/lib/clip-export";
 import { scoreBand, fmtDuration } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
@@ -131,6 +132,8 @@ export function ClipCard({
             <Copy className="size-3.5" />
             Copy caption
           </Button>
+          {/* Additive: sits NEXT TO the MP4 button, which is unchanged. */}
+          <PostMenu clip={clip} rendered={rendered} />
           <Button
             size="sm"
             variant="outline"
