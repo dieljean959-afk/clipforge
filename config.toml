@@ -74,6 +74,14 @@ max_retries = 3
 # Verify this is still a current model before relying on it — Groq deprecates
 # models and the app will NOT guess a replacement for you; it fails loudly with
 # the exact API error so you can pick one from console.groq.com/docs/models.
+#
+# Do NOT switch this to another model just to dodge a spent daily quota.
+# Measured 2026-09-27: qwen/qwen3.8-27b has its own tokens-per-day bucket, but
+# caps input at 7,000 tokens/MINUTE, and a 120s detection chunk is ~2,500 input
+# tokens — so a single chunk collides with the previous call and is rejected
+# with 413. Shrinking chunk_words to fit would change every chunk boundary and
+# invalidate the per-chunk cache, re-billing the whole source. Spent quota is
+# cheaper than re-scored quota. Wait for the rolling 24h window instead.
 model = "openai/gpt-oss-120b"
 # Overridable with GROQ_BASE_URL (used by the test suite to point at a local
 # OpenAI-compatible stub instead of the real API).

@@ -542,7 +542,7 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
         # 8k-token/min one, which is the limit that actually stops a long
         # source. Reacting to a 429 instead means the rejected call was still
         # spent, and the retry after a 15s wait usually meets the next one.
-        token_wait = _groq_token_wait(est, cfg.tokens_per_min)
+        token_wait = _groq_token_wait(est, cfg.tokens_per_min) if attempt == 0 else 0.0
         if token_wait > 0:
             logger.info(
                 f"[llm] groq token budget: waiting {token_wait:.0f}s before a "
@@ -603,6 +603,15 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
                     f" — backing off {wait:.1f}s (attempt {attempt + 1})"
                 )
             else:
+                # 400 is PERMANENT: the same prompt produces the same unparseable
+                # reply, so a retry just re-bills it. 413 is NOT — Groq uses it
+                # for "Request too large ... on input tokens per minute", which is
+                # a RATE limit that clears in seconds and is the server's own
+                # signal to come back. Only the unfixable 4xx fail fast.
+                if exc.status == 400:
+                    raise LlmError(
+                        f"Groq rejected the request permanently (400): {msg[:220]}"
+                    )
                 wait = 2.0 * (attempt + 1)
                 logger.warning(
                     f"[llm] groq error ({exc.status} {msg[:140]}), "

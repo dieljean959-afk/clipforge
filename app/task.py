@@ -66,8 +66,9 @@ class _StageChunkCache(llm.ChunkCache):
     reuses them on resume.
     """
 
-    def __init__(self, ws: StageWorkspace) -> None:
+    def __init__(self, ws: StageWorkspace, model: str = "") -> None:
         self._ws = ws
+        self._model = model
 
     def get(self, index: int) -> list[dict[str, Any]] | None:
         data = self._ws.read_json("detect", f"chunks/chunk_{index:03d}.json")
@@ -77,6 +78,29 @@ class _StageChunkCache(llm.ChunkCache):
 
     def put(self, index: int, candidates: list[dict[str, Any]]) -> None:
         self._ws.write_json("detect", f"chunks/chunk_{index:03d}.json", candidates)
+        if self._model:
+            self._note_model(index)
+
+    # -- scoring provenance -------------------------------------------------- #
+    # Detection can span more than one model over a job's life: a quota runs
+    # out mid-source, the model is switched, the remaining chunks score under a
+    # different model than the cached ones. That is invisible in the result —
+    # every candidate looks identical — so which model scored which part of the
+    # video is recorded here, as a SIDECAR.
+    #
+    # Deliberately not folded into the chunk files: the chunk payload is what
+    # the cache hits on, and reshaping it to carry a model name would
+    # invalidate every chunk already paid for.
+    def _note_model(self, index: int) -> None:
+        prov = self.provenance()
+        prov[str(index)] = self._model
+        self._ws.write_json("detect", "provenance.json", prov)
+
+    def provenance(self) -> dict[str, str]:
+        data = self._ws.read_json("detect", "provenance.json")
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+        return {}
 
 
 class Pipeline:
@@ -617,7 +641,7 @@ class Pipeline:
             # Per-chunk persistence: a pause or host restart during chunk 5 of
             # 7 resumes at chunk 6 instead of re-running — and re-billing —
             # all seven Groq calls.
-            chunk_cache=_StageChunkCache(ws),
+            chunk_cache=_StageChunkCache(ws, model=llm.provider_label(self.settings)),
             should_pause=lambda: self.pause_requested(job_id),
         )
         ws.write_json("detect", "candidates.json", candidates)
