@@ -115,7 +115,10 @@ export function ClipCard({
           {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
             ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`}
         </p>
-        <div className="mt-auto flex items-center gap-1.5">
+        {/* Primary actions. flex-wrap so nothing can ever be pushed outside a
+            narrow card: a 4th button here previously pushed MP4 and .srt off
+            the edge where they still existed in the DOM but were unreachable. */}
+        <div className="mt-auto flex flex-wrap items-center gap-1.5">
           <Button
             size="sm"
             variant="outline"
@@ -132,8 +135,6 @@ export function ClipCard({
             <Copy className="size-3.5" />
             Copy caption
           </Button>
-          {/* Additive: sits NEXT TO the MP4 button, which is unchanged. */}
-          <PostMenu clip={clip} rendered={rendered} />
           <Button
             size="sm"
             variant="outline"
@@ -160,6 +161,11 @@ export function ClipCard({
           >
             .srt
           </Button>
+        </div>
+        {/* "Post to..." gets its OWN row. Social is strictly additive: it can
+            never take space from, reorder or hide the download above. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <PostMenu clip={clip} rendered={rendered} />
         </div>
         <CaptionTracks clip={clip} />
       </div>

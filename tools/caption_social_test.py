@@ -448,6 +448,58 @@ check("Copy caption still present", "copyClipMeta" in card)
 check("PostMenu added alongside", "PostMenu" in card)
 check("Copy caption label unchanged", "Copy caption" in card)
 
+# --- layout: the regression that actually bit -------------------------------
+# A 4th button in a single-line flex row pushed MP4 and .srt outside a narrow
+# card. They were still in the DOM, so the assertions above all passed while the
+# user could not see or reach them. Source checks cannot prove pixels, so these
+# assert the STRUCTURE that prevents the overflow instead.
+
+
+def div_block_from(src: str, anchor: str) -> str:
+    """The balanced <div>...</div> opened by the div carrying `anchor`.
+
+    Returns "" when the anchor is gone, so a regression reports as FAILED checks
+    rather than a traceback: a crashed suite reads like a broken harness, and
+    the one thing it must never do is stop describing the bug.
+    """
+    if anchor not in src:
+        return ""
+    start = src.rindex("<div", 0, src.index(anchor))
+    depth = 0
+    i = start
+    while i < len(src):
+        if src.startswith("<div", i):
+            depth += 1
+        elif src.startswith("</div>", i):
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 6]
+        i += 1
+    return src[start:]
+
+
+ROW_ANCHOR = 'className="mt-auto flex flex-wrap items-center gap-1.5"'
+check("primary row anchor present", ROW_ANCHOR in card)
+primary_row = div_block_from(card, ROW_ANCHOR)
+check("primary row located", "downloadMp4" in primary_row)
+check("primary row contains Copy caption", "copyClipMeta" in primary_row)
+check("primary row contains the MP4 download", "void downloadMp4()" in primary_row)
+check("primary row contains the SRT download", "buildClipSrt(clip)" in primary_row)
+check("primary button row can wrap", "flex-wrap" in primary_row)
+check(
+    "primary row is not a rigid single line",
+    "flex-nowrap" not in primary_row and "whitespace-nowrap" not in primary_row,
+)
+check(
+    "PostMenu is NOT in the primary row (it gets its own line)",
+    "<PostMenu" not in primary_row,
+)
+check(
+    "PostMenu renders after the download button",
+    card.index("<PostMenu") > card.index("void downloadMp4()"),
+)
+check("all three primary actions on one row", primary_row.count("<Button") == 3)
+
 ts_src = (ROOT / "src" / "lib" / "clipforge.ts").read_text()
 check("TS discovery tags match Python", '"#fyp", "#foryou", "#viral"' in ts_src)
 check("TS max tags match Python", "MAX_TAGS = 7" in ts_src)

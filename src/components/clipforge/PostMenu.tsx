@@ -133,7 +133,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
         <Button
           size="sm"
           variant="outline"
-          className="h-7 cursor-pointer gap-1.5 text-xs"
+          className="h-7 w-full cursor-pointer gap-1.5 text-xs"
           disabled={!rendered}
           title={rendered ? "Post this clip" : "No rendered MP4 yet"}
         >
