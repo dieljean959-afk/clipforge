@@ -133,11 +133,37 @@ def main() -> int:
     check("lower_third emits no animation tags", r"\fscx" not in lower_text and r"\fad" not in lower_text)
 
     print("\n[4] karaoke uses per-word \\k centiseconds")
-    wcues = [{"start": 0.0, "end": 2.0, "text": "one two",
-              "words": [{"text": "one", "start": 0.0, "end": 1.0},
-                        {"text": "two", "start": 1.0, "end": 2.0}]}]
+    # Build the words with the REAL payload shape. This used to hand-roll
+    # {"text": ...} — a key nothing in the pipeline produces — and that is
+    # precisely why the bug hid: production sends Word.as_dict(), which keys
+    # the text as "word", so _karaoke_tags raised KeyError('text') and killed
+    # the render at the subtitle stage (job f3b81a1dd7e6) while this test
+    # passed. Deriving the dicts from the dataclass keeps the test honest.
+    real_words = [subtitle.Word(start=0.0, end=1.0, word="one").as_dict(),
+                  subtitle.Word(start=1.0, end=2.0, word="two").as_dict()]
+    check("the test payload is the real one (keyed 'word', not 'text')",
+          all("word" in w and "text" not in w for w in real_words),
+          repr(real_words[0]))
+    wcues = [{"start": 0.0, "end": 2.0, "text": "one two", "words": real_words}]
     k_text = subtitle.build_ass_events(wcues, s, 0.0, "karaoke")
     check("karaoke emits \\k tags", r"\k" in k_text, k_text)
+    check("karaoke spells both words", "one" in k_text and "two" in k_text, k_text)
+    check("both accepted spellings work (legacy 'text' dicts)",
+          all(w in subtitle.build_ass_events(
+              [{"start": 0.0, "end": 2.0, "text": "one two",
+                "words": [{"text": "one", "start": 0.0, "end": 1.0},
+                          {"text": "two", "start": 1.0, "end": 2.0}]}],
+              s, 0.0, "karaoke") for w in ("one", "two")))
+    # A word with no text must not break the line, and must not eat the cue.
+    blank = subtitle.build_ass_events(
+        [{"start": 0.0, "end": 2.0, "text": "fallback line",
+          "words": [{"word": "  ", "start": 0.0, "end": 2.0}]}], s, 0.0, "karaoke")
+    check("a blank-word cue falls back to the cue text",
+          "fallback line" in blank, blank)
+    check("a brace inside a karaoke word cannot close the tag early",
+          r"\k100}(" in subtitle.build_ass_events(
+              [{"start": 0.0, "end": 2.0, "text": "x",
+                "words": [{"word": "{a}", "start": 0.0, "end": 2.0}]}], s, 0.0, "karaoke"))
 
     print("\n[5] braces in spoken text cannot break the override block")
     nasty = [{"start": 0.0, "end": 1.0, "text": "a {tag} and b"}]

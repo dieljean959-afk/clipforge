@@ -136,7 +136,7 @@ def _boot() -> None:
     accounts = AccountStore(settings.app.paths.data_dir)
 
     # --- crash recovery ---------------------------------------------------
-    # Three things are recoverable, and they are not the same thing:
+    # Four things are recoverable, and they are not the same thing:
     #   1. mid-flight — the process died before it could write a terminal state,
     #      so the job is simply frozen at its last stage.
     #   2. interrupted — we knew a host restart killed it.
@@ -144,10 +144,43 @@ def _boot() -> None:
     #      before the interrupted/resumed distinction existed. Those jobs are
     #      sitting at stage=failed with an intact stage cache, and used to be
     #      lost permanently.
+    #   4. a job whose clips are ALL on disk. Handled first and separately: it
+    #      is not resumable work, it is a record that is simply wrong (see
+    #      below), and re-queueing it would burn another detection call to
+    #      re-render clips that already exist.
     # Bounded by INTERRUPT_MAX_RESUMES so a job that cannot survive a restart
     # loop eventually stops instead of cycling forever.
     recoverable = {"grabbing", "transcribing", "finding", "rendering", "queued"}
     for job in store.list_jobs():
+        # A job can be stamped stage=failed by a LATER attempt after a good
+        # batch was already delivered — e.g. redetect re-running detection,
+        # getting rate-limited, and overwriting a finished job. The clips are
+        # on disk, so the record is the thing that is wrong. Restoring
+        # stage=complete here (rather than leaving it red) is the difference
+        # between "here are your 10 clips" and a permanent phantom failure
+        # with no action the user can take.
+        rendered, promised = store.clips_delivered(job["_id"], job)
+        if InProcessWorker.has_delivered_output(job, rendered, promised):
+            logger.info(
+                f"[boot] job {job['_id']} is marked failed but all {rendered} clips are on "
+                f"disk — restoring stage=complete (the failure cost no output)"
+            )
+            job.update({
+                "stage": "complete",
+                "progress": 100,
+                "progressDetail": f"{rendered} clips ready.",
+                "completedAt": job.get("completedAt") or int(time.time() * 1000),
+                "failedStage": None,
+                "error": None,
+                "errorDetail": None,
+            })
+            store.write_job(job)
+            store.append_job_log(
+                job["_id"],
+                f"marked complete at boot: all {rendered} clips were already rendered, "
+                "so the recorded failure had no output to show for it",
+            )
+            continue
         reason = None
         if job.get("stage") in recoverable:
             reason = "mid-flight"

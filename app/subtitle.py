@@ -634,16 +634,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def _karaoke_tags(cue: dict) -> str:
-    """ASS \\k timing tags (centiseconds per word) for karaoke-fill style."""
-    words = cue.get("words") or []
+    """ASS \\k timing tags (centiseconds per word) for karaoke-fill style.
+
+    Word dicts come from ``Word.as_dict()``, which keys the text as ``word``.
+    This function indexed ``w["text"]`` — the key a *cue* uses — so the karaoke
+    preset raised ``KeyError: 'text'`` on the first word and killed the whole
+    render at the subtitle stage (job f3b81a1dd7e6, "Pipeline error: 'text'").
+    Both spellings are accepted: the payload on disk may predate the dataclass.
+    """
+    words = [
+        w
+        for w in (cue.get("words") or [])
+        if (w.get("word") or w.get("text") or "").strip()
+    ]
     if not words:
         return ""
     total = max(0.01, cue["end"] - cue["start"])
     parts: list[str] = []
     for w in words:
-        dur = max(0.0, w["end"] - w["start"])
+        dur = max(0.0, float(w.get("end") or 0.0) - float(w.get("start") or 0.0))
         cs = int(round(dur / total * 100 * len(words)))
-        parts.append(r"{\k%d}%s" % (max(1, cs), w["text"]))
+        # A literal brace in a word would close the tag early and corrupt the
+        # rest of the line, so it is folded to a paren like the non-karaoke path.
+        text = (w.get("word") or w.get("text") or "").strip().replace("{", "(").replace("}", ")")
+        parts.append(r"{\k%d}%s" % (max(1, cs), text))
     return "".join(parts)
 
 
@@ -657,7 +671,9 @@ def build_ass_events(
         start = _ass_time(c["start"] - start_offset)
         end = _ass_time(c["end"] - start_offset)
         if p.karaoke and c.get("words"):
-            text = _karaoke_tags(c)
+            # A cue whose words are all blank still has to render as text —
+            # an empty Dialogue line is a caption that shows nothing.
+            text = _karaoke_tags(c) or c["text"]
         else:
             text = c["text"].replace("{", "(").replace("}", ")")
             if p.pop:

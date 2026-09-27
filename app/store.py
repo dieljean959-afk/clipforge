@@ -382,6 +382,30 @@ class LocalStore:
     def clips_ready_count(self, job_id: str) -> int:
         return sum(1 for c in self.list_clips(job_id) if c.get("videoPath"))
 
+    def clips_delivered(
+        self, job_id: str, job: dict[str, Any] | None = None
+    ) -> tuple[int, int]:
+        """``(clips actually on disk, clips the job promised)`` for one job.
+
+        "Promised" is the job's own ``clipCount`` when it recorded one, else the
+        number of clip records — a job that got as far as counting knows what a
+        full batch looked like, and a job that died before counting is judged
+        against what it managed to write.
+
+        Rendered means the MP4 exists on disk, not merely that a ``videoPath``
+        string was recorded: a container recycle can leave a job pointing at
+        files that are gone, and treating those as delivered would restore
+        ``stage=complete`` for a batch the user cannot download.
+        """
+        clips = self.list_clips(job_id)
+        rendered = sum(
+            1
+            for c in clips
+            if c.get("videoPath") and Path(str(c["videoPath"])).exists()
+        )
+        promised = int((job or {}).get("clipCount") or 0) or len(clips)
+        return rendered, promised
+
     # ------------------------------------------------------------------
     # logs
     # ------------------------------------------------------------------

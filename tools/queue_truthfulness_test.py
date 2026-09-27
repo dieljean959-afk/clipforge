@@ -180,6 +180,81 @@ def main() -> int:
         for name, body in (("_boot()", boot), ("retry()", retry_body)):
             check('"error": None' in body, f"{name} clears the stale error")
 
+        # ---- 11. a delivered batch is never a failed batch -------------
+        # Live case: job c57d7782c548 rendered all 10 clips, then a later
+        # re-detect hit a Groq 429 and _fail() overwrote stage=complete with
+        # stage=failed. Every clip was still on disk and downloadable, so the
+        # red banner was a phantom with no action behind it.
+        from app.worker import InProcessWorker as _W  # noqa: E402
+
+        media = root / "outputs" / "jclip"
+        media.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            (media / f"clip_{i}.mp4").write_bytes(b"\x00" * 16)
+        store.create_clips(
+            "j",
+            [
+                {"order": i, "title": f"c{i}", "start": 0.0, "end": 1.0,
+                 "videoPath": str(media / f"clip_{i}.mp4")}
+                for i in range(3)
+            ],
+            "groq",
+        )
+        # create_clips() writes the DETECTION fields; the media path is stamped
+        # later by the encode stage, so mirror that here rather than pretending
+        # a candidate carries a rendered file.
+        for doc in store.list_clips("j"):
+            doc["videoPath"] = str(media / f"clip_{doc['order']}.mp4")
+            store.write_clip(doc)
+        delivered = store.get_job("j")
+        delivered.update({
+            "stage": "failed", "clipCount": 3, "progress": 100,
+            "error": "AI detection failed: HTTP 429", "errorDetail": "TPM Limit",
+        })
+        store.write_job(delivered)
+        rendered, promised = store.clips_delivered("j", store.get_job("j"))
+        check((rendered, promised) == (3, 3), "clips_delivered counts 3 rendered of 3 promised")
+        check(
+            _W.has_delivered_output(store.get_job("j"), rendered, promised),
+            "a failed job whose whole batch is on disk is recognised as delivered",
+        )
+        check(
+            overall_status(store.get_job("j"))["state"] == "failed",
+            "REGRESSION GUARD: before the boot reconcile the user still sees 'failed'",
+        )
+        # The predicate must stay narrow, or it starts lying in the other
+        # direction: a run that genuinely lost a clip is still a failure.
+        check(
+            not _W.has_delivered_output(store.get_job("j"), 2, 3),
+            "a partial batch (2 of 3) is NOT treated as delivered",
+        )
+        check(
+            not _W.has_delivered_output({"stage": "complete"}, 3, 3),
+            "only stage=failed jobs are candidates (a complete job is left alone)",
+        )
+        check(
+            not _W.has_delivered_output(store.get_job("j"), 0, 0),
+            "a job with no clips at all is NOT treated as delivered",
+        )
+        # A videoPath that points at a file a container recycle removed is not
+        # delivery. c57d7782c548 is exactly the case that would otherwise
+        # restore stage=complete for clips the user cannot download.
+        (media / "clip_1.mp4").unlink()
+        check(
+            not _W.has_delivered_output(store.get_job("j"), *store.clips_delivered("j", store.get_job("j"))),
+            "a clip missing from disk does not count as rendered",
+        )
+        (media / "clip_1.mp4").write_bytes(b"\x00" * 16)
+
+        check("has_delivered_output(" in boot, "_boot() consults has_delivered_output")
+        check("clips_delivered(" in boot, "_boot() asks the store what is actually on disk")
+        check('"stage": "complete"' in boot, "_boot() restores stage=complete for a delivered batch")
+        check('"errorDetail": None' in boot, "_boot() clears the stale errorDetail too")
+        check(
+            boot.index("has_delivered_output") < boot.index("has_signal_failure"),
+            "the delivered check runs BEFORE the re-queue paths, so it is not re-queued",
+        )
+
         # ---- a real stored job round-trips honestly -------------------
         store.write_job({**queued, "_id": "real", "source": "s", "title": "t"})
         back = store.get_job("real")

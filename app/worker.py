@@ -524,6 +524,26 @@ class InProcessWorker:
         text = f"{job.get('error') or ''}\n{job.get('errorDetail') or ''}"
         return bool(_SIGNAL_BANNER.search(text))
 
+    @staticmethod
+    def has_delivered_output(job: dict[str, Any], rendered: int, promised: int) -> bool:
+        """True when a job marked ``failed`` actually delivered its whole batch.
+
+        Live case: job ``c57d7782c548`` rendered all 10 of its clips, then a
+        LATER re-detect attempt hit a Groq 429 and ``_fail()`` overwrote
+        ``stage=complete`` with ``stage=failed``. The clips were all on disk and
+        downloadable the whole time, so the dashboard advertised a failure the
+        user could do nothing about and did not need to act on.
+
+        A failure that cost no output is not a failed batch. Requiring the FULL
+        set matters: a run that lost clips really did fail, and saying
+        "complete" there would hide a genuine hole.
+        """
+        return (
+            job.get("stage") == "failed"
+            and promised > 0
+            and rendered >= promised
+        )
+
     #: Failures worth exactly one silent automatic retry. A hung ffmpeg and a
     #: starved host are both environmental and often transient; making the user
     #: click Retry for a hang that a second attempt would have cleared is a
