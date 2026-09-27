@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { BadgeCheck, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { BadgeCheck, Captions, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -66,6 +66,26 @@ export default function Dashboard() {
       toast.error(err instanceof Error ? err.message : "Re-detection failed.");
     } finally {
       setRedetecting(null);
+    }
+  };
+
+  // Re-encode with fresh captions, reusing the cached transcript and cuts.
+  // This is the repair path for a caption change: the karaoke preset once
+  // rendered "bro." + "Did" as "bro.Did" in clips that were ALREADY encoded,
+  // and the only way to fix pixels is to encode them again.
+  const [rerendering, setRerendering] = useState<string | null>(null);
+  const runRerender = async (jobId: string) => {
+    setRerendering(jobId);
+    try {
+      const res = await api.rerender(jobId);
+      toast.info(
+        `Re-rendering ${res.clipsReset} clip${res.clipsReset === 1 ? "" : "s"} with fresh captions — the transcript is reused, so no re-transcription.`,
+      );
+      void refreshJobs();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Re-render failed.");
+    } finally {
+      setRerendering(null);
     }
   };
 
@@ -211,6 +231,20 @@ export default function Dashboard() {
                     <Sparkles className="size-3.5 text-primary" />
                   )}
                   Re-detect with AI
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="cursor-pointer gap-1.5 text-xs"
+                  disabled={rerendering !== null || redetecting !== null}
+                  onClick={() => void runRerender(selectedJob._id)}
+                >
+                  {rerendering === selectedJob._id ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Captions className="size-3.5 text-primary" />
+                  )}
+                  Re-render captions
                 </Button>
                 <ExportDialog job={selectedJob} clips={clips} />
                 <ConfirmDeleteJob

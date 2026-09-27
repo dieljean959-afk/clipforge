@@ -353,6 +353,14 @@ export const api = {
     }),
   redetect: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/redetect`, { method: "POST" }),
+  /**
+   * Re-encode with fresh captions, reusing the cached transcript and cuts.
+   * No re-transcription and no AI call — minutes of CPU, nothing else.
+   */
+  rerender: (jobId: string) =>
+    request<{ queued: boolean; clipsReset: number }>(`/api/jobs/${jobId}/rerender`, {
+      method: "POST",
+    }),
   verifyClips: (jobId: string) =>
     request<VerifyClipsDto>(`/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`),
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),

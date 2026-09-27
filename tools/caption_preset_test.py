@@ -243,6 +243,45 @@ def main() -> int:
         subtitle.words_to_cues(clear, words_per_cue=2), s, 0.0, "karaoke")
     check("karaoke is unaffected for confident cues", r"\k" in k_clear, k_clear)
 
+    # ---- words must not be welded together on screen ------------------
+    # Whisper keeps punctuation on the word it follows, and the karaoke path
+    # emits one \k tag per word with NOTHING between them. ASS renders the
+    # tag as nothing, so "bro." + "Did" burned in as "bro.Did" and "ain't" +
+    # "nigga," as "ain'tnigga,". These are the two lines the user reported.
+    def spoken(text):
+        return [{"word": w, "start": i * 0.3, "end": (i + 1) * 0.3, "conf": 0.95}
+                for i, w in enumerate(text.split())]
+
+    for phrase in ("bro. Did", "ain't nigga,", "Y'all just dropped cypher?",
+                   "Really? He went to eat the baby waffles."):
+        rendered = subtitle.build_ass_events(
+            [{"start": 0.0, "end": 1.2, "text": phrase, "words": spoken(phrase)}],
+            s, 0.0, "karaoke",
+        )
+        # The ASS text field is after the LAST ",," in the Dialogue line.
+        visible = rendered.rsplit(",,", 1)[-1]
+        # What a reader sees is the ASS text with the {} override blocks
+        # removed, so strip them and compare with the phrase itself.
+        plain = re.sub(r"\{[^}]*\}", "", visible).strip()
+        check(f"karaoke keeps the words apart: {phrase!r}", plain == phrase,
+              f"rendered {plain!r}")
+        check(f"no fused words: {phrase!r}", "  " not in visible, repr(visible))
+
+    check("the separator is a real space between the tags, not another tag",
+          "}one {\\k" in subtitle._karaoke_tags(
+              {"start": 0.0, "end": 1.0, "text": "one two", "words": spoken("one two")}
+          ).replace("{", "{").replace("}one", "}one").replace("}two", "}two"),
+          subtitle._karaoke_tags(
+              {"start": 0.0, "end": 1.0, "text": "one two", "words": spoken("one two")}))
+
+    # The non-karaoke presets read cue["text"], which was always space-joined;
+    # guard that path so the fix cannot be made by changing it.
+    pop_text = subtitle.build_ass_events(
+        [{"start": 0.0, "end": 1.0, "text": "bro. Did", "words": spoken("bro. Did")}],
+        s, 0.0, "bold_pop")
+    check("the non-karaoke path still reads the spaced cue text",
+          "bro. Did" in re.sub(r"\{[^}]*\}", "", pop_text), pop_text)
+
     # An uncertain cue is a marker of doubt, not a sentence — translating it
     # would invite a confident invented line in another language.
     from app import translate as translate_mod

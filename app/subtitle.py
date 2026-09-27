@@ -724,6 +724,12 @@ def _karaoke_tags(cue: dict) -> str:
     preset raised ``KeyError: 'text'`` on the first word and killed the whole
     render at the subtitle stage (job f3b81a1dd7e6, "Pipeline error: 'text'").
     Both spellings are accepted: the payload on disk may predate the dataclass.
+
+    Each word is separated by a SPACE. The tag itself renders as nothing, so
+    concatenating bare words put them on screen fused — "bro." + "Did" burned
+    in as "bro.Did", and "ain't" + "nigga," as "ain'tnigga,". Whisper keeps
+    punctuation attached to the preceding word, so the missing space was
+    visible on almost every cue with a comma or full stop in it.
     """
     words = [
         w
@@ -741,7 +747,9 @@ def _karaoke_tags(cue: dict) -> str:
         # rest of the line, so it is folded to a paren like the non-karaoke path.
         text = (w.get("word") or w.get("text") or "").strip().replace("{", "(").replace("}", ")")
         parts.append(r"{\k%d}%s" % (max(1, cs), text))
-    return "".join(parts)
+    # The separator is a real space, not a tag: ASS renders "{}" as nothing, so
+    # without it the words are welded together on screen.
+    return " ".join(parts)
 
 
 def build_ass_events(

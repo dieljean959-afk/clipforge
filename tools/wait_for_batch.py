@@ -91,10 +91,8 @@ def main() -> int:
             try:
                 with urllib.request.urlopen(req, timeout=20) as r:
                     ranged = f"{r.status}/{len(r.read())}B"
-                    disp = r.headers.get("content-disposition", "")
             except Exception as e:  # noqa: BLE001
                 ranged = f"ERR {e}"
-                disp = ""
         usable = c.get("renderState") == "done" and c.get("videoPath") and srt_status == 200
         ready += bool(usable)
         print(f"  {n:2d} {c.get('title', '')[:30]:32} state={c.get('renderState'):8} "

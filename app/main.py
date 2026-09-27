@@ -1055,6 +1055,62 @@ def register_worker(body: RegisterWorkerIn) -> dict:
     return {"ok": True, "workerUrl": settings.hosted.worker_url}
 
 
+@app.post("/api/jobs/{job_id}/rerender")
+def rerender_job(job_id: str) -> dict:
+    """Re-encode a finished batch with fresh captions, reusing the transcript.
+
+    This is the repair path for anything wrong with the BURNED-IN text — a
+    caption-style fix, a threshold change, a bad `.ass` (the karaoke preset
+    once welded words together on screen: "bro." + "Did" rendered as
+    "bro.Did"). Re-encoding a 10-clip batch costs minutes of CPU and no money:
+    the transcript and the detection result are read back from the stage cache,
+    so nothing is re-transcribed and no LLM call is made. That is the
+    difference between this and Re-detect, which re-scores the video and costs
+    a detection call.
+    """
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.get("stage") in {"queued", "grabbing", "transcribing", "finding", "rendering"}:
+        raise HTTPException(409, "this job is still running — wait for it to finish")
+    src = store.find_source_file(job_id)
+    if src is None:
+        raise HTTPException(400, "source file no longer on disk — this batch cannot be re-rendered")
+    clips = store.list_clips(job_id)
+    if not clips:
+        raise HTTPException(400, "this batch has no clips to re-render")
+
+    # Only the caption/reframe stages are invalidated. "transcribe" and "detect"
+    # stay done, so the run resumes with the cached words and the cached cuts.
+    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
+    ws.clear_from("reframe")
+    reset = 0
+    for clip in clips:
+        if clip.get("renderState") == "done":
+            clip["renderState"] = "pending"
+            store.write_clip(clip)
+            reset += 1
+    job.update({
+        "stage": "queued",
+        "progress": 0,
+        "progressDetail": "Re-rendering with fresh captions — transcript and cuts are reused.",
+        "error": None,
+        "errorDetail": None,
+        "completedAt": None,
+        "unitLabel": None,
+        "unitsDone": None,
+        "unitsTotal": None,
+    })
+    store.write_job(job)
+    store.append_job_log(
+        job_id,
+        f"re-render requested — {reset} clip(s) reset; the transcript and the "
+        "detection are reused, so this costs no transcription and no AI call",
+    )
+    worker.enqueue(job_id)
+    return {"queued": True, "clipsReset": reset, "resumesAt": ws.first_incomplete()}
+
+
 @app.post("/api/jobs/{job_id}/redetect")
 def redetect_job(job_id: str) -> dict:
     """Re-run highlight detection on an existing job and re-render the clips."""
