@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Paperclip, Sparkles, Type, Youtube } from "lucide-react";
+import { Layers, Loader2, Paperclip, Sparkles, Type, Youtube } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, type CaptionPresetDto } from "@/lib/api";
@@ -19,6 +19,10 @@ export function NewJobForm({ className }: { className?: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [presets, setPresets] = useState<CaptionPresetDto[]>([]);
   const [preset, setPreset] = useState("bold_pop");
+  // "" = auto (clip count scaled from the source length). A number is a hard
+  // cap the user chose, and it is what the server uses.
+  const [maxClips, setMaxClips] = useState("");
+  const clipCap = maxClips ? Number(maxClips) : undefined;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // caption styles come from the backend so the UI never drifts from the
@@ -51,9 +55,9 @@ export function NewJobForm({ className }: { className?: string }) {
     setSubmitting(true);
     try {
       if (mode === "url") {
-        await api.createJob(url.trim(), "url", preset);
+        await api.createJob(url.trim(), "url", preset, clipCap);
       } else if (file !== null) {
-        await api.uploadJob(file, preset);
+        await api.uploadJob(file, preset, clipCap);
       }
       toast.success("Job queued — ClipForge's server is on it.", {
         description: mode === "url" ? url.trim() : file?.name,
@@ -158,6 +162,32 @@ export function NewJobForm({ className }: { className?: string }) {
               </option>
             ))}
           </select>
+        </span>
+      </label>
+
+      <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+        <Layers className="mt-0.5 size-3.5 shrink-0 text-primary" />
+        <span className="flex-1">
+          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Clip count
+          </span>
+          <select
+            value={maxClips}
+            onChange={(e) => setMaxClips(e.target.value)}
+            className="h-9 w-full cursor-pointer rounded-md border border-input bg-card px-2 text-sm text-foreground"
+          >
+            <option value="">Auto — based on video length</option>
+            {[3, 5, 8, 10, 15, 20, 25, 30, 40].map((n) => (
+              <option key={n} value={n}>
+                Max {n}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1 block text-[11px] leading-relaxed">
+            Auto scales with length: 5-8 clips under 10 min, 10-15 up to 25 min,
+            15-25 up to an hour, 25-40 beyond. It is a ceiling — the AI only
+            keeps moments that score as real highlights, so you may get fewer.
+          </span>
         </span>
       </label>
 

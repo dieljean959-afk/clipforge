@@ -27,8 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import Paths  # noqa: E402
+from app.config import Paths, load_config  # noqa: E402
 from app.store import LocalStore  # noqa: E402
+from app.task import Pipeline  # noqa: E402
 
 FAILS: list[str] = []
 CHECKS = 0
@@ -261,12 +262,66 @@ def main() -> int:
         check(overall_status(back)["state"] == "queued", "a stored queued job round-trips as queued")
         check(json.dumps(back) is not None, "the stored job is JSON-serialisable")
 
+    section_no_stale_writes(store, Pipeline(load_config(quiet=True), store))
+
     print()
     if FAILS:
         print(f"{CHECKS - len(FAILS)} passed, {len(FAILS)} FAILED")
         return 1
     print(f"{CHECKS} passed, 0 failed")
     return 0
+
+
+def section_no_stale_writes(store, pipeline) -> None:
+    """A stage must never write back the job dict it was handed.
+
+    `run()` reads the job once and passes that same object down through every
+    stage, while `_progress` writes a freshly-read copy on every tick. A stage
+    that annotates its own copy and saves it therefore resurrects whatever
+    `stage`, `progress` and ETA the job had when the pipeline STARTED.
+
+    On a real 55-minute job this was not subtle: detection worked through its
+    chunks while the dashboard read "queued, 0%" the whole time, because the
+    clip-count annotation was written back from the stale dict each time.
+    """
+    print("\n-- stage writes never resurrect a stale job --")
+    job = store.create_job("upload", "stale.mp4")
+    jid = job["_id"]
+    # This is exactly what run() hands to every stage.
+    handed_down = store.get_job(jid)
+    check(handed_down is not None and handed_down.get("stage") == "queued",
+          "a new job starts queued")
+
+    # The worker makes progress, which is written from a fresh read.
+    # _progress takes a FRACTION; 42 would clamp to 100.
+    pipeline._progress(jid, "transcribing", 0.42, "working")
+    live = store.get_job(jid)
+    check(live.get("stage") == "transcribing" and round(live.get("progress")) == 42,
+          "progress reached the store")
+    # The stage then annotates the dict it was given, and saves it.
+    handed_down["clipTarget"] = 23
+    store.write_job(handed_down)
+    after = store.get_job(jid)
+    check(after.get("stage") == "queued" and round(after.get("progress")) == 0,
+          "writing the handed-down dict clobbers live progress (this is the bug)")
+
+    # And _patch_job is the way that does NOT.
+    pipeline._progress(jid, "transcribing", 0.42, "working")
+    pipeline._patch_job(jid, clipTarget=23, clipTargetReason="because")
+    fixed = store.get_job(jid)
+    check(fixed.get("stage") == "transcribing" and round(fixed.get("progress")) == 42,
+          "_patch_job keeps the live stage and progress")
+    check(fixed.get("clipTarget") == 23 and fixed.get("clipTargetReason") == "because",
+          "_patch_job still applies its own fields")
+    check(pipeline._patch_job("nope-not-a-job", x=1) == {},
+          "_patch_job on a deleted job does not raise")
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "task.py").read_text(encoding="utf-8")
+    stage_src = src.split("def _stage_detect")[1].split("\n    def ")[0]
+    check("self.store.write_job(job)" not in stage_src,
+          "the detect stage no longer writes the dict it was handed")
+    check("_patch_job(" in stage_src, "it annotates through _patch_job instead")
+    store.delete_job(jid)
 
 
 if __name__ == "__main__":

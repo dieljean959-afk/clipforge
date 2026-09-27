@@ -22,7 +22,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from app import caption_style, eta, hosting, hostlimits
+from app import caption_style, clipcount, eta, hosting, hostlimits
 from app import encode as encode_mod
 from app import llm as llm_mod
 from app import subtitle as subtitle_svc
@@ -340,7 +340,7 @@ class CreateJobIn(BaseModel):
     source: str = Field(min_length=1, max_length=2048)
     minClipSec: int | None = Field(default=None, ge=5, le=180)
     maxClipSec: int | None = Field(default=None, ge=10, le=180)
-    maxClips: int | None = Field(default=None, ge=1, le=15)
+    maxClips: int | None = Field(default=None, ge=1, le=clipcount.HARD_CEILING)
     captionPreset: str | None = Field(default=None, pattern="^(bold_pop|karaoke|lower_third|boxed)$")
 
 

@@ -120,6 +120,7 @@ export function JobCard({
   const watching = isActiveJob(job);
   const now = useNow(watching);
   const quiet = watching && silenceMs(job, now) > QUIET_THRESHOLD_MS;
+  const plan = job.stagePlan ?? [];
 
   const doPause = async () => {
     setBusy("pause");
@@ -385,6 +386,43 @@ export function JobCard({
               </span>
             )}
           </div>
+
+          {/* Per-stage plan: which stage this is, and what is left after it.
+              A single "whole job ~34 min" number moves for reasons the user
+              cannot see — it is the sum of a 20-minute transcription and a
+              3-minute render, and it barely moves while the transcription
+              runs. This shows the split, and labels each row by where its
+              number came from so a prior is never read as a measurement. */}
+          {plan.length > 0 && (
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+              {plan.map((entry) => (
+                <li
+                  key={entry.stage}
+                  className={cn(
+                    "flex items-center gap-1.5 tabular-nums",
+                    entry.current
+                      ? "font-medium text-primary"
+                      : "text-muted-foreground/80",
+                  )}
+                  title={
+                    entry.source === "live"
+                      ? "Live estimate from this stage's own progress"
+                      : entry.source === "measured"
+                        ? "How long this stage actually took on this job"
+                        : "Estimated from the source length and this host's speed"
+                  }
+                >
+                  {entry.current ? (
+                    <Loader2 className="size-2.5 shrink-0 animate-spin" />
+                  ) : (
+                    <span className="size-1 shrink-0 rounded-full bg-current opacity-50" />
+                  )}
+                  {entry.label}
+                  <span className="opacity-70">~{fmtEta(entry.sec)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
           {quiet && !stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90">
               No recent activity ({fmtAgo(silenceMs(job, now))}). The job may just be
@@ -406,6 +444,27 @@ export function JobCard({
             </div>
           )}
         </div>
+      )}
+
+      {/* How the batch size was decided. "You asked for 10 and got 10" and
+          "the detector found 61 moments, 23 of them were highlights, and the
+          length-based ceiling was 23" are different stories, and only the
+          second one tells the user whether to change anything. */}
+      {complete && typeof job.candidatesDetected === "number" && (
+        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+          {job.candidatesDetected} candidate highlight
+          {job.candidatesDetected === 1 ? "" : "s"} found ·{" "}
+          {job.clipsAboveScore ?? job.candidatesDetected} scored above{" "}
+          {Math.round(job.clipScoreFloor ?? 0)} ·{" "}
+          <span className="text-foreground">
+            {job.clipCount ?? 0} rendered
+          </span>
+          {job.clipTarget ? ` (ceiling ${job.clipTarget})` : ""}
+          {job.clipTargetReason ? ` — ${job.clipTargetReason}` : ""}
+          {typeof job.clipsBelowScore === "number" && job.clipsBelowScore > 0
+            ? `. ${job.clipsBelowScore} weaker moment${job.clipsBelowScore === 1 ? "" : "s"} dropped rather than padded in.`
+            : "."}
+        </p>
       )}
 
       {/* Manual control: pause/resume a live job, and force a poll so activity

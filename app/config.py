@@ -30,6 +30,7 @@ except ModuleNotFoundError:  # Python 3.10 dev/test environments
 
 from dotenv import load_dotenv
 
+from app import clipcount as clipcount_mod  # pure math, no cycle
 from app import translate as translate_mod  # no cycle: translate imports lazily
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -586,6 +587,13 @@ class GeminiConfig:
     max_clip_sec: int
     max_clips: int
     max_retries: int
+    # Ceiling for the duration-scaled clip count, and the score below which a
+    # candidate is not a highlight. `auto_clip_count` scales the target with the
+    # source length (see app/clipcount.py) instead of always asking for the
+    # same number; `min_score` is what stops a long source from being padded
+    # out to its ceiling with the leftovers.
+    auto_clip_count: bool = True
+    min_score: float = 60.0
 
 
 @dataclass
@@ -893,9 +901,13 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         model=str(g.get("model", "gemini-3.6-flash")),
         min_clip_sec=max(5, int(g.get("min_clip_sec", 15))),
         max_clip_sec=max(15, int(g.get("max_clip_sec", 60))),
-        max_clips=min(15, max(5, int(g.get("max_clips", 10)))),
+        max_clips=min(clipcount_mod.HARD_CEILING, max(1, int(g.get("max_clips", 40)))),
         max_retries=max(0, int(g.get("max_retries", 3))),
+        auto_clip_count=bool(g.get("auto_clip_count", True)),
+        min_score=float(g.get("min_score", 60.0)),
     )
+    if not 0.0 <= gemini.min_score <= 100.0:
+        errors.append(f'gemini.min_score {gemini.min_score} is out of range (0-100)')
     if gemini.min_clip_sec >= gemini.max_clip_sec:
         errors.append("gemini.min_clip_sec must be < gemini.max_clip_sec")
 

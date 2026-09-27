@@ -51,8 +51,18 @@ batch_size = 8
 model = "gemini-3.6-flash"
 min_clip_sec = 15
 max_clip_sec = 60
-# Auto-select the top N clips by score (5-15).
-max_clips = 10
+# Clip count follows the source length, not a fixed number (see app/clipcount.py):
+#   under 10 min -> 5-8, 10-25 min -> 10-15, 25-60 min -> 15-25, 60+ min -> 25-40
+# This is a CEILING. Candidates scoring below `min_score` are dropped rather
+# than padding the batch out to it, so a long but unremarkable source returns
+# fewer clips instead of twenty-five mediocre ones. Set auto_clip_count = false
+# to use max_clips as a flat number again.
+auto_clip_count = true
+# Hard ceiling on the scaled count, and the flat count when auto is off (1-40).
+max_clips = 40
+# 0-100. Below this a candidate is not a highlight. Raise it to get shorter,
+# sharper batches; lower it only if the batch comes back with too few clips.
+min_score = 60
 # 429 backoff retries before giving up (free tier = 15 RPM).
 max_retries = 3
 

@@ -27,6 +27,7 @@ from loguru import logger
 from app import (
     asr,
     caption_style,
+    clipcount,
     download,
     encode,
     eta,
@@ -41,9 +42,6 @@ from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
 from app.store import LocalStore
-
-# Stages whose ETA still has to account for detection + rendering afterwards.
-_PRE_TAIL_STAGES = {"queued", "grabbing", "transcribing"}
 
 
 class JobPaused(Exception):
@@ -127,8 +125,12 @@ class Pipeline:
                 timings.append({
                     "stage": prev_stage,
                     "sec": round(max(0.0, (now_ms - prev_start) / 1000), 1),
+                    "at": prev_start,
                 })
-            job["stageTimings"] = timings[-12:]
+            job["stageTimings"] = [
+                {"stage": eta.plan_stage_for(t.get("stage")), "sec": t.get("sec"), "at": t.get("at")}
+                for t in timings[-12:]
+            ]
             job["stageStartedAt"] = now_ms
             # Moving into a new stage means the job is alive again, so any
             # error left by the attempt that died stops being true. Without
@@ -148,10 +150,30 @@ class Pipeline:
             fraction=fraction,
             prior_remaining_sec=self._prior_eta_sec,
         )
-        tail = 0.0
-        if stage in _PRE_TAIL_STAGES:
-            opts = job.get("options") or {}
-            tail = eta.tail_estimate_sec(opts.get("maxClips") or self.settings.gemini.max_clips)
+        # A countable stage (clips rendered, chunks done) extrapolates far
+        # better on cost-per-unit than on a percentage: the first clip pays for
+        # probing and filter-graph setup, and clips are not all the same length,
+        # so a straight line through "clip 3 of 23" is wrong at both ends.
+        if stage_eta is None and units_done and units_total:
+            per_unit = eta.eta_from_units(elapsed, units_done, units_total)
+            if per_unit is not None:
+                stage_eta, eta_source = per_unit, "measured"
+
+        # Per-stage plan: what is left, stage by stage, with each number
+        # labelled by where it came from. The current stage's estimate is the
+        # live one, completed stages use their real duration, and the rest use
+        # priors scaled by the source length.
+        plan = eta.build_plan(
+            current_stage=stage,
+            duration_sec=float(job.get("durationSec") or 0.0),
+            clip_count=int(job.get("clipTarget") or (job.get("options") or {}).get("maxClips")
+                           or self.settings.gemini.max_clips),
+            clip_seconds=float(job.get("expectedClipSec") or self.settings.gemini.max_clip_sec),
+            rtf=self._current_rtf(),
+            stage_eta_sec=stage_eta,
+            measured={t.get("stage"): t.get("sec") for t in (job.get("stageTimings") or [])},
+        )
+        total_eta = eta.plan_total_sec(plan) if plan else None
 
         job.update({
             "stage": stage,
@@ -161,15 +183,47 @@ class Pipeline:
             "unitsDone": units_done,
             "unitsTotal": units_total,
             "stageEtaSec": None if stage_eta is None else round(stage_eta, 1),
-            "totalEtaSec": None if stage_eta is None else round(stage_eta + tail, 1),
+            "totalEtaSec": total_eta,
             "etaSource": eta_source,
+            "stagePlan": plan,
             "lastProgressAt": now_ms,
         })
         self.store.write_job(job)
 
+    def _current_rtf(self) -> float:
+        """This host's transcription speed, measured where possible."""
+        try:
+            engine = asr.status(self.settings)
+            store = eta.store(self.settings.app.paths.data_dir)
+            value, _ = store.effective_rtf(
+                engine.engine, engine.device, engine.model, engine.compute_type
+            )
+            return float(value)
+        except Exception as exc:  # a missing prior must not break progress
+            logger.debug(f"[eta] falling back to the default RTF: {exc}")
+            return 0.3
+
     def _log(self, job_id: str, line: str) -> None:
         logger.info(f"[job {job_id}] {line}")
         self.store.append_job_log(job_id, line)
+
+    def _patch_job(self, job_id: str, **fields: Any) -> dict[str, Any]:
+        """Re-read the job, apply `fields`, write it back.
+
+        Never write the dict a stage was HANDED. `run()` reads the job once and
+        passes that same object down through every stage, while `_progress`
+        writes a freshly-read copy to the store on every tick. Writing the
+        handed-down dict back therefore resurrects whatever `stage`, `progress`
+        and ETA the job had when the pipeline started — which is how a job
+        detecting 20 chunks in a row reported itself "queued" at 0%: this
+        method's whole reason for existing.
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            return {}
+        job.update(fields)
+        self.store.write_job(job)
+        return job
 
     # ------------------------------------------------------------------ #
     # cooperative pause
@@ -490,6 +544,7 @@ class Pipeline:
             if cached:
                 self._log(job_id, f"resume: reusing {len(cached)} detected candidates")
                 self._progress(job_id, "finding", 100, "Reusing AI clip selection")
+                self._patch_job(job_id, clipTarget=len(cached))
                 return cached
 
         opts = job.get("options", {}) or {}
@@ -497,17 +552,37 @@ class Pipeline:
         self._log(job_id, "Stage: detect — Gemini clip detection (word indices)")
         words = [w.as_dict() for w in transcript.words]
 
+        # How many clips this source is worth, decided ONCE and written to the
+        # job so the UI, the logs and the render loop all use the same number.
+        # An explicit maxClips on the job is the user overriding this, and
+        # always wins.
+        duration = float(job.get("durationSec") or 0.0)
+        override = opts.get("maxClips")
+        if override:
+            target, reason = int(override), f"you asked for {override}"
+        elif self.settings.gemini.auto_clip_count:
+            target, reason = clipcount.suggest(duration, self.settings.gemini.max_clips)
+        else:
+            target, reason = self.settings.gemini.max_clips, "flat count (auto scaling off)"
+        self._log(job_id, f"Clip target: {target} — {reason}")
+        self._patch_job(job_id, clipTarget=target, clipTargetReason=reason)
+
         def on_log(line: str) -> None:
             self._log(job_id, line)
-            self._progress(job_id, "finding", 50, line)
 
+        def on_progress(fraction: float, line: str) -> None:
+            self._progress(job_id, "finding", fraction, line, unit_label="chunk")
+
+        report: dict[str, Any] = {}
         candidates = llm.detect_clips(
             words,
             self.settings,
             min_clip_sec=opts.get("minClipSec"),
             max_clip_sec=opts.get("maxClipSec"),
-            max_clips=opts.get("maxClips"),
+            max_clips=target,
             on_log=on_log,
+            on_progress=on_progress,
+            report=report,
             # Per-chunk persistence: a pause or host restart during chunk 5 of
             # 7 resumes at chunk 6 instead of re-running — and re-billing —
             # all seven Groq calls.
@@ -516,6 +591,29 @@ class Pipeline:
         )
         ws.write_json("detect", "candidates.json", candidates)
         ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(candidates))
+        # The three numbers that explain the batch size. "Detected 61, kept 18
+        # of a possible 23" is a different story from "asked for 10, got 10",
+        # and only the first one tells the user whether to raise min_score,
+        # lower the cap, or leave it alone.
+        job = self._patch_job(
+            job_id,
+            candidatesDetected=int(report.get("detected", len(candidates))),
+            clipsAboveScore=int(report.get("aboveFloor", len(candidates))),
+            clipsBelowScore=int(report.get("belowFloor", 0)),
+            clipScoreFloor=float(report.get("floor", self.settings.gemini.min_score)),
+        )
+        self._log(
+            job_id,
+            f"Detection: {job.get('candidatesDetected')} candidate(s) found, "
+            f"{job.get('clipsAboveScore')} scored >= {job.get('clipScoreFloor'):.0f}, "
+            f"{len(candidates)} kept (cap was {target})",
+        )
+        if report.get("aboveFloor", 0) > len(candidates):
+            self._log(
+                job_id,
+                f"Note: {report['aboveFloor'] - len(candidates)} good candidate(s) were "
+                f"dropped by the {target}-clip cap — raise [gemini] max_clips for more",
+            )
         return candidates
 
     # ------------------------------------------------------------------

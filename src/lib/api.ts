@@ -5,6 +5,17 @@ import type { ClipStage } from "@/lib/clipforge";
 
 export type DetectionProvider = "groq" | "gemini" | "ollama";
 
+/** One row of the per-stage time plan. */
+export interface StagePlanEntry {
+  stage: "fetch" | "transcribe" | "detect" | "reframe" | "render";
+  label: string;
+  /** Seconds still expected for this stage. */
+  sec: number;
+  /** How that number was arrived at, so a guess is never shown as a fact. */
+  source: "live" | "measured" | "estimate";
+  current: boolean;
+}
+
 /** The caption look knobs the dashboard can change. */
 export interface CaptionStyleDto {
   /** Target burst length in words; a pause or the cap still ends a burst sooner. */
@@ -69,7 +80,21 @@ export interface JobDto {
   /** Where the job stopped when paused, e.g. "finding" or "rendering (after clip 4 of 10)". */
   pausedStage?: string | null;
   pausedAt?: number | null;
-  stageTimings?: { stage: string; sec: number }[];
+  stageTimings?: { stage: string; sec: number; at?: number }[];
+  /** Remaining stages, nearest first, each with its own estimate. */
+  stagePlan?: StagePlanEntry[];
+  /** Clips this source is worth; scaled from its length unless overridden. */
+  clipTarget?: number;
+  /** Why that number — the sentence the user sees in the job log. */
+  clipTargetReason?: string;
+  /** Candidates the detector found before the score floor. */
+  candidatesDetected?: number;
+  /** Candidates that cleared the score floor (before the clip cap). */
+  clipsAboveScore?: number;
+  /** Candidates dropped as not-a-highlight. */
+  clipsBelowScore?: number;
+  /** The score a candidate had to clear. */
+  clipScoreFloor?: number;
   lastProgressAt?: number;
   slow?: boolean;
   stageStartedAt?: number;
@@ -342,16 +367,23 @@ export const api = {
     source: string,
     sourceType: "url" | "upload" = "url",
     captionPreset?: string,
+    maxClips?: number,
   ) =>
     request<{ jobId: string }>("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceType, source, captionPreset }),
+      // maxClips is omitted entirely for "auto" — the server scales the count
+      // from the source length, and sending null/undefined would be read as an
+      // explicit override of 0 by some clients.
+      body: JSON.stringify(
+        maxClips ? { sourceType, source, captionPreset, maxClips } : { sourceType, source, captionPreset },
+      ),
     }),
-  uploadJob: (file: File, captionPreset?: string) => {
+  uploadJob: (file: File, captionPreset?: string, maxClips?: number) => {
     const fd = new FormData();
     fd.append("file", file);
     if (captionPreset) fd.append("captionPreset", captionPreset);
+    if (maxClips) fd.append("maxClips", String(maxClips));
     return request<{ jobId: string; file: string; bytes: number }>("/api/jobs/upload", {
       method: "POST",
       body: fd,

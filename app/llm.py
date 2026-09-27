@@ -36,10 +36,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from typing import Any
 
 from loguru import logger
 
+from app import clipcount
 from app.caption_format import finalize_clip_caption, normalize_hashtags, shorten_caption
 from app.config import GeminiConfig, Settings, live_gemini_key, live_groq_key
 
@@ -47,6 +49,11 @@ PROVIDER_GROQ = "groq"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OLLAMA = "ollama"
 PROVIDERS = (PROVIDER_GROQ, PROVIDER_GEMINI, PROVIDER_OLLAMA)
+
+
+#: Ceiling on detection API calls per job, whatever the source length, so a
+#: 2-hour interview costs the same number of requests as a 20-minute one.
+MAX_DETECTION_CHUNKS = 20
 
 
 class LlmNotConfigured(Exception):
@@ -103,7 +110,16 @@ def _load_google_module():
 
 
 def build_prompt(chunk: list[dict], cfg: GeminiConfig, start_index: int = 0) -> str:
-    """Prompt with globally-numbered words; the model picks index ranges."""
+    """Prompt with globally-numbered words; the model picks index ranges.
+
+    The per-chunk ask is deliberately NOT the global clip cap. Asking a 2-minute
+    chunk for 40 clips invites the model to pad the chunk with its weakest
+    moments so the quota is met — and since selection is a global top-N by
+    score afterwards, those padded candidates are the ones that crowd out good
+    ones from other chunks. A small per-chunk number and a large global cap
+    gives a much better pool to rank.
+    """
+    per_chunk = max(3, min(8, cfg.max_clips))
     lines = ["NUMBERED TRANSCRIPT (word index, seconds):"]
     for i, w in enumerate(chunk):
         lines.append(f'[{start_index + i}] {w["start"]:.2f}s {w["word"]}')
@@ -112,9 +128,11 @@ def build_prompt(chunk: list[dict], cfg: GeminiConfig, start_index: int = 0) -> 
 Every transcript line starts with a [word_index]. Identify clip-worthy moments
 BY WORD INDEX RANGE — do NOT output timestamps, the indices are the contract.
 Timing window: clips must be {cfg.min_clip_sec}-{cfg.max_clip_sec} seconds long
-(as shown next to each word). Pick {cfg.max_clips} best candidates max — fewer
-is fine. Do NOT invent indices that are not in the transcript. Score 0-100 for
-hook strength, pacing and emotional energy.
+(as shown next to each word). Pick at most {per_chunk} of the best moments in
+this section — fewer is fine, and a section with nothing strong should return
+an empty list rather than its least bad moment. Do NOT invent indices that are
+not in the transcript. Score 0-100 for hook strength, pacing and emotional
+energy; only moments you would genuinely call a highlight belong above 60.
 
 hook_text is the POST CAPTION: ONE line, under 150 characters, no newlines, no
 repetition of the title, no "in this video..." preamble. It must work on its own
@@ -224,14 +242,32 @@ def resolve_candidates(
     return out
 
 
-def chunk_words(words: list[dict], target_seconds: float = 120.0) -> list[tuple[int, list[dict]]]:
-    """Split a word-level transcript into ~2-minute chunks.
+def chunk_words(
+    words: list[dict],
+    target_seconds: float = 120.0,
+    max_chunks: int = MAX_DETECTION_CHUNKS,
+) -> list[tuple[int, list[dict]]]:
+    """Split a word-level transcript into chunks for the detector.
 
     Returns [(global_start_index, chunk_words), ...] so prompts can carry the
     same word numbering the resolver uses.
+
+    The chunk length is not fixed: it grows for long sources so the NUMBER of
+    API calls stays bounded. A 2-minute target meant 28 calls for a 55-minute
+    interview and 60 for a 2-hour one, at ~4k tokens each — which walks
+    straight into a tokens-per-minute limit and then dies on a 429 part way
+    through, having already paid for most of the work. Detection is a
+    fixed-cost-per-chunk operation, so a bounded number of slightly larger
+    chunks is both cheaper and far more likely to finish. Clip candidates are
+    picked by word index, so a wider window costs resolution in *search*, not
+    in timing accuracy.
     """
     if not words:
         return []
+    if max_chunks > 0:
+        span = float(words[-1].get("end") or 0.0) - float(words[0].get("start") or 0.0)
+        if span > 0:
+            target_seconds = max(target_seconds, span / float(max_chunks))
     chunks: list[tuple[int, list[dict]]] = []
     current: list[dict] = []
     start_index = 0
@@ -434,11 +470,19 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
     TEXT ONLY: `chunk_text_prompt` is the numbered transcript built by
     build_prompt(). No audio, no video, no file handles ever leave this call.
 
-    Two rate-limit defences, because the free tier is 30 req/min:
-      1. Pacing — a process-wide floor between Groq calls, so a 60-chunk
-         transcript never bursts into the limit in the first place.
-      2. Backoff — on a 429 we honour the server's Retry-After when it sends
-         one, else exponential + jitter, exactly like the Gemini path.
+    Two rate-limit defences, because the free tier is 30 req/min AND 8k
+    tokens/min — and on a long source the token limit is the one that bites,
+    because each chunk is a few thousand tokens:
+      1. Pacing — a process-wide floor between Groq calls, so a long transcript
+         never bursts into the limit in the first place.
+      2. Backoff — on a 429 we honour the server's wait, which it sends in the
+         body for token limits ("try again in 15.6s") rather than in a
+         Retry-After header, else exponential + jitter.
+
+    `max_tokens` is set explicitly and tightly. Left unset, the provider's
+    default reservation counted against the token budget in full, so a request
+    whose real answer was 900 tokens reserved ~4k and halved the number of
+    chunks a minute could get through.
 
     Uses urllib (stdlib) so the backend adds no Python dependency, matching
     call_ollama. Returns the assistant message text; raises on failure.
@@ -461,11 +505,30 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
             {"role": "user", "content": chunk_text_prompt},
         ],
         "temperature": cfg.temperature,
+        # ~8 candidates of {title, start_word, end_word, score, hook_text,
+        # hashtags} is under 1200 tokens; anything larger is the provider
+        # reserving headroom we never use, out of a per-minute budget that is
+        # the real constraint on a long source.
+        "max_tokens": 1600,
     }
 
     last_err: Exception | None = None
+    est = _est_tokens(chunk_text_prompt, int(body.get("max_tokens") or 1600))
     for attempt in range(cfg.max_retries + 1):
         _groq_wait_turn(cfg.min_interval_sec)
+        # Pace on TOKELS as well as on requests. The request floor keeps a
+        # burst under the 30-req/min limit; this keeps a burst under the
+        # 8k-token/min one, which is the limit that actually stops a long
+        # source. Reacting to a 429 instead means the rejected call was still
+        # spent, and the retry after a 15s wait usually meets the next one.
+        token_wait = _groq_token_wait(est, GROQ_TOKEN_BUDGET)
+        if token_wait > 0:
+            logger.info(
+                f"[llm] groq token budget: waiting {token_wait:.0f}s before a "
+                f"~{est}-token call ({GROQ_TOKEN_BUDGET}/min self-imposed)"
+            )
+            time.sleep(token_wait)
+        _groq_record_tokens(est)
         try:
             data = _groq_post(body, api_key, cfg.base_url, cfg.timeout_sec)
             text = _groq_reply_text(data)
@@ -495,10 +558,28 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
                     f"Sent User-Agent: {GROQ_USER_AGENT!r}."
                 ) from exc
             if exc.status == 429:
-                wait = exc.retry_after or min(60.0, (2 ** attempt) + random.random() * 2)
+                # The server's own number is a FLOOR, never a cap: a TPM or RPD
+                # limit resets on a window we do not control, so retrying sooner
+                # than we were told only burns the remaining attempts.
+                fallback = min(90.0, (2 ** attempt) * 4.0 + random.random() * 2)
+                asked = exc.retry_after or 0.0
+                wait = max(asked, fallback)
+                if asked > MAX_INLINE_RATE_LIMIT_WAIT:
+                    # A DAILY token limit answers with an hour-scale wait
+                    # ("1h25m40s"). Sleeping that inside a retry loop looks
+                    # exactly like a hung job to the stall watchdog, burns the
+                    # remaining attempts, and produces a failure an hour later
+                    # with no useful reason. Better to stop now and say so.
+                    raise LlmError(
+                        f"{label} rate limit needs {asked / 60:.0f} minutes before it "
+                        f"will accept another call — this is a daily quota, not a "
+                        f"burst one. {msg[:220]}"
+                    )
                 logger.warning(
-                    f"[llm] groq 429 rate limited (free tier ~30 rpm), "
-                    f"backing off {wait:.1f}s (attempt {attempt + 1})"
+                    f"[llm] groq 429 rate limited"
+                    f"{' (tokens/min)' if 'tokens per minute' in msg else ''}"
+                    f"{f', server asked for {asked:.0f}s' if asked else ''}"
+                    f" — backing off {wait:.1f}s (attempt {attempt + 1})"
                 )
             else:
                 wait = 2.0 * (attempt + 1)
@@ -515,6 +596,27 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
             logger.warning(f"[llm] groq transport error ({exc}), retry {attempt + 1} in {wait:.0f}s")
             time.sleep(wait)
     raise LlmError(f"Groq failed after retries: {last_err}")
+
+
+#: "Please try again in 15.6375s" / "retry after 30 seconds" — providers that
+#: rate-limit by TOKENS tell you the wait in prose rather than a header, and
+#: the number is the whole difference between backing off enough and burning
+#: every retry against a limit that has not reset yet.
+_RETRY_HINT = re.compile(
+    r"try again in\s*([0-9]+(?:\.[0-9]+)?)\s*s|retry after\s*([0-9]+(?:\.[0-9]+)?)\s*s",
+    re.IGNORECASE,
+)
+
+
+def _retry_hint(detail: str) -> float | None:
+    """Seconds to wait, if the provider said so in the error body."""
+    m = _RETRY_HINT.search(detail or "")
+    if not m:
+        return None
+    try:
+        return max(0.0, float(m.group(1) or m.group(2)))
+    except (TypeError, ValueError):
+        return None
 
 
 class _GroqHttpError(Exception):
@@ -542,6 +644,53 @@ def _groq_model_problem(msg: str) -> bool:
 
 _groq_lock = threading.Lock()
 _groq_last_call: float = 0.0
+#: (monotonic timestamp, estimated tokens) for calls made in the last minute.
+_groq_token_ledger: list[tuple[float, int]] = []
+
+#: Conservative share of the published per-minute token allowance this client
+#: will spend. Groq's free tier allows 8000 tokens/min for this model; leaving
+#: a quarter of it unused costs a little wall time and removes essentially all
+#: of the 429s, which cost far more (a retried call is a re-billed call).
+GROQ_TOKEN_BUDGET = 6000
+
+#: Longest a single retry may sleep in-line. Past this the limit is a daily
+#: quota that will not clear inside a job, and the honest answer is to stop and
+#: report it rather than sit in a sleep loop the watchdog will kill.
+MAX_INLINE_RATE_LIMIT_WAIT = 150.0
+
+
+def _est_tokens(text: str, max_tokens: int) -> int:
+    """Rough token cost of one call: the prompt plus the output reservation."""
+    return max(64, len(text or "") // 4) + max(64, int(max_tokens))
+
+
+def _groq_token_wait(est: int, budget: int) -> float:
+    """Seconds to wait so `est` more tokens fit inside the rolling minute."""
+    if est <= 0 or budget <= 0:
+        return 0.0
+    now = time.monotonic()
+    with _groq_lock:
+        recent = [(t, n) for t, n in _groq_token_ledger if now - t < 60.0]
+        _groq_token_ledger[:] = recent
+        used = sum(n for _, n in recent)
+        if used + est <= budget:
+            return 0.0
+        # Drop the oldest entries until it fits, and wait for them to age out.
+        need = used + est - budget
+        freed = 0
+        for t, n in sorted(recent):
+            freed += n
+            if freed >= need:
+                return max(0.0, 60.0 - (now - t) + 0.5)
+        return 30.0
+
+
+def _groq_record_tokens(est: int) -> None:
+    with _groq_lock:
+        _groq_token_ledger.append((time.monotonic(), est))
+        _groq_token_ledger[:] = [
+            (t, n) for t, n in _groq_token_ledger if time.monotonic() - t < 60.0
+        ]
 
 
 def _groq_wait_turn(floor_sec: float) -> None:
@@ -609,6 +758,16 @@ def _groq_post(
                         retry_after = float(hdr)
             except (TypeError, ValueError):
                 retry_after = None
+            if retry_after is None:
+                # Groq's token-per-minute limit does NOT send Retry-After — it
+                # puts the wait in the body: "Please try again in 15.6375s".
+                # Parsing it matters more than it looks: a 55-minute source is
+                # 28 detection chunks of ~4k tokens each, which overruns an
+                # 8000 TPM limit within the first few calls, and the old
+                # fallback backed off 1+2+4s against a limit that needed 15.6s
+                # — so the retry budget was spent and the job died on a limit
+                # it could simply have waited out.
+                retry_after = _retry_hint(detail)
             if exc.code == 400 and "response_format" in detail and attempt_json_mode:
                 last_400 = detail
                 continue
@@ -679,10 +838,12 @@ def detect_clips(
     max_clip_sec: int | None = None,
     max_clips: int | None = None,
     on_log=None,
+    on_progress=None,
     chunk_cache: ChunkCache | None = None,
     should_pause=None,
+    report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Full detection: chunk → LLM (word indices) → resolve timings → top-N.
+    """Full detection: chunk → LLM (word indices) → resolve timings → gate.
 
     Returns MPT-style dicts: start, end, score, title, hook_text.
     Raises LlmNotConfigured when no key, LlmError when the API fails after
@@ -692,6 +853,14 @@ def detect_clips(
     only the chunks that never finished. `should_pause` is polled at each chunk
     boundary — the one safe point in this stage — so a user-requested pause can
     stop the job between API calls instead of mid-write.
+
+    `report`, if given, is filled in with how many candidates were detected,
+    how many cleared the score floor and how many were kept — the three numbers
+    that explain a batch size the user did not choose.
+
+    `on_progress(fraction, detail)` is called once per chunk. Without it a
+    28-chunk detection run sat on a hardcoded 50% for two and a half minutes,
+    which looks exactly like a stall to anyone watching the job card.
     """
     if provider(settings) == PROVIDER_OLLAMA:
         # No API key by design. The only precondition is a reachable server.
@@ -726,11 +895,11 @@ def detect_clips(
 
     cfg = settings.gemini
     if min_clip_sec is not None:
-        cfg = GeminiConfig(cfg.model, min_clip_sec, cfg.max_clip_sec, cfg.max_clips, cfg.max_retries)
+        cfg = replace(cfg, min_clip_sec=min_clip_sec)
     if max_clip_sec is not None:
-        cfg = GeminiConfig(cfg.model, cfg.min_clip_sec, max_clip_sec, cfg.max_clips, cfg.max_retries)
+        cfg = replace(cfg, max_clip_sec=max_clip_sec)
     if max_clips is not None:
-        cfg = GeminiConfig(cfg.model, cfg.min_clip_sec, cfg.max_clip_sec, max_clips, cfg.max_retries)
+        cfg = replace(cfg, max_clips=max_clips)
 
     chunks = chunk_words(words)
     label = provider_label(settings)
@@ -753,6 +922,8 @@ def detect_clips(
         if cached is not None:
             candidates.extend(cached)
             reused += 1
+            if on_progress:
+                on_progress((i + 1) / len(chunks), f"Detection: chunk {i + 1}/{len(chunks)} (cached)")
             if on_log:
                 on_log(
                     f"Detection: chunk {i + 1}/{len(chunks)} → {len(cached)} candidates "
@@ -771,6 +942,8 @@ def detect_clips(
         if chunk_cache is not None:
             chunk_cache.put(i, resolved)
         candidates.extend(resolved)
+        if on_progress:
+            on_progress((i + 1) / len(chunks), f"Detection: chunk {i + 1}/{len(chunks)}")
         if on_log:
             on_log(f"Detection: chunk {i + 1}/{len(chunks)} → {len(resolved)} candidates")
         logger.info(f"[llm] chunk {i + 1}/{len(chunks)}: {len(resolved)} candidates")
@@ -780,10 +953,28 @@ def detect_clips(
             f"re-billed only the remainder"
         )
 
-    # keep only the top N by score
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    top = candidates[: cfg.max_clips]
+    # Keep only the strong ones, up to the cap. The cap is a ceiling and the
+    # score floor is the gate: a source with three genuinely good moments
+    # returns three clips whatever its length, and the report says so.
+    top, above_floor, below_floor = clipcount.gate(
+        candidates, cfg.max_clips, cfg.min_score
+    )
     if not top:
         raise LlmError(f"{label} returned no valid clip candidates")
-    logger.info(f"[llm] selected {len(top)} clips (scores {top[0]['score']:.0f}…{top[-1]['score']:.0f})")
+    if report is not None:
+        report.update({
+            "detected": len(candidates),
+            "selected": len(top),
+            "cap": cfg.max_clips,
+            "floor": cfg.min_score,
+            "aboveFloor": above_floor,
+            "belowFloor": below_floor,
+            "topScore": float(top[0]["score"]),
+            "lowestKept": float(top[-1]["score"]),
+        })
+    logger.info(
+        f"[llm] selected {len(top)} clip(s) (cap {cfg.max_clips}, score floor "
+        f"{cfg.min_score:.0f}): {above_floor} candidate(s) cleared the floor, "
+        f"{below_floor} did not; scores {top[0]['score']:.0f}…{top[-1]['score']:.0f}"
+    )
     return top

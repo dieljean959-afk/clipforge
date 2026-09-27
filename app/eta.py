@@ -200,3 +200,143 @@ def tail_estimate_sec(clip_count: int | None = None, clip_seconds: float = 0.0) 
     """
     clips = max(1, int(clip_count or 8))
     return 20.0 + clips * 12.0 + clip_seconds * 0.6
+
+
+# --------------------------------------------------------------------------- #
+# Per-stage plan
+#
+# "Rendering: ~8 min remaining" is only useful if the user can also see what
+# is left AFTER it, and which stage they are actually in. One number for the
+# whole job hides both: it moves for reasons the user cannot see, and it is
+# dominated by whichever stage happens to be long.
+# --------------------------------------------------------------------------- #
+
+#: Pipeline order as the user thinks about it. `captions` and `export` are both
+#: inside the render loop, so they are shown as the single "render" stage.
+STAGE_ORDER: tuple[str, ...] = ("fetch", "transcribe", "detect", "reframe", "render")
+
+STAGE_LABELS: dict[str, str] = {
+    "fetch": "Downloading",
+    "transcribe": "Transcribing",
+    "detect": "Finding highlights",
+    "reframe": "Framing 9:16",
+    "render": "Rendering clips",
+}
+
+#: Pipeline stage keys -> plan keys. The job's `stage` field uses these.
+_STAGE_ALIASES = {
+    "fetch": "fetch",
+    "queued": "fetch",
+    "transcribing": "transcribe",
+    "finding": "detect",
+    "detecting": "detect",
+    "reframing": "reframe",
+    "rendering": "render",
+    "exporting": "render",
+}
+
+
+def plan_stage_for(stage: str | None) -> str:
+    """Map a job stage name onto the plan's stage name."""
+    return _STAGE_ALIASES.get(str(stage or ""), "fetch")
+
+
+def eta_from_units(elapsed_sec: float, done: float | None, total: float | None) -> float | None:
+    """Per-unit extrapolation for countable stages (clips rendered, chunks done).
+
+    Far better than a fraction for the render loop, which reports "clip 3 of
+    23": clips are not the same size and the first one pays for probe and
+    filter-graph setup, so linear-on-fraction systematically over-estimates the
+    start and under-estimates the end. Cost-per-clip is the honest shape.
+    """
+    if not done or not total or done < 1 or elapsed_sec <= 0.5:
+        return None
+    if done >= total:
+        return 0.0
+    per_unit = elapsed_sec / float(done)
+    return max(0.0, per_unit * (float(total) - float(done)))
+
+
+def stage_prior_sec(
+    stage: str,
+    *,
+    duration_sec: float,
+    clip_count: int,
+    clip_seconds: float,
+    rtf: float,
+) -> float:
+    """Seconds this stage is expected to take, from the source length alone.
+
+    Deliberately shaped by what the stage actually does rather than a single
+    blended constant: transcription scales with audio and the host's measured
+    RTF, detection scales with the number of 2-minute chunks it has to send,
+    and rendering scales with the total clip runtime to encode.
+    """
+    d = max(0.0, float(duration_sec or 0.0))
+    clips = max(1, int(clip_count or 1))
+    if stage == "fetch":
+        # A URL download, at a conservative sustained rate. An upload is
+        # already on our disk, so this is the optimistic end either way.
+        return 3.0 + d * 0.02
+    if stage == "transcribe":
+        return d * max(0.01, float(rtf))
+    if stage == "detect":
+        chunks = max(1, round(d / 120.0))
+        return 2.0 + chunks * 6.0
+    if stage == "reframe":
+        # Shot detection samples frames, not the whole stream.
+        return 2.0 + d * 0.02
+    if stage == "render":
+        # Per-clip encode at ~half realtime for 1080x1920 on a CPU encoder,
+        # plus a fixed per-clip cost for probe + filter graph + thumbnail.
+        return clips * (4.0 + max(0.0, float(clip_seconds)) * 0.5)
+    return 0.0
+
+
+def build_plan(
+    *,
+    current_stage: str | None,
+    duration_sec: float,
+    clip_count: int,
+    clip_seconds: float = 0.0,
+    rtf: float = 0.3,
+    stage_eta_sec: float | None = None,
+    measured: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    """The remaining stages, each with its own estimate, nearest first.
+
+    A stage that has already run on THIS job uses its real duration; the
+    current stage uses the live estimate; the rest use priors. That ordering is
+    what makes the numbers converge instead of sitting at "about 8 minutes" for
+    the whole job.
+    """
+    here = plan_stage_for(current_stage)
+    start = STAGE_ORDER.index(here) if here in STAGE_ORDER else 0
+    done = {k: float(v) for k, v in (measured or {}).items() if k in STAGE_ORDER}
+    plan: list[dict[str, Any]] = []
+    for stage in STAGE_ORDER[start:]:
+        if stage == here and stage_eta_sec is not None:
+            sec, source = float(stage_eta_sec), "live"
+        elif stage in done:
+            sec, source = done[stage], "measured"
+        else:
+            sec = stage_prior_sec(
+                stage,
+                duration_sec=duration_sec,
+                clip_count=clip_count,
+                clip_seconds=clip_seconds,
+                rtf=rtf,
+            )
+            source = "estimate"
+        plan.append({
+            "stage": stage,
+            "label": STAGE_LABELS.get(stage, stage),
+            "sec": round(sec, 1),
+            "source": source,
+            "current": stage == here,
+        })
+    return plan
+
+
+def plan_total_sec(plan: list[dict[str, Any]]) -> float:
+    return round(sum(float(p.get("sec") or 0.0) for p in plan), 1)
