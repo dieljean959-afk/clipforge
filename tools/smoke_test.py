@@ -201,15 +201,21 @@ def main() -> int:
     live_gemini_key().refresh(force=True)
     if settings.gemini_api_key:
         # A usable key exists in this environment (platform Keys tab / .env).
-        # The no-key guard cannot fire here — verify the positive path instead:
-        # parse_candidates must still reject garbage replies deterministically.
+        # The no-key guard cannot fire here — verify the positive path instead.
         print("   note: key present — testing parse-only guard instead")
+        # A garbage reply must NOT raise. That was the bug: one unparseable
+        # chunk out of twenty propagated an exception that failed the whole
+        # job, discarding the chunks already paid for and cached. Now a reply
+        # that yields nothing is simply "no clips from this chunk".
         try:
-            llm_mod.parse_candidates("not json at all")
-            print("   FAIL: expected LlmError for unparseable reply")
+            empty = llm_mod.parse_candidates("not json at all")
+        except Exception as exc:  # noqa: BLE001
+            print(f"   FAIL: parse_candidates raised on a garbage reply: {exc!r}")
             return 1
-        except llm_mod.LlmError:
-            print("   OK: unparseable Gemini reply raises LlmError")
+        if empty != []:
+            print(f"   FAIL: garbage reply produced clips: {empty}")
+            return 1
+        print("   OK: unparseable reply yields no clips instead of raising")
         # word-index contract: the model returns indices, we resolve timings
         parsed = llm_mod.parse_candidates(
             '[{"start_word": 4, "end_word": 9, "score": 88, "title": "T", "hook_text": "H"}]'
