@@ -19,9 +19,10 @@ import { ClipPreview } from "@/components/clipforge/ClipPreview";
 import { ExportDialog } from "@/components/clipforge/ExportDialog";
 import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
 import { CaptionStyleDialog } from "@/components/clipforge/CaptionStyleDialog";
+import { GroqUsageBadge } from "@/components/clipforge/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips } from "@/hooks/use-poll";
-import { api, type VerifyClipsDto } from "@/lib/api";
+import { api, type UsageDto, type VerifyClipsDto } from "@/lib/api";
 import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
@@ -33,6 +34,8 @@ export default function Dashboard() {
   const [redetecting, setRedetecting] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<VerifyClipsDto | null>(null);
+  // Fed by the header badge, read by the submit form. One poll, two consumers.
+  const [usage, setUsage] = useState<UsageDto | null>(null);
 
   const allJobs = useMemo(() => jobs ?? [], [jobs]);
   // The backend derives `status` in ONE place (app/jobstatus.py) and clears
@@ -142,6 +145,13 @@ export default function Dashboard() {
             <LogoWordmark />
           </a>
           <div className="flex items-center gap-2">
+            {/* Groq's daily token budget is the constraint on AI detection, and
+                it is invisible until a job dies part way through a paid
+                transcript. Shown up front, with the pre-submit warning below
+                fed from the same number. */}
+            <div className="hidden w-40 sm:block">
+              <GroqUsageBadge onUsage={setUsage} />
+            </div>
             <Button asChild variant="ghost" size="sm" className="cursor-pointer gap-1.5 text-xs">
               <a href="/">
                 Landing
@@ -195,7 +205,7 @@ export default function Dashboard() {
               <Sparkles className="size-4 text-primary" />
               New batch
             </h2>
-            <NewJobForm className="mt-4" />
+            <NewJobForm className="mt-4" usage={usage} />
           </div>
         </section>
 

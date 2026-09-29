@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { Layers, Loader2, Paperclip, Sparkles, Type, Youtube } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, type CaptionPresetDto } from "@/lib/api";
+import { api, type CaptionPresetDto, type UsageDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
@@ -11,7 +11,14 @@ import { cn } from "@/lib/utils";
  * a file. Ownership confirmation is required before submission. Uploads
  * always work — URL fetching can fail (bot checks), and we say so honestly.
  */
-export function NewJobForm({ className }: { className?: string }) {
+export function NewJobForm({
+  className,
+  usage,
+}: {
+  className?: string;
+  /** Latest Groq usage, fed by the header badge. Null until its first poll. */
+  usage?: UsageDto | null;
+}) {
   const [mode, setMode] = useState<"url" | "upload">("url");
   const [url, setUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -48,6 +55,48 @@ export function NewJobForm({ className }: { className?: string }) {
     confirmed &&
     !submitting &&
     (mode === "url" ? url.trim().length > 0 : file !== null);
+
+  // Warn BEFORE the job is queued, not after it dies at chunk 18. Detection is
+  // the only stage that costs money and it is metered per model per day, so a
+  // 54-minute source can exhaust the budget part way through — which used to
+  // surface as a failed job plus a 4,000s transcription already paid for.
+  //
+  // The estimate is driven by the remaining budget rather than the pasted
+  // video's length, because the length is not known until the server has
+  // fetched and probed it — by then the job is already queued. 26.7 tokens per
+  // source-second is the measured rate (app/groq_usage.py).
+  const TOKENS_PER_SECOND = 26.7;
+  const budgetWarning = (() => {
+    if (!usage || !usage.configured) return null;
+    const remaining = Math.max(0, usage.remaining);
+    if (remaining <= 0) {
+      return {
+        tone: "destructive" as const,
+        text:
+          "Today's Groq token quota is spent. AI clip detection cannot run until the " +
+          "daily window resets — transcription and rendering still work.",
+      };
+    }
+    if (usage.percentUsed >= 90) {
+      return {
+        tone: "destructive" as const,
+        text:
+          `Only ${remaining.toLocaleString()} of ${usage.limit.toLocaleString()} Groq ` +
+          "tokens left today — enough for roughly " +
+          `${Math.floor(remaining / TOKENS_PER_SECOND / 60)} more minutes of video. ` +
+          "A shorter source will be safer.",
+      };
+    }
+    if (usage.percentUsed >= 70) {
+      return {
+        tone: "warn" as const,
+        text:
+          `${usage.percentUsed.toFixed(0)}% of today's Groq token quota is used. ` +
+          "Detection is metered per video, so a long one may run out part way through.",
+      };
+    }
+    return null;
+  })();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -190,6 +239,23 @@ export function NewJobForm({ className }: { className?: string }) {
           </span>
         </span>
       </label>
+
+      {/* Quota warning, shown BEFORE submit. Advisory only: the job is still
+          allowed through, because transcription and rendering cost nothing and
+          a spent detection quota should not block the rest of the pipeline. */}
+      {budgetWarning && (
+        <p
+          role="status"
+          className={cn(
+            "rounded-md border px-3 py-2 text-[11px] leading-relaxed",
+            budgetWarning.tone === "destructive"
+              ? "border-destructive/50 bg-destructive/10 text-destructive"
+              : "border-amber-500/40 bg-amber-500/10 text-amber-200",
+          )}
+        >
+          {budgetWarning.text}
+        </p>
+      )}
 
       <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
         <input

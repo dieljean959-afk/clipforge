@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -241,8 +240,13 @@ def test_single_source_of_truth() -> None:
     check("JobCard uses activeStage for the stepper", "job.activeStage" in card)
     check("live progress gated on terminal state",
           "const watching = !job.isTerminal" in card)
-    # The exact contradiction: a live block rendered for a failed job.
-    check("live progress block is gated", "{watching || paused} &&" in card)
+    # The exact contradiction: a live block rendered for a failed job. Gated
+    # on `watching` (the backend's verdict), NOT on stage equality — that is
+    # the structural change, so assert the gate is not the old one.
+    check("live progress block gated on `watching`", "{watching && (" in card)
+    check("live progress is not gated on stage equality",
+          "{!complete && !failed && (" not in card,
+          "the old stage-equality gate is still there")
 
     api = src("src/lib/api.ts")
     check("JobDto carries status", "status:" in api and '"queued" | "running"' in api)

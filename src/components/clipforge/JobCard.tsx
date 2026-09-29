@@ -337,8 +337,10 @@ export function JobCard({
         })}
       </div>
 
-      {/* live progress with units + ETA */}
-      {!complete && !failed && (
+      {/* live progress with units + ETA. Gated on `watching` — the backend's
+          single verdict — rather than on stage equality, so a job the server
+          considers terminal can never render a spinner and a countdown. */}
+      {watching && (
         <div className="mt-3">
           <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
             <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
@@ -631,14 +633,18 @@ function friendlyError(error: string | null | undefined, where?: string | null):
   if (!raw) return "This job failed.";
 
   // Chunk-level detection failures already name the chunk; lead with that.
-  const chunk = /chunk\s+(\d+)\s*\/\s*(\d+)/i.exec(raw);
-  if (chunk) {
-    const skipped = /(\d+)\s+of\s+(\d+)\s+chunk\(s\)\s+failed/i.exec(raw);
-    if (skipped) {
-      return `AI detection failed on ${skipped[1]} of ${skipped[2]} chunks. ` +
-        `The rest of the video was detected normally — hit Re-detect to retry just those.`;
-    }
-    return `AI detection failed on chunk ${chunk[1]}/${chunk[2]}.`;
+  // Two orders reach us: the per-chunk skip logged during the run
+  // ("chunk 3/7 failed") and the total-failure message from detect_clips
+  // ("all 1/7 chunk(s) failed"), where the count PRECEDES the noun. Matching
+  // only one order meant the total-failure case fell through to the raw text.
+  const chunkFirst = /chunk\s+(\d+)\s*\/\s*(\d+)/i.exec(raw);
+  const countFirst = /(\d+)\s*\/\s*(\d+)\s+chunk\(s\)\s+failed/i.exec(raw);
+  if (chunkFirst) {
+    return `AI detection failed on chunk ${chunkFirst[1]}/${chunkFirst[2]}.`;
+  }
+  if (countFirst) {
+    return `AI detection failed on ${countFirst[1]} of ${countFirst[2]} chunks. ` +
+      `The rest of the video was detected normally — hit Re-detect to retry just those.`;
   }
   if (/chain failed to return valid json/i.test(raw) || /json_validate_failed/i.test(raw)) {
     return "The AI model did not return usable JSON for this video. Retrying usually helps.";
