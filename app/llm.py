@@ -41,7 +41,7 @@ from typing import Any
 
 from loguru import logger
 
-from app import clipcount
+from app import clipcount, jsonfix
 from app.caption_format import finalize_clip_caption, normalize_hashtags, shorten_caption
 from app.config import GeminiConfig, Settings, live_gemini_key, live_groq_key
 
@@ -155,35 +155,26 @@ Return ONLY a JSON array (no prose, no markdown fences):
 
 
 def parse_candidates(text: str) -> list[dict[str, Any]]:
-    """Extract word-index candidates from a model reply, tolerating fences."""
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if m is None:
-        raise LlmError(f"no JSON array in model reply: {text[:200]!r}")
-    try:
-        raw = json.loads(m.group(0))
-    except json.JSONDecodeError as exc:
-        raise LlmError(f"invalid JSON from model: {exc}") from exc
+    """Extract word-index candidates from a possibly-noisy model reply.
+
+    Delegates the hard part to `app.jsonfix`, which strips fences and prose,
+    closes a reply truncated by the token limit, tolerates trailing commas, and
+    unwraps whichever envelope the reply used — including the single clip OBJECT
+    that `json_object` mode produces when the prompt asked for an array.
+
+    NEVER raises. An unreadable reply yields an empty list and the caller treats
+    that as "this chunk had no highlights" rather than a failed job: the
+    previous implementation raised on a fenced or truncated reply, and one such
+    chunk at 3/7 killed the whole 20-chunk run.
+    """
     out: list[dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        try:
-            start_word = int(item["start_word"])
-            end_word = int(item["end_word"])
-            score = float(item.get("score", 0))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if end_word <= start_word:
-            continue
+    for item in jsonfix.repair_candidates(text):
+        # The prompt asks for one line of copy and 5-7 tags; these two calls
+        # enforce that rather than trusting the reply, which is routinely
+        # multi-line and over-tagged.
         out.append(
             {
-                "start_word": start_word,
-                "end_word": end_word,
-                "score": max(0.0, min(100.0, score)),
-                "title": str(item.get("title", "Untitled clip"))[:120],
-                # The prompt asks for one line of copy and 5-7 tags; these two
-                # calls enforce that rather than trusting the reply, which is
-                # routinely multi-line and over-tagged.
+                **item,
                 "hook_text": shorten_caption(item.get("hook_text", "")),
                 "hashtags": normalize_hashtags(item.get("hashtags")),
             }
@@ -484,37 +475,242 @@ def call_ollama(chunk_text_prompt: str, settings: Settings) -> str:
 # non-Python-urllib UA gets through. Never remove this.
 GROQ_USER_AGENT = "ClipForge/1.1 (+https://github.com/harry0703/MoneyPrinterTurbo)"
 
+#: The clip contract, as a JSON Schema for Groq's strict Structured Outputs.
+#:
+#: The top level is an OBJECT holding a `clips` array, and that is the entire
+#: fix for `json_validate_failed`. The prompt has always asked for a top-level
+#: array, which `json_object` cannot represent; under strict schema the shape
+#: is enforced by constrained decoding, so the model cannot emit a mismatched
+#: payload no matter how the prompt is worded. `parse_candidates` unwraps the
+#: envelope.
+CLIP_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "clips": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_word": {"type": "integer"},
+                    "end_word": {"type": "integer"},
+                    "score": {"type": "number"},
+                    "title": {"type": "string"},
+                    "hook_text": {"type": "string"},
+                    "hashtags": {"type": "array", "items": {"type": "string"}},
+                },
+                # Strict mode requires every property listed as required and
+                # additionalProperties:false. The natural-language fields are
+                # required too — parse_candidates defaults them, but asking for
+                # them keeps the decoder from skipping them.
+                "required": [
+                    "start_word", "end_word", "score", "title", "hook_text", "hashtags",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["clips"],
+    "additionalProperties": False,
+}
+
+#: Groq error text that means "the model produced JSON we could not accept",
+#: as opposed to "your request was wrong". These are RETRYABLE and, crucially,
+#: must not be treated as permanent 400s — the previous code failed the whole
+#: job on any 400, which is how one bad chunk at 3/7 killed a 20-chunk run.
+_JSON_VALIDATION = re.compile(
+    r"json_validate_failed|failed to validate json|failed to generate json|"
+    r"invalid json|json_schema_validation|does not match the expected schema",
+    re.IGNORECASE,
+)
+
+#: A model that does not support Structured Outputs at all. Not a JSON-content
+#: problem and not a bad request either: the feature is simply unavailable for
+#: it, so the fix is to drop `response_format` and repair the reply locally.
+#: Retrying the identical request can only ever earn the same 400.
+_NO_RESPONSE_FORMAT = re.compile(
+    r"response_format.{0,40}not supported|"
+    r"structured output.{0,40}not supported|"
+    r"does not support (?:json_schema|response_format|structured output)",
+    re.IGNORECASE,
+)
+
+
+def _is_json_validation_error(detail: str) -> bool:
+    """True when a 400 means 'bad model output', not 'bad request'."""
+    return bool(_JSON_VALIDATION.search(detail or ""))
+
+
+def _format_unsupported(detail: str) -> bool:
+    """True when the model cannot do Structured Outputs at all."""
+    return bool(_NO_RESPONSE_FORMAT.search(detail or ""))
+
+
+def _response_format_for(mode: str) -> dict[str, Any] | None:
+    """The wire `response_format` for a configured mode name."""
+    if mode == "json_object":
+        return {"type": "json_object"}
+    if mode == "json_schema":
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "clips", "strict": True, "schema": CLIP_SCHEMA},
+        }
+    return None
+
+
+class _JsonRetry(Exception):
+    """Internal: this attempt produced unusable JSON, escalate the ladder."""
+
+
+class _FormatUnsupported(Exception):
+    """Internal: this model has no Structured Outputs; retry without it."""
+
+
+class _ModelExhausted(Exception):
+    """Internal: every model in the chain failed for this chunk."""
+
 
 def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
-    """Single Groq chat-completions call with pacing + 429-aware backoff.
+    """One detection call to Groq, with a JSON-repair ladder and model chain.
 
     TEXT ONLY: `chunk_text_prompt` is the numbered transcript built by
     build_prompt(). No audio, no video, no file handles ever leave this call.
 
-    Two rate-limit defences, because the free tier is 30 req/min AND 8k
-    tokens/min — and on a long source the token limit is the one that bites,
-    because each chunk is a few thousand tokens:
-      1. Pacing — a process-wide floor between Groq calls, so a long transcript
-         never bursts into the limit in the first place.
-      2. Backoff — on a 429 we honour the server's wait, which it sends in the
-         body for token limits ("try again in 15.6s") rather than in a
-         Retry-After header, else exponential + jitter.
+    THE LADDER
+    ----------
+    A chunk used to be all-or-nothing: one malformed reply and
+    `json_validate_failed` (400) failed the entire job, discarding the 19
+    chunks already paid for and cached. Detection now degrades instead:
 
-    `max_tokens` is set explicitly and tightly. Left unset, the provider's
-    default reservation counted against the token budget in full, so a request
-    whose real answer was 900 tokens reserved ~4k and halved the number of
-    chunks a minute could get through.
+      1. the configured `response_format` (default: strict `json_schema`, whose
+         constrained decoding cannot emit a mismatched shape);
+      2. on a JSON-validation failure, up to `json_retries` attempts at LOWER
+         temperature and HIGHER `max_tokens` — truncation at the token ceiling
+         is the usual real cause, so the budget grows;
+      3. then a `response_format`-free attempt at the ceiling budget, whose
+         reply is repaired locally by `app.jsonfix` (fences, prose, trailing
+         commas, truncation);
+      4. then the same ladder against each model in `fallback_models`.
 
-    Uses urllib (stdlib) so the backend adds no Python dependency, matching
-    call_ollama. Returns the assistant message text; raises on failure.
+    A 400 is PERMANENT only when it is not a JSON-validation error, so a
+    genuinely malformed request still fails fast rather than re-billing.
+
+    Two rate-limit defences remain, because the free tier is 30 req/min AND a
+    per-model tokens-per-day ceiling: a process-wide request floor, and a token
+    pacer. On 429 the server's own wait is honoured, and a daily-quota wait
+    fails fast rather than sleeping inline for an hour.
+
+    Returns the assistant message text. Raises LlmNotConfigured with no key,
+    LlmError when the whole chain is exhausted.
     """
     cfg = settings.groq
     api_key = settings.groq_api_key
     if not api_key:
         raise LlmNotConfigured("GROQ_API_KEY missing — add it in the Keys/API keys tab.")
 
+    prompt = _groq_envelope_prompt(chunk_text_prompt, cfg.response_format)
+    chain = [cfg.model, *[m for m in cfg.fallback_models if m and m != cfg.model]]
+    problems: list[str] = []
+
+    for model in chain:
+        try:
+            return _groq_attempt_chain(prompt, cfg, model, api_key, problems)
+        except _ModelExhausted:
+            logger.warning(
+                f"[llm] {model} could not produce valid JSON for this chunk after the "
+                f"full ladder; trying the next fallback model"
+            )
+        except LlmError:
+            # A non-JSON failure (bad key, dead model, exhausted quota) is not
+            # worth re-asking a different model — surface it immediately.
+            raise
+
+    detail = "; ".join(problems[-3:])
+    raise LlmError(
+        "Every model in the detection chain failed to return valid JSON for this "
+        f"chunk. Tried: {', '.join(chain)}. Last problems: {detail[:400]}"
+    )
+
+
+def _groq_envelope_prompt(prompt: str, response_format: str) -> str:
+    """Align the ASK with the envelope the response_format actually enforces.
+
+    Under `json_schema`/`json_object` the top level must be an object, so a
+    prompt saying "return a JSON array" contradicts the wire contract — the
+    exact contradiction that produced the original 400s. Under `plain` the
+    legacy array wording is kept, because there is no envelope to satisfy and
+    `jsonfix` unwraps either shape.
+    """
+    if response_format == "plain":
+        return prompt
+    return prompt.replace(
+        "Return ONLY a JSON array (no prose, no markdown fences):",
+        "Return ONLY a JSON object shaped {\"clips\": [...]} — the top level must "
+        "be an object whose \"clips\" key holds the array (no prose, no fences):",
+    )
+
+
+def _groq_attempt_chain(
+    prompt: str, cfg: Any, model: str, api_key: str, problems: list[str]
+) -> str:
+    """Run the full ladder against ONE model. Raises _ModelExhausted on failure.
+
+    The last rung deliberately drops `response_format` and asks the model to
+    repair its own JSON, with the largest token budget. That is the rung that
+    survives a model whose structured-output path is broken but whose plain
+    generation is fine — and `app.jsonfix` cleans up whatever comes back.
+    """
+    for attempt in range(cfg.json_retries + 1):
+        # temperature can only go DOWN from the configured base
+        temp = max(0.0, min(cfg.temperature, cfg.json_retry_temperature))
+        if attempt >= cfg.json_retries:
+            # Final rung: no response_format, largest budget.
+            mode, budget = "plain", cfg.max_tokens_ceiling
+        else:
+            # Grow the budget geometrically: 3200 -> 6400 -> 8192 (capped).
+            mode = cfg.response_format
+            budget = min(
+                cfg.max_tokens_ceiling,
+                cfg.max_tokens * (2 ** attempt) if attempt else cfg.max_tokens,
+            )
+        try:
+            return _groq_single(prompt, cfg, model, api_key, mode, temp, budget)
+        except _FormatUnsupported as exc:
+            # The model cannot do Structured Outputs at all. Skip straight to
+            # the no-format rung rather than repeating the same rejected call.
+            problems.append(f"{model}/{mode}: {str(exc)[:140]}")
+            logger.warning(
+                f"[llm] {model} does not support {mode} — retrying without "
+                f"response_format and repairing the JSON locally"
+            )
+            try:
+                return _groq_single(
+                    prompt, cfg, model, api_key, "plain", temp, cfg.max_tokens_ceiling
+                )
+            except (_JsonRetry, _FormatUnsupported) as inner:
+                problems.append(f"{model}/plain: {str(inner)[:140]}")
+                break
+        except _JsonRetry as exc:
+            reason = str(exc)
+            problems.append(f"{model}/{mode}/t{temp}/mt{budget}: {reason[:140]}")
+            logger.warning(
+                f"[llm] JSON ladder step {attempt + 1}/{cfg.json_retries + 1} for "
+                f"{model} (mode={mode}, temp={temp}, max_tokens={budget}): {reason[:180]}"
+            )
+    raise _ModelExhausted(problems[-1] if problems else "no usable JSON")
+
+
+def _groq_single(
+    prompt: str, cfg: Any, model: str, api_key: str, mode: str,
+    temperature: float, max_tokens: int,
+) -> str:
+    """One HTTP rung with pacing, 429 backoff and JSON-aware 400 handling.
+
+    Raises `_JsonRetry` when the provider rejected the OUTPUT (retryable — the
+    ladder should escalate), and `LlmError` for anything else (bad key, dead
+    model, a quota wait too long to sit through).
+    """
     body: dict[str, Any] = {
-        "model": cfg.model,
+        "model": model,
         "messages": [
             {
                 "role": "system",
@@ -523,25 +719,24 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
                     "object and nothing else — no prose, no markdown fence."
                 ),
             },
-            {"role": "user", "content": chunk_text_prompt},
+            {"role": "user", "content": prompt},
         ],
-        "temperature": cfg.temperature,
-        # ~8 candidates of {title, start_word, end_word, score, hook_text,
-        # hashtags} is under 1200 tokens; anything larger is the provider
-        # reserving headroom we never use, out of a per-minute budget that is
-        # the real constraint on a long source.
-        "max_tokens": 1600,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }
+    fmt = _response_format_for(mode)
+    if fmt is not None:
+        body["response_format"] = fmt
 
     last_err: Exception | None = None
-    est = _est_tokens(chunk_text_prompt, int(body.get("max_tokens") or 1600))
+    est = _est_tokens(prompt, max_tokens)
     for attempt in range(cfg.max_retries + 1):
         _groq_wait_turn(cfg.min_interval_sec)
-        # Pace on TOKELS as well as on requests. The request floor keeps a
-        # burst under the 30-req/min limit; this keeps a burst under the
-        # 8k-token/min one, which is the limit that actually stops a long
-        # source. Reacting to a 429 instead means the rejected call was still
-        # spent, and the retry after a 15s wait usually meets the next one.
+        # Pace on TOKENS as well as requests: the request floor keeps a burst
+        # under the rpm limit, this under the token limit that actually stops a
+        # long source. Only on the first attempt — a retry after a 429 has
+        # already waited out the limit, and pacing again would double every
+        # backoff.
         token_wait = _groq_token_wait(est, cfg.tokens_per_min) if attempt == 0 else 0.0
         if token_wait > 0:
             logger.info(
@@ -555,11 +750,9 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
             text = _groq_reply_text(data)
             if not text.strip():
                 raise LlmError("Groq returned an empty reply")
-            # What we were actually billed, plus the rate-limit headers. Both
-            # feed the header badge, and neither is available anywhere else.
             try:
                 _usage_store().record_call(
-                    cfg.model,
+                    model,
                     total_tokens=(data.get("usage") or {}).get("total_tokens"),
                     headers=resp_headers,
                 )
@@ -570,11 +763,10 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
             msg = exc.detail
             last_err = exc
             # A model that no longer exists can never succeed on retry, and
-            # Groq does not name a replacement the way Google does. Fail with
-            # the exact reason rather than burning the retry budget.
+            # Groq does not name a replacement the way Google does.
             if exc.status in (400, 404) and _groq_model_problem(msg):
                 raise LlmError(
-                    f"Groq rejected model {cfg.model!r}: {msg[:200]}. "
+                    f"Groq rejected model {model!r}: {msg[:200]}. "
                     f"Pick a current model from console.groq.com/docs/models and set "
                     f"[groq] model in config.toml."
                 ) from exc
@@ -582,69 +774,74 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
                 break
             if exc.status == 403 and "1010" in msg:
                 # Cloudflare edge ban on the request signature, NOT a bad key.
-                # Retrying cannot help, so fail immediately with the real cause.
                 raise LlmError(
                     "Groq returned 403 / Cloudflare error 1010. This is NOT a bad API key "
                     f"— Cloudflare blocked the request before it reached Groq. "
                     f"Sent User-Agent: {GROQ_USER_AGENT!r}."
                 ) from exc
             if exc.status == 429:
-                # A daily-quota rejection is the only place Groq states the real
-                # tokens-per-day balance, so capture it before deciding what to
-                # do. Recorded even when the wait is too long to sit through —
-                # that is precisely when the number matters most, and it is what
-                # the dashboard badge reads from.
+                # The daily-quota rejection is the only place Groq states the real
+                # tokens-per-day balance — record it before deciding what to do.
                 try:
-                    _usage_store().record_quota_error(cfg.model, msg)
+                    _usage_store().record_quota_error(model, msg)
                 except Exception as qexc:  # noqa: BLE001 - telemetry only
                     logger.debug(f"[groq-usage] could not record quota error: {qexc}")
-                # The server's own number is a FLOOR, never a cap: a TPM or RPD
-                # limit resets on a window we do not control, so retrying sooner
-                # than we were told only burns the remaining attempts.
                 fallback = min(90.0, (2 ** attempt) * 4.0 + random.random() * 2)
                 asked = exc.retry_after or 0.0
                 wait = max(asked, fallback)
                 if asked > MAX_INLINE_RATE_LIMIT_WAIT:
                     # A DAILY token limit answers with an hour-scale wait
-                    # ("1h25m40s"). Sleeping that inside a retry loop looks
-                    # exactly like a hung job to the stall watchdog, burns the
-                    # remaining attempts, and produces a failure an hour later
-                    # with no useful reason. Better to stop now and say so.
+                    # ("1h25m40s"). Sleeping that inside a retry loop looks like
+                    # a hung job, burns the retries, and fails an hour later with
+                    # no useful reason. Stop now and say so.
                     raise LlmError(
                         f"Groq rate limit needs {asked / 60:.0f} minutes before it "
                         f"will accept another call — this is a daily quota, not a "
                         f"burst one. {msg[:220]}"
-                    )
+                    ) from exc
                 logger.warning(
                     f"[llm] groq 429 rate limited"
                     f"{' (tokens/min)' if 'tokens per minute' in msg else ''}"
                     f"{f', server asked for {asked:.0f}s' if asked else ''}"
                     f" — backing off {wait:.1f}s (attempt {attempt + 1})"
                 )
+            elif exc.status == 400 and _is_json_validation_error(msg):
+                # The point of the ladder: a 400 that means "your OUTPUT was
+                # bad" is retryable with a different strategy (lower temp, bigger
+                # budget, no format, another model). Do not spend the in-attempt
+                # backoff on it, and do not fail the job over it.
+                raise _JsonRetry(f"400 {msg[:200]}")
+            elif exc.status in (400, 422) and _format_unsupported(msg):
+                # The model has no Structured Outputs. Drop response_format
+                # entirely and repair the reply locally rather than failing the
+                # whole job over an output-formatting nicety.
+                raise _FormatUnsupported(f"{exc.status} {msg[:200]}")
+            elif exc.status == 400:
+                # A genuinely permanent 400: the same request fails again. Fail
+                # fast rather than re-bill it.
+                raise LlmError(
+                    f"Groq rejected the request permanently (400): {msg[:220]}"
+                )
             else:
-                # 400 is PERMANENT: the same prompt produces the same unparseable
-                # reply, so a retry just re-bills it. 413 is NOT — Groq uses it
-                # for "Request too large ... on input tokens per minute", which is
-                # a RATE limit that clears in seconds and is the server's own
-                # signal to come back. Only the unfixable 4xx fail fast.
-                if exc.status == 400:
-                    raise LlmError(
-                        f"Groq rejected the request permanently (400): {msg[:220]}"
-                    )
+                # 413 is NOT permanent — Groq uses it for "Request too large ...
+                # on input tokens per minute", a rate limit that clears in
+                # seconds. Only the unfixable 4xx fail fast.
                 wait = 2.0 * (attempt + 1)
                 logger.warning(
                     f"[llm] groq error ({exc.status} {msg[:140]}), "
                     f"retry {attempt + 1} in {wait:.0f}s"
                 )
             time.sleep(wait)
-        except (TimeoutError, json.JSONDecodeError, LlmError) as exc:
+        except (TimeoutError, json.JSONDecodeError, LlmError, urllib.error.URLError) as exc:
             last_err = exc
             if attempt >= cfg.max_retries:
                 break
             wait = 2.0 * (attempt + 1)
             logger.warning(f"[llm] groq transport error ({exc}), retry {attempt + 1} in {wait:.0f}s")
             time.sleep(wait)
-    raise LlmError(f"Groq failed after retries: {last_err}")
+        except _FormatUnsupported:
+            raise  # handled by the ladder; never spend the backoff on it
+    raise _JsonRetry(f"transport/rate failures exhausted: {last_err}")
 
 
 #: Providers that rate-limit by TOKENS state the wait in prose rather than a
@@ -797,70 +994,65 @@ def _groq_wait_turn(floor_sec: float) -> None:
 def _groq_post(
     body: dict[str, Any], api_key: str, base_url: str, timeout_sec: int
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """POST to {base_url}/chat/completions.
+    """POST to {base_url}/chat/completions with the body exactly as given.
 
     Returns (body, headers). The headers are only there for the
     `x-ratelimit-*` counters, which are per-minute rather than per-day — the
     daily balance is never in a header, only in a 429 body.
+
+    `response_format` is the CALLER's decision now. It used to be hardcoded to
+    `json_object` here, which is the root of the `json_validate_failed` death:
+    that mode forces a top-level JSON *object* while the detection prompt asks
+    for a top-level *array*, so the model had two contradictory instructions
+    and failed validation non-deterministically. The retry ladder in call_groq
+    owns the format now because choosing it is a strategy, not a transport
+    detail.
     """
     base = str(base_url).rstrip("/")
-    last_400 = ""
-    # Try with a JSON-mode hint first; not every Groq model accepts it, so a
-    # 400 that names response_format degrades to a plain call rather than
-    # failing the whole job over an output-formatting nicety.
-    for attempt_json_mode in (True, False):
-        req_body = dict(body)
-        if attempt_json_mode:
-            req_body["response_format"] = {"type": "json_object"}
-        req = urllib.request.Request(
-            f"{base}/chat/completions",
-            data=json.dumps(req_body).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                # REQUIRED. api.groq.com sits behind Cloudflare, which returns
-                # "HTTP 403: error code: 1010" — a signature ban on the
-                # default `Python-urllib/3.x` User-Agent — BEFORE the request
-                # reaches Groq, so a perfectly valid key still fails. Verified:
-                # urllib default -> 403/1010, an explicit UA -> 401 (reaches
-                # the API). Do not remove this header.
-                "User-Agent": GROQ_USER_AGENT,
-            },
-            method="POST",
-        )
+    req = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            # REQUIRED. api.groq.com sits behind Cloudflare, which returns
+            # "HTTP 403: error code: 1010" — a signature ban on the
+            # default `Python-urllib/3.x` User-Agent — BEFORE the request
+            # reaches Groq, so a perfectly valid key still fails. Verified:
+            # urllib default -> 403/1010, an explicit UA -> 401 (reaches
+            # the API). Do not remove this header.
+            "User-Agent": GROQ_USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+            return json.loads(resp.read().decode("utf-8")), dict(resp.headers.items())
+    except urllib.error.HTTPError as exc:
+        raw = ""
         try:
-            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
-                return json.loads(resp.read().decode("utf-8")), dict(resp.headers.items())
-        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - body is best-effort context only
             raw = ""
-            try:
-                raw = exc.read().decode("utf-8", errors="replace")
-            except Exception:  # noqa: BLE001 - body is best-effort context only
-                raw = ""
-            detail = raw or exc.reason or ""
-            retry_after: float | None = None
-            try:
-                if exc.headers is not None:
-                    hdr = exc.headers.get("Retry-After")
-                    if hdr:
-                        retry_after = float(hdr)
-            except (TypeError, ValueError):
-                retry_after = None
-            if retry_after is None:
-                # Groq's token-per-minute limit does NOT send Retry-After — it
-                # puts the wait in the body: "Please try again in 15.6375s".
-                # Parsing it matters more than it looks: a 55-minute source is
-                # 28 detection chunks of ~4k tokens each, which overruns an
-                # 8000 TPM limit within the first few calls, and the old
-                # fallback backed off 1+2+4s against a limit that needed 15.6s
-                # — so the retry budget was spent and the job died on a limit
-                # it could simply have waited out.
-                retry_after = _retry_hint(detail)
-            if exc.code == 400 and "response_format" in detail and attempt_json_mode:
-                last_400 = detail
-                continue
-            raise _GroqHttpError(exc.code, detail, retry_after) from exc
-    raise _GroqHttpError(400, last_400 or "groq rejected the request")
+        detail = raw or exc.reason or ""
+        retry_after: float | None = None
+        try:
+            if exc.headers is not None:
+                hdr = exc.headers.get("Retry-After")
+                if hdr:
+                    retry_after = float(hdr)
+        except (TypeError, ValueError):
+            retry_after = None
+        if retry_after is None:
+            # Groq's token-per-minute limit does NOT send Retry-After — it
+            # puts the wait in the body: "Please try again in 15.6375s".
+            # Parsing it matters more than it looks: a 55-minute source is
+            # 20 bounded detection chunks of ~3k tokens each, which overruns
+            # an 8000 TPM limit within the first few calls, and a fallback
+            # that backed off 1+2+4s against a limit needing 15.6s spent the
+            # retry budget and died on a limit it could have waited out.
+            retry_after = _retry_hint(detail)
+        raise _GroqHttpError(exc.code, detail, retry_after) from exc
 
 
 def _groq_reply_text(data: dict[str, Any]) -> str:
@@ -997,6 +1189,7 @@ def detect_clips(
 
     candidates: list[dict[str, Any]] = []
     reused = 0
+    skipped: list[int] = []
     for i, (start_index, chunk) in enumerate(chunks):
         # Pause is honoured at a chunk boundary: never between the API call
         # and the cache write, which is the window where a kill would lose
@@ -1022,8 +1215,51 @@ def detect_clips(
             )
             continue
         prompt = build_prompt(chunk, cfg, start_index=start_index)
-        text = call_llm(prompt, settings)
+        # ONE BAD CHUNK MUST NOT FAIL THE JOB. This is the single most
+        # important behaviour change in this stage: a 20-chunk run that lost
+        # chunk 3 to a malformed reply threw away 19 chunks that had already
+        # been paid for and cached, and reported "Failed during AI clip
+        # detection" for a job that was 15% broken rather than unusable.
+        #
+        # LlmError is still raised when EVERY chunk failed — then the stage
+        # genuinely has nothing and the user is right to be told. A partial
+        # result is reported as a warning and the job continues.
+        try:
+            text = call_llm(prompt, settings)
+        except LlmNotConfigured:
+            raise  # a missing key affects every chunk; never hide it
+        except DetectionPaused:
+            raise
+        except LlmError as exc:
+            skipped.append(i)
+            logger.warning(
+                f"[llm] chunk {i + 1}/{len(chunks)} failed ({exc}) — skipping it and "
+                f"keeping the other chunks"
+            )
+            if on_log:
+                on_log(
+                    f"⚠ AI detection failed on chunk {i + 1}/{len(chunks)} "
+                    f"(retried with fallbacks) — skipping it and keeping the rest"
+                )
+            if on_progress:
+                on_progress((i + 1) / len(chunks), f"Detection: chunk {i + 1}/{len(chunks)} (skipped)")
+            continue
         parsed = parse_candidates(text)
+        if not parsed:
+            # The call succeeded but nothing usable came back (prose only, or
+            # every clip failed schema validation). Same treatment: skip, keep
+            # going, and say so, rather than failing the run.
+            skipped.append(i)
+            logger.warning(
+                f"[llm] chunk {i + 1}/{len(chunks)} returned no valid clips — skipping"
+            )
+            if on_log:
+                on_log(
+                    f"⚠ Chunk {i + 1}/{len(chunks)} returned no usable clips — skipping it"
+                )
+            if on_progress:
+                on_progress((i + 1) / len(chunks), f"Detection: chunk {i + 1}/{len(chunks)} (skipped)")
+            continue
         resolved = resolve_candidates(parsed, words, start_index, cfg)
         # Persist BEFORE reporting progress, so a kill in the next instant
         # still keeps this chunk.
@@ -1040,6 +1276,22 @@ def detect_clips(
             f"[llm] detection resumed: reused {reused}/{len(chunks)} chunk(s) from cache, "
             f"re-billed only the remainder"
         )
+    if skipped:
+        # Say it out loud. A silently short batch is indistinguishable from a
+        # genuinely quiet source, and the user deserves to know that a chunk was
+        # dropped rather than left to wonder why a 54-minute video produced 11
+        # clips instead of 23.
+        where = ", ".join(str(i + 1) for i in skipped)
+        logger.warning(
+            f"[llm] detection completed with {len(skipped)}/{len(chunks)} chunk(s) "
+            f"skipped after model failures (chunk {where}); every other chunk was kept"
+        )
+        if on_log:
+            on_log(
+                f"Finished with {len(skipped)} of {len(chunks)} chunk(s) skipped "
+                f"(chunk {where}). The rest of the video was detected normally — "
+                f"hit Re-detect to retry just those."
+            )
 
     # Keep only the strong ones, up to the cap. The cap is a ceiling and the
     # score floor is the gate: a source with three genuinely good moments
@@ -1048,6 +1300,16 @@ def detect_clips(
         candidates, cfg.max_clips, cfg.min_score
     )
     if not top:
+        # Every chunk failed, so there is genuinely nothing to render. This is
+        # the one case where detection must still fail the job — but the error
+        # names the chunk count, so the user sees why nothing happened.
+        if skipped:
+            raise LlmError(
+                f"{label} returned no valid clip candidates — all "
+                f"{len(skipped)}/{len(chunks)} chunk(s) failed after retries and "
+                f"fallback models. The transcript is fine; the detection backend is not "
+                f"responding with usable JSON right now."
+            )
         raise LlmError(f"{label} returned no valid clip candidates")
     if report is not None:
         report.update({
@@ -1059,6 +1321,9 @@ def detect_clips(
             "belowFloor": below_floor,
             "topScore": float(top[0]["score"]),
             "lowestKept": float(top[-1]["score"]),
+            "chunksTotal": len(chunks),
+            "chunksSkipped": len(skipped),
+            "chunksSkippedAt": [i + 1 for i in skipped],
         })
     logger.info(
         f"[llm] selected {len(top)} clip(s) (cap {cfg.max_clips}, score floor "

@@ -61,6 +61,17 @@ export interface JobDto {
   title?: string | null;
   isUpload: boolean;
   stage: ClipStage;
+  /** Authoritative status from the backend's single derivation. Prefer this
+   *  over inferring one from `stage` + `progress` — those two disagreeing is
+   *  exactly what produced "Failed" beside "61% overall, running". */
+  status: "queued" | "running" | "paused" | "failed" | "complete";
+  /** True once no further progress is possible. When true, every running-only
+   *  field (stagePlan, units, ETAs, queuePosition) is absent from the payload. */
+  isTerminal: boolean;
+  /** The stage a RUNNING job is on, or null. Never set for a dead job. */
+  activeStage?: string | null;
+  /** Human name of the stage this job is on, or died in. */
+  stageLabel?: string | null;
   progress: number;
   progressDetail?: string | null;
   unitLabel?: string | null;

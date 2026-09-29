@@ -76,12 +76,19 @@ export interface OverallStatus {
  *
  * Deliberately separate from the per-stage stepper: that one answers "which
  * step am I on", this answers "should I still be waiting, or can I go use the
- * clips?". `done` requires stage === "complete" — never inferred from
- * progress, so a job sitting at 99% can never read as finished.
+ * clips?".
+ *
+ * The backend derives `status` in ONE place (app/jobstatus.py) and strips
+ * every running-only field off a terminal job, so this reads THAT rather than
+ * re-deriving from `stage` + `progress`. The stage/progress fallback stays for
+ * a job that predates the field. `done` is never inferred from progress, so a
+ * job at 99% cannot read as finished, and a failed job cannot read as running
+ * just because it still carries a stale progress number.
  */
 export function overallStatus(job: JobDoc): OverallStatus {
   const total = PIPELINE_STAGES.length;
-  if (job.stage === "complete") {
+  const status = job.status ?? job.stage;
+  if (status === "complete") {
     return {
       state: "done",
       stageNumber: total,
@@ -90,24 +97,24 @@ export function overallStatus(job: JobDoc): OverallStatus {
       label: "Done — clips ready",
     };
   }
-  if (job.stage === "failed") {
+  if (status === "failed") {
     // `stage` is "failed", so the stage that actually broke lives in
-    // `failedStage` (recorded server-side before `stage` is overwritten).
-    // Fall back to the generic headline for older jobs without the field.
-    const where = job.failedStage
-      ? (STAGE_LABELS[job.failedStage as ClipStage] ?? job.failedStage)
+    // `failedStage` (recorded server-side before `stage` is overwritten), or
+    // in the backend's own `stageLabel`.
+    const raw = job.stageLabel ?? job.failedStage ?? null;
+    const where = raw
+      ? (STAGE_LABELS[raw as ClipStage] ?? raw)
       : null;
+    const idx = PIPELINE_STAGES.indexOf(raw as ClipStage);
     return {
       state: "failed",
-      stageNumber: where
-        ? Math.max(1, PIPELINE_STAGES.indexOf(job.failedStage as ClipStage) + 1)
-        : total,
+      stageNumber: idx >= 0 ? idx + 1 : total,
       total,
-      percent: 100,
+      percent: 0,
       label: where ? `Failed during ${where}` : "Failed",
     };
   }
-  if (job.stage === "paused") {
+  if (status === "paused") {
     // A pause is a deliberate stop, not a failure and not "still running".
     // It must never read as running, or the card shows a live spinner for a
     // job that is deliberately idle until the user resumes it.
@@ -116,12 +123,14 @@ export function overallStatus(job: JobDoc): OverallStatus {
       stageNumber: 0,
       total,
       percent: Math.min(99, Math.round(job.progress ?? 0)),
-      label: job.pausedStage
-        ? `Paused at ${STAGE_LABELS[job.pausedStage as ClipStage] ?? job.pausedStage}`
-        : "Paused by user",
+      label: job.stageLabel
+        ? `Paused at ${job.stageLabel}`
+        : job.pausedStage
+          ? `Paused at ${STAGE_LABELS[job.pausedStage as ClipStage] ?? job.pausedStage}`
+          : "Paused by user",
     };
   }
-  if (job.stage === "queued") {
+  if (status === "queued") {
     return {
       state: "queued",
       stageNumber: 0,
@@ -130,7 +139,8 @@ export function overallStatus(job: JobDoc): OverallStatus {
       label: "Queued — waiting for a worker",
     };
   }
-  const idx = PIPELINE_STAGES.indexOf(job.stage as ClipStage);
+  const live = job.activeStage ?? job.stage;
+  const idx = PIPELINE_STAGES.indexOf(live as ClipStage);
   const stageNumber = idx === -1 ? 1 : idx + 1;
   const within = Math.min(100, Math.max(0, job.progress ?? 0));
   const percent = Math.round(((stageNumber - 1 + within / 100) / total) * 100);
@@ -139,7 +149,7 @@ export function overallStatus(job: JobDoc): OverallStatus {
     stageNumber,
     total,
     percent: Math.min(99, percent),
-    label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[job.stage as ClipStage]}`,
+    label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[live as ClipStage] ?? live}`,
   };
 }
 
@@ -160,6 +170,27 @@ export function fmtClock(sec: number): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * A DURATION as mm:ss, or h:mm:ss past an hour. Rounded to the nearest second.
+ *
+ * Exists because `${job.totalClipsSec}s of clips` rendered the raw float:
+ * "932.8100000000011s of clips". Durations are sums of clip lengths, so they
+ * are never whole — but the sub-second remainder is noise, and float error in
+ * the sum is noise on top of that. Rounding first and formatting second is the
+ * only order that hides both.
+ */
+export function fmtDurationLong(sec: number | null | undefined): string {
+  if (sec == null || !Number.isFinite(sec)) return "0:00";
+  const total = Math.max(0, Math.round(sec));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  return h > 0
+    ? `${h}:${mm}:${String(s).padStart(2, "0")}`
+    : `${mm}:${String(s).padStart(2, "0")}`;
 }
 
 /**
@@ -188,6 +219,7 @@ export const STALL_THRESHOLD_MS = 600_000;
 
 /** True while a job is doing work we can meaningfully watch. */
 export function isActiveJob(job: JobDoc): boolean {
+  if (job.isTerminal !== undefined) return !job.isTerminal && job.status !== "queued";
   return job.stage !== "complete" && job.stage !== "failed" && job.stage !== "paused";
 }
 
@@ -245,6 +277,56 @@ export function sourceLabel(job: Pick<JobDoc, "source" | "isUpload">): string {
   } catch {
     return job.source;
   }
+}
+
+/**
+ * The platform/video ID from a source URL, e.g. "LsNjFCfQKis".
+ * Returns "" when the URL carries no recognisable ID, so callers can fall back
+ * rather than render an empty label.
+ */
+export function sourceId(job: Pick<JobDoc, "source" | "isUpload">): string {
+  if (job.isUpload) return "";
+  const id = (() => {
+    try {
+      const url = new URL(job.source);
+      const host = url.hostname.replace(/^www\./, "");
+      // youtu.be/<id>, /watch?v=<id>, /embed/<id>, /shorts/<id>
+      if (host === "youtu.be") return url.pathname.slice(1).split("/")[0] ?? "";
+      const v = url.searchParams.get("v");
+      if (v) return v;
+      const m = /^\/(?:embed|shorts|v|live)\/([^/?#]+)/.exec(url.pathname);
+      return m?.[1] ?? "";
+    } catch {
+      return "";
+    }
+  })();
+  // Platform IDs are base64-ish and short; anything else is a path, not an ID.
+  return /^[A-Za-z0-9_-]{6,20}$/.test(id) ? id : "";
+}
+
+/**
+ * What a batch pill should say: the VIDEO TITLE when we have one, else the
+ * platform + ID.
+ *
+ * "youtube.com/watch" told the user nothing — three batches from three
+ * different videos all read "youtube.com/watch · 23 clips", so they could not
+ * be told apart at a glance. The title (or at minimum the video ID) is what
+ * identifies a batch; the date (rendered separately) disambiguates re-runs of
+ * the same video.
+ */
+export function batchLabel(job: Pick<JobDoc, "source" | "isUpload" | "title">): string {
+  const title = (job.title ?? "").trim();
+  if (title) return title.length > 60 ? `${title.slice(0, 59)}…` : title;
+  const id = sourceId(job);
+  if (id) {
+    try {
+      return `${new URL(job.source).hostname.replace(/^www\./, "")} · ${id}`;
+    } catch {
+      return id;
+    }
+  }
+  // No title and no ID: the hostname alone is the least-bad identifier.
+  return sourceLabel(job);
 }
 
 export function hostOf(source: string): string {

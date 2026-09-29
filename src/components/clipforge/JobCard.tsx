@@ -34,8 +34,9 @@ import {
   fmtAgo,
   fmtClock,
   fmtDate,
+  fmtDurationLong,
   fmtEta,
-  isActiveJob,
+  batchLabel,
   overallStatus,
   silenceMs,
   sourceLabel,
@@ -110,14 +111,23 @@ export function JobCard({
   onDeleted?: () => void;
   onCheckNow?: (jobId: string) => Promise<void> | void;
 }) {
-  const failed = job.stage === "failed";
-  const complete = job.stage === "complete";
-  const paused = job.stage === "paused";
-  const activeIdx = STAGES.indexOf(job.stage as (typeof STAGES)[number]);
+  const failed = job.status === "failed" || job.stage === "failed";
+  const complete = job.status === "complete" || job.stage === "complete";
+  const paused = job.status === "paused" || job.stage === "paused";
+  // The stage to highlight: for a live job that is its active stage, and for a
+  // dead one the stage it died in, so the stepper marks the right pill rather
+  // than leaving every stage grey.
+  const stepStage = (job.activeStage ?? job.failedStage ?? job.stage) as
+    | (typeof STAGES)[number]
+    | undefined;
+  const activeIdx = stepStage ? STAGES.indexOf(stepStage) : -1;
   const overall = overallStatus(job);
   const stalled = useStalled(job);
   const [busy, setBusy] = useState<null | "pause" | "resume" | "check">(null);
-  const watching = isActiveJob(job);
+  // Live ONLY while the backend says the job is live. isTerminal is the
+  // backend's single verdict, so this can never show a spinner for a job that
+  // has already stopped.
+  const watching = !job.isTerminal && !complete && !failed && !paused;
   const now = useNow(watching);
   const quiet = watching && silenceMs(job, now) > QUIET_THRESHOLD_MS;
   const plan = job.stagePlan ?? [];
@@ -192,8 +202,11 @@ export function JobCard({
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
+          {/* The title identifies the batch; the URL is the fallback and the
+              tooltip. Three batches from three videos all read
+              "youtube.com/watch", so the host alone was not a label. */}
           <p className="truncate text-sm font-semibold" title={job.source}>
-            {sourceLabel(job)}
+            {batchLabel(job)}
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {job.isUpload ? "Uploaded file" : "Video URL"} · {fmtDate(job.createdAt)}
@@ -267,7 +280,9 @@ export function JobCard({
           <div className="min-w-0">
             <div className="font-semibold text-destructive">{overall.label}</div>
             {job.error && (
-              <div className="mt-0.5 truncate text-xs text-muted-foreground" title={job.error}>
+              <div
+                className="mt-0.5 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]"
+              >
                 {job.error}
               </div>
             )}
@@ -515,7 +530,7 @@ export function JobCard({
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span className="font-semibold text-primary">{job.clipCount ?? 0} clips</span>
           {job.totalClipsSec !== undefined && job.totalClipsSec !== null && (
-            <span>{job.totalClipsSec}s total</span>
+            <span>{fmtDurationLong(job.totalClipsSec)} total</span>
           )}
           <span>
             {job.detectedSource ? `AI-detected via ${job.detectedSource}` : "Detection failed"}
@@ -527,16 +542,7 @@ export function JobCard({
         </div>
       )}
 
-      {failed && (
-        <div className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2">
-          <p className="text-sm font-medium text-destructive">{job.error}</p>
-          {job.errorDetail && (
-            <p className="mt-0.5 font-mono text-[10px] text-destructive/70">
-              {job.errorDetail}
-            </p>
-          )}
-        </div>
-      )}
+      {failed && <FailureNotice job={job} />}
 
       {/* per-job worker log ("View logs") */}
       <Dialog open={logsOpen} onOpenChange={setLogsOpen}>
@@ -563,6 +569,102 @@ export function JobCard({
       </Dialog>
     </div>
   );
+}
+
+/**
+ * A failure, in words a person can act on.
+ *
+ * The raw Python traceback used to be rendered inline. On a phone it is a wall
+ * of "/home/daytona/.local/share/uv/python/…" that pushed the card past the
+ * viewport and forced horizontal scrolling, and it buried the one sentence that
+ * says what happened. So: a short headline derived from what the pipeline
+ * knows, the full text and traceback behind a collapsed "Show details", and
+ * wrapping everywhere so nothing can widen the page.
+ */
+function FailureNotice({ job }: { job: JobDoc }) {
+  const [open, setOpen] = useState(false);
+  const where = job.stageLabel?.toLowerCase();
+  const headline = friendlyError(job.error, where);
+  return (
+    <div
+      data-testid="job-failed-detail"
+      className="mt-3 min-w-0 overflow-hidden rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2"
+    >
+      <p className="break-words text-sm font-medium text-destructive [overflow-wrap:anywhere]">
+        {headline}
+      </p>
+      {job.error && job.error !== headline && (
+        <p className="mt-1 break-words text-xs text-destructive/80 [overflow-wrap:anywhere]">
+          {job.error}
+        </p>
+      )}
+      {job.errorDetail && (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="mt-1.5 cursor-pointer text-xs font-medium text-destructive underline underline-offset-2"
+            aria-expanded={open}
+          >
+            {open ? "Hide details" : "Show details"}
+          </button>
+          {open && (
+            <pre className="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-destructive/70 [overflow-wrap:anywhere]">
+              {job.errorDetail}
+            </pre>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One short sentence for a failure, derived from the message rather than
+ * shown raw. Detection is the case that mattered: the backend said
+ * "AI detection failed on chunk 3/7" and the raw body underneath was a
+ * `json_validate_failed` envelope, which reads as gibberish to anyone who
+ * did not write the parser.
+ */
+function friendlyError(error: string | null | undefined, where?: string | null): string {
+  const raw = String(error ?? "").trim();
+  if (!raw) return "This job failed.";
+
+  // Chunk-level detection failures already name the chunk; lead with that.
+  const chunk = /chunk\s+(\d+)\s*\/\s*(\d+)/i.exec(raw);
+  if (chunk) {
+    const skipped = /(\d+)\s+of\s+(\d+)\s+chunk\(s\)\s+failed/i.exec(raw);
+    if (skipped) {
+      return `AI detection failed on ${skipped[1]} of ${skipped[2]} chunks. ` +
+        `The rest of the video was detected normally — hit Re-detect to retry just those.`;
+    }
+    return `AI detection failed on chunk ${chunk[1]}/${chunk[2]}.`;
+  }
+  if (/chain failed to return valid json/i.test(raw) || /json_validate_failed/i.test(raw)) {
+    return "The AI model did not return usable JSON for this video. Retrying usually helps.";
+  }
+  if (/rate limit|daily quota|tokens\/day/i.test(raw)) {
+    return "The AI provider's daily token quota is used up. Detection will work again when it resets.";
+  }
+  if (/GROQ_API_KEY missing/i.test(raw)) return "No AI provider key is configured. Add it in the Keys/API keys tab.";
+  if (/GEMINI_API_KEY missing/i.test(raw)) return "No AI provider key is configured. Add it in the Keys/API keys tab.";
+  if (/no longer available|decommissioned/i.test(raw)) {
+    return "The configured AI model is no longer available. Pick a current one in config.toml.";
+  }
+  if (/no active worker|never reported back/i.test(raw)) {
+    return "The worker stopped without reporting back. Retry — finished stages are cached.";
+  }
+  if (where && raw.toLowerCase().includes(where)) {
+    // Already names the stage; leave the operator's own text alone.
+    return raw;
+  }
+  if (raw.length > 240) {
+    // Too long to be a headline and not a case we recognise. Keep the first
+    // sentence, which is where these messages put the reason.
+    const first = raw.split(/(?<=[.!?])\s/)[0] ?? raw;
+    return first.length > 200 ? `${first.slice(0, 199)}…` : first;
+  }
+  return raw;
 }
 
 /** "Waiting behind 2 other jobs" — a backed-up queue is not a stuck job. */

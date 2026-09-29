@@ -22,7 +22,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from app import caption_style, clipcount, eta, hosting, hostlimits
+from app import caption_style, clipcount, eta, hosting, hostlimits, jobstatus
 from app import encode as encode_mod
 from app import llm as llm_mod
 from app import subtitle as subtitle_svc
@@ -971,13 +971,19 @@ async def upload_job(
 
 @app.get("/api/jobs")
 def list_jobs() -> list[dict]:
+    # A job whose worker died mid-stage leaves `stage` on a live value with
+    # nothing behind it. Reconciled HERE — at the single point every read goes
+    # through — so no view can disagree about whether it is running.
+    worker.reconcile_stale_running()
     jobs = store.list_jobs()
     # live queue positions — a job waiting at 0% must be distinguishable from
     # one that is genuinely stuck
     positions = worker.queue_snapshot()
     for job in jobs:
         job["queuePosition"] = positions.get(job["_id"])
-    return jobs
+    # ONE derivation for every consumer, so the list card and the job card
+    # cannot read the same document and reach opposite conclusions.
+    return jobstatus.describe_all(jobs)
 
 
 @app.get("/api/jobs/{job_id}")
@@ -985,8 +991,12 @@ def get_job(job_id: str) -> dict:
     job = store.get_job(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
+    # "Check now" hits this route, so it must reconcile too — otherwise the
+    # button that exists to tell the truth is the one place that cannot.
+    worker.reconcile_stale_running()
+    job = store.get_job(job_id) or job
     job["queuePosition"] = worker.queue_snapshot().get(job_id)
-    return job
+    return jobstatus.describe(job)
 
 
 @app.delete("/api/jobs/{job_id}")

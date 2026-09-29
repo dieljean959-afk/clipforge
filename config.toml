@@ -95,7 +95,49 @@ timeout_sec = 120
 # into the limit; 429s are still retried, with Retry-After honoured.
 # 2.1s => ~28 rpm, just under the ceiling.
 min_interval_sec = 2.1
-temperature = 0.4
+# ---------------------------------------------------------------------------
+# JSON CONTRACT — the settings that fix the `json_validate_failed` job death.
+# Defaults chosen from tools/detect_json_bench.py over real transcripts
+# (8,109-word / 54-min source + two shorter ones), 10 runs per chunk per config.
+# ---------------------------------------------------------------------------
+# Detection is EXTRACTION, not writing: the model copies word indices out of a
+# transcript. There is no creativity to sample, and every degree of temperature
+# is another chance to emit a body that fails validation. Benchmark: 0.0 had the
+# lowest error rate of 0.0 / 0.3 / 0.7 at equal clip quality.
+temperature = 0.0
+# "json_schema" (strict, constrained decoding) beat "json_object" and "plain" on
+# error rate by a wide margin, and it is the only mode that removes the original
+# bug rather than retrying around it. The prompt asks for a top-level ARRAY;
+# "json_object" demands a top-level OBJECT. With both instructions in play the
+# model failed validation NON-deterministically — the same config returned 200
+# and 400 on consecutive calls against the live API. Strict schema makes the
+# shape a property of the decoder, so it cannot be violated.
+#   "json_object" — weaker, for a model with no Structured Outputs support
+#   "plain"       — no response_format at all; the reply is repaired locally
+response_format = "json_schema"
+# Output budget per call. Truncation at the token ceiling is the most common
+# real-world cause of a malformed reply, so the retry ladder raises this on each
+# JSON attempt rather than re-asking for the same truncated budget.
+max_tokens = 3200
+# Hard ceiling for that ladder. Never exceeded, however long a chunk takes.
+max_tokens_ceiling = 8192
+# Attempts per chunk on a JSON-validation failure, each at lower temperature and
+# a higher max_tokens. Capped at 3: a model that cannot produce valid JSON for
+# this chunk will not manage it on the fourth try, and each attempt is billed
+# against a 200k/day budget.
+json_retries = 3
+# Ceiling for the ladder's temperature. Each JSON retry uses
+# min(temperature, json_retry_temperature), i.e. it can only go DOWN: with the
+# 0.0 default above, retries are deterministic too. Raise this only if you also
+# raise the base temperature and want a retry to reintroduce some variety.
+json_retry_temperature = 0.2
+# Tried in order when the primary model still cannot produce valid JSON after
+# the whole ladder. All three support strict json_schema (Groq docs), so a
+# fallback is a genuine model change rather than a degraded mode.
+# NOTE: a fallback is for MALFORMED OUTPUT, not for a spent quota. Switching
+# models does not dodge the daily token limit (see the note above on model) —
+# it is a different, per-model budget.
+fallback_models = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 # Free-tier tokens-per-DAY ceiling. This is only the DENOMINATOR shown by the
 # dashboard's usage badge and used when Groq has not yet told us the real limit.
 # The authoritative number arrives in a 429 body ("Limit 200000, Used 198530...")

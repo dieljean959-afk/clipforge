@@ -22,7 +22,7 @@ import { CaptionStyleDialog } from "@/components/clipforge/CaptionStyleDialog";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips } from "@/hooks/use-poll";
 import { api, type VerifyClipsDto } from "@/lib/api";
-import { fmtAgo, fmtClock, fmtDate, sourceLabel } from "@/lib/clipforge";
+import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
 
@@ -35,11 +35,15 @@ export default function Dashboard() {
   const [verifyResult, setVerifyResult] = useState<VerifyClipsDto | null>(null);
 
   const allJobs = useMemo(() => jobs ?? [], [jobs]);
+  // The backend derives `status` in ONE place (app/jobstatus.py) and clears
+  // every running-only field on a terminal job, so filtering here cannot put
+  // the same job in two lists. Keyed off `isTerminal`/`status` rather than
+  // `stage` so a job can never read as both failed and running.
   const activeJobs = allJobs.filter(
-    (j) => j.stage !== "complete" && j.stage !== "failed",
+    (j) => !j.isTerminal && (j.status === "running" || j.status === "queued"),
   );
-  const doneJobs = allJobs.filter((j) => j.stage === "complete");
-  const failedJobs = allJobs.filter((j) => j.stage === "failed");
+  const doneJobs = allJobs.filter((j) => j.status === "complete");
+  const failedJobs = allJobs.filter((j) => j.status === "failed");
 
   // Auto-select the newest completed job without a setState-in-effect:
   // the effective selection is derived, and the user's explicit pick is kept
@@ -207,15 +211,35 @@ export default function Dashboard() {
                   onDeleted={refreshJobs}
                   onCheckNow={async (jobId) => {
                     // "Check now" forces an immediate poll of THIS job instead
-                    // of waiting out the 2s interval, so activity can be
-                    // confirmed on demand rather than by reloading the page.
+                    // of waiting out the 2s interval. The server reconciles
+                    // stale running state on this route, so the answer is the
+                    // authoritative status — and the toast says WHICH status,
+                    // because a toast reading "updated just now" on a job that
+                    // had already failed was exactly the ambiguity reported.
                     const fresh = await checkOne(jobId);
-                    if (fresh) {
-                      toast.success(`Checked — ${fresh.stage} · updated ${
-                        typeof fresh.lastProgressAt === "number"
-                          ? fmtAgo(Date.now() - fresh.lastProgressAt)
-                          : "just now"
-                      }`);
+                    if (!fresh) return;
+                    const since =
+                      typeof fresh.lastProgressAt === "number"
+                        ? fmtAgo(Date.now() - fresh.lastProgressAt)
+                        : "just now";
+                    if (fresh.isTerminal) {
+                      if (fresh.status === "complete") {
+                        toast.success(`Checked — done, ${fresh.clipCount ?? 0} clips ready.`);
+                      } else if (fresh.status === "paused") {
+                        toast.info("Checked — this job is paused. Resume to continue.");
+                      } else {
+                        toast.error(
+                          `Checked — this job has failed${
+                            fresh.stageLabel ? ` during ${fresh.stageLabel.toLowerCase()}` : ""
+                          }. See the error on the card.`,
+                        );
+                      }
+                    } else if (fresh.status === "queued") {
+                      toast.info("Checked — still queued, waiting for a worker.");
+                    } else {
+                      toast.success(
+                        `Checked — ${fresh.stageLabel ?? "running"}${fresh.progressDetail ? `: ${fresh.progressDetail}` : ""} · updated ${since}`,
+                      );
                     }
                   }}
                 />
@@ -330,9 +354,17 @@ export default function Dashboard() {
                     <button
                       type="button"
                       onClick={() => setSelectedJobId(job._id)}
-                      className="cursor-pointer px-3 py-1.5"
+                      className="block cursor-pointer px-3 py-1.5 text-left"
                     >
-                      {sourceLabel(job).slice(0, 36)} · {job.clipCount ?? 0} clips
+                      {/* Title (or platform + video ID), never a bare host. Three
+                          batches all reading "youtube.com/watch · 23 clips" were
+                          indistinguishable; the date below disambiguates re-runs. */}
+                      <span className="block max-w-[15rem] truncate" title={batchLabel(job)}>
+                        {batchLabel(job)}
+                      </span>
+                      <span className="ml-1.5 font-normal text-muted-foreground">
+                        {fmtDate(job.createdAt)} · {job.clipCount ?? 0} clips
+                      </span>
                     </button>
                     {/* Delete lives INSIDE the pill, next to the batch it
                         belongs to. It opens a confirmation and never deletes
@@ -357,7 +389,9 @@ export default function Dashboard() {
                   {selectedJob.durationSec != null && (
                     <span>
                       {fmtClock(selectedJob.durationSec)} source ·{" "}
-                      {selectedJob.totalClipsSec ?? 0}s of clips
+                      {/* mm:ss, not the raw float. This read
+                          "932.8100000000011s of clips". */}
+                      {fmtDurationLong(selectedJob.totalClipsSec)} of clips
                     </span>
                   )}
                   <span>

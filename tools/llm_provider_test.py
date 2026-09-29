@@ -230,8 +230,19 @@ def test_wire_contract() -> None:
         msgs = req["body"].get("messages") or []
         check("sends a user message carrying the prompt",
               any(m.get("role") == "user" and m.get("content") == "hello transcript" for m in msgs))
-        check("asks for JSON output mode",
-              req["body"].get("response_format") == {"type": "json_object"})
+        # The default is strict json_schema, NOT json_object. json_object forces
+        # a top-level OBJECT while the prompt asks for a top-level ARRAY; the
+        # model then had two contradictory instructions and failed validation
+        # non-deterministically (reproduced live: 200 and 400 on consecutive
+        # calls with one config). Strict schema constrains the decoder, so the
+        # shape cannot be violated.
+        rf = req["body"].get("response_format") or {}
+        check("asks for strict json_schema", rf.get("type") == "json_schema", str(rf))
+        check("schema is strict", (rf.get("json_schema") or {}).get("strict") is True, str(rf))
+        check("schema puts clips under a top-level object",
+              (rf.get("json_schema") or {}).get("schema", {}).get("required") == ["clips"], str(rf))
+        check("no bare max_tokens default of 1600 left",
+              req["body"].get("max_tokens") == 3200, str(req["body"].get("max_tokens")))
         check("returns the assistant message verbatim", text == _candidates(10, 120))
         parsed = llm_mod.parse_candidates(text)
         check("reply parses through the shared parser", len(parsed) == 1, str(parsed))
@@ -271,9 +282,19 @@ def test_429_exhaustion() -> None:
         finally:
             _restore(orig)
         check("raises LlmError instead of hanging", err is not None, str(err))
-        check("error names the backend", "Groq" in (err or ""), str(err))
-        check("stops after max_retries attempts (1 + 2)",
-              len(stub.requests) == 3, str(len(stub.requests)))
+        # A spent 429 budget is now a LADDER failure: the rung exhausts its
+        # in-attempt retries, and the ladder escalates through its rungs and
+        # then the model chain. What must stay true is that it terminates,
+        # names what it tried, and never silently switches PROVIDER.
+        check("error names the detection chain", "detection chain" in (err or ""), str(err))
+        check("error lists the models it tried",
+              "openai/gpt-oss-120b" in (err or ""), str(err))
+        check("error explains the rate limit",
+              "429" in (err or "") or "Rate limit" in (err or ""), str(err))
+        # Bounded: 3 in-attempt retries x 4 ladder rungs x 3 models in the
+        # chain. The old behaviour stopped at 3; the ladder is what makes a
+        # malformed reply survivable, and it is still strictly finite.
+        check("ladder is bounded, not unbounded", len(stub.requests) <= 40, str(len(stub.requests)))
         check("does NOT fall through to another provider", "gemini" not in (err or "").lower())
 
 

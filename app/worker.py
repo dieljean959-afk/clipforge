@@ -750,6 +750,72 @@ class InProcessWorker:
         self.enqueue(job_id)
         return True
 
+    def reconcile_stale_running(self) -> list[str]:
+        """Clear jobs that claim to be running with no worker behind them.
+
+        A job's `stage` is written by a CHILD process. If that process is
+        SIGKILLed, OOM-reaped or lost to a host restart, nothing overwrites
+        `stage` — the document is left saying "finding, 61%" forever, with no
+        process and no queue entry. That is the state behind "Stage 3 of 4,
+        running" on a job that had already failed.
+
+        The worker knows exactly which jobs it is running and which are queued,
+        so it is the authority: anything on an active stage that is in neither
+        set is stale by definition. Reconciled on every read rather than by a
+        timer, so the dashboard is right the moment it is looked at.
+
+        Terminal jobs are never touched — a genuinely running job is not
+        affected, and a paused/failed/complete one is already settled.
+        """
+        with self._lock:
+            live = set(self._active) | set(self._pending)
+        fixed: list[str] = []
+        for job in self.store.list_jobs():
+            if job.get("_id") in live:
+                continue
+            from app import jobstatus  # local: avoids an import cycle at module load
+
+            if jobstatus.is_terminal(job):
+                continue
+            job_id = job["_id"]
+            stage = job.get("stage")
+            # A QUEUED job not in the queue is equally stale — it was enqueued
+            # by a process that died before the worker picked it up.
+            silent = int((job.get("lastProgressAt") or job.get("stageStartedAt")
+                          or job.get("createdAt") or 0))
+            job.update({
+                "stage": "failed",
+                "failedStage": stage,
+                "error": (
+                    "The worker stopped while this job was in progress and never "
+                    "reported back. Completed stages are cached, so Retry resumes "
+                    "from the last finished one."
+                ),
+                "interrupted": False,
+                "interruptReason": None,
+                "completedAt": silent or None,
+            })
+            # Clear the running-shaped fields through the same derivation the
+            # API uses, so the stored document matches what the API serves.
+            jobstatus.describe(job)
+            for field in ("stagePlan", "unitsDone", "unitsTotal", "unitLabel",
+                          "stageEtaSec", "totalEtaSec", "queueEtaSec",
+                          "queuePosition", "progressDetail"):
+                job.pop(field, None)
+            job["progress"] = 0
+            self.store.write_job(job)
+            self.store.append_job_log(
+                job_id,
+                f"RECONCILED: job was marked '{stage}' but no worker held it — "
+                f"cleared to failed (stale running state)",
+            )
+            logger.warning(
+                f"[worker] reconciled stale job {job_id}: stage '{stage}' with no "
+                f"active worker and no queue entry"
+            )
+            fixed.append(job_id)
+        return fixed
+
     def mark_in_flight_interrupted(self) -> list[str]:
         """Flag every job with a live child as interrupted, for the next boot.
 

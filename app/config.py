@@ -612,7 +612,39 @@ class GroqConfig:
     timeout_sec: int = 120
     # 30 rpm -> 2.0s floor. Small headroom below the documented ceiling.
     min_interval_sec: float = 2.1
-    temperature: float = 0.4
+    # 0.0, not 0.4. Detection is an EXTRACTION task: the model is copying word
+    # indices out of a transcript, not writing prose. There is no creativity to
+    # sample, and every degree of temperature is a chance to emit a malformed
+    # or truncated JSON body — which is exactly how this stage used to fail.
+    temperature: float = 0.0
+    # `json_schema` is the only mode that resolves the original bug. The prompt
+    # asks for a top-level ARRAY; `json_object` requires a top-level OBJECT, so
+    # the model had two contradictory instructions and failed validation
+    # non-deterministically (reproduced live: same config, 200 and 400 on
+    # consecutive calls). Strict json_schema uses constrained decoding, so the
+    # shape is guaranteed by the decoder and cannot be violated.
+    #   "json_object" — weaker, kept selectable for models without schema support
+    #   "plain"       — no response_format; the reply is repaired locally
+    response_format: str = "json_schema"
+    # Output budget per detection call. The observed failure mode is truncation
+    # at the token ceiling, which is why this is raised on each JSON retry.
+    max_tokens: int = 3200
+    #: Hard ceiling for the retry ladder, never exceeded however long a chunk
+    #: takes to produce valid JSON.
+    max_tokens_ceiling: int = 8192
+    #: Retries for a JSON-validation failure, each at lower temperature and a
+    #: higher max_tokens. Capped at 3 because a model that cannot emit valid
+    #: JSON for this chunk will not manage it on the fourth attempt, and each
+    #: attempt costs real tokens against a daily quota.
+    json_retries: int = 3
+    #: Temperature CEILING for the ladder. Each JSON retry uses
+    #: min(temperature, json_retry_temperature), so it can only go DOWN — with
+    #: the 0.0 default above, retries are deterministic as well.
+    json_retry_temperature: float = 0.2
+    #: Tried in order when the primary model cannot produce valid JSON for a
+    #: chunk even after the ladder. All three support strict json_schema per
+    #: Groq's docs. Kept out of the code so the chain is a config decision.
+    fallback_models: tuple[str, ...] = ("openai/gpt-oss-20b", "qwen/qwen3.8-27b")
     # Self-imposed share of the account's tokens-per-minute allowance. The
     # client paces itself to this so a long source does not walk into a 429
     # part way through detection — and, more to the point, does not walk into
@@ -924,16 +956,40 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         errors.append("gemini.min_clip_sec must be < gemini.max_clip_sec")
 
     gq = raw.get("groq", {})
+    _rf = str(gq.get("response_format", "json_schema")).strip().lower()
+    if _rf not in {"json_schema", "json_object", "plain"}:
+        errors.append(
+            f'groq.response_format "{_rf}" is not one of json_schema/json_object/plain'
+        )
+        _rf = "json_schema"
+    _mt = max(256, int(gq.get("max_tokens", 3200)))
+    _ceiling = max(_mt, int(gq.get("max_tokens_ceiling", 8192)))
+    # A fallback equal to the primary model is a no-op that would burn a whole
+    # retry ladder proving nothing, so it is dropped at load time.
+    _primary = str(os.getenv("GROQ_MODEL") or gq.get("model", "openai/gpt-oss-120b"))
+    _fallbacks = tuple(
+        m for m in (str(x) for x in _as_list(gq.get("fallback_models", [])) if str(x).strip())
+        if m and m != _primary
+    )
     groq = GroqConfig(
-        model=str(os.getenv("GROQ_MODEL") or gq.get("model", "openai/gpt-oss-120b")),
+        model=_primary,
         base_url=str(
             os.getenv("GROQ_BASE_URL") or gq.get("base_url", "https://api.groq.com/openai/v1")
         ).strip().rstrip("/"),
         max_retries=max(0, int(gq.get("max_retries", 3))),
         timeout_sec=max(15, int(gq.get("timeout_sec", 120))),
         min_interval_sec=max(0.0, float(gq.get("min_interval_sec", 2.1))),
-        temperature=float(gq.get("temperature", 0.4)),
+        temperature=float(gq.get("temperature", 0.0)),
+        response_format=_rf,
+        max_tokens=_mt,
+        max_tokens_ceiling=_ceiling,
+        json_retries=max(0, min(3, int(gq.get("json_retries", 3)))),
+        json_retry_temperature=max(
+            0.0, min(float(gq.get("temperature", 0.0)), float(gq.get("json_retry_temperature", 0.2)))
+        ),
+        fallback_models=_fallbacks,
         tokens_per_min=max(0, int(gq.get("tokens_per_min", 6000))),
+        daily_token_limit=max(1000, int(gq.get("daily_token_limit", 200000))),
     )
 
     lc = raw.get("llm", {})
