@@ -96,6 +96,11 @@ timeout_sec = 120
 # 2.1s => ~28 rpm, just under the ceiling.
 min_interval_sec = 2.1
 temperature = 0.4
+# Free-tier tokens-per-DAY ceiling. This is only the DENOMINATOR shown by the
+# dashboard's usage badge and used when Groq has not yet told us the real limit.
+# The authoritative number arrives in a 429 body ("Limit 200000, Used 198530...")
+# and overrides this for the day. Raise it on a paid tier.
+daily_token_limit = 200000
 
 [llm]
 # Which backend runs AI clip/highlight DETECTION — NOT transcription.

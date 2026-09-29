@@ -357,9 +357,39 @@ export interface PostResultDto {
   captionLength: number;
 }
 
+export interface UsageModelDto {
+  model: string;
+  tokens: number;
+  calls: number;
+  active: boolean;
+}
+
+export interface UsageDto {
+  /** Tokens used today — Groq's own figure when it has told us, else our sum. */
+  used: number;
+  limit: number;
+  remaining: number;
+  percentUsed: number;
+  /** `groq-report` = from a 429 body (authoritative). `local-sum` = our own tally. */
+  source: "groq-report" | "local-sum";
+  localTokens: number;
+  reportedUsed: number | null;
+  /** Epoch ms when the daily window next frees capacity, or null if unknown. */
+  refillAt: number | null;
+  refillSec: number | null;
+  calls: number;
+  activeModel: string;
+  activeModelTokens: number;
+  models: UsageModelDto[];
+  rateLimit: Record<string, string>;
+  configured: boolean;
+}
+
 export const api = {
   health: () => request<HealthDto>("/api/health"),
   doctor: () => request<DoctorReport>("/api/doctor"),
+  /** Today's Groq token budget. Never throws on a missing key — returns zeros. */
+  usage: () => request<UsageDto>("/api/usage"),
   captionPresets: () => request<CaptionPresetDto[]>("/api/caption-presets"),
   listJobs: () => request<JobDto[]>("/api/jobs"),
   getJob: (jobId: string) => request<JobDto>(`/api/jobs/${jobId}`),

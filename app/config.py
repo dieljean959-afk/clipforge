@@ -620,6 +620,11 @@ class GroqConfig:
     # token pacer and leaves only the per-request floor, which is the right
     # setting for a key on a much larger tier.
     tokens_per_min: int = 6000
+    # The free tier's tokens-per-DAY ceiling, shown by the dashboard badge and
+    # used as the denominator when Groq has not told us the real limit. A 429
+    # overwrites this for the day with the provider's own number, which is the
+    # only authoritative one — Groq never reports the daily balance in a header.
+    daily_token_limit: int = 200000
 
 
 @dataclass

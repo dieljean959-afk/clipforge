@@ -551,10 +551,20 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
             time.sleep(token_wait)
         _groq_record_tokens(est)
         try:
-            data = _groq_post(body, api_key, cfg.base_url, cfg.timeout_sec)
+            data, resp_headers = _groq_post(body, api_key, cfg.base_url, cfg.timeout_sec)
             text = _groq_reply_text(data)
             if not text.strip():
                 raise LlmError("Groq returned an empty reply")
+            # What we were actually billed, plus the rate-limit headers. Both
+            # feed the header badge, and neither is available anywhere else.
+            try:
+                _usage_store().record_call(
+                    cfg.model,
+                    total_tokens=(data.get("usage") or {}).get("total_tokens"),
+                    headers=resp_headers,
+                )
+            except Exception as exc:  # noqa: BLE001 - telemetry must never fail a job
+                logger.debug(f"[groq-usage] could not record usage: {exc}")
             return text
         except _GroqHttpError as exc:
             msg = exc.detail
@@ -579,6 +589,15 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
                     f"Sent User-Agent: {GROQ_USER_AGENT!r}."
                 ) from exc
             if exc.status == 429:
+                # A daily-quota rejection is the only place Groq states the real
+                # tokens-per-day balance, so capture it before deciding what to
+                # do. Recorded even when the wait is too long to sit through —
+                # that is precisely when the number matters most, and it is what
+                # the dashboard badge reads from.
+                try:
+                    _usage_store().record_quota_error(cfg.model, msg)
+                except Exception as qexc:  # noqa: BLE001 - telemetry only
+                    logger.debug(f"[groq-usage] could not record quota error: {qexc}")
                 # The server's own number is a FLOOR, never a cap: a TPM or RPD
                 # limit resets on a window we do not control, so retrying sooner
                 # than we were told only burns the remaining attempts.
@@ -697,6 +716,37 @@ def _est_tokens(text: str, max_tokens: int) -> int:
     return max(64, len(text or "") // 4) + max(64, int(max_tokens))
 
 
+def _usage_store() -> "Any":
+    """The Groq usage counter for the configured data dir.
+
+    A wrapper rather than the store itself so a missing/odd data dir can never
+    turn telemetry into a detection failure — callers already guard the call,
+    and this keeps that guarantee in one place.
+    """
+    from app import groq_usage
+
+    paths = _SETTINGS_HOLDER[0]
+    if paths is None:
+        from app.config import load_config
+
+        paths = load_config().app.paths.data_dir
+        _SETTINGS_HOLDER[0] = paths
+    return groq_usage.store(paths)
+
+
+#: Cached data dir for the usage store. ``llm`` is imported by tooling that
+#: never boots the app, so this is filled lazily on first Groq call.
+_SETTINGS_HOLDER: list[Any] = [None]
+
+
+def note_usage_call(model: str, total_tokens: Any = None, headers: Any = None) -> None:
+    """Record one Groq call. Public so tests and the ollama path can drive it."""
+    try:
+        _usage_store().record_call(model, total_tokens, headers)
+    except Exception as exc:  # noqa: BLE001 - telemetry must never fail a job
+        logger.debug(f"[groq-usage] could not record call: {exc}")
+
+
 def _groq_token_wait(est: int, budget: int) -> float:
     """Seconds to wait so `est` more tokens fit inside the rolling minute."""
     if est <= 0 or budget <= 0:
@@ -746,8 +796,13 @@ def _groq_wait_turn(floor_sec: float) -> None:
 
 def _groq_post(
     body: dict[str, Any], api_key: str, base_url: str, timeout_sec: int
-) -> dict[str, Any]:
-    """POST to {base_url}/chat/completions and return the decoded JSON body."""
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """POST to {base_url}/chat/completions.
+
+    Returns (body, headers). The headers are only there for the
+    `x-ratelimit-*` counters, which are per-minute rather than per-day — the
+    daily balance is never in a header, only in a 429 body.
+    """
     base = str(base_url).rstrip("/")
     last_400 = ""
     # Try with a JSON-mode hint first; not every Groq model accepts it, so a
@@ -775,7 +830,7 @@ def _groq_post(
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
-                return json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8")), dict(resp.headers.items())
         except urllib.error.HTTPError as exc:
             raw = ""
             try:

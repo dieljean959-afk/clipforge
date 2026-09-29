@@ -686,6 +686,25 @@ def caption_presets() -> list[dict]:
     ]
 
 
+@app.get("/api/usage")
+def usage() -> dict:
+    """Today's Groq token budget, for the header badge.
+
+    Read-only and dependency-free: the counter is written as calls happen, so
+    this never calls out to the provider. If the key is absent, or nothing has
+    been spent today, it still answers with a zeroed but well-formed shape so
+    the UI has no empty state to handle.
+    """
+    from app import groq_usage
+
+    limit = int(settings.groq.daily_token_limit or 0)
+    snap = groq_usage.store(settings.app.paths.data_dir).snapshot(
+        default_limit=limit, model=settings.groq.model
+    )
+    snap["configured"] = bool(settings.groq.model)
+    return snap
+
+
 @app.get("/api/warmup")
 def warmup_status() -> dict:
     return warmup
