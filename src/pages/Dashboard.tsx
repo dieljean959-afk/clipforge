@@ -149,16 +149,22 @@ export default function Dashboard() {
 
       {/* hosted pipeline status (CPU/RAM/queue/warmup) */}
       <div className="mx-auto w-full max-w-6xl px-4 pt-6">
-        <LocalWorkerCard />
+        {/* min-w-0 lets the card shrink to the viewport instead of widening the
+            page from inside a grid column; overflow-x-hidden catches anything
+            that still insists on being wider (e.g. an error code string) so a
+            phone never gets horizontal scroll from a status readout. */}
+        <div className="min-w-0 overflow-x-hidden">
+          <LocalWorkerCard />
+        </div>
         {apiError && (
           <div className="mt-3 rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3">
             <p className="text-sm font-semibold text-destructive">
               API unreachable: {apiError}
             </p>
             <p className="mt-1 text-xs leading-relaxed text-destructive/80">
-              {/^(HTTP [45]\d\d)/.test(apiError)
-                ? "The pipeline server answered with an HTTP error on /api/health — the response is logged server-side; try again in a minute or check the deployment logs."
-                : "The pipeline server did not answer /api/health. If this persists, the deployment is restarting — try again in a minute."}
+              {/HTTP 5\d\d/.test(apiError)
+                ? "The pipeline server answered with a server error on /api/health after repeated retries — the response is logged server-side; check the deployment logs."
+                : "The pipeline server did not answer /api/health after repeated retries. If this persists, the deployment is restarting or offline."}
             </p>
           </div>
         )}
@@ -166,8 +172,8 @@ export default function Dashboard() {
 
       <div className="mx-auto w-full max-w-6xl px-4 py-8">
         {/* header + new job */}
-        <section className="grid gap-6 lg:grid-cols-[1fr_380px]">
-          <div>
+        <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+          <div className="min-w-0">
             <p className="text-sm text-muted-foreground">
               Processed on ClipForge's server — videos are deleted after you download them
             </p>
@@ -180,7 +186,7 @@ export default function Dashboard() {
             </p>
             <RightsNotice className="mt-5 max-w-lg" compact />
           </div>
-          <div className="rounded-xl border border-primary/30 bg-card p-5 neon-glow-sm">
+          <div className="min-w-0 rounded-xl border border-primary/30 bg-card p-5 neon-glow-sm">
             <h2 className="flex items-center gap-2 font-bold tracking-tight">
               <Sparkles className="size-4 text-primary" />
               New batch

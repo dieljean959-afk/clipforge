@@ -198,7 +198,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetContent
           side="bottom"
-          className="max-h-[88vh] gap-3 overflow-y-auto p-4 sm:max-w-md sm:self-end sm:justify-self-end"
+          className="max-h-[88vh] w-full max-w-[100vw] gap-3 overflow-x-hidden overflow-y-auto p-4 box-border sm:max-w-md sm:self-end sm:justify-self-end"
         >
           {/* Sheet affordance: the grabber is decorative only. */}
           <div
@@ -206,11 +206,11 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
             className="mx-auto h-1 w-10 shrink-0 rounded-full bg-muted-foreground/40"
           />
           <SheetHeader className="text-left">
-            <SheetTitle className="text-base">{clip.title}</SheetTitle>
-            <SheetDescription className="text-xs">
+            <SheetTitle className="text-base break-words">{clip.title}</SheetTitle>
+            <SheetDescription className="block whitespace-normal text-xs [overflow-wrap:anywhere]">
               Caption: {caption.split("\n")[0] || "(empty)"}
               {caption.includes("\n") ? (
-                <span className="mt-1 block text-muted-foreground">
+                <span className="mt-1 block whitespace-normal text-muted-foreground [overflow-wrap:anywhere]">
                   {caption.split("\n").slice(1).join(" ")}
                 </span>
               ) : null}
@@ -246,18 +246,18 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
                       else if (p.status === "not_connected") void connect(p.slug);
                       else void shareVia();
                     }}
-                    className="flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-accent/40 disabled:opacity-50"
+                    className="flex w-full min-w-0 cursor-pointer flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-accent/40 disabled:opacity-50"
                   >
-                    <span className="flex w-full items-center gap-2 text-sm">
+                    <span className="flex w-full min-w-0 items-center gap-2 text-sm">
                       {busyNow ? (
-                        <Loader2 className="size-3.5 animate-spin" />
+                        <Loader2 className="size-3.5 shrink-0 animate-spin" />
                       ) : canPost ? (
-                        <Send className={cn("size-3.5", TINTS[p.slug])} />
+                        <Send className={cn("size-3.5 shrink-0", TINTS[p.slug])} />
                       ) : (
-                        <TriangleAlert className="size-3.5 text-muted-foreground" />
+                        <TriangleAlert className="size-3.5 shrink-0 text-muted-foreground" />
                       )}
-                      <span className="font-medium">Post to {p.label}</span>
-                      <span className="ml-auto text-[10px] text-muted-foreground">
+                      <span className="min-w-0 font-medium">Post to {p.label}</span>
+                      <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
                         {canPost ? (
                           <span className="flex items-center gap-1 text-primary">
                             <Check className="size-3" />
@@ -292,12 +292,12 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
                 setOpen(false);
                 void shareVia();
               }}
-              className="flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-accent/40"
+              className="flex w-full min-w-0 cursor-pointer flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-accent/40"
             >
-              <span className="flex w-full items-center gap-2 text-sm">
-                <Share2 className="size-3.5" />
-                <span className="font-medium">Share via...</span>
-                <span className="ml-auto text-[10px] text-muted-foreground">
+              <span className="flex w-full min-w-0 items-center gap-2 text-sm">
+                <Share2 className="size-3.5 shrink-0" />
+                <span className="min-w-0 font-medium">Share via...</span>
+                <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
                   no account needed
                 </span>
               </span>

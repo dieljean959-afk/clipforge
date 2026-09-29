@@ -113,24 +113,31 @@ export function SocialAccounts() {
             return (
               <li
                 key={p.slug}
-                className="rounded-lg border border-border bg-card/40 p-3"
+                className="min-w-0 rounded-lg border border-border bg-card/40 p-3"
               >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-medium">{p.label}</span>
-                  <span
-                    className={cn(
-                      "rounded-full border px-2 py-0.5 text-[10px] font-medium",
-                      badge.className,
-                    )}
-                  >
-                    {badge.label}
-                  </span>
-                  {p.connected && (
-                    <span className="text-[10px] text-primary">
-                      connected{p.accountName ? ` · ${p.accountName}` : ""}
+                {/* Stacked top-to-bottom on a phone, one row from sm up. The
+                    old single flex-wrap row squeezed the label into a few
+                    characters per line on a 360px screen once the two buttons
+                    landed beside it — a column gives the text the full width
+                    and lets the actions wrap as a group instead. */}
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                  <span className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium">{p.label}</span>
+                    <span
+                      className={cn(
+                        "rounded-full border px-2 py-0.5 text-[10px] font-medium",
+                        badge.className,
+                      )}
+                    >
+                      {badge.label}
                     </span>
-                  )}
-                  <span className="ml-auto flex items-center gap-1">
+                    {p.connected && (
+                      <span className="min-w-0 text-[10px] text-primary">
+                        connected{p.accountName ? ` · ${p.accountName}` : ""}
+                      </span>
+                    )}
+                  </span>
+                  <span className="flex flex-wrap items-center gap-1 sm:ml-auto">
                     {p.connected ? (
                       <>
                         <Button

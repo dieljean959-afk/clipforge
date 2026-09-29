@@ -240,7 +240,10 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   return (
     <div
       className={cn(
-        "rounded-xl border bg-card px-4 py-3",
+        // min-w-0: as a grid/flex child this card must be allowed to shrink
+        // below its content's intrinsic width, or a long unbroken string (a
+        // URL, an error code) pushes the whole page wide on a 360px phone.
+        "min-w-0 rounded-xl border bg-card px-4 py-3",
         error ? "border-destructive/50" : "border-primary/30",
         className,
       )}

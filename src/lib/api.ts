@@ -294,10 +294,22 @@ export interface CaptionPresetDto {
   label: string;
 }
 
-const BASE = import.meta.env.VITE_API_BASE ?? "";
+/**
+ * API base URL, normalised.
+ *
+ * A trailing slash on VITE_API_BASE produced "/api//health"-style URLs — the
+ * Vite dev proxy still matched them, but the FastAPI route did not, and the
+ * response came back as a 400/404 that the dashboard reported as "API
+ * unreachable". Collapsing duplicates at the one place the two strings meet
+ * removes that whole failure class.
+ */
+const BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
+/** Same guarantee for the path half of every URL this module builds. */
+const path = (p: string) => (p.startsWith("/") ? p : `/${p}`).replace(/\/{2,}/g, "/");
+
+async function request<T>(path_: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path(path_)}`, init);
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try {
@@ -312,8 +324,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** Request that returns a raw Blob (file downloads). */
-async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
-  const res = await fetch(`${BASE}${path}`, init);
+async function requestBlob(path_: string, init?: RequestInit): Promise<Blob> {
+  const res = await fetch(`${BASE}${path(path_)}`, init);
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try {

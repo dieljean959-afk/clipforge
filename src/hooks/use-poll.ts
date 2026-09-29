@@ -113,16 +113,38 @@ export function useHealth(intervalMs = 5000) {
   // Read inside the async callback only (never during render) to decide
   // whether a failure is fatal or transient.
   const haveData = useRef(false);
+  /** Failed probes since the last success — the banner only shows at 3. */
+  const failures = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
       const data = await api.health();
       haveData.current = true;
+      failures.current = 0;
       setHealth(data);
       setError(null);
       setStale(null);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "API unreachable";
+      const raw = err instanceof Error ? err.message : "API unreachable";
+      // What failed decides whether a banner is honest:
+      //   5xx              — the server answered and is broken. Banner-worthy.
+      //   no status at all — fetch itself threw (offline, DNS, restart). A
+      //                      phone losing signal mid-poll is a real network
+      //                      failure, banner-worthy AFTER retries.
+      //   4xx              — the server answered and REJECTED one request.
+      //                      That is a bug in one route, not an unreachable
+      //                      API, and shouting "API unreachable: HTTP 400"
+      //                      over a card full of live numbers was exactly the
+      //                      false alarm this hook exists to prevent. Never
+      //                      a banner.
+      const status = /HTTP (\d{3})/.exec(raw)?.[1];
+      const fatal = status === undefined || status.startsWith("5");
+      failures.current = fatal ? failures.current + 1 : 0;
+      // Retry twice (three strikes across the 5s polls, ~10s) before a red
+      // banner is allowed: a deploy restarting under the reader produces
+      // exactly one or two blips, and none of them deserve the alarm.
+      if (!fatal || failures.current < 3) return;
+      const msg = failures.current > 1 ? `${raw} (${failures.current} failed polls)` : raw;
       if (haveData.current) {
         // We are still showing the last good reading; keep it and note the
         // blip instead of blanking the card with a false "unreachable".
