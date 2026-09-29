@@ -39,8 +39,24 @@ const state = {
 // Backoff schedule, ms. Doubles per failed boot, capped.
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 const MAX_ATTEMPTS = 12;
+// After the crash-loop budget is spent, keep probing at this slow rate rather
+// than giving up for good.
+//
+// This used to latch: once `attempts` reached MAX_ATTEMPTS the middleware
+// logged "giving up on respawn. Reload the app to retry." and never tried
+// again for the life of the web process. The only escape was restarting the
+// managed web process, which the user cannot do — so a backend that was down
+// for a couple of minutes (an OOM at import, a redeploy, a transient crash)
+// stayed down until someone restarted the app. That is the "API unreachable"
+// that kept coming back.
+//
+// A cooldown preserves the fork-bomb protection the budget existed for —
+// still at most one spawn per COOLDOWN_MS — while making the failure
+// self-healing instead of requiring a manual reload.
+const COOLDOWN_MS = 60_000;
 
 function backoffFor(attempts: number): number {
+  if (attempts >= MAX_ATTEMPTS) return COOLDOWN_MS;
   return BACKOFF_MS[Math.min(attempts, BACKOFF_MS.length - 1)];
 }
 
@@ -189,13 +205,12 @@ export function clipforgeBackend(): Plugin {
           if (state.proc === null) {
             const sinceLast = Date.now() - state.lastAttemptAt;
             const wait = backoffFor(state.attempts);
-            if (state.attempts >= MAX_ATTEMPTS) {
+            const exhausted = state.attempts >= MAX_ATTEMPTS;
+            if (sinceLast >= wait) {
               log(
-                `ERROR: backend has failed to boot ${state.attempts} times — ` +
-                  `giving up on respawn. Reload the app to retry.`,
+                `backend down — respawning on demand (attempt ${state.attempts + 1}` +
+                `${exhausted ? `, crash-loop budget spent, retrying every ${COOLDOWN_MS / 1000}s` : ""})`,
               );
-            } else if (sinceLast >= wait) {
-              log(`backend down — respawning on demand (attempt ${state.attempts + 1})`);
               state.starting = state.starting ?? startBackend().finally(() => {
                 state.starting = null;
               });

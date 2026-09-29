@@ -28,7 +28,13 @@ import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
 
 export default function Dashboard() {
-  const { jobs, error: apiError, refresh: refreshJobs, checkOne } = useJobs(2000);
+  const {
+    jobs,
+    error: apiError,
+    stale: apiStale,
+    refresh: refreshJobs,
+    checkOne,
+  } = useJobs(2000);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [previewClip, setPreviewClip] = useState<ClipDto | null>(null);
   const [redetecting, setRedetecting] = useState<string | null>(null);
@@ -170,6 +176,10 @@ export default function Dashboard() {
         <div className="min-w-0 overflow-x-hidden">
           <LocalWorkerCard />
         </div>
+        {/* A 4xx is NOT an outage. The server answered and rejected one request,
+            so it is shown as a quiet amber note and the job list below stays on
+            screen. Only a genuine outage — repeated 5xx or a dead connection
+            with nothing to show — earns the red banner. */}
         {apiError && (
           <div className="mt-3 rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3">
             <p className="text-sm font-semibold text-destructive">
@@ -177,8 +187,23 @@ export default function Dashboard() {
             </p>
             <p className="mt-1 text-xs leading-relaxed text-destructive/80">
               {/HTTP 5\d\d/.test(apiError)
-                ? "The pipeline server answered with a server error on /api/health after repeated retries — the response is logged server-side; check the deployment logs."
-                : "The pipeline server did not answer /api/health after repeated retries. If this persists, the deployment is restarting or offline."}
+                ? "The pipeline server answered /api/jobs with a server error three times in a row — the response is logged server-side; check the deployment logs."
+                : "The pipeline server did not answer /api/jobs after repeated retries. If this persists, the deployment is restarting or offline."}
+            </p>
+          </div>
+        )}
+        {apiStale && !apiError && (
+          <div
+            role="status"
+            className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3"
+          >
+            <p className="text-sm font-semibold text-amber-300">
+              Could not refresh the job list
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-amber-200/80">
+              {apiStale}. The pipeline server is reachable — this is a soft
+              blip, and the batches below are the last good reading. It will
+              recover on the next poll.
             </p>
           </div>
         )}

@@ -8,26 +8,86 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ClipDto, type HealthDto, type JobDto } from "@/lib/api";
 
+/**
+ * Shared failure triage for the pollers.
+ *
+ * A 4xx is NOT the API being unreachable. It means the server received the
+ * request, understood it, and rejected THIS one — a stale route, a bad id, a
+ * malformed header block. Rendering a hard red "API unreachable: HTTP 400"
+ * over a dashboard that is otherwise showing live job cards is a false alarm,
+ * and treating it as an outage is how this banner kept coming back for
+ * something that was never an outage.
+ *
+ * So a 4xx is recorded as `stale` — a note, never an alarm — while only a 5xx
+ * or a genuine network failure counts toward the outage threshold, and even
+ * those need several consecutive failures before they are believed, since a
+ * deploy restarting under the reader produces a blip or two.
+ */
+function triage(raw: string): { fatal: boolean; message: string } {
+  const status = /HTTP (\d{3})/.exec(raw)?.[1];
+  if (status && status.startsWith("4")) {
+    return { fatal: false, message: raw };
+  }
+  return { fatal: true, message: raw };
+}
+
+/** Consecutive failures before an outage is believed. */
+const FAILURES_BEFORE_ALARM = 3;
+
 export function useJobs(intervalMs = 2000) {
   const [jobs, setJobs] = useState<JobDto[] | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+  // A poll failed but we are still showing the last good list. Same split as
+  // useHealth: a soft note, never a hard red "API unreachable" over data that
+  // is demonstrably on screen.
+  const [stale, setStale] = useState<string | null>(null);
+  // Read inside async callbacks only, never during render.
+  const haveData = useRef(false);
+  const failures = useRef(0);
+
+  const applyFailure = useCallback((err: unknown) => {
+    const raw = err instanceof Error ? err.message : "API unreachable";
+    const { fatal } = triage(raw);
+    if (!fatal) {
+      // The server answered and rejected one request. That is not an outage,
+      // so it must not blank the page or claim the API is gone.
+      failures.current = 0;
+      setStale(`${raw} — the server answered but rejected this request`);
+      return;
+    }
+    failures.current += 1;
+    if (failures.current < FAILURES_BEFORE_ALARM) return;
+    const msg =
+      failures.current > 1
+        ? `${raw} (${failures.current} failed polls of /api/jobs)`
+        : raw;
+    if (haveData.current) setStale(msg);
+    else setError(msg);
+  }, []);
+
+  const applySuccess = useCallback(() => {
+    haveData.current = true;
+    failures.current = 0;
+    setError(null);
+    setStale(null);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
       const data = await api.listJobs();
       setJobs(data);
-      setError(null);
+      applySuccess();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "API unreachable");
+      applyFailure(err);
     }
-  }, []);
+  }, [applyFailure, applySuccess]);
 
   useEffect(() => {
     const initial = setTimeout(() => void refresh(), 0);
     const t = setInterval(() => void refresh(), intervalMs);
     return () => {
       clearTimeout(initial);
-      clearInterval(t);
+      clearTimeout(t);
     };
   }, [refresh, intervalMs]);
 
@@ -41,15 +101,17 @@ export function useJobs(intervalMs = 2000) {
       setJobs((prev) =>
         prev ? prev.map((j) => (j._id === fresh._id ? fresh : j)) : prev,
       );
-      setError(null);
+      applySuccess();
       return fresh;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "API unreachable");
+      // "Check now" is an explicit request for the truth, so it goes through
+      // the same triage rather than becoming an instant red banner.
+      applyFailure(err);
       return null;
     }
-  }, []);
+  }, [applyFailure, applySuccess]);
 
-  return { jobs, error, refresh, checkOne };
+  return { jobs, error, stale, refresh, checkOne };
 }
 
 export function useClips(jobId: string | null, intervalMs = 2000) {

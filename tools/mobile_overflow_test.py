@@ -116,12 +116,22 @@ check("min-w-0" in lwc, "status card can shrink below its content width")
 print("\n[4] Health banner only on network failure / 5xx, after retries")
 poll = read("hooks/use-poll.ts")
 check("failures.current" in poll, "failure counter for the retry rule")
-check('failures.current < 3' in poll, "two silent retries before any banner")
+check('failures.current < 3' in poll or "FAILURES_BEFORE_ALARM" in poll,
+      "two silent retries before any banner")
 check('status.startsWith("5")' in poll, "5xx is banner-worthy")
 check("HTTP (\\d{3})" in poll.replace("\\\\", "\\"), "status parsed out of the message")
 # The historical false alarm: a 400 on one poll must never set the banner.
-seg = poll.split("const status = ")[1].split("if (haveData.current)")[0]
-check("startsWith(\"4\")" not in seg, "4xx never becomes a banner")
+# Scoped to the health segment on purpose — the file grew a shared `triage()`
+# helper above it, and the old positional slice from the first
+# `const status = ` landed in that helper and reported a false failure.
+health = poll.split("export function useHealth")[1]
+check('startsWith("4")' not in health, "4xx never becomes a banner in useHealth")
+# The same rule now has to hold for the job poller, which is the hook that
+# actually renders the "API unreachable" banner.
+jobs = poll.split("export function useJobs")[1].split("export function useClips")[0]
+check("triage(" in jobs, "useJobs triages failures")
+check("setStale(" in jobs, "a 4xx becomes a soft note, not a banner")
+check("FAILURES_BEFORE_ALARM" in jobs, "useJobs needs repeated failures to alarm")
 
 print(f"\n{CHECKS} passed, {len(FAILS)} failed")
 sys.exit(1 if FAILS else 0)
