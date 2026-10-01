@@ -158,6 +158,11 @@ def _settings(base: str, **kw: Any):
     s.groq = replace(
         s.groq, base_url=base, min_interval_sec=0.0, tokens_per_min=0, **kw
     )
+    # Pin the backend to Groq and failover OFF. This suite tests the GROQ JSON
+    # ladder specifically, so it must not be re-pointed by a provider swap in
+    # config.toml, and a failing primary must not be silently answered by a
+    # backup — that would make "the ladder exhausted the chain" untestable.
+    s.llm = replace(s.llm, provider="groq", fallback_provider="")
     return s
 
 

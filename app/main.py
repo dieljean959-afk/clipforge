@@ -37,11 +37,14 @@ from app.config import (
     ffprobe_bin,
     live_gemini_key,
     live_groq_key,
+    live_nvidia_key,
     load_config,
     sync_gemini_env_after_save,
     sync_gemini_env_for_delete,
     sync_groq_env_after_save,
     sync_groq_env_for_delete,
+    sync_nvidia_env_after_save,
+    sync_nvidia_env_for_delete,
     write_env_var,
 )
 from app.download import probe_url
@@ -421,15 +424,20 @@ def verify_clips(jobId: str | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# detection backend (Groq = hosted default, Gemini = fallback, Ollama = local)
+# detection backend (NVIDIA = hosted default, Groq = backup, Gemini, Ollama = local)
 # --------------------------------------------------------------------------- #
 
 # Shown verbatim in the UI so the tradeoff is visible BEFORE the user picks.
 DETECTION_TRADEOFFS = {
-    "groq": "Hosted, OpenAI-compatible chat completions. Free tier is ~30 requests "
-            "per minute; the app paces calls below that and retries 429s, so "
-            "quota errors are rare. Needs a Groq API key.",
-    "gemini": "Hosted fallback for when the Groq quota is spent. Needs a Gemini API key.",
+    "nvidia": "Hosted, OpenAI-compatible chat completions, and the DEFAULT. NVIDIA NIM "
+              "has no per-model daily token ceiling like Groq's free tier, so a long "
+              "source cannot run out of quota half way through detection. Needs an "
+              "NVIDIA API key.",
+    "groq": "Hosted BACKUP. Same wire format and the same code path as NVIDIA, but its "
+            "free tier is ~30 requests per minute with a 200k tokens-per-DAY ceiling "
+            "per model — the app paces calls below the request limit and retries 429s, "
+            "but a spent daily quota can only be waited out. Needs a Groq API key.",
+    "gemini": "Hosted alternative, selectable without a redeploy. Needs a Gemini API key.",
     "ollama": "Fully local, free and private: your transcript never leaves the machine. "
               "Slower — it shares the same CPU as Whisper, so it runs sequentially "
               "after the transcript exists instead of alongside it.",
@@ -454,10 +462,15 @@ def detection_status(probe: bool = True) -> dict:
             for p in llm_mod.PROVIDERS
         ],
         "models": {
+            "nvidia": settings.nvidia.model,
             "groq": settings.groq.model,
             "gemini": settings.gemini.model,
             "ollama": settings.llm.ollama_model,
         },
+        # The backup is reported alongside the primary so the UI can say what
+        # happens when the primary runs out, rather than leaving the user to
+        # discover it from a failed job.
+        "fallbackProvider": llm_mod.settings_llm_fallback(settings),
         # Transcription is unaffected by this choice — say so explicitly so the
         # UI never implies the ASR engine changes with the detection backend.
         "transcriptionEngine": subtitle_svc.engine_status(settings).engine,
@@ -474,18 +487,22 @@ def detection_status(probe: bool = True) -> dict:
             out["ready"] = ok
             out["probed"] = True
             out["detail"] = reason
-    elif active == "groq":
-        live = live_groq_key()
+    elif active in ("nvidia", "groq"):
+        live = live_nvidia_key() if active == "nvidia" else live_groq_key()
+        var = "NVIDIA_API_KEY" if active == "nvidia" else "GROQ_API_KEY"
         # force=True re-reads the env each call, which is what makes a key
         # saved after boot appear on the next poll. It is a local env lookup,
-        # never a request to Groq, so it is safe in the health path.
+        # never a request to the provider, so it is safe in the health path.
         live.refresh(force=probe)
         out["ready"] = live.key is not None
         out["probed"] = False
         out["detail"] = live.problem or (
-            f"GROQ_API_KEY loaded from {live.source}" if live.key
-            else "GROQ_API_KEY missing — add it in the Keys/API keys tab."
+            f"{var} loaded from {live.source}" if live.key
+            else f"{var} missing — add it in the Keys/API keys tab."
         )
+        backup = llm_mod.settings_llm_fallback(settings)
+        if out["ready"] and backup:
+            out["detail"] += f" Falls back to {backup} if a chunk fails."
     else:
         out["ready"] = settings.gemini_api_key is not None
         out["probed"] = False
@@ -596,6 +613,13 @@ def health() -> dict:
                 **live_groq_key().status(),
             },
         ),
+        "llmNvidia": _block(
+            "llmNvidia",
+            lambda: {
+                "provider": llm_mod.PROVIDER_NVIDIA,
+                **live_nvidia_key().status(),
+            },
+        ),
         # probe=False: key presence only, never a vendor round trip. A Groq or
         # Ollama outage must not be able to fail our own health endpoint.
         "detection": _block("detection", detection_status, probe=False),
@@ -688,20 +712,31 @@ def caption_presets() -> list[dict]:
 
 @app.get("/api/usage")
 def usage() -> dict:
-    """Today's Groq token budget, for the header badge.
+    """Today's token budget for the ACTIVE detection provider.
 
     Read-only and dependency-free: the counter is written as calls happen, so
     this never calls out to the provider. If the key is absent, or nothing has
     been spent today, it still answers with a zeroed but well-formed shape so
     the UI has no empty state to handle.
+
+    The denominator follows the ACTIVE provider, because the two budgets are
+    not comparable: Groq states a real per-model tokens-per-day ceiling in its
+    429 body, while NIM reports credits and has no equivalent number, so its
+    limit is whatever the operator configured. Showing Groq's 200k while
+    running on NVIDIA would report a badge that is both wrong and alarming.
     """
     from app import groq_usage
 
-    limit = int(settings.groq.daily_token_limit or 0)
+    active = llm_mod.provider(settings)
+    cfg = llm_mod.openai_cfg(settings, active) if active in ("nvidia", "groq") else settings.groq
+    limit = int(getattr(cfg, "daily_token_limit", 0) or 0)
+    model = str(getattr(cfg, "model", "") or "")
     snap = groq_usage.store(settings.app.paths.data_dir).snapshot(
-        default_limit=limit, model=settings.groq.model
+        default_limit=limit, model=model
     )
-    snap["configured"] = bool(settings.groq.model)
+    snap["configured"] = bool(model)
+    snap["provider"] = active
+    snap["providerLabel"] = str(getattr(cfg, "label", active))
     return snap
 
 
@@ -718,10 +753,13 @@ def reload_secrets() -> dict:
     status = live.status()
     groq_live = live_groq_key()
     groq_live.refresh(force=True)
+    nvidia_live = live_nvidia_key()
+    nvidia_live.refresh(force=True)
     logger.info(f"[config] secrets re-checked — key loaded: {status['keyLoaded']} ({status['source']})")
     return {
         **status,
         "groq": groq_live.status(),
+        "nvidia": nvidia_live.status(),
         "activeProvider": llm_mod.provider(settings),
     }
 
@@ -810,6 +848,48 @@ def remove_groq_key() -> dict:
     live.refresh(force=True)
     logger.info(
         f"[config] GROQ_API_KEY deleted via dashboard "
+        f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
+    )
+    return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
+
+
+@app.post("/api/settings/nvidia-key")
+def set_nvidia_key(body: SetKeyIn) -> dict:
+    """Save/replace NVIDIA_API_KEY in .env.local.
+
+    Mirrors set_groq_key so a phone-only operator can paste a key from
+    build.nvidia.com without a terminal. Returns the live status plus a
+    verification shape (first 6 / last 4 chars only — never the key).
+    """
+    raw = body.key.strip()
+    if raw.lower().startswith("encrypted:"):
+        raise HTTPException(400, "That looks like an encrypted blob — paste the raw nvapi-... key.")
+    if " " in raw:
+        raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
+    write_env_var("NVIDIA_API_KEY", raw)
+    # Mirror into the process env: the live resolver prefers OS env, so a stale
+    # copy from an older .env.local would otherwise shadow the new value.
+    sync_nvidia_env_after_save(raw)
+    live = live_nvidia_key()
+    live.refresh(force=True)
+    status = live.status()
+    logger.info("[config] NVIDIA_API_KEY updated via dashboard — verification: "
+                f"{raw[:6]}…{raw[-4:]} ({len(raw)} chars)")
+    return {
+        **status,
+        "storedShape": {"first6": raw[:6], "last4": raw[-4:], "length": len(raw)},
+    }
+
+
+@app.delete("/api/settings/nvidia-key")
+def remove_nvidia_key() -> dict:
+    """Delete NVIDIA_API_KEY from .env.local."""
+    dropped = sync_nvidia_env_for_delete()
+    removed = delete_env_var("NVIDIA_API_KEY")
+    live = live_nvidia_key()
+    live.refresh(force=True)
+    logger.info(
+        f"[config] NVIDIA_API_KEY deleted via dashboard "
         f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
     )
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}

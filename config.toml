@@ -144,15 +144,75 @@ fallback_models = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 # and overrides this for the day. Raise it on a paid tier.
 daily_token_limit = 200000
 
+[nvidia]
+# PRIMARY detection backend. NVIDIA NIM (build.nvidia.com) is OpenAI-compatible
+# and speaks the same /chat/completions dialect as Groq, so it reuses that whole
+# call path — endpoint, model and rate budget are the only differences.
+# NVIDIA_API_KEY comes from the Keys/API keys tab.
+#
+# Why primary: Groq's free tier enforces a hard tokens-per-DAY ceiling PER MODEL
+# (200k, rolling 24h). A 54-minute source spends ~87k detecting and a 2-hour
+# source blows through the whole day's budget part way through, which used to
+# end the job at "chunk 3/7, retrying". NIM has no comparable per-model daily
+# wall, so the primary no longer dies on a quota that is invisible until it is
+# gone.
+model = "deepseek-ai/deepseek-v4.1-flash"
+# Overridable with NVIDIA_BASE_URL (used by the test suite to point at a local
+# OpenAI-compatible stub instead of the real API).
+base_url = "https://integrate.api.nvidia.com/v1"
+max_retries = 3
+timeout_sec = 120
+# 0.0 disables the per-request floor. Groq NEEDS 2.1s (its free tier is ~30
+# rpm); NIM's limits are far higher and pacing a 20-chunk run at 2.1s would
+# cost 40 seconds of wall time for nothing. The token pacer below still applies.
+min_interval_sec = 0.0
+# Detection is EXTRACTION (copying word indices out of a transcript), so the
+# same reasoning as [groq] applies: no creativity to sample, and every degree
+# of temperature is another chance to emit a body that fails validation.
+temperature = 0.0
+# "json_object", NOT "json_schema". Strict Structured Outputs are a Groq
+# feature; NIM's compatibility layer does not promise them, and asking for a
+# mode the model cannot do earns a permanent 400 rather than valid JSON. The
+# JSON ladder detects that rejection and retries with no response_format,
+# repairing the reply locally — so "json_schema" is still safe to select if
+# your NIM account does support it.
+response_format = "json_object"
+# Output budget per call, and the ceiling the JSON-retry ladder grows towards.
+# Truncation at the token ceiling is the usual real cause of a malformed
+# reply, so each ladder step raises this rather than re-asking for the same
+# truncated budget.
+max_tokens = 3200
+max_tokens_ceiling = 8192
+# Attempts per chunk on a JSON-validation failure, each at lower temperature
+# and a higher max_tokens. Same reasoning and same cap as [groq].
+json_retries = 3
+json_retry_temperature = 0.2
+# Deliberately EMPTY. NIM's catalog rotates and a wrong name here would add a
+# hard 404 to every chunk's ladder; fill it in from build.nvidia.com if you
+# know the model you want second.
+fallback_models = []
+# Self-imposed tokens-per-minute share. NIM rate-limits per model/account in
+# requests per minute rather than a small daily token wall, so this is a burst
+# guard, not survival pacing. 0 disables it and leaves only the request floor.
+tokens_per_min = 120000
+# ONLY the denominator the usage badge divides by. NIM reports CREDITS, not a
+# per-model daily token ceiling, and — unlike Groq — there is no 429 body that
+# overrides this with the provider's real number. Set it to whatever daily
+# budget you actually intend to spend.
+daily_token_limit = 2000000
+
 [llm]
 # Which backend runs AI clip/highlight DETECTION — NOT transcription.
 # Transcription is always faster-whisper (see [whisper] above); this choice
 # never changes the ASR engine.
 #
-#   groq   (default) — hosted, OpenAI-compatible. ~30 req/min on the free tier;
-#                      requests are paced client-side so 429s are rare. Needs
-#                      GROQ_API_KEY (Keys/API keys tab).
-#   gemini           — hosted fallback for when the Groq quota is spent.
+#   nvidia  (default) — hosted, OpenAI-compatible, PRIMARY. No per-model daily
+#                       token wall like Groq's, so a long source cannot die half
+#                       way through detection. Needs NVIDIA_API_KEY.
+#   groq             — hosted BACKUP. Same wire format, same code path. ~30
+#                      req/min and a 200k/day ceiling on the free tier, so calls
+#                      are paced client-side. Needs GROQ_API_KEY.
+#   gemini           — hosted alternative, selectable without a redeploy.
 #                      Needs GEMINI_API_KEY.
 #   ollama           — self-hosted. Free and fully private (the transcript
 #                      never leaves the machine) and needs no API key, but it
@@ -160,13 +220,20 @@ daily_token_limit = 200000
 #                      sequentially after the transcript exists and is markedly
 #                      slower. Requires `ollama serve` + the model pulled.
 #
-# There is NO automatic failover between these: a quota error fails the stage
-# loudly rather than silently scoring clips with a model you did not pick.
+# There is NO automatic failover between these UNLESS fallback_provider is set
+# below: a quota error fails the stage loudly rather than silently scoring clips
+# with a model you did not pick.
 #
 # Env overrides: CLIPFORGE_LLM_PROVIDER, OLLAMA_URL, OLLAMA_MODEL,
-#                GROQ_MODEL, GROQ_BASE_URL.
+#                GROQ_MODEL, GROQ_BASE_URL, NVIDIA_MODEL, NVIDIA_BASE_URL.
 # The dashboard shows the active backend and its tradeoff, and can switch it.
-provider = "groq"
+provider = "nvidia"
+
+# Automatic failover: when a chunk FAILS on the primary (quota spent, endpoint
+# down, key rejected), retry that chunk on the backup before skipping it. Blank
+# disables this. Every swap is logged with the provider name, so the provenance
+# of a clip is never a surprise.
+fallback_provider = "groq"
 
 # Only read when provider = "ollama".
 ollama_url = "http://127.0.0.1:11434"

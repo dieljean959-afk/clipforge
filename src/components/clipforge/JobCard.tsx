@@ -652,8 +652,12 @@ function friendlyError(error: string | null | undefined, where?: string | null):
   if (/rate limit|daily quota|tokens\/day/i.test(raw)) {
     return "The AI provider's daily token quota is used up. Detection will work again when it resets.";
   }
-  if (/GROQ_API_KEY missing/i.test(raw)) return "No AI provider key is configured. Add it in the Keys/API keys tab.";
-  if (/GEMINI_API_KEY missing/i.test(raw)) return "No AI provider key is configured. Add it in the Keys/API keys tab.";
+  // One rule for every hosted provider: the message is the same whichever key
+  // is missing, so list the providers rather than growing a branch each time
+  // the primary changes.
+  if (/(NVIDIA|GROQ|GEMINI)_API_KEY missing/i.test(raw)) {
+    return "No AI provider key is configured. Add it in the Keys/API keys tab.";
+  }
   if (/no longer available|decommissioned/i.test(raw)) {
     return "The configured AI model is no longer available. Pick a current one in config.toml.";
   }

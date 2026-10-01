@@ -120,7 +120,7 @@ def main() -> int:
     # --- 1. selection / default -------------------------------------------
     print("== 1. backend selection")
     settings.llm.provider = "gemini"
-    check("config default is groq (fresh load)", load_config(quiet=True).llm.provider == "groq")
+    check("config default is nvidia (fresh load)", load_config(quiet=True).llm.provider == "nvidia")
     check("hosted label names the configured model",
           settings.gemini.model in llm.provider_label(settings))
     settings.llm.provider = "groq"

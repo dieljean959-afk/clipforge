@@ -69,11 +69,16 @@ export function NewJobForm({
   const budgetWarning = (() => {
     if (!usage || !usage.configured) return null;
     const remaining = Math.max(0, usage.remaining);
+    // Name whichever provider the budget actually belongs to. The two limits
+    // are not comparable — Groq states a real per-model daily ceiling, NVIDIA's
+    // is the budget configured in config.toml — so the copy has to follow the
+    // backend rather than assume Groq.
+    const vendor = usage.providerLabel ?? (usage.provider === "groq" ? "Groq" : "NVIDIA");
     if (remaining <= 0) {
       return {
         tone: "destructive" as const,
         text:
-          "Today's Groq token quota is spent. AI clip detection cannot run until the " +
+          `Today's ${vendor} token quota is spent. AI clip detection cannot run until the ` +
           "daily window resets — transcription and rendering still work.",
       };
     }
@@ -81,7 +86,7 @@ export function NewJobForm({
       return {
         tone: "destructive" as const,
         text:
-          `Only ${remaining.toLocaleString()} of ${usage.limit.toLocaleString()} Groq ` +
+          `Only ${remaining.toLocaleString()} of ${usage.limit.toLocaleString()} ${vendor} ` +
           "tokens left today — enough for roughly " +
           `${Math.floor(remaining / TOKENS_PER_SECOND / 60)} more minutes of video. ` +
           "A shorter source will be safer.",
@@ -91,7 +96,7 @@ export function NewJobForm({
       return {
         tone: "warn" as const,
         text:
-          `${usage.percentUsed.toFixed(0)}% of today's Groq token quota is used. ` +
+          `${usage.percentUsed.toFixed(0)}% of today's ${vendor} token quota is used. ` +
           "Detection is metered per video, so a long one may run out part way through.",
       };
     }

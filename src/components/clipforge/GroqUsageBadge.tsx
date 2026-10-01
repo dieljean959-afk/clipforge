@@ -106,6 +106,10 @@ export function GroqUsageBadge({
   const pct = Math.max(0, Math.min(100, usage.percentUsed));
   const band = bandFor(pct);
   const countdown = formatCountdown(usage.refillSec);
+  // The backend reports which provider's budget this is. Do not hardcode a
+  // vendor name here: the same badge describes NVIDIA's allowance and, after a
+  // failover, Groq's, and a badge that says the wrong one is worse than none.
+  const vendor = usage.providerLabel ?? (usage.provider === "groq" ? "Groq" : "NVIDIA");
 
   return (
     <div ref={wrapRef} className={cn("relative", className)}>
@@ -121,7 +125,7 @@ export function GroqUsageBadge({
       >
         <span className="flex items-center gap-1.5 text-[11px] leading-none">
           <Gauge className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
-          <span className="font-medium">Groq</span>
+          <span className="font-medium">{vendor}</span>
           <span className={cn("font-mono tabular-nums", band.text)}>
             {compact(usage.used)} / {compact(usage.limit)}
           </span>
@@ -140,7 +144,7 @@ export function GroqUsageBadge({
           aria-valuenow={Math.round(pct)}
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-label="Groq daily token usage"
+          aria-label={`${vendor} daily token usage`}
         >
           <span
             className={cn("block h-full rounded-full transition-[width] duration-500", band.bar)}
@@ -174,7 +178,7 @@ export function GroqUsageBadge({
             <div className="flex justify-between gap-2">
               <dt>Source</dt>
               <dd className="text-right">
-                {usage.source === "groq-report" ? "Groq 429 report" : "local tally"}
+                {usage.source === "groq-report" ? `${vendor} 429 report` : "local tally"}
               </dd>
             </div>
             <div className="flex justify-between gap-2">
@@ -219,8 +223,10 @@ export function GroqUsageBadge({
 
           {usage.source === "local-sum" && (
             <p className="mt-3 text-[10px] leading-snug text-muted-foreground">
-              Tallied from each call&apos;s reported usage. Groq&apos;s own counter appears here
-              after a quota rejection, and overrides this.
+              Tallied from each call&apos;s reported usage.
+              {usage.provider === "groq"
+                ? " Groq's own counter appears here after a quota rejection, and overrides this."
+                : " Not all providers report a daily total — this is our own count, and the limit is the budget you configured."}
             </p>
           )}
         </div>

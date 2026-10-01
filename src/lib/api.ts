@@ -3,7 +3,10 @@
 
 import type { ClipStage } from "@/lib/clipforge";
 
-export type DetectionProvider = "groq" | "gemini" | "ollama";
+// NVIDIA NIM is the primary hosted backend; Groq is the backup and shares the
+// same OpenAI-compatible wire format. Order matters — it is the order the
+// dashboard renders the backend picker in.
+export type DetectionProvider = "nvidia" | "groq" | "gemini" | "ollama";
 
 /** One row of the per-stage time plan. */
 export interface StagePlanEntry {
@@ -241,8 +244,10 @@ export interface HealthDto {
   };
   warmup: { stage: string; detail: string; startedAt: number | null };
   llm: KeyStatusDto;
-  /** Live GROQ_API_KEY state — the key for the DEFAULT detection backend. */
+  /** Live GROQ_API_KEY state — the key for the BACKUP detection backend. */
   llmGroq?: KeyStatusDto;
+  /** Live NVIDIA_API_KEY state — the key for the DEFAULT detection backend. */
+  llmNvidia?: KeyStatusDto;
   detection?: DetectionDto;
   // Resolved engine/model/compute (already host-limit adjusted). The raw
   // config.toml request, when it differs, is `configuredModel`.
@@ -388,12 +393,16 @@ export interface UsageModelDto {
 }
 
 export interface UsageDto {
-  /** Tokens used today — Groq's own figure when it has told us, else our sum. */
+  /** Tokens used today — the provider's own figure when it has told us, else our sum. */
   used: number;
   limit: number;
   remaining: number;
   percentUsed: number;
-  /** `groq-report` = from a 429 body (authoritative). `local-sum` = our own tally. */
+  /**
+   * `groq-report` = from a Groq 429 body (authoritative). `local-sum` = our own
+   * tally, which is the only source on providers that report credits rather
+   * than a per-model daily token ceiling.
+   */
   source: "groq-report" | "local-sum";
   localTokens: number;
   reportedUsed: number | null;
@@ -406,12 +415,20 @@ export interface UsageDto {
   models: UsageModelDto[];
   rateLimit: Record<string, string>;
   configured: boolean;
+  /**
+   * Which provider `limit`/`used` describe. The denominator follows the ACTIVE
+   * backend because the two budgets are not comparable: Groq states a real
+   * per-model tokens-per-day ceiling, NIM has only an operator-set one.
+   */
+  provider?: string;
+  /** Display name for the active provider ("NVIDIA", "Groq", ...). */
+  providerLabel?: string;
 }
 
 export const api = {
   health: () => request<HealthDto>("/api/health"),
   doctor: () => request<DoctorReport>("/api/doctor"),
-  /** Today's Groq token budget. Never throws on a missing key — returns zeros. */
+  /** Today's token budget for the ACTIVE detection provider. Never throws. */
   usage: () => request<UsageDto>("/api/usage"),
   captionPresets: () => request<CaptionPresetDto[]>("/api/caption-presets"),
   listJobs: () => request<JobDto[]>("/api/jobs"),
@@ -480,10 +497,31 @@ export const api = {
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),
   /** Force the server to re-read env files and re-resolve the LLM keys. */
   reloadSecrets: () =>
-    request<KeyStatusDto & { groq?: KeyStatusDto; activeProvider?: string }>(
+    request<
+      KeyStatusDto & {
+        groq?: KeyStatusDto;
+        nvidia?: KeyStatusDto;
+        activeProvider?: string;
+      }
+    >(
       "/api/settings/reload-secrets",
       { method: "POST" },
     ),
+  /** Save/replace NVIDIA_API_KEY in the backend's env file. */
+  setNvidiaKey: (key: string) =>
+    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+      "/api/settings/nvidia-key",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      },
+    ),
+  /** Delete NVIDIA_API_KEY from the backend's env file. */
+  deleteNvidiaKey: () =>
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/nvidia-key", {
+      method: "DELETE",
+    }),
   /** Save/replace GROQ_API_KEY in the backend's env file. */
   setGroqKey: (key: string) =>
     request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(

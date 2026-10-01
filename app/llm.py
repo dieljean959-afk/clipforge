@@ -7,14 +7,23 @@ resolve the real start/end from Whisper's word-level timings afterwards.
 
 Two interchangeable hosted backends plus a local one, chosen by `[llm]
 provider` / CLIPFORGE_LLM_PROVIDER:
-  - groq   (default) — OpenAI-compatible chat completions. Free tier is
-                       ~30 req/min, so calls are PACED client-side and 429s
-                       are retried with Retry-After-aware backoff.
-  - gemini           — hosted alternative, kept selectable as a fallback when
-                       the Groq quota is exhausted.
+  - nvidia  (default) — NVIDIA NIM, OpenAI-compatible chat completions. The
+                       primary because it has no per-model DAILY token ceiling
+                       like Groq's free tier, so a long source cannot die half
+                       way through detection on an invisible quota.
+  - groq             — the backup. Same wire format, same code path; its free
+                       tier is ~30 req/min, so calls are PACED client-side and
+                       429s are retried with Retry-After-aware backoff.
+  - gemini           — hosted alternative, kept selectable without a redeploy.
   - ollama           — self-hosted. Free and fully private, but it competes for
                        the SAME CPU as Whisper, so it runs sequentially and is
                        markedly slower. Requires no API key.
+
+`[llm] fallback_provider` (default: groq) names a second backend to try for a
+chunk when the primary fails — quota spent, endpoint down, key rejected. It is
+opt-in, it is logged per swap, and a missing key on the PRIMARY is still a hard
+config error rather than a silent downgrade: a key mistake should be fixed, not
+worked around invisibly.
 
 The contract is deliberately narrow: every backend takes a prompt STRING and
 returns a reply STRING. `parse_candidates` is the only thing that knows what
@@ -22,9 +31,10 @@ the reply looks like, which is what makes swapping providers safe.
 
 Only transcript text is ever sent to any backend — never audio or video.
 The key-missing case is surfaced loudly: no silent heuristic fallback exists
-in this module. Likewise there is NO automatic failover between providers:
-a 429 on Groq fails the stage visibly rather than quietly producing clips
-scored by a different model than the one the operator configured.
+in this module. Provider FAILOVER, by contrast, is explicit and configured
+(`[llm] fallback_provider`): a chunk that fails on the primary is retried on
+the named backup, the swap is logged with both provider names, and every chunk
+of that job records which model actually answered.
 """
 
 from __future__ import annotations
@@ -43,12 +53,13 @@ from loguru import logger
 
 from app import clipcount, jsonfix
 from app.caption_format import finalize_clip_caption, normalize_hashtags, shorten_caption
-from app.config import GeminiConfig, Settings, live_gemini_key, live_groq_key
+from app.config import GeminiConfig, Settings, live_gemini_key, live_groq_key, live_nvidia_key
 
+PROVIDER_NVIDIA = "nvidia"
 PROVIDER_GROQ = "groq"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OLLAMA = "ollama"
-PROVIDERS = (PROVIDER_GROQ, PROVIDER_GEMINI, PROVIDER_OLLAMA)
+PROVIDERS = (PROVIDER_NVIDIA, PROVIDER_GROQ, PROVIDER_GEMINI, PROVIDER_OLLAMA)
 
 
 #: Ceiling on detection API calls per job, whatever the source length, so a
@@ -75,7 +86,7 @@ class LlmError(Exception):
 
 def provider(settings: Settings) -> str:
     """Which detection backend is active. Defaults to the hosted one."""
-    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_GROQ)
+    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_NVIDIA)
 
 
 def provider_label(settings: Settings) -> str:
@@ -85,7 +96,32 @@ def provider_label(settings: Settings) -> str:
         return f"ollama ({settings.llm.ollama_model})"
     if active == PROVIDER_GEMINI:
         return f"gemini ({settings.gemini.model})"
-    return f"groq ({settings.groq.model})"
+    return f"{active} ({openai_cfg(settings, active).model})"
+
+
+def settings_llm_fallback(settings: Settings) -> str:
+    """The configured backup provider, or "" when failover is off.
+
+    Normalised here rather than at each use site so "unset", "blank" and
+    "pointed at the primary" all mean the same thing: no failover. A fallback
+    equal to the primary would burn a second full ladder proving what the first
+    one already proved.
+    """
+    backup = str(getattr(settings.llm, "fallback_provider", "") or "").strip().lower()
+    if not backup or backup == provider(settings):
+        return ""
+    return backup
+
+
+def openai_cfg(settings: Settings, which: str | None = None) -> Any:
+    """The OpenAI-compatible config for a hosted provider (nvidia / groq).
+
+    Both providers share one call path, so everything downstream takes the
+    CONFIG rather than the provider name — the name is only needed for text
+    (logs, errors) and for pacing isolation, both of which the config carries.
+    """
+    name = which or provider(settings)
+    return settings.groq if name == PROVIDER_GROQ else settings.nvidia
 
 
 # Model names rot: Google retires old flash models with a 404 that names the
@@ -570,7 +606,23 @@ class _ModelExhausted(Exception):
 
 
 def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
-    """One detection call to Groq, with a JSON-repair ladder and model chain.
+    """One detection call to Groq. See `_call_openai_chat` for the ladder."""
+    return _call_openai_chat(chunk_text_prompt, settings, PROVIDER_GROQ)
+
+
+def call_nvidia(chunk_text_prompt: str, settings: Settings) -> str:
+    """One detection call to NVIDIA NIM.
+
+    Identical contract and identical ladder to `call_groq` — NIM and Groq are
+    the same wire format, so this is the same function with a different config
+    object. Kept as its own name so the dispatch in `call_llm` and the tests
+    read the same way they do for Groq.
+    """
+    return _call_openai_chat(chunk_text_prompt, settings, PROVIDER_NVIDIA)
+
+
+def _call_openai_chat(chunk_text_prompt: str, settings: Settings, which: str) -> str:
+    """One detection call to an OpenAI-compatible backend, with a repair ladder.
 
     TEXT ONLY: `chunk_text_prompt` is the numbered transcript built by
     build_prompt(). No audio, no video, no file handles ever leave this call.
@@ -581,8 +633,8 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
     `json_validate_failed` (400) failed the entire job, discarding the 19
     chunks already paid for and cached. Detection now degrades instead:
 
-      1. the configured `response_format` (default: strict `json_schema`, whose
-         constrained decoding cannot emit a mismatched shape);
+      1. the configured `response_format` (strict `json_schema` on Groq,
+         `json_object` on NIM);
       2. on a JSON-validation failure, up to `json_retries` attempts at LOWER
          temperature and HIGHER `max_tokens` — truncation at the token ceiling
          is the usual real cause, so the budget grows;
@@ -594,18 +646,20 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
     A 400 is PERMANENT only when it is not a JSON-validation error, so a
     genuinely malformed request still fails fast rather than re-billing.
 
-    Two rate-limit defences remain, because the free tier is 30 req/min AND a
-    per-model tokens-per-day ceiling: a process-wide request floor, and a token
-    pacer. On 429 the server's own wait is honoured, and a daily-quota wait
+    Rate-limit defences: a process-wide request floor and a token pacer, both
+    ISOLATED PER PROVIDER (an NIM call must never be throttled by Groq's
+    budget). On 429 the server's own wait is honoured, and a daily-quota wait
     fails fast rather than sleeping inline for an hour.
 
     Returns the assistant message text. Raises LlmNotConfigured with no key,
     LlmError when the whole chain is exhausted.
     """
-    cfg = settings.groq
-    api_key = settings.groq_api_key
+    cfg = openai_cfg(settings, which)
+    api_key = settings.groq_api_key if which == PROVIDER_GROQ else settings.nvidia_api_key
     if not api_key:
-        raise LlmNotConfigured("GROQ_API_KEY missing — add it in the Keys/API keys tab.")
+        raise LlmNotConfigured(
+            f"{cfg.label.upper()}_API_KEY missing — add it in the Keys/API keys tab."
+        )
 
     prompt = _groq_envelope_prompt(chunk_text_prompt, cfg.response_format)
     chain = [cfg.model, *[m for m in cfg.fallback_models if m and m != cfg.model]]
@@ -616,8 +670,8 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
             return _groq_attempt_chain(prompt, cfg, model, api_key, problems)
         except _ModelExhausted:
             logger.warning(
-                f"[llm] {model} could not produce valid JSON for this chunk after the "
-                f"full ladder; trying the next fallback model"
+                f"[llm] {cfg.label} model {model} could not produce valid JSON for this "
+                f"chunk after the full ladder; trying the next fallback model"
             )
         except LlmError:
             # A non-JSON failure (bad key, dead model, exhausted quota) is not
@@ -626,8 +680,8 @@ def call_groq(chunk_text_prompt: str, settings: Settings) -> str:
 
     detail = "; ".join(problems[-3:])
     raise LlmError(
-        "Every model in the detection chain failed to return valid JSON for this "
-        f"chunk. Tried: {', '.join(chain)}. Last problems: {detail[:400]}"
+        f"Every model in the {cfg.label} detection chain failed to return valid JSON "
+        f"for this chunk. Tried: {', '.join(chain)}. Last problems: {detail[:400]}"
     )
 
 
@@ -708,6 +762,10 @@ def _groq_single(
     Raises `_JsonRetry` when the provider rejected the OUTPUT (retryable — the
     ladder should escalate), and `LlmError` for anything else (bad key, dead
     model, a quota wait too long to sit through).
+
+    The config decides which provider this is: `cfg.label` names it in every
+    message and keys its pacing, so NIM and Groq share this function without
+    either one leaking its name or budget into the other.
     """
     body: dict[str, Any] = {
         "model": model,
@@ -730,26 +788,30 @@ def _groq_single(
 
     last_err: Exception | None = None
     est = _est_tokens(prompt, max_tokens)
+    # Pacing is per PROVIDER, not global: an NIM call must never wait out
+    # Groq's 30-rpm floor, or a job that failed over to the backup would run
+    # at half speed for no reason.
+    pace_key = str(getattr(cfg, "label", "groq")).lower()
     for attempt in range(cfg.max_retries + 1):
-        _groq_wait_turn(cfg.min_interval_sec)
+        _groq_wait_turn(cfg.min_interval_sec, pace_key)
         # Pace on TOKENS as well as requests: the request floor keeps a burst
         # under the rpm limit, this under the token limit that actually stops a
         # long source. Only on the first attempt — a retry after a 429 has
         # already waited out the limit, and pacing again would double every
         # backoff.
-        token_wait = _groq_token_wait(est, cfg.tokens_per_min) if attempt == 0 else 0.0
+        token_wait = _groq_token_wait(est, cfg.tokens_per_min, pace_key) if attempt == 0 else 0.0
         if token_wait > 0:
             logger.info(
-                f"[llm] groq token budget: waiting {token_wait:.0f}s before a "
+                f"[llm] {cfg.label} token budget: waiting {token_wait:.0f}s before a "
                 f"~{est}-token call ({cfg.tokens_per_min}/min self-imposed)"
             )
             time.sleep(token_wait)
-        _groq_record_tokens(est)
+        _groq_record_tokens(est, pace_key)
         try:
             data, resp_headers = _groq_post(body, api_key, cfg.base_url, cfg.timeout_sec)
             text = _groq_reply_text(data)
             if not text.strip():
-                raise LlmError("Groq returned an empty reply")
+                raise LlmError(f"{cfg.label} returned an empty reply")
             try:
                 _usage_store().record_call(
                     model,
@@ -763,21 +825,21 @@ def _groq_single(
             msg = exc.detail
             last_err = exc
             # A model that no longer exists can never succeed on retry, and
-            # Groq does not name a replacement the way Google does.
+            # neither Groq nor NIM names a replacement the way Google does.
             if exc.status in (400, 404) and _groq_model_problem(msg):
                 raise LlmError(
-                    f"Groq rejected model {model!r}: {msg[:200]}. "
-                    f"Pick a current model from console.groq.com/docs/models and set "
-                    f"[groq] model in config.toml."
+                    f"{cfg.label} rejected model {model!r}: {msg[:200]}. "
+                    f"Pick a current model from {cfg.docs_url} and set "
+                    f"[{pace_key}] model in config.toml."
                 ) from exc
             if attempt >= cfg.max_retries:
                 break
             if exc.status == 403 and "1010" in msg:
                 # Cloudflare edge ban on the request signature, NOT a bad key.
                 raise LlmError(
-                    "Groq returned 403 / Cloudflare error 1010. This is NOT a bad API key "
-                    f"— Cloudflare blocked the request before it reached Groq. "
-                    f"Sent User-Agent: {GROQ_USER_AGENT!r}."
+                    f"{cfg.label} returned 403 / Cloudflare error 1010. This is NOT a bad "
+                    f"API key — Cloudflare blocked the request before it reached "
+                    f"{cfg.label}. Sent User-Agent: {GROQ_USER_AGENT!r}."
                 ) from exc
             if exc.status == 429:
                 # The daily-quota rejection is the only place Groq states the real
@@ -795,12 +857,12 @@ def _groq_single(
                     # a hung job, burns the retries, and fails an hour later with
                     # no useful reason. Stop now and say so.
                     raise LlmError(
-                        f"Groq rate limit needs {asked / 60:.0f} minutes before it "
+                        f"{cfg.label} rate limit needs {asked / 60:.0f} minutes before it "
                         f"will accept another call — this is a daily quota, not a "
                         f"burst one. {msg[:220]}"
                     ) from exc
                 logger.warning(
-                    f"[llm] groq 429 rate limited"
+                    f"[llm] {cfg.label} 429 rate limited"
                     f"{' (tokens/min)' if 'tokens per minute' in msg else ''}"
                     f"{f', server asked for {asked:.0f}s' if asked else ''}"
                     f" — backing off {wait:.1f}s (attempt {attempt + 1})"
@@ -820,7 +882,7 @@ def _groq_single(
                 # A genuinely permanent 400: the same request fails again. Fail
                 # fast rather than re-bill it.
                 raise LlmError(
-                    f"Groq rejected the request permanently (400): {msg[:220]}"
+                    f"{cfg.label} rejected the request permanently (400): {msg[:220]}"
                 )
             else:
                 # 413 is NOT permanent — Groq uses it for "Request too large ...
@@ -828,7 +890,7 @@ def _groq_single(
                 # seconds. Only the unfixable 4xx fail fast.
                 wait = 2.0 * (attempt + 1)
                 logger.warning(
-                    f"[llm] groq error ({exc.status} {msg[:140]}), "
+                    f"[llm] {cfg.label} error ({exc.status} {msg[:140]}), "
                     f"retry {attempt + 1} in {wait:.0f}s"
                 )
             time.sleep(wait)
@@ -837,7 +899,9 @@ def _groq_single(
             if attempt >= cfg.max_retries:
                 break
             wait = 2.0 * (attempt + 1)
-            logger.warning(f"[llm] groq transport error ({exc}), retry {attempt + 1} in {wait:.0f}s")
+            logger.warning(
+                f"[llm] {cfg.label} transport error ({exc}), retry {attempt + 1} in {wait:.0f}s"
+            )
             time.sleep(wait)
         except _FormatUnsupported:
             raise  # handled by the ladder; never spend the backoff on it
@@ -890,10 +954,30 @@ def _groq_model_problem(msg: str) -> bool:
     return bool(_GROQ_MODEL_PROBLEM.search(msg))
 
 
-_groq_lock = threading.Lock()
-_groq_last_call: float = 0.0
-#: (monotonic timestamp, estimated tokens) for calls made in the last minute.
-_groq_token_ledger: list[tuple[float, int]] = []
+#: REENTRANT on purpose. `_groq_wait_turn` / `_groq_record_tokens` /
+#: `_groq_token_wait` hold this lock across their whole critical section AND
+#: call `_pacer()`, which takes the same lock to fetch their per-provider
+#: state. A plain Lock deadlocks the first detection call — which is exactly
+#: what a 60-second hang on a fresh process looks like.
+_groq_lock = threading.RLock()
+#: Per-PROVIDER pacing state, keyed by `cfg.label.lower()` ("nvidia" / "groq").
+#:
+#: These used to be module globals, which was fine with one provider and is
+#: wrong with two: Groq's 30-rpm floor and 6000 tok/min cap are properties of
+#: GROQ's free tier, not of the process. Sharing one ledger would make every
+#: NIM call wait out a budget it does not share — and, worse, a job that failed
+#: over to the backup would run at half speed for no reason.
+_PACERS: dict[str, dict[str, Any]] = {}
+
+
+def _pacer(key: str) -> dict[str, Any]:
+    """The pacing state for one provider, created on first use."""
+    with _groq_lock:
+        state = _PACERS.get(key)
+        if state is None:
+            state = {"last": 0.0, "ledger": []}
+            _PACERS[key] = state
+        return state
 
 #: Conservative share of the published per-minute token allowance this client
 #: will spend. Groq's free tier allows 8000 tokens/min for this model; leaving
@@ -944,14 +1028,15 @@ def note_usage_call(model: str, total_tokens: Any = None, headers: Any = None) -
         logger.debug(f"[groq-usage] could not record call: {exc}")
 
 
-def _groq_token_wait(est: int, budget: int) -> float:
+def _groq_token_wait(est: int, budget: int, key: str = "groq") -> float:
     """Seconds to wait so `est` more tokens fit inside the rolling minute."""
     if est <= 0 or budget <= 0:
         return 0.0
     now = time.monotonic()
     with _groq_lock:
-        recent = [(t, n) for t, n in _groq_token_ledger if now - t < 60.0]
-        _groq_token_ledger[:] = recent
+        ledger = _pacer(key)["ledger"]
+        recent = [(t, n) for t, n in ledger if now - t < 60.0]
+        ledger[:] = recent
         used = sum(n for _, n in recent)
         if used + est <= budget:
             return 0.0
@@ -965,40 +1050,49 @@ def _groq_token_wait(est: int, budget: int) -> float:
         return 30.0
 
 
-def _groq_record_tokens(est: int) -> None:
+def _groq_record_tokens(est: int, key: str = "groq") -> None:
     with _groq_lock:
-        _groq_token_ledger.append((time.monotonic(), est))
-        _groq_token_ledger[:] = [
-            (t, n) for t, n in _groq_token_ledger if time.monotonic() - t < 60.0
-        ]
+        ledger = _pacer(key)["ledger"]
+        ledger.append((time.monotonic(), est))
+        ledger[:] = [(t, n) for t, n in ledger if time.monotonic() - t < 60.0]
 
 
-def _groq_wait_turn(floor_sec: float) -> None:
-    """Block until the configured floor between Groq calls has elapsed.
+def _groq_wait_turn(floor_sec: float, key: str = "groq") -> None:
+    """Block until the configured floor between this provider's calls elapsed.
 
-    Process-wide (not per-job) on purpose: a long transcript is many calls
-    and they must be paced against the ACCOUNT limit, not each other.
+    Per-provider and process-wide (not per-job) on purpose: a long transcript
+    is many calls and they must be paced against the ACCOUNT limit, not each
+    other — while a call to the OTHER provider must not be counted against it.
     """
     if floor_sec <= 0:
         return
-    global _groq_last_call
     with _groq_lock:
+        state = _pacer(key)
         now = time.monotonic()
-        wait = _groq_last_call + floor_sec - now
+        wait = state["last"] + floor_sec - now
         if wait > 0:
             time.sleep(wait)
             now = time.monotonic()
-        _groq_last_call = now
+        state["last"] = now
 
 
 def _groq_post(
-    body: dict[str, Any], api_key: str, base_url: str, timeout_sec: int
+    body: dict[str, Any],
+    api_key: str,
+    base_url: str,
+    timeout_sec: int,
+    user_agent: str = GROQ_USER_AGENT,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """POST to {base_url}/chat/completions with the body exactly as given.
 
     Returns (body, headers). The headers are only there for the
     `x-ratelimit-*` counters, which are per-minute rather than per-day — the
     daily balance is never in a header, only in a 429 body.
+
+    `user_agent` defaults to the Groq constant because api.groq.com sits behind
+    Cloudflare and rejects the urllib default outright (see below). NIM does not
+    need it, but sending the same explicit UA is harmless and keeps one code
+    path rather than a conditional.
 
     `response_format` is the CALLER's decision now. It used to be hardcoded to
     `json_object` here, which is the root of the `json_validate_failed` death:
@@ -1021,7 +1115,7 @@ def _groq_post(
             # reaches Groq, so a perfectly valid key still fails. Verified:
             # urllib default -> 403/1010, an explicit UA -> 401 (reaches
             # the API). Do not remove this header.
-            "User-Agent": GROQ_USER_AGENT,
+            "User-Agent": user_agent,
         },
         method="POST",
     )
@@ -1069,13 +1163,61 @@ def _groq_reply_text(data: dict[str, Any]) -> str:
 
 
 def call_llm(chunk_text_prompt: str, settings: Settings) -> str:
-    """Dispatch one detection call to the configured backend."""
+    """Dispatch one detection call, with optional provider failover.
+
+    The primary is tried first. If it FAILS (quota spent, endpoint down, key
+    rejected, unparseable replies after the whole ladder) and
+    `[llm] fallback_provider` names a different backend that has a usable key,
+    the same chunk is retried there.
+
+    Two things deliberately do NOT fail over:
+
+      * `LlmNotConfigured` on the PRIMARY. A missing key is a mistake to fix,
+        not a transient blip to route around — silently downgrading on every
+        chunk would hide the misconfiguration until someone read the logs.
+        (A missing key on the FALLBACK is different: it just means there is
+        nothing to fail over to, and the original error stands.)
+      * `DetectionPaused`, which is a user action rather than a failure.
+    """
     active = provider(settings)
-    if active == PROVIDER_OLLAMA:
+    try:
+        return _call_provider(active, chunk_text_prompt, settings)
+    except (LlmNotConfigured, DetectionPaused):
+        raise
+    except LlmError as exc:
+        backup = settings_llm_fallback(settings)
+        if not backup or not _provider_ready(backup, settings):
+            raise
+        logger.warning(
+            f"[llm] {active} failed for this chunk ({exc}) — retrying it on the "
+            f"configured fallback provider {backup!r}"
+        )
+        return _call_provider(backup, chunk_text_prompt, settings)
+
+
+def _call_provider(which: str, chunk_text_prompt: str, settings: Settings) -> str:
+    """One detection call to a named backend (no failover logic here)."""
+    if which == PROVIDER_OLLAMA:
         return call_ollama(chunk_text_prompt, settings)
-    if active == PROVIDER_GEMINI:
+    if which == PROVIDER_GEMINI:
         return call_gemini(chunk_text_prompt, settings)
+    if which == PROVIDER_NVIDIA:
+        return call_nvidia(chunk_text_prompt, settings)
     return call_groq(chunk_text_prompt, settings)
+
+
+def _provider_ready(which: str, settings: Settings) -> bool:
+    """Can this backend actually be called right now?
+
+    Key presence only — no network. Used to decide whether a failover is even
+    possible, so a missing backup key does not turn one clear error into two.
+    """
+    if which == PROVIDER_OLLAMA:
+        ok, _ = ollama_status(settings)
+        return ok
+    if which == PROVIDER_GEMINI:
+        return settings.gemini_api_key is not None
+    return bool(settings.nvidia_api_key if which == PROVIDER_NVIDIA else settings.groq_api_key)
 
 
 class ChunkCache:
@@ -1151,15 +1293,23 @@ def detect_clips(
                 f"Run `ollama serve` and `ollama pull {settings.llm.ollama_model}`, "
                 f"or switch the detection backend back to the hosted one."
             )
-    elif provider(settings) == PROVIDER_GROQ:
-        if not settings.groq_api_key:
-            live = live_groq_key()
+    elif provider(settings) in (PROVIDER_NVIDIA, PROVIDER_GROQ):
+        # The PRIMARY must have a key even when a fallback is configured: a
+        # missing primary key is a misconfiguration to fix, not a transient
+        # failure to route around.
+        if not _provider_ready(provider(settings), settings):
+            live = (
+                live_nvidia_key()
+                if provider(settings) == PROVIDER_NVIDIA
+                else live_groq_key()
+            )
             live.refresh(force=True)
+            var = "NVIDIA_API_KEY" if provider(settings) == PROVIDER_NVIDIA else "GROQ_API_KEY"
             detail = live.problem or (
                 f"no key found under any supported name ({', '.join(live.status()['aliases'])})"
             )
             raise LlmNotConfigured(
-                f"GROQ_API_KEY missing — add it in the Keys/API keys tab (or .env), "
+                f"{var} missing — add it in the Keys/API keys tab (or .env), "
                 f"then hit Re-check. Detail: {detail}"
             )
     elif not settings.gemini_api_key:

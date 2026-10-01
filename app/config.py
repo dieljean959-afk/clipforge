@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from loguru import logger
@@ -161,6 +161,17 @@ GROQ_KEY_ALIASES = (
     "GROQ_KEY",
 )
 
+# NVIDIA NIM (integrate.api.nvidia.com) is the PRIMARY detection backend and
+# Groq is the backup. NIM speaks the same OpenAI chat-completions wire format,
+# so it reuses the whole Groq call path; only the endpoint, model and rate
+# budget differ. Keys are `nvapi-…`.
+NVIDIA_KEY_ALIASES = (
+    "NVIDIA_API_KEY",
+    "NVIDIA_KEY",
+    "NVIDIA_NIM_API_KEY",
+    "NGC_API_KEY",
+)
+
 _PLACEHOLDER_VALUES = {
     "changeme", "change-me", "your-api-key", "your_api_key",
     "your-key-here", "<paste-key-here>", "none", "null", "todo", "xxx",
@@ -301,6 +312,47 @@ def _resolve_groq_key(environ: dict[str, str]) -> tuple[str | None, str, str | N
     return None, "", None
 
 
+def _resolve_nvidia_key(environ: dict[str, str]) -> tuple[str | None, str, str | None]:
+    """Find the NVIDIA NIM key under any supported name.
+
+    Same (key, source, problem) contract as the Gemini/Groq resolvers. NIM
+    keys are long `nvapi-…` strings; the prefix is only a warning, never a
+    rejection, because the shape is not contractual and a stricter check would
+    lock out a future key format.
+    """
+    for name in NVIDIA_KEY_ALIASES:
+        value = (environ.get(name) or "").strip()
+        if not value:
+            continue
+        if value.startswith(_ENC_PREFIX):
+            if _empty_encrypted(value):
+                return None, f"{name} (empty)", (
+                    f"{name} is an EMPTY save — the platform stored an encrypted envelope "
+                    "with no key inside. Paste the full key (starts with nvapi-) in the "
+                    "Keys/API keys tab again, then hit Re-check."
+                )
+            return None, f"{name} (encrypted)", (
+                f"{name} is stored in the platform's encrypted dotenvx format and could "
+                "not be decrypted inside the app — re-save it in the Keys/API keys tab, "
+                "then hit Re-check."
+            )
+        if value.lower() in _PLACEHOLDER_VALUES:
+            return None, f"{name} (placeholder)", (
+                f"{name} still contains placeholder text — paste the real NVIDIA API key."
+            )
+        if " " in value:
+            return None, f"{name} (malformed)", (
+                f"{name} contains spaces — it should be the raw key with no quotes or spaces."
+            )
+        if not value.lower().startswith("nvapi-") and len(value) < 20:
+            return value, f"{name} (short — verify)", (
+                f"{name} is only {len(value)} characters and does not start with nvapi- — "
+                "double-check the paste from build.nvidia.com."
+            )
+        return value, name, None
+    return None, "", None
+
+
 def _as_list(value: object) -> list[object]:
     """Coerce a config value to a list.
 
@@ -415,6 +467,7 @@ class _LiveKeyState:
 
 _live_key: _LiveKeyState | None = None
 _live_groq: _LiveKeyState | None = None
+_live_nvidia: _LiveKeyState | None = None
 
 
 def live_gemini_key() -> _LiveKeyState:
@@ -433,6 +486,19 @@ def live_groq_key() -> _LiveKeyState:
             ROOT, resolver=_resolve_groq_key, aliases=GROQ_KEY_ALIASES, label="Groq"
         )
     return _live_groq
+
+
+def live_nvidia_key() -> _LiveKeyState:
+    """Process-wide live NVIDIA-key state (created on first use)."""
+    global _live_nvidia
+    if _live_nvidia is None:
+        _live_nvidia = _LiveKeyState(
+            ROOT,
+            resolver=_resolve_nvidia_key,
+            aliases=NVIDIA_KEY_ALIASES,
+            label="NVIDIA",
+        )
+    return _live_nvidia
 
 
 # --------------------------------------------------------------------------- #
@@ -506,6 +572,16 @@ def sync_groq_env_after_save(value: str) -> None:
 def sync_groq_env_for_delete() -> list[str]:
     """Drop Groq key aliases from the process env before a file delete."""
     return _sync_env_for_delete(GROQ_KEY_ALIASES, "GROQ_API_KEY")
+
+
+def sync_nvidia_env_after_save(value: str) -> None:
+    """Mirror a freshly written NVIDIA_API_KEY into the process env."""
+    os.environ["NVIDIA_API_KEY"] = value
+
+
+def sync_nvidia_env_for_delete() -> list[str]:
+    """Drop NVIDIA key aliases from the process env before a file delete."""
+    return _sync_env_for_delete(NVIDIA_KEY_ALIASES, "NVIDIA_API_KEY")
 
 
 def _sync_env_for_delete(aliases: tuple[str, ...], primary: str) -> list[str]:
@@ -657,6 +733,67 @@ class GroqConfig:
     # overwrites this for the day with the provider's own number, which is the
     # only authoritative one — Groq never reports the daily balance in a header.
     daily_token_limit: int = 200000
+    #: Provider name used in log lines and error text, so one shared call path
+    #: can say "Groq" or "NVIDIA" without hardcoding either.
+    label: str = "Groq"
+    #: Where an operator goes to pick a current model after a 404. Named in the
+    #: error rather than guessed at: a retired model has no safe auto-replacement.
+    docs_url: str = "console.groq.com/docs/models"
+
+
+@dataclass
+class NvidiaConfig:
+    """NVIDIA NIM (integrate.api.nvidia.com) — the PRIMARY detection backend.
+
+    NIM is OpenAI-compatible, so these fields are deliberately the SAME names
+    and with the SAME meanings as GroqConfig: one call path serves both
+    providers and only the endpoint, model and rate budget differ. Do not fork
+    the names here — `app.llm` passes this object straight into the
+    Groq-shaped ladder.
+
+    Where the defaults differ from Groq, and why:
+
+      * ``min_interval_sec`` is 0.0, not 2.1. Groq's free tier caps at ~30
+        requests/minute, so pacing there is mandatory; NIM's limits are far
+        higher and pacing a 20-chunk run at 2.1s would cost 40s for nothing.
+        0.0 disables the request floor while leaving the token pacer on.
+      * ``response_format`` is ``json_object``, not ``json_schema``. Strict
+        Structured Outputs are a Groq feature; NIM's compatibility layer does
+        not guarantee them, and asking for a mode the model cannot do earns a
+        permanent 400 rather than valid JSON. The ladder detects that and drops
+        the field, so ``json_schema`` is still selectable if NIM grows support.
+      * ``tokens_per_min`` is generous. NIM rate-limits per model and per
+        account in requests/minute, not a small daily token wall like Groq's
+        200k TPD, so the self-imposed cap here is about bursts, not survival.
+      * ``daily_token_limit`` is only the DENOMINATOR the usage badge divides
+        by. NIM reports credits rather than a per-model daily token ceiling, so
+        this is an operator-set figure, not a provider-stated one — and unlike
+        Groq there is no 429 body that overrides it with the truth.
+    """
+
+    model: str = "deepseek-ai/deepseek-v4.1-flash"
+    base_url: str = "https://integrate.api.nvidia.com/v1"
+    max_retries: int = 3
+    timeout_sec: int = 120
+    min_interval_sec: float = 0.0
+    temperature: float = 0.0
+    response_format: str = "json_object"
+    max_tokens: int = 3200
+    max_tokens_ceiling: int = 8192
+    json_retries: int = 3
+    json_retry_temperature: float = 0.2
+    #: Tried in order when the primary model cannot produce valid JSON for a
+    #: chunk even after the ladder. Left empty by default: NIM's catalog rotates
+    #: and a wrong name here would add a hard 404 to every chunk's ladder. Fill
+    #: it in from build.nvidia.com once you know the model you want second.
+    fallback_models: tuple[str, ...] = ()
+    tokens_per_min: int = 120000
+    daily_token_limit: int = 2000000
+    #: Provider name used in log lines and error text, so a single call path can
+    #: say "NVIDIA" or "Groq" without hardcoding either.
+    label: str = "NVIDIA"
+    #: Where an operator goes to pick a current model after a 404.
+    docs_url: str = "build.nvidia.com/models"
 
 
 @dataclass
@@ -668,16 +805,27 @@ class LlmConfig:
     scoring step is pluggable, because that is the one step a user may want
     to run fully offline on their own hardware.
 
-        groq   — hosted, default. OpenAI-compatible chat completions, ~30 rpm
-                 on the free tier, paced client-side so 429s are rare.
-        gemini — hosted alternative, kept as a selectable fallback for when
-                 the Groq quota is exhausted.
-        ollama — self-hosted. Free and private, but it shares the same CPU
-                 as Whisper, so detection runs sequentially AFTER the
-                 transcript exists (no overlap) and is markedly slower.
+        nvidia  — hosted, default. NVIDIA NIM, OpenAI-compatible chat
+                  completions. The primary because Groq's free tier enforces a
+                  hard tokens-per-DAY ceiling per model, and a long source
+                  exhausts it part way through detection.
+        groq    — hosted backup. Same wire format, same code path; ~30 rpm on
+                  the free tier, paced client-side so 429s are rare.
+        gemini  — hosted alternative, selectable without a redeploy.
+        ollama  — self-hosted. Free and private, but it shares the same CPU
+                  as Whisper, so detection runs sequentially AFTER the
+                  transcript exists (no overlap) and is markedly slower.
+
+    `fallback_provider` names a second backend to try for a chunk when the
+    primary FAILS (quota spent, endpoint down, key rejected). It is opt-in and
+    off by default, because silently scoring clips with a model the operator
+    did not pick is worse than a loud failure. When it is set, the swap is
+    logged per chunk so the provenance is never a surprise.
     """
 
-    provider: str = "groq"
+    provider: str = "nvidia"
+    #: "" disables automatic failover. Otherwise one of PROVIDERS.
+    fallback_provider: str = ""
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.1:8b"
     ollama_timeout_sec: int = 600
@@ -824,6 +972,7 @@ class Settings:
     whisper: WhisperConfig
     gemini: GeminiConfig
     groq: GroqConfig
+    nvidia: NvidiaConfig
     llm: LlmConfig
     translate: TranslateConfig
     subtitle: SubtitleConfig
@@ -847,6 +996,13 @@ class Settings:
     def groq_api_key(self) -> str | None:
         """LIVE Groq key — re-resolved whenever the env files change."""
         state = live_groq_key()
+        state.refresh()
+        return state.key
+
+    @property
+    def nvidia_api_key(self) -> str | None:
+        """LIVE NVIDIA key — re-resolved whenever the env files change."""
+        state = live_nvidia_key()
         state.refresh()
         return state.key
 
@@ -879,6 +1035,75 @@ def _hex_or_blank(value: object, name: str, errors: list[str]) -> str:
         errors.append(f'{name} "{text}" must be a hex colour like #39FF14, or left empty')
         return ""
     return text
+
+
+def _load_openai_provider(
+    section: dict,
+    name: str,
+    *,
+    defaults: "GroqConfig | NvidiaConfig",
+    errors: list[str],
+    env_model: str,
+    env_base_url: str,
+) -> "GroqConfig | NvidiaConfig":
+    """Build one OpenAI-compatible provider config from its TOML section.
+
+    Groq and NVIDIA NIM speak the same chat-completions dialect, so they share
+    every knob: response format, the JSON-retry ladder, the model chain, the
+    token budget. Only the DEFAULTS differ, and those come from the dataclass
+    rather than being written out twice here — which is the point: a field
+    added to one provider cannot silently go missing from the other.
+
+    `defaults` is a dataclass INSTANCE so every unset key falls back to that
+    provider's own shipped value instead of to the other one's.
+    """
+    _rf = str(section.get("response_format", defaults.response_format)).strip().lower()
+    if _rf not in {"json_schema", "json_object", "plain"}:
+        errors.append(
+            f'{name}.response_format "{_rf}" is not one of json_schema/json_object/plain'
+        )
+        _rf = defaults.response_format
+    _mt = max(256, int(section.get("max_tokens", defaults.max_tokens)))
+    _ceiling = max(_mt, int(section.get("max_tokens_ceiling", defaults.max_tokens_ceiling)))
+    # A fallback equal to the primary model is a no-op that would burn a whole
+    # retry ladder proving nothing, so it is dropped at load time.
+    _primary = str(os.getenv(env_model) or section.get("model", defaults.model))
+    _fallbacks = tuple(
+        m for m in (
+            str(x) for x in _as_list(section.get("fallback_models", defaults.fallback_models))
+            if str(x).strip()
+        )
+        if m and m != _primary
+    )
+    return replace(
+        defaults,
+        model=_primary,
+        base_url=str(
+            os.getenv(env_base_url) or section.get("base_url", defaults.base_url)
+        ).strip().rstrip("/"),
+        max_retries=max(0, int(section.get("max_retries", defaults.max_retries))),
+        timeout_sec=max(15, int(section.get("timeout_sec", defaults.timeout_sec))),
+        min_interval_sec=max(
+            0.0, float(section.get("min_interval_sec", defaults.min_interval_sec))
+        ),
+        temperature=float(section.get("temperature", defaults.temperature)),
+        response_format=_rf,
+        max_tokens=_mt,
+        max_tokens_ceiling=_ceiling,
+        json_retries=max(0, min(3, int(section.get("json_retries", defaults.json_retries)))),
+        json_retry_temperature=max(
+            0.0,
+            min(
+                float(section.get("temperature", defaults.temperature)),
+                float(section.get("json_retry_temperature", defaults.json_retry_temperature)),
+            ),
+        ),
+        fallback_models=_fallbacks,
+        tokens_per_min=max(0, int(section.get("tokens_per_min", defaults.tokens_per_min))),
+        daily_token_limit=max(
+            1000, int(section.get("daily_token_limit", defaults.daily_token_limit))
+        ),
+    )
 
 
 def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
@@ -956,55 +1181,44 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         errors.append("gemini.min_clip_sec must be < gemini.max_clip_sec")
 
     gq = raw.get("groq", {})
-    _rf = str(gq.get("response_format", "json_schema")).strip().lower()
-    if _rf not in {"json_schema", "json_object", "plain"}:
-        errors.append(
-            f'groq.response_format "{_rf}" is not one of json_schema/json_object/plain'
-        )
-        _rf = "json_schema"
-    _mt = max(256, int(gq.get("max_tokens", 3200)))
-    _ceiling = max(_mt, int(gq.get("max_tokens_ceiling", 8192)))
-    # A fallback equal to the primary model is a no-op that would burn a whole
-    # retry ladder proving nothing, so it is dropped at load time.
-    _primary = str(os.getenv("GROQ_MODEL") or gq.get("model", "openai/gpt-oss-120b"))
-    _fallbacks = tuple(
-        m for m in (str(x) for x in _as_list(gq.get("fallback_models", [])) if str(x).strip())
-        if m and m != _primary
+    groq = _load_openai_provider(
+        gq, "groq", defaults=GroqConfig(), errors=errors, env_model="GROQ_MODEL",
+        env_base_url="GROQ_BASE_URL",
     )
-    groq = GroqConfig(
-        model=_primary,
-        base_url=str(
-            os.getenv("GROQ_BASE_URL") or gq.get("base_url", "https://api.groq.com/openai/v1")
-        ).strip().rstrip("/"),
-        max_retries=max(0, int(gq.get("max_retries", 3))),
-        timeout_sec=max(15, int(gq.get("timeout_sec", 120))),
-        min_interval_sec=max(0.0, float(gq.get("min_interval_sec", 2.1))),
-        temperature=float(gq.get("temperature", 0.0)),
-        response_format=_rf,
-        max_tokens=_mt,
-        max_tokens_ceiling=_ceiling,
-        json_retries=max(0, min(3, int(gq.get("json_retries", 3)))),
-        json_retry_temperature=max(
-            0.0, min(float(gq.get("temperature", 0.0)), float(gq.get("json_retry_temperature", 0.2)))
-        ),
-        fallback_models=_fallbacks,
-        tokens_per_min=max(0, int(gq.get("tokens_per_min", 6000))),
-        daily_token_limit=max(1000, int(gq.get("daily_token_limit", 200000))),
+
+    nv = raw.get("nvidia", {})
+    nvidia = _load_openai_provider(
+        nv, "nvidia", defaults=NvidiaConfig(), errors=errors, env_model="NVIDIA_MODEL",
+        env_base_url="NVIDIA_BASE_URL",
     )
 
     lc = raw.get("llm", {})
     provider = str(
-        os.getenv("CLIPFORGE_LLM_PROVIDER") or lc.get("provider", "groq")
+        os.getenv("CLIPFORGE_LLM_PROVIDER") or lc.get("provider", "nvidia")
     ).strip().lower()
-    if provider not in {"groq", "gemini", "ollama"}:
+    if provider not in {"nvidia", "groq", "gemini", "ollama"}:
         errors.append(
-            f'llm.provider "{provider}" is not one of groq/gemini/ollama'
+            f'llm.provider "{provider}" is not one of nvidia/groq/gemini/ollama'
         )
-        provider = "groq"
+        provider = "nvidia"
+    # Automatic failover is opt-in (see LlmConfig). An unset, blank, or
+    # self-referential value means "no failover" rather than a config error:
+    # pointing the fallback at the primary would burn a whole second ladder
+    # proving what the first one already proved.
+    fallback_provider = str(lc.get("fallback_provider", "") or "").strip().lower()
+    if fallback_provider == provider:
+        fallback_provider = ""
+    if fallback_provider and fallback_provider not in {"nvidia", "groq", "gemini", "ollama"}:
+        errors.append(
+            f'llm.fallback_provider "{fallback_provider}" is not one of '
+            "nvidia/groq/gemini/ollama"
+        )
+        fallback_provider = ""
     sc = raw.get("social", {})
 
     llm = LlmConfig(
         provider=provider,
+        fallback_provider=fallback_provider,
         ollama_url=str(
             os.getenv("OLLAMA_URL") or lc.get("ollama_url", "http://127.0.0.1:11434")
         ).strip().rstrip("/"),
@@ -1139,6 +1353,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     # Initialize the live key state so the boot banner reports it. The key is
     # NEVER snapshotted into Settings — every read re-resolves.
     live_gemini_key().refresh(force=True)
+    live_nvidia_key().refresh(force=True)
 
     if errors:
         raise ConfigError(
@@ -1153,6 +1368,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         whisper=whisper,
         gemini=gemini,
         groq=groq,
+        nvidia=nvidia,
         llm=llm,
         translate=translate,
         subtitle=subtitle,
@@ -1213,10 +1429,14 @@ def boot_banner(settings: Settings) -> None:
     """Print the fail-fast boot banner with the exact lines ops greps for."""
     settings = load_config(quiet=True)
     active = settings.llm.provider
-    # Report the key for the ACTIVE backend. Groq is the default, so printing
-    # only Gemini made a fully-working deployment look unconfigured.
-    if active == "groq":
-        live: _LiveKeyState = live_groq_key()
+    # Report the key for the ACTIVE backend. Printing only Gemini made a
+    # fully-working deployment look unconfigured, and printing only Groq would
+    # now do the same for an NVIDIA-primary one.
+    if active == "nvidia":
+        live: _LiveKeyState = live_nvidia_key()
+        env_name = "NVIDIA_API_KEY"
+    elif active == "groq":
+        live = live_groq_key()
         env_name = "GROQ_API_KEY"
     else:
         live = live_gemini_key()

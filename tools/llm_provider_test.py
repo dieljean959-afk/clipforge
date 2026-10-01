@@ -387,8 +387,12 @@ def test_detect_clips_end_to_end() -> None:
 
 def test_provider_roster() -> None:
     print("\n[provider] roster and dispatch")
-    check("groq is the default", load_config(quiet=True).llm.provider == "groq")
-    check("all three are offered", llm_mod.PROVIDERS == ("groq", "gemini", "ollama"))
+    check("nvidia is the default", load_config(quiet=True).llm.provider == "nvidia")
+    check("groq is the configured backup",
+          load_config(quiet=True).llm.fallback_provider == "groq")
+    check("all four are offered",
+          llm_mod.PROVIDERS == ("nvidia", "groq", "gemini", "ollama"),
+          str(llm_mod.PROVIDERS))
     s = load_config(quiet=True)
     s.llm.provider = "ollama"
     check("ollama still dispatches to its own client",
@@ -436,8 +440,10 @@ def test_no_gemini_shaped_strings():
     check("the pipeline surfaces the exception's own provider-accurate message",
           re.search(r"AI detection offline\s*—\s*\{exc\}", task_code) is not None)
 
-    check("llm.py names GROQ_API_KEY when it is missing",
-          "GROQ_API_KEY missing" in llm_src)
+    check("llm.py names NVIDIA_API_KEY when the primary's key is missing",
+          "NVIDIA_API_KEY" in llm_src)
+    check("llm.py names GROQ_API_KEY when Groq's key is missing",
+          "GROQ_API_KEY" in llm_src)
     check("llm.py still names GEMINI_API_KEY for the fallback",
           "GEMINI_API_KEY" in llm_src)
 

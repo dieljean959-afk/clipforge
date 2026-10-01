@@ -170,8 +170,8 @@ def check_llm(settings: Settings) -> list[Check]:
             "" if ok else "run `ollama serve` + `ollama pull <model>`, or switch "
                           "[llm] provider back to groq",
         )]
-    if llm_mod.provider(settings) == llm_mod.PROVIDER_GROQ:
-        return _check_groq(settings)
+    if llm_mod.provider(settings) in (llm_mod.PROVIDER_NVIDIA, llm_mod.PROVIDER_GROQ):
+        return _check_hosted(settings)
     live = live_gemini_key()
     live.refresh(force=True)
     status = live.status()
@@ -195,30 +195,40 @@ def check_llm(settings: Settings) -> list[Check]:
     return checks
 
 
-def _check_groq(settings: Settings) -> list[Check]:
-    """Groq key presence + optional live probe of the models endpoint.
+def _check_hosted(settings: Settings) -> list[Check]:
+    """Hosted-provider key presence + optional live probe of the models endpoint.
 
-    The live probe is deliberately a GET /models rather than a chat call: it
-    costs no quota and still proves both the key AND network path work.
+    Covers NVIDIA NIM and Groq, which are the same OpenAI-compatible shape, so
+    the probe is identical: a GET /models rather than a chat call, because it
+    costs no quota and still proves both the key AND the network path work.
     """
-    from app.config import live_groq_key  # noqa: PLC0415
+    from app import llm as llm_mod  # noqa: PLC0415 - avoids an import cycle at boot
+    from app.config import live_groq_key, live_nvidia_key  # noqa: PLC0415
     from app.llm import GROQ_USER_AGENT  # noqa: PLC0415 - same edge-block guard
 
-    live = live_groq_key()
+    which = llm_mod.provider(settings)
+    cfg = llm_mod.openai_cfg(settings, which)
+    env_name = "NVIDIA_API_KEY" if which == llm_mod.PROVIDER_NVIDIA else "GROQ_API_KEY"
+    api_key = (
+        settings.nvidia_api_key if which == llm_mod.PROVIDER_NVIDIA else settings.groq_api_key
+    )
+
+    live = live_nvidia_key() if which == llm_mod.PROVIDER_NVIDIA else live_groq_key()
     live.refresh(force=True)
     status = live.status()
     if not status.get("keyLoaded"):
-        return [Check("groq key", "fail", status.get("problem") or status.get("source", "not found"),
-                      "set GROQ_API_KEY in the Keys tab (or .env)")]
-    checks = [Check("groq key", "ok", f"loaded from {status.get('source')}")]
+        return [Check(f"{which} key", "fail",
+                      status.get("problem") or status.get("source", "not found"),
+                      f"set {env_name} in the Keys tab (or .env)")]
+    checks = [Check(f"{which} key", "ok", f"loaded from {status.get('source')}")]
     if os.getenv("CLIPFORGE_DOCTOR_LIVE", "").lower() in {"1", "true", "yes"}:
-        base = str(settings.groq.base_url).rstrip("/")
+        base = str(cfg.base_url).rstrip("/")
         req = urllib.request.Request(  # noqa: S310 - https base from config
             f"{base}/models",
             headers={
-                "Authorization": f"Bearer {settings.groq_api_key or ''}",
-                # Same Cloudflare 1010 signature ban as the chat call — without
-                # this the probe reports a bogus "bad key" for a good key.
+                "Authorization": f"Bearer {api_key or ''}",
+                # Same Cloudflare 1010 signature ban as the Groq chat call —
+                # without this the probe reports a bogus "bad key" for a good key.
                 "User-Agent": GROQ_USER_AGENT,
             },
         )
@@ -226,20 +236,21 @@ def _check_groq(settings: Settings) -> list[Check]:
             with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
                 data = json.loads(resp.read().decode("utf-8"))
             ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict)]
-            want = settings.groq.model
+            want = cfg.model
             note = ""
             if ids and want not in ids:
                 note = f" (CONFIGURED MODEL NOT IN CATALOG — pick one of: {', '.join(ids[:6])})"
-            checks.append(Check("groq API", "ok" if not note else "warn",
+            checks.append(Check(f"{which} API", "ok" if not note else "warn",
                                 f"live call ok, {len(ids)} model(s) visible{note}"))
         except urllib.error.HTTPError as exc:
-            checks.append(Check("groq API", "fail", f"live call failed: HTTP {exc.code}",
+            checks.append(Check(f"{which} API", "fail", f"live call failed: HTTP {exc.code}",
                                 "check the key + network"))
         except Exception as exc:  # noqa: BLE001 - any transport error is a fail
-            checks.append(Check("groq API", "fail", f"live call failed: {exc}",
+            checks.append(Check(f"{which} API", "fail", f"live call failed: {exc}",
                                 "check the key + network"))
     else:
-        checks.append(Check("groq API", "warn", "not tested (set CLIPFORGE_DOCTOR_LIVE=1 to test)",
+        checks.append(Check(f"{which} API", "warn",
+                            "not tested (set CLIPFORGE_DOCTOR_LIVE=1 to test)",
                             "run: CLIPFORGE_DOCTOR_LIVE=1 python -m app.doctor"))
     return checks
 

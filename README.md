@@ -31,9 +31,19 @@ viral clips". See [LICENSE](LICENSE).
 
    | Backend | Speed | Cost / privacy | Needs |
    |---|---|---|---|
-   | `groq` (default) | **Fast** — the request overlaps local CPU work | Hosted API, OpenAI-compatible, ~30 req/min free tier (calls are paced below that) | `GROQ_API_KEY` |
-   | `gemini` | **Fast** | Hosted fallback, used when the Groq quota is spent | `GEMINI_API_KEY` |
+   | `nvidia` (default) | **Fast** — the request overlaps local CPU work | Hosted API, OpenAI-compatible (NVIDIA NIM). No per-model daily token ceiling like Groq's, so a long source cannot die half way through detection | `NVIDIA_API_KEY` |
+   | `groq` (backup) | **Fast** | Hosted API, OpenAI-compatible. ~30 req/min and a **200k tokens-per-DAY** ceiling per model on the free tier; calls are paced below the request limit, but a spent daily quota can only be waited out | `GROQ_API_KEY` |
+   | `gemini` | **Fast** | Hosted alternative, selectable without a redeploy | `GEMINI_API_KEY` |
    | `ollama` | **Slower** — it shares the same CPU as Whisper, so it runs sequentially after the transcript exists | **Free and fully private** — the transcript never leaves the machine | `ollama serve` + the model pulled, no API key |
+
+   `NVIDIA_API_KEY` is the one to paste in the Keys tab. `config.toml`
+   `[llm] fallback_provider = "groq"` makes a chunk that fails on the primary
+   (spent quota, endpoint down) retry on Groq before it is skipped; blank
+   disables that, and a missing PRIMARY key is always a loud config error
+   rather than a silent downgrade. Both providers share one code path — the
+   JSON-repair ladder, pacing and the model chain are per-provider config, not
+   per-provider code — and each provider's rate budget is tracked separately,
+   so an NVIDIA call never waits out Groq's 30-rpm floor.
 
    This choice affects **detection only**. Transcription is always
    faster-whisper/WhisperX, and the dashboard says so next to the toggle.
@@ -65,7 +75,7 @@ viral clips". See [LICENSE](LICENSE).
      in use.
    - The pipeline's offline failure message overrode the exception's own
      provider-accurate text with a hardcoded Gemini string. It now surfaces
-     the exception, which already says `GROQ_API_KEY missing…` or
+     the exception, which already says `NVIDIA_API_KEY missing…` or
      `ollama server unreachable…`.
    - `detectedSource` was written as the literal `"gemini"` no matter which
      backend ran, so a Groq-detected batch was filed as Gemini work. It now
@@ -95,7 +105,9 @@ button forces an immediate re-read with the result in a toast. The chip
 follows the **active** detection backend, so it never shows Gemini's key
 state while Groq is the one actually making calls.
 
-Supported names: `GROQ_API_KEY` (canonical) or `GROQ_KEY`; `GEMINI_API_KEY`
+Supported names: `NVIDIA_API_KEY` (canonical), plus `NVIDIA_KEY`,
+`NVIDIA_NIM_API_KEY`, `NGC_API_KEY`; `GROQ_API_KEY` (canonical) or
+`GROQ_KEY`; `GEMINI_API_KEY`
 (canonical), plus `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY`,
 `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_KEY`, `VITE_GEMINI_API_KEY`.
 
@@ -922,8 +934,8 @@ thumbnail exists, and re-sums the total against the job's `totalClipsSec`.
 faster-whisper transcript through the configured provider, which is the
 end-to-end proof for an LLM provider swap: it exercises chunking, the wire
 contract and the word-index → real-timestamp resolution on production data.
-Without `GROQ_API_KEY` it falls back to a local OpenAI-compatible stub and
-prints a loud warning that the real api.groq.com round trip was **not**
+Without a provider key it falls back to a local OpenAI-compatible stub and
+prints a loud warning that the real round trip was **not**
 tested — add the key and re-run to complete the check. On the reference
 batch it reports `✓ this was a REAL api.groq.com round trip`.
 
