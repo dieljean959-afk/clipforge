@@ -88,9 +88,13 @@ export default defineConfig({
   },
   // Performance hints
   server: {
-    // Bind to all interfaces so WebContainer's server-ready event fires.
-    host: true,
+    // Bind to all interfaces so the preview proxy (and WebContainer's
+    // server-ready event) can reach the dev server from outside the sandbox.
+    host: "0.0.0.0",
     port: 5173,
+    // The preview is served from a generated *.freebuff.dev domain, so the
+    // Host header never matches localhost. Accept it instead of 403-ing.
+    allowedHosts: true,
     // Freebuff manages the web process; keep HMR disabled for this project.
     hmr: false,
     proxy: {
