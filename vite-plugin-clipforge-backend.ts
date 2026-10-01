@@ -198,9 +198,23 @@ export function clipforgeBackend(): Plugin {
       // The respawn middleware below already waits on an in-flight boot, so
       // publishing `state.starting` here gives the same guarantee for the
       // first API call without holding the whole dev server hostage.
-      state.starting = startBackend().finally(() => {
-        state.starting = null;
-      });
+      //
+      // The `.catch` is load-bearing, not defensive noise. `state.starting` is
+      // a FLOATING promise until the first /api request arrives and awaits it.
+      // Node's default for an unhandled rejection is to THROW, which exits the
+      // process — so a boot that rejected (or a future line that throws) would
+      // take the whole Vite dev server down, and the platform's proxy would
+      // answer 502 on every path with nothing in the browser to explain it.
+      // Before this was made non-blocking, `await startBackend()` meant Vite
+      // owned that rejection instead.
+      state.starting = startBackend()
+        .catch((err: unknown) => {
+          log(`backend boot failed: ${err instanceof Error ? err.message : String(err)}`);
+          return false;
+        })
+        .finally(() => {
+          state.starting = null;
+        });
 
       // Respawn guard: any proxied /api request revives a dead backend first.
       //
@@ -226,9 +240,14 @@ export function clipforgeBackend(): Plugin {
                 `backend down — respawning on demand (attempt ${state.attempts + 1}` +
                 `${exhausted ? `, crash-loop budget spent, retrying every ${COOLDOWN_MS / 1000}s` : ""})`,
               );
-              state.starting = state.starting ?? startBackend().finally(() => {
-                state.starting = null;
-              });
+              state.starting = state.starting ?? startBackend()
+                .catch((err: unknown) => {
+                  log(`backend respawn failed: ${err instanceof Error ? err.message : String(err)}`);
+                  return false;
+                })
+                .finally(() => {
+                  state.starting = null;
+                });
             }
           }
           if (state.starting) {
