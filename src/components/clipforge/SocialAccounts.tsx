@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
   BadgeCheck,
   CircleSlash,
+  Copy,
   ExternalLink,
   Loader2,
   Plug,
@@ -11,6 +12,33 @@ import {
 import { Button } from "@/components/ui/button";
 import { api, type SocialPlatformDto, type SocialSlug } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+/**
+ * The exact env vars each platform needs, in the order you paste them.
+ *
+ * The "Not configured" state used to be a disabled button with the reason in a
+ * tooltip, which is a dead end on a phone: nothing told you WHICH values to
+ * get or where to put them. Direct posting needs an app you register with the
+ * platform yourself — there is no key we can supply — so the honest, useful
+ * thing is to name the values and make them one tap to copy.
+ *
+ * Cost is the real differentiator and is stated per row, because "works now"
+ * and "needs a paid developer account" are very different decisions.
+ */
+const ENV_VARS: Record<SocialSlug, string[]> = {
+  youtube: ["YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET"],
+  x: ["X_CLIENT_ID", "X_CLIENT_SECRET"],
+  tiktok: ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"],
+  instagram: ["META_APP_ID", "META_APP_SECRET"],
+};
+
+/** Where to register the app, for the platform you have not done yet. */
+const SIGNUP_URLS: Record<SocialSlug, string> = {
+  youtube: "https://console.cloud.google.com/apis/credentials",
+  x: "https://developer.x.com/en/portal/dashboard",
+  tiktok: "https://developers.tiktok.com/apps",
+  instagram: "https://developers.facebook.com/apps",
+};
 
 /** How hard each approval gate is, as a short badge. */
 const GATE_BADGE: Record<
@@ -152,21 +180,21 @@ export function SocialAccounts() {
                         </Button>
                       </>
                     ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 cursor-pointer gap-1 text-xs"
-                        disabled={busy === p.slug || p.status === "needs_app"}
-                        title={p.status === "needs_app" ? p.reason : "Connect account"}
-                        onClick={() => void connect(p.slug)}
-                      >
-                        {busy === p.slug ? (
-                          <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                          <Plug className="size-3.5" />
-                        )}
-                        {p.status === "needs_app" ? "Not configured" : "Connect"}
-                      </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 cursor-pointer gap-1 text-xs"
+                      disabled={busy === p.slug || p.status === "needs_app"}
+                      title={p.status === "needs_app" ? p.reason : "Connect account"}
+                      onClick={() => void connect(p.slug)}
+                    >
+                      {busy === p.slug ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Plug className="size-3.5" />
+                      )}
+                      {p.status === "needs_app" ? "Not configured" : "Connect"}
+                    </Button>
                     )}
                     <Button
                       size="sm"
@@ -185,10 +213,49 @@ export function SocialAccounts() {
                   {p.headline}. {p.detail}
                 </p>
                 {!p.connected && p.status === "needs_app" && (
-                  <p className="mt-1 flex items-start gap-1.5 text-[11px] text-amber-300/90">
-                    <CircleSlash className="mt-0.5 size-3 shrink-0" />
-                    {p.reason}
-                  </p>
+                  <div className="mt-1.5 space-y-1.5 rounded-md border border-amber-400/25 bg-amber-400/5 p-2">
+                    <p className="flex items-start gap-1.5 text-[11px] text-amber-300/90">
+                      <CircleSlash className="mt-0.5 size-3 shrink-0" />
+                      {p.reason}
+                    </p>
+                    {/* Name the exact values and make them copyable. Without
+                        this the row is a dead end: the user knows posting is
+                        unavailable but not what to go and do about it. */}
+                    <div className="flex flex-wrap gap-1">
+                      {ENV_VARS[p.slug].map((name) => (
+                        <button
+                          key={name}
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard
+                              ?.writeText(name)
+                              .then(() => toast.success(`Copied ${name}`))
+                              .catch(() => toast.error("Clipboard blocked."));
+                          }}
+                          title="Copy this variable name"
+                          className="flex cursor-pointer items-center gap-1 rounded border border-amber-400/30 bg-background/60 px-1.5 py-0.5 font-mono text-[10px] text-amber-200 transition hover:border-amber-400/60"
+                        >
+                          {name}
+                          <Copy className="size-2.5" />
+                        </button>
+                      ))}
+                      <a
+                        href={SIGNUP_URLS[p.slug]}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center gap-1 rounded border border-amber-400/30 bg-background/60 px-1.5 py-0.5 text-[10px] text-amber-200 transition hover:border-amber-400/60"
+                      >
+                        Register an app
+                        <ExternalLink className="size-2.5" />
+                      </a>
+                    </div>
+                    <p className="text-[10px] leading-snug text-muted-foreground">
+                      Paste them into the <strong>Keys/API keys</strong> tab, then
+                      reload. Until then, the Share button on each clip still
+                      posts the MP4 through your phone&apos;s share sheet — no
+                      account needed.
+                    </p>
+                  </div>
                 )}
                 {p.connected && (
                   <p className="mt-1 flex items-center gap-1.5 text-[11px] text-primary/80">

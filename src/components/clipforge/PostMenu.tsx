@@ -285,7 +285,18 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
                       if (busyNow) return;
                       if (canPost) void post(p.slug, p.label);
                       else if (p.status === "not_connected") void connect(p.slug);
-                      else void shareVia();
+                      else {
+                        // Unconfigured (needs_app): posting is impossible
+                        // until an app is registered. Sharing the FILE is the
+                        // honest thing that still achieves "post this MP4 to
+                        // this platform" — it lands in the platform's own app
+                        // via the OS sheet, with no credentials at all.
+                        toast.info(
+                          `${p.label} isn't set up for direct posting yet — sharing the MP4 instead.`,
+                          { description: "Add its API keys in Settings to upload straight to it." },
+                        );
+                        void shareVia();
+                      }
                     }}
                     className="flex w-full min-w-0 cursor-pointer flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-accent/40 disabled:opacity-50"
                   >
