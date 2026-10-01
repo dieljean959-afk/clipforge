@@ -19,6 +19,43 @@ import type { ClipDto } from "@/lib/api";
 /** Fired whenever one preview starts playing, so every other one pauses. */
 const PLAY_EVENT = "clipforge:clip-play";
 
+/** HTMLMediaElement error codes, named. */
+const MEDIA_ERR_ABORTED = 1;
+const MEDIA_ERR_NETWORK = 2;
+const MEDIA_ERR_DECODE = 3;
+const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+
+/**
+ * Whether a load failure is worth retrying.
+ *
+ * MEDIA_ERR_SRC_NOT_SUPPORTED (4) means the browser has definitively rejected
+ * the file — retrying that is pointless and it will just spin. Network (2) and
+ * decode (3) are transient far more often than not: a flaky mobile connection,
+ * a dev server restarting, a proxy hiccup mid-transfer. Treating those as fatal
+ * is what turned one blip into a permanent "this browser could not play the
+ * rendered file" card on a file that is perfectly fine — and on a phone that
+ * means the clip is unjudgeable with no way back.
+ */
+function isRetryable(code: number | undefined): boolean {
+  return code === undefined || code === MEDIA_ERR_NETWORK || code === MEDIA_ERR_DECODE;
+}
+
+/** Human-readable reason, so the card never says "it broke" with no detail. */
+function mediaErrorText(code: number | undefined, msg: string): string {
+  switch (code) {
+    case MEDIA_ERR_NETWORK:
+      return "The connection dropped while loading it. The file is fine — tap retry.";
+    case MEDIA_ERR_DECODE:
+      return "The connection stalled part-way through. The file is fine — tap retry.";
+    case MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return "This browser rejected the codec. Download it instead.";
+    case MEDIA_ERR_ABORTED:
+      return "Loading was cancelled. Tap retry.";
+    default:
+      return msg || "The file could not be loaded.";
+  }
+}
+
 /**
  * ClipPreview — plays the REAL rendered MP4 streamed from the server via the
  * same-origin /api endpoint. There is no scene generator here on purpose: a
@@ -80,10 +117,17 @@ export function ClipPreview({
   const [videoFailed, setVideoFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [cue, setCue] = useState("");
-  // 0 = first attempt, 1 = one retry already spent. A single retry covers the
-  // real cause (an aborted first request while the server was restarting)
-  // without looping forever on a genuinely broken file.
-  const [retryCount, setRetryCount] = useState(0);
+  // Network/decode failures are retried with a REAL cache-busting URL and a
+  // backoff before the error card is allowed to appear. The poster and the
+  // clip's metadata stay on screen throughout, so the frame is still judgeable
+  // even while the bytes are still arriving.
+  const [retry, setRetry] = useState(0);
+  const [retrying, setRetrying] = useState(false);
+  const [mediaError, setMediaError] = useState("");
+  // True only when the browser has definitively rejected the file (unsupported
+  // codec). Offering "Retry" in that case is a lie — it will never work.
+  const [fatalError, setFatalError] = useState(false);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The clip's own length: what the detection step asked for. Shown whenever
   // the element has not reported a usable duration.
@@ -101,11 +145,13 @@ export function ClipPreview({
   const resetKey = `${clip._id}:${autoPlay ? "1" : "0"}`;
 
   const hasMedia = videoUrl !== null;
-  // Cache-busted URL: a re-render replaces the bytes behind the same clip id,
-  // and an element that already failed (or already buffered the old encode)
-  // would otherwise never re-request them.
+  // Cache-busted on retry, and the counter MUST ride in the QUERY STRING, not
+  // after the `#`. A fragment is never sent to the server and does not
+  // participate in cache identity, so a counter placed there left the retry
+  // re-requesting the byte-identical URL — answerable from cache, which is why
+  // a failed load stayed failed.
   const src = videoUrl
-    ? `${videoUrl}#t=0.001${retryCount > 0 ? `&r=${retryCount}` : ""}`
+    ? `${videoUrl}${retry > 0 ? `?r=${retry}` : ""}#t=0.001`
     : null;
 
   // --- playback ---------------------------------------------------------
@@ -203,14 +249,38 @@ export function ClipPreview({
     setCue(cueAt(clip, t));
   };
 
-  const onError = () => {
-    if (retryCount === 0) {
-      // Retry once, fresh URL, before declaring the file unplayable.
-      setRetryCount(1);
-      setVideoFailed(false);
+  const onError = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const err = e.currentTarget.error;
+    const code = err?.code;
+    setFatalError(!isRetryable(code));
+    if (isRetryable(code) && retry < 3) {
+      // Backoff grows with the attempt so a dead connection is not hammered.
+      const wait = [0, 1200, 3000][retry] ?? 3000;
+      setRetrying(true);
+      setMediaError(mediaErrorText(code, err?.message ?? ""));
+      retryTimer.current = setTimeout(() => {
+        setRetry((n) => n + 1);
+        setRetrying(false);
+      }, wait);
       return;
     }
     setVideoFailed(true);
+    setMediaError(mediaErrorText(code, err?.message ?? ""));
+  };
+
+  // A new clip starts from a clean slate; a pending retry must not fire into it.
+  useEffect(() => {
+    return () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+    };
+  }, [clip._id]);
+
+  const manualRetry = () => {
+    if (retryTimer.current) clearTimeout(retryTimer.current);
+    setRetrying(false);
+    setVideoFailed(false);
+    setFatalError(false);
+    setRetry((n) => n + 1);
   };
 
   const controls = hasMedia && !videoFailed;
@@ -224,7 +294,7 @@ export function ClipPreview({
         )}
       >
         <div className="relative aspect-[9/16] w-full" key={resetKey}>
-          {hasMedia && !videoFailed && src !== null ? (
+          {hasMedia && src !== null && (!videoFailed || thumbUrl) ? (
             <video
               ref={videoRef}
               src={src}
@@ -249,28 +319,40 @@ export function ClipPreview({
               // which is how the total stayed "--:--".
               onDurationChange={onLoadedMetadata}
               onError={onError}
-            />
-          ) : thumbUrl && !videoFailed ? (
-            // rendered file exists but the browser failed to play it — still real
-            <img
-              src={thumbUrl}
-              alt="Clip first frame"
-              className="block h-full w-full object-cover"
+              onCanPlay={() => {
+                // The load succeeded, so any pending backoff is pointless.
+                if (retryTimer.current) clearTimeout(retryTimer.current);
+                setRetrying(false);
+                setVideoFailed(false);
+              }}
             />
           ) : videoFailed ? (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-muted/40 px-4 text-center">
               <Film className="size-7 text-muted-foreground/60" />
               <p className="text-xs text-muted-foreground">
-                This browser could not play the rendered file. Download it
-                instead — the MP4 itself is fine.
+                This browser could not play the rendered file.
               </p>
-              <a
-                href={api.clipDownloadUrl(clip._id)}
-                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-[11px] font-medium text-foreground transition hover:bg-accent"
-              >
-                <Download className="size-3" />
-                Download MP4
-              </a>
+              <p className="px-2 text-[10px] leading-relaxed text-muted-foreground/80">
+                {mediaError || "Download it instead — the MP4 itself is fine."}
+              </p>
+              <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
+                {!fatalError && (
+                  <button
+                    type="button"
+                    onClick={manualRetry}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-[11px] font-semibold text-primary-foreground transition hover:opacity-90"
+                  >
+                    Retry
+                  </button>
+                )}
+                <a
+                  href={api.clipDownloadUrl(clip._id)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-[11px] font-medium text-foreground transition hover:bg-accent"
+                >
+                  <Download className="size-3" />
+                  Download MP4
+                </a>
+              </div>
             </div>
           ) : (
             // honest empty state — no video, no invented frames
@@ -298,9 +380,18 @@ export function ClipPreview({
             </p>
           )}
 
+          {/* retrying banner — the frame stays, so a blip is not a dead card */}
+          {retrying && (
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center pt-2">
+              <span className="rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-medium text-white/90">
+                Reconnecting…
+              </span>
+            </div>
+          )}
+
           {/* controls only over real media */}
           {controls && (
-            <div className="absolute inset-x-0 bottom-0 z-20 flex items-center gap-2 bg-gradient-to-t from-black/85 to-transparent px-3 pb-2 pt-6">
+            <div className="absolute inset-x-0 bottom-0 z-20 flex items-center gap-1.5 bg-gradient-to-t from-black/85 to-transparent px-2 pb-2 pt-6">
               <button
                 type="button"
                 onClick={() => void togglePlay()}
@@ -356,7 +447,7 @@ export function ClipPreview({
                   if (e.key === "ArrowRight") v.currentTime = Math.min(duration, v.currentTime + 5);
                   if (e.key === "ArrowLeft") v.currentTime = Math.max(0, v.currentTime - 5);
                 }}
-                className="relative h-6 flex-1 cursor-pointer touch-none"
+                className="relative h-6 min-w-8 flex-1 cursor-pointer touch-none"
               >
                 <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-white/25">
                   <div
@@ -370,7 +461,7 @@ export function ClipPreview({
                 />
               </div>
 
-              <span className="shrink-0 font-mono text-[9px] text-white/80">
+              <span className="shrink-0 whitespace-nowrap font-mono text-[9px] tabular-nums text-white/80">
                 {fmtClock(time)} / {duration !== null ? fmtClock(duration) : "--:--"}
               </span>
 
@@ -421,6 +512,7 @@ function ClipLightbox({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLVideoElement | null>(null);
+  const [t, setT] = useState(0);
 
   // Move focus into the dialog so Escape and the close button are reachable
   // without hunting for them.
@@ -429,6 +521,15 @@ function ClipLightbox({
   }, []);
 
   if (src === null) return null;
+
+  // A phone on a bad connection cannot always stream the clip — and "can I
+  // play it" is not the same question as "is this clip any good". The full cue
+  // list is on screen either way, so the hook, the wording and the caption
+  // timing stay judgeable even when the bytes will not arrive.
+  const cues = clip.captionCues ?? [];
+  const activeIndex = cues.findIndex(
+    (c) => t >= c.start - 0.05 && t <= c.end + 0.05,
+  );
 
   // Portalled to <body> on purpose. `position: fixed` is only viewport-relative
   // while no ancestor establishes a containing block — and the dashboard uses
@@ -475,15 +576,49 @@ function ClipLightbox({
             // Still only one clip at a time.
             window.dispatchEvent(new CustomEvent(PLAY_EVENT, { detail: e.currentTarget }));
           }}
+          onTimeUpdate={(e) => setT(e.currentTarget.currentTime)}
           className="block max-h-full w-full max-w-[min(100%,56vh)] object-contain"
           style={{ display: "block" }}
         />
       </div>
 
-      <p className="px-3 pb-3 text-center font-mono text-[10px] text-white/60">
-        {duration !== null ? fmtClock(duration) : "--:--"} ·{" "}
-        {fmtDuration(clip.start)} → {fmtDuration(clip.end)}
-      </p>
+      {cues.length > 0 && (
+        <div className="max-h-[28vh] shrink-0 overflow-y-auto border-t border-white/10 px-3 py-2">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-white/50">
+            Captions as rendered · {cues.length} cues
+          </p>
+          <ol className="space-y-0.5">
+            {cues.map((cue, i) => (
+              <li
+                key={`${cue.start}-${i}`}
+                className={cn(
+                  "flex gap-2 rounded px-1.5 py-1 text-left text-[12px] leading-snug transition",
+                  i === activeIndex ? "bg-primary/25 text-white" : "text-white/70",
+                )}
+              >
+                <span className="shrink-0 font-mono text-[10px] text-white/40">
+                  {fmtClock(cue.start)}
+                </span>
+                <span className="min-w-0">{cue.text}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      <div className="flex shrink-0 items-center justify-between gap-3 px-3 pb-3">
+        <p className="font-mono text-[10px] text-white/60">
+          {duration !== null ? fmtClock(duration) : "--:--"} ·{" "}
+          {fmtDuration(clip.start)} → {fmtDuration(clip.end)}
+        </p>
+        <a
+          href={api.clipDownloadUrl(clip._id)}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-white/20 px-2.5 py-1.5 text-[11px] font-medium text-white transition hover:bg-white/10"
+        >
+          <Download className="size-3" />
+          Download MP4
+        </a>
+      </div>
     </div>,
     document.body,
   );

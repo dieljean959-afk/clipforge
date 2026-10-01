@@ -244,10 +244,11 @@ def test_frontend() -> None:
     check("the source carries a #t= media fragment", "#t=0.001" in body)
     check("loadedmetadata is handled", "onLoadedMetadata" in body)
     check("durationchange is handled", "onDurationChange" in body)
-    check("an error triggers a retry", "setRetryCount" in body and "onError" in body)
-    check("the retry is cache-busted", "&r=" in body)
-    check("the error card offers a download",
-          "Download MP4" in body and "clipDownloadUrl" in body)
+    check("an error triggers a retry", "manualRetry" in body and "onError" in body)
+    check("the retry is cache-busted in the QUERY string",
+          "?r=${retry}" in body and "&r=" not in body)
+    check("the error card offers a download AND a retry",
+          "Download MP4" in body and "clipDownloadUrl" in body and "Retry" in body)
 
     # Duration fallback: the clip's own length, used when duration is NaN or
     # Infinity. This is what turns "0:00 / --:--" into "0:00 / 0:17".

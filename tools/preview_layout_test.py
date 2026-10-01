@@ -4,6 +4,7 @@ Two complaints, one of which turned out not to be a rendering bug at all:
 
   "the frame only fills the top ~60%, with a black area below it"
   "I need real playback"
+  "it doesn't play"
 
 THE BLACK AREA IS NOT IN THE FILE. ffprobe on a real rendered clip: 1080x1920,
 no rotation matrix, no SAR override. A frame-by-frame luminance scan finds ZERO
@@ -17,12 +18,20 @@ THE PLAYBACK WAS BROKEN, and provably so: ClipCard wrapped the video in a
 transparent <button> covering the entire frame to open the detail dialog. Every
 tap hit that button, so `video.play()` was never called. That overlay is gone.
 
+AND THE RETRY WAS A NO-OP. The cache-buster rode AFTER the `#`, making it part
+of the fragment — which is never sent to the server and is not part of cache
+identity. So the "retry" re-requested the byte-identical URL, could be answered
+from cache, and one dropped connection became a permanent error card on a file
+ffprobe says is fine.
+
 These tests pin the fixes and the invariants that keep them true:
   - taps reach the <video>; no transparent overlay sits above it
   - the frame is a 9:16 box and the video fills it edge to edge (display:block
     matters — <video> is inline by default and leaves a baseline gap)
   - play/pause/seek/mute are wired to real media events, and only one clip in
     a grid plays at a time
+  - transient network/decode failures retry with a REAL new URL and a backoff;
+    a rejected codec does not loop forever; the poster stays visible throughout
   - the review modal is portalled, native-controls, unmuted, closable
   - renders pin setsar=1, so a non-square-pixel source cannot letterbox
   - every clip actually on disk is 1080x1920 with no rotation
@@ -249,6 +258,10 @@ def test_lightbox() -> None:
     check("it closes on Escape", 'e.key === "Escape"' in body)
     check("it has a visible close button", "aria-label=\"Close preview\"" in body)
     check("closing from the backdrop works", "onClose()" in body)
+    check("the cue list is on screen, so a clip is judgeable without streaming",
+          "Captions as rendered" in body and "clip.captionCues ?? []" in body)
+    check("the active cue is highlighted as it plays", "activeIndex" in body)
+    check("the lightbox offers the MP4 directly", "clipDownloadUrl(clip._id)" in body)
 
 
 def test_caption_preview() -> None:
@@ -262,6 +275,52 @@ def test_caption_preview() -> None:
     check("the overlay only shows during playback", 'controls && cue !== ""' in body)
 
 
+def test_resilient_loading() -> None:
+    print("\n[9] a flaky connection does not permanently kill a clip")
+    body = src("src/components/clipforge/ClipPreview.tsx")
+
+    # THE bug this section exists for: the retry rode AFTER the '#', so it was
+    # part of the fragment, which never reaches the server and is not part of
+    # cache identity. The "cache-busted" retry re-requested the identical URL.
+    check("the retry counter is in the QUERY string, before the fragment",
+          "${videoUrl}${retry > 0 ? `?r=${retry}` : \"\"}#t=0.001" in body,
+          "no query-string retry found")
+    check("no retry parameter is built into the fragment",
+          "#t=0.001" in body and "?r=${retry}" in body)
+
+    check("network errors are classified as retryable",
+          "code === MEDIA_ERR_NETWORK" in body)
+    check("decode errors are classified as retryable",
+          "code === MEDIA_ERR_DECODE" in body)
+    check("an unsupported codec is NOT retried pointlessly",
+          "MEDIA_ERR_SRC_NOT_SUPPORTED" in body and "isRetryable(code)" in body)
+    check("the Retry button is hidden when the codec is truly unsupported",
+          "fatalError" in body and "{!fatalError && (" in body)
+    check("retries are bounded", "retry < 3" in body)
+    check("retries back off rather than hammering",
+          "[0, 1200, 3000]" in body)
+    check("a successful load cancels a pending retry",
+          "onCanPlay" in body and "clearTimeout(retryTimer.current)" in body)
+    check("there is a manual Retry button",
+          "manualRetry" in body and "Retry" in body)
+    check("the error explains itself instead of shrugging",
+          "connection dropped" in body and "stalled" in body)
+    check("the poster stays on screen while broken, so the frame is judgeable",
+          "(!videoFailed || thumbUrl)" in body)
+    check("a reconnecting banner is shown", "Reconnecting" in body)
+
+
+def test_controls_fit_a_phone() -> None:
+    print("\n[10] the control bar survives a 2-up phone grid")
+    body = src("src/components/clipforge/ClipPreview.tsx")
+    # The seek track collapsed to zero width on a narrow card, so its 12px
+    # thumb rendered on top of the mute button and the time was clipped.
+    check("the seek track has a minimum width", "min-w-8" in body)
+    check("the time readout cannot be squeezed shut",
+          "shrink-0 whitespace-nowrap" in body)
+    check("the row is not cramped by its own gaps", 'gap-1.5' in body)
+
+
 def main() -> int:
     test_render_geometry()
     test_existing_clips()
@@ -271,6 +330,8 @@ def main() -> int:
     test_only_one_plays()
     test_lightbox()
     test_caption_preview()
+    test_resilient_loading()
+    test_controls_fit_a_phone()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
