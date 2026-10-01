@@ -28,8 +28,16 @@ import { cn } from "@/lib/utils";
  * The file path is the upgrade, and the badge says which one a tap will get.
  */
 
-/** Never leave the spinner up forever if something goes wrong upstream. */
-const READY_TIMEOUT_MS = 120_000;
+/**
+ * Never leave the spinner up forever if something goes wrong upstream.
+ *
+ * Deliberately short. This copy is fetched from a server that transcodes on a
+ * miss, so a clip that is not ready in half a minute is not going to be ready
+ * in two — and a ring that runs for minutes reads as a broken button, not as
+ * progress. Timing out just puts the card back on the instant link path, which
+ * is the outcome a tap produces either way.
+ */
+const READY_TIMEOUT_MS = 25_000;
 
 export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boolean }) {
   const [entry, setEntry] = useState<cache.ShareEntry>(() => cache.getEntry(clip._id));

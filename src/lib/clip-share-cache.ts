@@ -47,6 +47,23 @@ export type ShareListener = (clipId: string, entry: ShareEntry) => void;
 const MAX_CONCURRENT = 2;
 
 /**
+ * Cap on how many clips may prefetch at once, queued plus in flight.
+ *
+ * The share endpoint is not a static file server: on a miss it transcodes, and
+ * that competes with the host's CPU for every other job. Prefetching a whole
+ * batch therefore queues work that mostly finishes long after the user stopped
+ * looking — a 13-clip grid is ~33 MB of mobile data and ~13 transcodes, and
+ * measured on the 1-CPU reference host the last card did not reach Ready until
+ * well past the point anyone would wait.
+ *
+ * Past the cap a card stays on the link path. That is not a downgrade: the
+ * share link IS this clip served from this origin, and tapping it is instant.
+ * The cap only stops the app from eagerly spending a phone's data and a
+ * server's CPU on clips the user may never share.
+ */
+const MAX_PREFETCH = 4;
+
+/**
  * Retries, with backoff. Three attempts is deliberate: a prefetch that keeps
  * retrying forever drains the battery and competes with the video the user is
  * actually watching, and after three failures the link path is a better answer
@@ -275,6 +292,7 @@ async function fetchWithProgress(
   url: string,
   clipId: string,
   attempt: number,
+  signal: AbortSignal,
 ): Promise<Blob> {
   const backoff = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
   if (backoff > 0) await new Promise((r) => setTimeout(r, backoff));
@@ -283,7 +301,7 @@ async function fetchWithProgress(
   const headers: Record<string, string> = {};
   if (from > 0) headers.Range = `bytes=${from}-`;
 
-  const res = await fetch(url, { headers, cache: "force-cache" });
+  const res = await fetch(url, { headers, cache: "force-cache", signal });
   if (!res.ok && res.status !== 206) {
     throw new Error(`HTTP ${res.status}`);
   }
@@ -321,11 +339,11 @@ async function fetchWithProgress(
   return new Blob(chunks, { type: "video/mp4" });
 }
 
-async function run(clipId: string, url: string, fileName: string) {
+async function run(clipId: string, url: string, fileName: string, signal: AbortSignal) {
   let lastError = "";
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      const blob = await fetchWithProgress(url, clipId, attempt);
+      const blob = await fetchWithProgress(url, clipId, attempt, signal);
       if (!blob || blob.size === 0) throw new Error("empty response");
       await idbPut(clipId, blob);
       // Build the File NOW, off the tap path. This is the object the click
@@ -335,6 +353,13 @@ async function run(clipId: string, url: string, fileName: string) {
       emit(clipId, { ready: true, error: null, loaded: blob.size, total: blob.size });
       return;
     } catch (err) {
+      // An abort is a decision, not a failure. `invalidate` stopped this on
+      // purpose, so retrying would resurrect the very ring the caller just
+      // cancelled and leave it spinning forever. Settle once and stay quiet.
+      if (signal.aborted) {
+        emit(clipId, { inFlight: false });
+        return;
+      }
       lastError = err instanceof Error ? err.message : String(err);
       if (attempt < MAX_ATTEMPTS - 1) {
         // A failed attempt leaves `loaded` at whatever it reached, which is
@@ -353,7 +378,7 @@ function pump() {
     const job = jobs.get(clipId);
     if (!job) continue;
     active++;
-    run(clipId, job.url, job.fileName)
+    run(clipId, job.url, job.fileName, job.controller.signal)
       .catch(() => {
         /* run() already recorded the error */
       })
@@ -383,15 +408,19 @@ export function prefetch(clipId: string, url: string, fileName: string): void {
   }
   if (entries.get(clipId)?.inFlight) return;
   if (jobs.has(clipId)) return;
+  if (jobs.size >= MAX_PREFETCH) return;
 
-  jobs.set(clipId, { clipId, url, fileName });
+  jobs.set(clipId, { clipId, url, fileName, controller: new AbortController() });
   emit(clipId, { inFlight: true, error: null });
   queue.push(clipId);
   pump();
 }
 
 /** clipId -> the url/name the prefetch is using. */
-const jobs = new Map<string, { clipId: string; url: string; fileName: string }>();
+const jobs = new Map<
+  string,
+  { clipId: string; url: string; fileName: string; controller: AbortController }
+>();
 
 /**
  * Restore a prefetched blob from IndexedDB into memory.
@@ -417,6 +446,11 @@ export async function hydrate(clipId: string, fileName: string): Promise<boolean
 
 /** Forget one clip (a re-render, a deleted job). */
 export function invalidate(clipId: string): void {
+  // Abort BEFORE dropping the bookkeeping. A fetch that is merely forgotten
+  // keeps running, keeps emitting progress, and the ring the caller just
+  // cancelled comes back — which is exactly how a share button ended up
+  // spinning for minutes after it had already given up.
+  jobs.get(clipId)?.controller.abort();
   const f = memory.get(clipId);
   if (f) {
     memoryBytes -= f.size;
@@ -430,6 +464,7 @@ export function invalidate(clipId: string): void {
 
 /** Drop everything. Used when the user switches batches. */
 export function clear(): void {
+  for (const job of jobs.values()) job.controller.abort();
   memory.clear();
   entries.clear();
   jobs.clear();

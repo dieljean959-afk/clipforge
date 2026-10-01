@@ -300,6 +300,57 @@ def test_service_worker() -> None:
           or "navigator.serviceWorker" in main)
 
 
+# --------------------------------------------------------------------------
+# 7. the ring always terminates
+# --------------------------------------------------------------------------
+
+
+def test_spinner_terminates() -> None:
+    """A cancelled prefetch must actually stop.
+
+    The complaint this guards is a Share button that spins for minutes. The
+    cause was not a slow server: `invalidate` dropped the bookkeeping for an
+    in-flight fetch but never aborted it, so the request kept running, kept
+    emitting progress, and the ring the button had just cancelled came back.
+    """
+
+    section("7. a cancelled prefetch really stops, and not the whole batch")
+    cache = _ts_code("src/lib/clip-share-cache.ts")
+
+    check("every job carries an AbortController",
+          "controller: AbortController" in cache)
+    check("the fetch actually receives the signal",
+          re.search(r"fetch\(url, \{[^}]*signal", cache) is not None)
+    check("invalidate aborts before it forgets the job",
+          re.search(r"jobs\.get\(clipId\)\?\.controller\.abort\(\);", cache)
+          is not None)
+    check("clearing the cache aborts every in-flight job",
+          "for (const job of jobs.values()) job.controller.abort();" in cache)
+
+    # An abort must not be retried: retrying is what resurrected the ring.
+    check("an aborted run stops instead of retrying",
+          "if (signal.aborted) {" in cache
+          and re.search(r"if \(signal\.aborted\) \{\s*\n\s*emit\(", cache) is not None)
+    check("an aborted run settles the in-flight flag",
+          re.search(r"if \(signal\.aborted\) \{[^}]*inFlight: false", cache)
+          is not None)
+
+    # A batch is not prefetched wholesale: 13 cards would otherwise queue ~33 MB
+    # of mobile data and a transcoder's worth of work for clips nobody taps.
+    check("prefetching a whole batch is capped",
+          "MAX_PREFETCH" in cache and "jobs.size >= MAX_PREFETCH" in cache)
+    check("the cap is small enough to be a real cap",
+          re.search(r"const MAX_PREFETCH = (\d+);", cache) is not None
+          and int(re.search(r"const MAX_PREFETCH = (\d+);", cache).group(1)) <= 6)
+
+    btn = _ts_code("src/components/clipforge/ShareButton.tsx")
+    ms = re.search(r"const READY_TIMEOUT_MS = ([\d_]+);", btn)
+    check("the preparing ring gives up on a human timescale", ms is not None)
+    if ms:
+        check("the timeout is short enough that nobody waits it out",
+              int(ms.group(1).replace("_", "")) <= 45_000, f"{ms.group(1)} ms")
+
+
 def main() -> int:
     test_share_encoding()
     test_invalidation()
@@ -307,6 +358,7 @@ def main() -> int:
     test_abort_is_not_an_error()
     test_prefetch()
     test_service_worker()
+    test_spinner_terminates()
     print(f"\n{'=' * 60}\n  {PASS} passed, {FAIL} failed\n{'=' * 60}")
     return 1 if FAIL else 0
 
