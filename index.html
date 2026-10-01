@@ -37,6 +37,15 @@
       background: #22c55e; color: #052e16; font-weight: 700;
       font-size: 13px; padding: 10px 18px;
     }
+    #boot button.ghost {
+      background: transparent; color: #a1a1aa; border: 1px solid #3f3f46;
+      margin-left: 8px; font-weight: 600;
+    }
+    #boot .actions { display: flex; gap: 0; justify-content: center; flex-wrap: wrap; }
+    #boot .status {
+      margin: 14px 0 0; font-size: 11px; letter-spacing: .04em;
+      text-transform: uppercase; color: #71717a; min-height: 14px;
+    }
     #boot .spin {
       display: inline-block; width: 13px; height: 13px; margin-right: 8px;
       vertical-align: -2px; border: 2px solid #3f3f46; border-top-color: #22c55e;
@@ -64,7 +73,11 @@
       <p class="title"><span class="spin"></span><span id="boot-title">Starting ClipForge…</span></p>
       <p class="sub" id="boot-sub">Loading the app. This normally takes a few seconds.</p>
       <pre class="err" id="boot-err" hidden></pre>
-      <button id="boot-reload" hidden onclick="location.reload()">Reload</button>
+      <p class="status" id="boot-status"></p>
+      <div class="actions" hidden id="boot-actions">
+        <button id="boot-reload">Reload now</button>
+        <button class="ghost" id="boot-stop">Stop auto-retry</button>
+      </div>
     </div>
   </div>
 
@@ -74,20 +87,72 @@
       // fallback and tells these handlers there is nothing left to report.
       window.__clipforgeBooted = false;
 
+      // A restart of the dev server leaves this tab holding a page whose module
+      // URLs 404 until it is re-fetched, and while the server itself is down the
+      // proxy answers 502. Both are fixed by the same thing: re-request the
+      // document. A plain location.reload() can be served from cache and fail
+      // identically, so every attempt adds a cache-busting query and forces a
+      // fresh fetch of index.html.
+      var MAX_ATTEMPTS = 30;
+      var RETRY_MS = 5000;
+      var attempt = 0;
+      var timer = null;
+
+      function hardReload() {
+        if (window.__clipforgeBooted) return;
+        attempt += 1;
+        var url = location.pathname + "?reload=" + Date.now();
+        location.replace(url);
+      }
+
+      function status(text) {
+        var el = document.getElementById("boot-status");
+        if (el) el.textContent = text;
+      }
+
+      function schedule() {
+        if (timer || attempt >= MAX_ATTEMPTS) return;
+        var next = attempt + 1;
+        var tick = function () {
+          if (next > MAX_ATTEMPTS) {
+            status("Stopped retrying. Reload once the server is back.");
+            return;
+          }
+          var left = Math.ceil((next * RETRY_MS - (Date.now() - window.__clipforgeT0)) / 1000);
+          status("Retrying in " + Math.max(0, left) + "s — attempt " + next + " of " + MAX_ATTEMPTS);
+        };
+        tick();
+        timer = setInterval(tick, 1000);
+        setTimeout(function () {
+          clearInterval(timer);
+          timer = null;
+          if (attempt < MAX_ATTEMPTS) hardReload();
+        }, RETRY_MS);
+      }
+
       function fail(message) {
         if (window.__clipforgeBooted) return;
         var boot = document.getElementById("boot");
-        if (!boot) return;
+        if (!boot || boot.classList.contains("failed")) return;
+        window.__clipforgeT0 = Date.now();
         boot.classList.add("failed");
         document.getElementById("boot-title").textContent = "ClipForge didn't start";
         document.getElementById("boot-sub").textContent =
-          "The app's JavaScript failed to load. This is usually a stale page after a " +
-          "restart — a reload normally fixes it.";
+          "The app's JavaScript failed to load — usually a dev server that is restarting " +
+          "or stopped. Leave this tab open; it retries on its own until it comes back.";
         var err = document.getElementById("boot-err");
         err.textContent = message;
         err.hidden = false;
-        document.getElementById("boot-reload").hidden = false;
+        document.getElementById("boot-actions").hidden = false;
+        schedule();
       }
+
+      document.getElementById("boot-reload").addEventListener("click", hardReload);
+      document.getElementById("boot-stop").addEventListener("click", function () {
+        attempt = MAX_ATTEMPTS;
+        if (timer) { clearInterval(timer); timer = null; }
+        status("Auto-retry stopped.");
+      });
 
       // A <script type="module"> that cannot be fetched or evaluated fires an
       // error event on the element itself, which never reaches window.onerror.
