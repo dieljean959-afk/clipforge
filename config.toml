@@ -459,7 +459,9 @@ auto_update = true
 max_source_min = 120
 
 # Finished downloads/outputs are deleted this long after a job completes.
-retention_hours = 24
+# 0 = never auto-delete. Keep it 0 unless you actively want batches to expire:
+# the sweep is destructive and, before trash existed, unrecoverable.
+retention_hours = 0
 
 # Remote worker dispatch (Tailscale mode B): when set, e.g.
 #   WORKER_URL = "http://100.101.102.103:8765"

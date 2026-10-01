@@ -205,16 +205,115 @@ class LocalStore:
                 json.dumps({"jobId": job_id, "at": int(time.time() * 1000)}),
                 encoding="utf-8",
             )
-            # remove rendered artifacts + transcripts for this job
+            # Move the documents and rendered media to data/trash/ instead of
+            # unlinking them. Deleting used to be IRREVERSIBLE: the retention
+            # sweep calls this on every job older than retention_hours (24h by
+            # default), so a batch finished on Monday was unrecoverable by
+            # Tuesday — the job record, the clip records and every rendered
+            # MP4 were gone with no backup and no undo, which is exactly how a
+            # user's whole library vanished overnight. Trash keeps the bytes and
+            # restore_job() puts them back; the job is still invisible to the
+            # app either way, because the tombstone still blocks list_jobs().
+            trash = self._trash_dir(job_id)
+            moved = 0
             for clip in self.list_clips(job_id):
                 for key in ("videoPath", "thumbPath"):
                     p = clip.get(key)
                     if p:
-                        Path(p).unlink(missing_ok=True)
-                cpath = self._paths.data_dir / "clips" / f"{clip['_id']}.json"
-                cpath.unlink(missing_ok=True)
-            self._job_path(job_id).unlink(missing_ok=True)
-            logger.info(f"[store] deleted job {job_id} and its clips (tombstoned)")
+                        moved += self._move_to_trash(Path(p), trash / "media")
+                cpath = self._clip_path(clip["_id"])
+                moved += self._move_to_trash(cpath, trash / "clips")
+            moved += self._move_to_trash(self._job_path(job_id), trash)
+            (trash / "meta.json").write_text(
+                json.dumps({"jobId": job_id, "at": int(time.time() * 1000), "moved": moved}),
+                encoding="utf-8",
+            )
+            logger.info(
+                f"[store] deleted job {job_id} and its clips (tombstoned); "
+                f"{moved} file(s) moved to {trash} — restorable"
+            )
+        return True
+
+    # ------------------------------------------------------------------
+    # trash / restore
+    # ------------------------------------------------------------------
+
+    def _trash_dir(self, job_id: str) -> Path:
+        """`data/trash/<jobId>-<timestamp>` — one dir per deletion."""
+        return self._paths.data_dir / "trash" / f"{job_id}-{int(time.time())}"
+
+    @staticmethod
+    def _move_to_trash(src: Path, dest_dir: Path) -> int:
+        """Move one file into `dest_dir`, keeping its name. Returns 1 on move."""
+        if not src.exists():
+            return 0
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            target = dest_dir / src.name
+            # never clobber a same-named file from an earlier deletion
+            if target.exists():
+                target = dest_dir / f"{src.stem}.{int(time.time())}{src.suffix}"
+            src.replace(target)
+            return 1
+        except OSError as exc:
+            # A locked/unreadable artifact must not abort the deletion — the
+            # tombstone is what makes the job disappear, and a leftover file in
+            # trash is strictly better than a resurrected job.
+            logger.warning(f"[store] could not move {src} to trash: {exc}")
+            return 0
+
+    def restore_job(self, job_id: str) -> bool:
+        """Undo the most recent delete of `job_id` from the trash.
+
+        Restores the job document, its clip documents and any rendered media
+        that was still on disk, and clears the tombstone so the job (and its
+        late writes, if a child is still running) become live again.
+        """
+        tomb = self._tombstone_path(job_id)
+        if not tomb.exists():
+            return False
+        with self._lock:
+            candidates = sorted(
+                (self._paths.data_dir / "trash").glob(f"{job_id}-*"),
+                key=lambda p: p.name,
+            )
+            if not candidates:
+                logger.warning(f"[store] restore {job_id}: tombstone but no trash dir")
+                return False
+            trash = candidates[-1]
+            restored = 0
+            # Rendered media is restored to the absolute path recorded in the
+            # clip doc, not to a guessed directory — that is the only place the
+            # app will look for it.
+            media_dir = trash / "media"
+            clip_dir = trash / "clips"
+            trashed_clips = sorted(clip_dir.glob("*.json")) if clip_dir.exists() else []
+            for cpath in trashed_clips:
+                try:
+                    clip = json.loads(cpath.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    logger.warning(f"[store] restore {job_id}: unreadable {cpath.name}: {exc}")
+                    clip = {}
+                for key in ("videoPath", "thumbPath"):
+                    p = clip.get(key)
+                    if not p:
+                        continue
+                    candidate = media_dir / Path(str(p)).name
+                    if not candidate.exists():
+                        continue
+                    try:
+                        target = Path(str(p))
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        candidate.replace(target)
+                        restored += 1
+                    except OSError as exc:
+                        logger.warning(f"[store] restore {job_id}: cannot place {p}: {exc}")
+                restored += self._move_to_trash(cpath, self._paths.data_dir / "clips")
+            src_job = trash / f"{job_id}.json"
+            if src_job.exists():
+                restored += self._move_to_trash(src_job, self._paths.data_dir / "jobs")
+            tomb.unlink(missing_ok=True)
+            logger.info(f"[store] restored job {job_id} from {trash} ({restored} file(s))")
         return True
 
     def _tombstone_path(self, job_id: str) -> Path:

@@ -1504,7 +1504,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     h = raw.get("hosted", {})
     hosted = HostedConfig(
         max_source_min=max(1, int(h.get("max_source_min", os.getenv("CLIPFORGE_MAX_SOURCE_MIN", 120)))),
-        retention_hours=max(1, int(h.get("retention_hours", os.getenv("CLIPFORGE_RETENTION_HOURS", 24)))),
+        retention_hours=max(0, int(h.get("retention_hours", os.getenv("CLIPFORGE_RETENTION_HOURS", 24)))),
         worker_url=(os.getenv("WORKER_URL") or h.get("worker_url", "") or "").strip().rstrip("/"),
         worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),
         tailscale_only=str(os.getenv("TAILSCALE_ONLY", str(h.get("tailscale_only", False)))).strip().lower()
@@ -1644,7 +1644,12 @@ def boot_banner(settings: Settings) -> None:
         print(f"[boot] WARNING: {engine.model_note}")
     print(f"[boot] Output: {settings.video.width}x{settings.video.height} @ {settings.video.fps}fps CRF {settings.video.crf}")
     print(f"[boot] Folders: {settings.app.paths.downloads_dir} / {settings.app.paths.outputs_dir} / {settings.app.paths.data_dir}")
-    print(f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min | retention: {settings.hosted.retention_hours}h")
+    retention = (
+        "disabled (jobs are never auto-deleted)"
+        if settings.hosted.retention_hours <= 0
+        else f"{settings.hosted.retention_hours}h"
+    )
+    print(f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min | retention: {retention}")
     print(f"[boot] Worker pool: {settings.hosted.worker_concurrency} parallel job(s) (one child process each)")
     if settings.hosted.worker_url:
         print(f"[boot] Worker dispatch: {settings.hosted.worker_url} (rendering happens on the remote worker)")

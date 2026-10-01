@@ -318,8 +318,12 @@ class RetentionCleaner:
     def start(self) -> None:
         threading.Thread(target=self._run, name="clipforge-retention", daemon=True).start()
         logger.info(
-            f"[hosting] retention cleaner online — outputs deleted "
-            f"{self.settings.hosted.retention_hours}h after completion"
+            "[hosting] retention cleaner online — outputs deleted "
+            + (
+                "never (retention disabled)"
+                if self.settings.hosted.retention_hours <= 0
+                else f"{self.settings.hosted.retention_hours}h after completion"
+            )
         )
 
     def stop(self) -> None:
@@ -333,6 +337,12 @@ class RetentionCleaner:
                 logger.error(f"[hosting] retention sweep failed: {exc}")
 
     def sweep(self) -> int:
+        if self.settings.hosted.retention_hours <= 0:
+            # retention_hours = 0 means "never expire anything". A library
+            # that silently empties itself while nobody is looking is far
+            # worse than a disk that fills up, so the off switch has to be
+            # reachable from config alone.
+            return 0
         cutoff = time.time() * 1000 - self.settings.hosted.retention_hours * 3600 * 1000
         removed = 0
         for job in self.store.list_jobs():

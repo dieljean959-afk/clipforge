@@ -1214,6 +1214,20 @@ def delete_job(job_id: str) -> dict:
     return {"deleted": True, "cancelled": cancelled}
 
 
+@app.post("/api/jobs/{job_id}/restore")
+def restore_job(job_id: str) -> dict:
+    """Undo a delete: job + clip docs + rendered media come back from trash.
+
+    Deletes used to be a one-way door — the retention sweep emptied whole
+    libraries with no undo — so this exists to make a mistake recoverable
+    without waiting for someone to restore a backup.
+    """
+    ok = store.restore_job(job_id)
+    if not ok:
+        raise HTTPException(404, "nothing to restore for this job")
+    return {"restored": True, "jobId": job_id}
+
+
 @app.post("/api/jobs/{job_id}/pause")
 def pause_job(job_id: str) -> dict:
     """Stop a job at its next safe boundary (never mid-write)."""
