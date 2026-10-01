@@ -16,6 +16,7 @@ request we WOULD send, which is the part a live test cannot check.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -528,17 +529,22 @@ check("TS caption cap matches Python", "MAX_CAPTION_CHARS = 150" in ts_src)
 # Share via... vs Post to... — two different things, two different words.
 # --------------------------------------------------------------------------- #
 menu = (ROOT / "src" / "components" / "clipforge" / "PostMenu.tsx").read_text()
-share_row = div_block_from(menu, "Share via...", "button")
+share_row = div_block_from(menu, "Share the MP4 file...", "button")
 # JSX wraps prose across lines, so match against a whitespace-collapsed copy:
 # "share\n  sheet" is the same sentence a reader sees as "share sheet".
 share_flat = " ".join(share_row.split())
-check("the share-sheet action is labelled 'Share via...'", "Share via..." in menu)
+check(
+    "the share-sheet action is labelled as sending the FILE",
+    "Share the MP4 file..." in menu,
+)
 check(
     "the old ambiguous label is gone ('Share sheet / download instead' next to "
     "'Post to...' is exactly the confusion this replaces)",
     "Share sheet / download instead" not in menu,
 )
-check("the posting trigger still says 'Post to...'", "Post to..." in menu)
+# The trigger was relabelled 'Share...' when the sheet grew real platform rows:
+# it is no longer only about posting through a connected account.
+check("the trigger says 'Share...'", "Share..." in menu)
 check(
     "the share row says what it actually does (share sheet + burned-in captions)",
     "share sheet" in share_flat and "captions burned in" in share_flat,
@@ -618,8 +624,18 @@ check("the sheet opens from the bottom of the screen",
       'side="bottom"' in menu)
 check("nothing can keep the panel open after a tap (preventDefault on a row is "
       "what held the modal layer over the page)", "preventDefault" not in code_only(menu))
-check("every action row dismisses the sheet first (the platform list AND the "
-      "share row must both close it)", menu.count("setOpen(false)") == 2)
+# Every actionable row must dismiss the sheet, or a slow post pins the modal
+# layer over the page and the rest of the batch cannot be reached. Counted
+# structurally (one close per click handler) rather than pinned to a literal
+# count, so adding a legitimate row does not read as a regression.
+click_handlers = re.findall(r"onClick=\{\(\) => \{(.*?)\}\}", code_only(menu), re.S)
+_dismiss = sum("setOpen(false)" in h for h in click_handlers)
+check(
+    f"every action row dismisses the sheet first ({_dismiss}/{len(click_handlers)} "
+    "handlers close it: the platform list, the share intents, copy-link and the "
+    "share row must all dismiss)",
+    len(click_handlers) >= 4 and _dismiss == len(click_handlers),
+)
 _menu_code = code_only(menu)
 check("the dismiss happens BEFORE the action is kicked off (close first, then "
       "upload, or a slow post pins the sheet open)",

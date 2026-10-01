@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Check,
+  Copy,
   ExternalLink,
+  Link2,
   Loader2,
   Send,
   Share2,
@@ -18,6 +20,12 @@ import {
 } from "@/components/ui/sheet";
 import { api, type ClipDto, type SocialPlatformDto, type SocialSlug } from "@/lib/api";
 import { buildPostCaption, clipFileName } from "@/lib/clip-export";
+import {
+  clipShareUrl,
+  intentUrl,
+  openIntent,
+  visibleIntents,
+} from "@/lib/share-intents";
 import { cn } from "@/lib/utils";
 
 /** One tint per platform so the menu is scannable, not four identical rows. */
@@ -96,39 +104,91 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
    * the burned-in captions, never the source video or a proxy. It is fetched
    * ONCE and reused for the download fallback: a 10-clip batch is 80 MB a
    * piece, and the old code downloaded the file twice on every fallback.
+   *
+   * The fallback ladder is the important part. This used to end in a silent
+   * download plus "no share sheet on this device", which on Android Chrome
+   * (where `canShare({files})` is version-dependent and often false) meant the
+   * user silently got an 8 MB file they never asked for. Now it degrades
+   * through progressively cheaper options and only downloads as an explicit,
+   * announced last resort.
    */
   const shareVia = async () => {
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
+    const link = clipShareUrl(clip._id);
     const name = clipFileName(clip);
     const nav = navigator as Navigator & {
       canShare?: (data: ShareData) => boolean;
       share?: (data: ShareData) => Promise<void>;
     };
-    let blob: Blob;
+
+    // 1. Share the FILE, if this browser can take files. Cheapest for the user
+    //    (no re-upload, the finished MP4 goes straight to their app).
+    let blob: Blob | null = null;
     try {
       const res = await fetch(api.clipDownloadUrl(clip._id));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      blob = await res.blob();
+      if (res.ok) blob = await res.blob();
     } catch {
-      toast.error("Could not load the clip — try the MP4 button.");
+      blob = null;
+    }
+
+    if (blob && nav.share) {
+      const file = new File([blob], name, { type: "video/mp4" });
+      const canFile = nav.canShare?.({ files: [file] }) ?? false;
+      if (canFile) {
+        try {
+          await nav.share({ files: [file], text: caption, title: clip.title });
+          return;
+        } catch {
+          // Aborted by the user, or the platform rejected the file. Fall
+          // through to the link, which needs nothing from the device.
+        }
+      }
+      // 2. Share TEXT + LINK. `canShare` is often undefined here even when
+      //    `share` works, so this is attempted whenever share exists.
+      try {
+        await nav.share({ text: caption, url: link, title: clip.title });
+        return;
+      } catch {
+        // Dismissed, or unsupported. One more option before the download.
+      }
+    }
+
+    // 3. Copy the caption + link. Always works, never silently downloads, and
+    //    it is the one fallback that leaves the user in control.
+    try {
+      await navigator.clipboard.writeText(link ? `${caption}\n\n${link}` : caption);
+      toast.success("Caption and clip link copied — paste it anywhere.", {
+        description: link || undefined,
+      });
+      return;
+    } catch {
+      toast.error(
+        "This browser can't share files and can't reach the clipboard.",
+        { description: "Use the MP4 button, or a platform row above." },
+      );
       return;
     }
-    try {
-      const file = new File([blob], name, { type: "video/mp4" });
-      if (nav.canShare?.({ files: [file] })) {
-        await nav.share!({ files: [file], text: caption, title: clip.title });
-        toast.success(`Shared ${name} through your share sheet.`);
-        return;
-      }
-    } catch {
-      // The user dismissed the sheet, or the platform has no share target.
+
+    // 4. Never reached: 3 always returns. Kept out deliberately so a silent
+    //    download can never come back as the default outcome.
+  };
+
+  /** Open one platform's own composer with the caption (and link) filled in. */
+  const shareTo = (slug: string, label: string) => {
+    const caption = buildPostCaption(clip.hookText, clip.hashtags);
+    const link = clipShareUrl(clip._id);
+    const intent = visibleIntents(!!link).find((i) => i.slug === slug);
+    if (!intent) {
+      toast.error(`${label} cannot build a share link here.`);
+      return;
     }
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast.success(`Downloaded ${name} — no share sheet on this device.`);
+    const url = intentUrl(intent, caption, link);
+    if (!url) {
+      toast.error(`${label} needs a public clip link — copy the link instead.`);
+      return;
+    }
+    openIntent(url);
+    toast.success(`Opened ${label} — press Post there to publish.`);
   };
 
   const connect = async (slug: SocialSlug) => {
@@ -182,7 +242,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
         disabled={!rendered}
         title={
           rendered
-            ? "Post this clip straight to a platform, or share it to another app"
+            ? "Share this clip to a platform, or post it through a connected account"
             : "No rendered MP4 yet"
         }
         // A plain onClick, not a Radix trigger: DropdownMenu opens on
@@ -192,7 +252,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
         onClick={() => setOpen(true)}
       >
         <Send className="size-3.5" />
-        Post to...
+        Share...
       </Button>
 
       <Sheet open={open} onOpenChange={setOpen}>
@@ -286,6 +346,57 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
 
             <div className="my-1 h-px bg-border" />
 
+            <p className="px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Share to a platform — no download, no account
+            </p>
+
+            <div className="grid grid-cols-3 gap-1.5">
+              {visibleIntents(!!clipShareUrl(clip._id)).map((intent) => (
+                <button
+                  key={intent.slug}
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    shareTo(intent.slug, intent.label);
+                  }}
+                  title={`Open ${intent.label} with this clip's caption`}
+                  className="flex min-w-0 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-border px-2 py-2 text-xs transition hover:border-primary/50 hover:bg-accent/40"
+                >
+                  <Link2 className={cn("size-3.5 shrink-0", intent.tint)} />
+                  <span className="truncate">{intent.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                const link = clipShareUrl(clip._id);
+                void navigator.clipboard
+                  .writeText(
+                    link
+                      ? `${buildPostCaption(clip.hookText, clip.hashtags)}\n\n${link}`
+                      : buildPostCaption(clip.hookText, clip.hashtags),
+                  )
+                  .then(() =>
+                    toast.success("Caption and clip link copied.", {
+                      description: link || undefined,
+                    }),
+                  )
+                  .catch(() =>
+                    toast.error("This browser blocked the clipboard."),
+                  );
+              }}
+              className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-border px-3 py-2.5 text-left text-sm transition hover:border-primary/50 hover:bg-accent/40"
+            >
+              <Copy className="size-3.5 shrink-0" />
+              <span className="min-w-0 font-medium">Copy caption + link</span>
+              <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                paste anywhere
+              </span>
+            </button>
+
             <button
               type="button"
               onClick={() => {
@@ -296,7 +407,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
             >
               <span className="flex w-full min-w-0 items-center gap-2 text-sm">
                 <Share2 className="size-3.5 shrink-0" />
-                <span className="min-w-0 font-medium">Share via...</span>
+                <span className="min-w-0 font-medium">Share the MP4 file...</span>
                 <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
                   no account needed
                 </span>
