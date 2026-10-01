@@ -1,6 +1,5 @@
 import '@vly-ai/integrations';
 import { Toaster } from "@/components/ui/sonner";
-import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import React, { StrictMode, useEffect, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
@@ -10,6 +9,14 @@ import "./index.css";
 const Landing = lazy(() => import("./pages/Landing.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
+
+// The Vly dev toolbar is CHROME, not app: it renders nothing unless the
+// hostname ends in `.vly.sh` (see isDevDeployment inside it). It was imported
+// eagerly, so every visitor — including a phone on a slow connection — paid for
+// the toolbar module AND `@zumer/snapdom`, the screenshot library it pulls in,
+// before first paint. Deferring it keeps those bytes out of the critical path
+// entirely, and the toolbar still appears when it is actually applicable.
+const VlyToolbar = lazy(() => import("../vly-toolbar-readonly.tsx"));
 
 // Simple loading fallback for route transitions
 function RouteLoading() {
@@ -141,7 +148,9 @@ createRoot(rootEl).render(
     <BootCleanup />
     <RootErrorBoundary>
       <ToolbarErrorBoundary>
-        <VlyToolbar />
+        <Suspense fallback={null}>
+          <VlyToolbar />
+        </Suspense>
       </ToolbarErrorBoundary>
       <BrowserRouter>
         <RouteSyncer />

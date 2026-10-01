@@ -54,6 +54,16 @@
     @keyframes bootspin { to { transform: rotate(360deg); } }
     /* Once a failure is known, stop implying that progress is happening. */
     #boot.failed .spin { display: none; }
+    /* A live progress bar: on a slow phone this is the difference between
+       "it is working, just slow" and "it is broken". */
+    #boot .meter {
+      margin-top: 14px; height: 4px; border-radius: 999px;
+      background: #27272a; overflow: hidden;
+    }
+    #boot .meter > i {
+      display: block; height: 100%; width: 0%;
+      background: #22c55e; transition: width .4s ease;
+    }
   </style>
 </head>
 
@@ -66,12 +76,30 @@
     a lazily-imported route — used to leave the page pure white with no
     information at all. This renders first, is removed by main.tsx once the
     app actually mounts, and turns that dead white screen into something that
-    says what went wrong and offers a reload.
+    says what is happening.
+
+    The important rule here is that a SLOW LOAD IS NOT A FAILURE. In dev the
+    browser fetches hundreds of separate modules over HTTP/1.1, and the first
+    paint of this app is roughly 3 MB across a dozen round trips (a 1 MB
+    react-dom chunk, a 1 MB integrations bundle, 460 KB of react-router, 186 KB
+    of CSS). On a phone that legitimately takes longer than any short timeout.
+
+    The previous version declared failure at 15s and then reloaded 30 times at
+    5s intervals. Every reload threw away the modules already downloaded and
+    started the same 3 MB again, so on a slow connection it could NEVER finish —
+    a self-inflicted reload storm that made the preview unreachable. It now:
+      - counts modules as they arrive and shows real progress,
+      - never reloads while progress is still happening,
+      - never auto-reloads on a mount timeout at all (a reload cannot make a
+        slow connection faster — it only restarts the download),
+      - auto-retries only for a genuine module-load failure, where a fresh
+        fetch genuinely can help, and only 8 times.
   -->
   <div id="boot">
     <div class="card">
       <p class="title"><span class="spin"></span><span id="boot-title">Starting ClipForge…</span></p>
-      <p class="sub" id="boot-sub">Loading the app. This normally takes a few seconds.</p>
+      <p class="sub" id="boot-sub">Loading the app.</p>
+      <div class="meter" id="boot-meter" hidden><i></i></div>
       <pre class="err" id="boot-err" hidden></pre>
       <p class="status" id="boot-status"></p>
       <div class="actions" hidden id="boot-actions">
@@ -87,69 +115,132 @@
       // fallback and tells these handlers there is nothing left to report.
       window.__clipforgeBooted = false;
 
-      // A restart of the dev server leaves this tab holding a page whose module
-      // URLs 404 until it is re-fetched, and while the server itself is down the
-      // proxy answers 502. Both are fixed by the same thing: re-request the
-      // document. A plain location.reload() can be served from cache and fail
-      // identically, so every attempt adds a cache-busting query and forces a
-      // fresh fetch of index.html.
-      var MAX_ATTEMPTS = 30;
+      // How many modules we EXPECT, roughly. Only used to draw a bar — an
+      // honest "we do not know the total" bar is better than a fake one.
+      var EXPECTED_MODULES = 26;
+      var MAX_RELOADS = 8;          // only for real load failures
       var RETRY_MS = 5000;
-      var attempt = 0;
+      var SLOW_AFTER_MS = 6000;     // say "slow connection" after this
+      var HARD_CEILING_MS = 180000; // 3 min: genuinely give up
+
+      var startedAt = Date.now();
+      var loaded = 0;
+      var lastProgressAt = Date.now();
+      var reloads = 0;
+      var failed = false;
       var timer = null;
+
+      function el(id) { return document.getElementById(id); }
+
+      function status(text) {
+        var node = el("boot-status");
+        if (node) node.textContent = text;
+      }
+
+      function drawMeter() {
+        var meter = el("boot-meter");
+        if (!meter) return;
+        meter.hidden = false;
+        var pct = Math.min(97, Math.round((loaded / EXPECTED_MODULES) * 100));
+        meter.firstElementChild.style.width = pct + "%";
+      }
+
+      // Every finished subresource is proof the app is still coming.
+      function noteProgress() {
+        loaded += 1;
+        lastProgressAt = Date.now();
+        drawMeter();
+      }
+
+      if (window.PerformanceObserver) {
+        try {
+          new PerformanceObserver(function (list) {
+            list.getEntries().forEach(noteProgress);
+          }).observe({ type: "resource", buffered: true });
+        } catch (e) { /* older browsers: the timer below still copes */ }
+      }
 
       function hardReload() {
         if (window.__clipforgeBooted) return;
-        attempt += 1;
-        var url = location.pathname + "?reload=" + Date.now();
-        location.replace(url);
+        reloads += 1;
+        location.replace(location.pathname + "?reload=" + Date.now());
       }
 
-      function status(text) {
-        var el = document.getElementById("boot-status");
-        if (el) el.textContent = text;
+      // Only ever called for a genuine failure a reload can fix: a module that
+      // would not fetch or evaluate.
+      function failAndRetry(message) {
+        if (window.__clipforgeBooted || failed) return;
+        failed = true;
+        var boot = el("boot");
+        if (!boot) return;
+        boot.classList.add("failed");
+        el("boot-title").textContent = "ClipForge didn't start";
+        el("boot-sub").textContent =
+          "A module of the app failed to load — usually a dev server that is " +
+          "restarting or stopped. It reloads on its own until it comes back.";
+        el("boot-err").textContent = message;
+        el("boot-err").hidden = false;
+        el("boot-actions").hidden = false;
+        scheduleReload();
       }
 
-      function schedule() {
-        if (timer || attempt >= MAX_ATTEMPTS) return;
-        var next = attempt + 1;
-        var tick = function () {
-          if (next > MAX_ATTEMPTS) {
-            status("Stopped retrying. Reload once the server is back.");
+      function scheduleReload() {
+        if (timer) return;
+        if (reloads >= MAX_RELOADS) {
+          status("Stopped retrying — tap Reload now.");
+          return;
+        }
+        var nextAt = Date.now() + RETRY_MS;
+        status("Reloading in " + Math.ceil(RETRY_MS / 1000) + "s (try " + (reloads + 1) + " of " + MAX_RELOADS + ")");
+        timer = setInterval(function () {
+          var left = Math.ceil((nextAt - Date.now()) / 1000);
+          if (left <= 0) {
+            clearInterval(timer);
+            timer = null;
+            hardReload();
+          } else {
+            status("Reloading in " + left + "s (try " + (reloads + 1) + " of " + MAX_RELOADS + ")");
+          }
+        }, 500);
+      }
+
+      // A load that is merely slow is NOT a failure, and must never trigger a
+      // reload: reloading discards the modules already downloaded and restarts
+      // the same transfer, so it converts a slow load into a page that never
+      // loads at all.
+      function watchProgress() {
+        setInterval(function () {
+          if (window.__clipforgeBooted || failed) return;
+          var now = Date.now();
+          var idleFor = now - lastProgressAt;
+          var elapsed = now - startedAt;
+
+          if (idleFor < 4000 && elapsed > SLOW_AFTER_MS) {
+            status("Still loading — slow connection · " + loaded + " modules");
             return;
           }
-          var left = Math.ceil((next * RETRY_MS - (Date.now() - window.__clipforgeT0)) / 1000);
-          status("Retrying in " + Math.max(0, left) + "s — attempt " + next + " of " + MAX_ATTEMPTS);
-        };
-        tick();
-        timer = setInterval(tick, 1000);
-        setTimeout(function () {
-          clearInterval(timer);
-          timer = null;
-          if (attempt < MAX_ATTEMPTS) hardReload();
-        }, RETRY_MS);
+          if (elapsed > HARD_CEILING_MS && idleFor > 15000) {
+            var root = el("root");
+            if (root && root.childElementCount > 0) return;
+            failed = true;
+            var boot = el("boot");
+            if (boot) boot.classList.add("failed");
+            el("boot-title").textContent = "ClipForge still hasn't loaded";
+            el("boot-sub").textContent =
+              "This is a slow connection, not a broken app: " + loaded +
+              " modules downloaded but the app never finished starting. A reload " +
+              "will not help — try a stronger connection, or close other tabs to free up bandwidth.";
+            el("boot-err").hidden = true;
+            el("boot-actions").hidden = false;
+            el("boot-stop").hidden = true;
+            status("No auto-reload: reloading would restart the download.");
+          }
+        }, 1000);
       }
 
-      function fail(message) {
-        if (window.__clipforgeBooted) return;
-        var boot = document.getElementById("boot");
-        if (!boot || boot.classList.contains("failed")) return;
-        window.__clipforgeT0 = Date.now();
-        boot.classList.add("failed");
-        document.getElementById("boot-title").textContent = "ClipForge didn't start";
-        document.getElementById("boot-sub").textContent =
-          "The app's JavaScript failed to load — usually a dev server that is restarting " +
-          "or stopped. Leave this tab open; it retries on its own until it comes back.";
-        var err = document.getElementById("boot-err");
-        err.textContent = message;
-        err.hidden = false;
-        document.getElementById("boot-actions").hidden = false;
-        schedule();
-      }
-
-      document.getElementById("boot-reload").addEventListener("click", hardReload);
-      document.getElementById("boot-stop").addEventListener("click", function () {
-        attempt = MAX_ATTEMPTS;
+      el("boot-reload").addEventListener("click", hardReload);
+      el("boot-stop").addEventListener("click", function () {
+        reloads = MAX_RELOADS;
         if (timer) { clearInterval(timer); timer = null; }
         status("Auto-retry stopped.");
       });
@@ -160,26 +251,21 @@
         "error",
         function (e) {
           if (e && e.target && e.target.tagName === "SCRIPT") {
-            fail("Failed to load " + (e.target.src || "a module"));
+            failAndRetry("Failed to load " + (e.target.src || "a module"));
           } else if (e && e.message) {
-            fail(e.message);
+            failAndRetry(e.message);
           }
         },
         true,
       );
       window.addEventListener("unhandledrejection", function (e) {
         var r = e && e.reason;
-        fail(String((r && r.message) || r || "Unhandled error"));
+        failAndRetry(String((r && r.message) || r || "Unhandled error"));
       });
 
-      // Last resort for a failure that raises no event: if React has still not
-      // mounted after this long, say so instead of leaving white on screen.
-      setTimeout(function () {
-        if (window.__clipforgeBooted) return;
-        var root = document.getElementById("root");
-        if (root && root.childElementCount > 0) return;
-        fail("Timed out after 15s waiting for the app to mount.");
-      }, 15000);
+      drawMeter();
+      status("Loading…");
+      watchProgress();
     })();
   </script>
 
