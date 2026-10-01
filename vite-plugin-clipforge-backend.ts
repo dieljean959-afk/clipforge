@@ -178,13 +178,45 @@ async function startBackend(): Promise<boolean> {
   return up;
 }
 
+// The platform runs the Vite dev server as a single supervised web process and
+// the preview proxy answers 502 for every path the moment that process exits.
+// Nothing in the browser can explain a 502 — index.html is never served, so any
+// in-app recovery UI (including the boot fallback) is unreachable by definition.
+//
+// So the only real defence is to keep the process alive. Node's default for an
+// unhandled rejection is to throw and terminate; a single stray rejection
+// anywhere in a dev-server plugin chain therefore turns a working preview into
+// a 502 on every path with no way for the user to recover it. Log loudly and
+// keep serving — a degraded app beats a dead origin.
+let guardsInstalled = false;
+function installCrashGuards() {
+  if (guardsInstalled) return;
+  guardsInstalled = true;
+  process.on("unhandledRejection", (reason) => {
+    log(
+      `WARNING: unhandled rejection (not fatal, preview stays up): ` +
+        `${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`,
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    log(
+      `WARNING: uncaught exception (not fatal, preview stays up): ` +
+        `${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    );
+  });
+}
+
 export function clipforgeBackend(): Plugin {
   return {
     name: "clipforge-backend-supervisor",
     // 'pre' so the backend boots before the first page request can proxy /api
     enforce: "pre",
 
-    async configureServer(server) {
+    configureServer(server) {
+      // Synchronous from here on: an async hook turns every throw inside it
+      // into a rejected promise, which Node escalates to a process exit — a
+      // way for a plugin bug to kill the whole origin.
+      installCrashGuards();
       // Start the backend, but do NOT block the dev server on it.
       //
       // This used to `await startBackend()`, which holds Vite's startup for up
