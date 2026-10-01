@@ -740,23 +740,28 @@ def usage() -> dict:
     equivalent number, so their limits are whatever the operator configured.
     Showing Groq's 200k while running on DeepSeek would report a badge that is
     both wrong and alarming.
+
+    A provider with NO daily token budget at all (Ollama is local and free;
+    Gemini bills per token against a key with no published daily ceiling) used
+    to borrow Groq's config wholesale, so the badge showed a confident
+    "0 / 200,000" and named a Groq model while a completely different backend
+    was selected. It now reports `budgeted: false` with no invented numbers,
+    and the UI says so instead of drawing a meter.
     """
     from app import groq_usage
 
     active = llm_mod.provider(settings)
-    cfg = (
-        llm_mod.openai_cfg(settings, active)
-        if active in llm_mod.OPENAI_PROVIDER_KEYS
-        else settings.groq
-    )
-    limit = int(getattr(cfg, "daily_token_limit", 0) or 0)
-    model = str(getattr(cfg, "model", "") or "")
+    budgeted = active in llm_mod.OPENAI_PROVIDER_KEYS
+    cfg = llm_mod.openai_cfg(settings, active) if budgeted else None
+    limit = int(getattr(cfg, "daily_token_limit", 0) or 0) if cfg else 0
+    model = str(getattr(cfg, "model", "") or "") if cfg else ""
     snap = groq_usage.store(settings.app.paths.data_dir).snapshot(
         default_limit=limit, model=model, provider=active
     )
     snap["configured"] = bool(model)
     snap["provider"] = active
-    snap["providerLabel"] = str(getattr(cfg, "label", active))
+    snap["budgeted"] = budgeted
+    snap["providerLabel"] = str(getattr(cfg, "label", active)) if cfg else active.capitalize()
     return snap
 
 

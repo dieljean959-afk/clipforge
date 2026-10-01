@@ -111,6 +111,34 @@ export function GroqUsageBadge({
   // failover, Groq's, and a badge that says the wrong one is worse than none.
   const vendor = usage.providerLabel ?? (usage.provider === "groq" ? "Groq" : "NVIDIA");
 
+  // No daily token budget to meter (local Ollama, or Gemini's key-based
+  // billing). Rendering a meter here meant showing a confident "0 / 200,000"
+  // against a denominator invented from an unrelated provider, so say what is
+  // actually true instead of drawing a bar.
+  if (usage.budgeted === false) {
+    return (
+      <div
+        className={cn(
+          "flex min-w-0 flex-col gap-0.5 rounded-md border border-border/60 bg-card/60 px-2 py-1",
+          className,
+        )}
+        title={
+          usage.provider === "ollama"
+            ? "Ollama runs on this machine — no API key, no token budget"
+            : `${vendor} bills per token against your key; there is no daily token ceiling to meter`
+        }
+      >
+        <span className="flex items-center gap-1.5 text-[11px] leading-none">
+          <Gauge className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="truncate font-medium">{vendor}</span>
+        </span>
+        <span className="truncate text-[10px] leading-none text-muted-foreground">
+          {usage.provider === "ollama" ? "Local · no token budget" : "No daily token budget"}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div ref={wrapRef} className={cn("relative", className)}>
       <button

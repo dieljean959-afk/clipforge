@@ -69,10 +69,12 @@ export function NewJobForm({
   const budgetWarning = (() => {
     if (!usage || !usage.configured) return null;
     const remaining = Math.max(0, usage.remaining);
-    // Name whichever provider the budget actually belongs to. The two limits
-    // are not comparable — Groq states a real per-model daily ceiling, NVIDIA's
-    // is the budget configured in config.toml — so the copy has to follow the
-    // backend rather than assume Groq.
+    // Name whichever provider the budget actually belongs to. The limits are
+    // not comparable — Groq states a real per-model daily ceiling, while
+    // DeepSeek's and NVIDIA's are the budgets configured in config.toml — so
+    // the copy has to follow the backend rather than assume Groq. Backends
+    // with no daily ceiling at all report `configured: false` and never
+    // reach here, so no warning is invented for them.
     const vendor = usage.providerLabel ?? (usage.provider === "groq" ? "Groq" : "NVIDIA");
     if (remaining <= 0) {
       return {

@@ -154,6 +154,53 @@ def test_provider_isolation() -> None:
           nv["used"] == 4000, str(nv["used"]))
 
 
+def test_rate_limit_headers_isolated() -> None:
+    print("\n[isolate] rate-limit headers belong to the provider that sent them")
+    d = _dir()
+    s = UsageStore(d)
+    s.record_call("openai/gpt-oss-120b", 100, provider="groq",
+                  headers={"x-ratelimit-remaining-tokens": "1400",
+                           "x-ratelimit-limit-tokens": "6000",
+                           "content-type": "application/json"})
+    s.record_call("deepseek-flash", 100, provider="deepseek",
+                  headers={"x-ratelimit-remaining-requests": "2499"})
+
+    gr = s.snapshot(default_limit=200_000, model="openai/gpt-oss-120b", provider="groq")
+    ds = s.snapshot(default_limit=2_000_000, model="deepseek-flash", provider="deepseek")
+    check("groq keeps its own rate-limit headers",
+          gr["rateLimit"].get("x-ratelimit-remaining-tokens") == "1400",
+          str(gr["rateLimit"]))
+    check("deepseek shows its own, not groq's",
+          ds["rateLimit"].get("x-ratelimit-remaining-requests") == "2499"
+          and "x-ratelimit-remaining-tokens" not in ds["rateLimit"],
+          str(ds["rateLimit"]))
+    check("non-rate-limit headers are dropped",
+          "content-type" not in gr["rateLimit"], str(gr["rateLimit"]))
+    check("a provider that never sent headers gets none", isinstance(
+        s.snapshot(default_limit=1, model="openai/gpt-oss-120b", provider="nvidia"
+                   )["rateLimit"], dict))
+
+    # A last-writer-wins overwrite must also stay inside its own provider.
+    s.record_call("deepseek-flash", 10, provider="deepseek",
+                  headers={"x-ratelimit-remaining-requests": "1"})
+    check("an overwrite does not clobber the other provider",
+          s.snapshot(default_limit=200_000, model="openai/gpt-oss-120b",
+                     provider="groq")["rateLimit"].get("x-ratelimit-remaining-tokens")
+          == "1400")
+
+    # Legacy single-slot files were written by Groq only.
+    k = today_key()
+    legacy = _write(_dir(), {"days": {k: {
+        "models": {"openai/gpt-oss-120b": {"tokens": 10, "provider": "groq"}},
+        "rateLimit": {"x-ratelimit-remaining-tokens": "77"},
+    }}})
+    check("a legacy groq header slot still reads as groq's",
+          legacy.snapshot(default_limit=1, provider="groq")["rateLimit"]
+          .get("x-ratelimit-remaining-tokens") == "77")
+    check("...and is not shown to another provider",
+          legacy.snapshot(default_limit=1, provider="deepseek")["rateLimit"] == {})
+
+
 # --------------------------------------------------------------------------- #
 # 3. only Groq may define a budget
 # --------------------------------------------------------------------------- #
@@ -277,14 +324,45 @@ def test_api_reports_active_provider() -> None:
     # silently downgrade every provider to "local tally" forever.
     check("source is one of the two the UI knows", usage["source"] in
           {"provider-report", "local-sum"}, str(usage.get("source")))
+    check("a budgeted provider is flagged as such", usage.get("budgeted") is True,
+          str(usage.get("budgeted")))
+
+
+def test_unbudgeted_providers_invent_nothing() -> None:
+    print("\n[api] a backend with no daily ceiling gets no invented meter")
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    from app import main as main_mod  # noqa: PLC0415
+
+    client = TestClient(main_mod.app)
+    original = main_mod.settings.llm.provider
+    try:
+        for name, expect_label in (("ollama", "Ollama"), ("gemini", "Gemini")):
+            main_mod.settings.llm.provider = name
+            u = client.get("/api/usage").json()
+            check(f"{name} reports no daily budget", u.get("budgeted") is False,
+                  str(u.get("budgeted")))
+            check(f"{name} invents no denominator", u.get("limit") == 0, str(u.get("limit")))
+            check(f"{name} borrows no model name", not u.get("activeModel"),
+                  str(u.get("activeModel")))
+            check(f"{name} is not labelled as a hosted vendor",
+                  u.get("providerLabel") == expect_label, str(u.get("providerLabel")))
+            # This is the gate NewJobForm uses, so an unbudgeted backend can
+            # never trip the "quota spent" pre-submit warning.
+            check(f"{name} is not marked configured", u.get("configured") is False,
+                  str(u.get("configured")))
+    finally:
+        main_mod.settings.llm.provider = original
 
 
 def main() -> int:
     test_survives_restart()
     test_provider_isolation()
+    test_rate_limit_headers_isolated()
     test_only_groq_defines_a_budget()
     test_file_tolerance()
     test_api_reports_active_provider()
+    test_unbudgeted_providers_invent_nothing()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

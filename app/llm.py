@@ -1022,13 +1022,14 @@ def _groq_model_problem(msg: str) -> bool:
 #: state. A plain Lock deadlocks the first detection call — which is exactly
 #: what a 60-second hang on a fresh process looks like.
 _groq_lock = threading.RLock()
-#: Per-PROVIDER pacing state, keyed by `cfg.label.lower()` ("nvidia" / "groq").
+#: Per-PROVIDER pacing state, keyed by `_provider_key(cfg)` — the config's own
+#: `provider` field, so "deepseek" / "nvidia" / "groq".
 #:
 #: These used to be module globals, which was fine with one provider and is
-#: wrong with two: Groq's 30-rpm floor and 6000 tok/min cap are properties of
-#: GROQ's free tier, not of the process. Sharing one ledger would make every
-#: NIM call wait out a budget it does not share — and, worse, a job that failed
-#: over to the backup would run at half speed for no reason.
+#: wrong with several: Groq's 30-rpm floor and 6000 tok/min cap are properties
+#: of GROQ's free tier, not of the process. Sharing one ledger would make every
+#: other call wait out a budget it does not share — and, worse, a job that
+#: failed over to the backup would run at half speed for no reason.
 _PACERS: dict[str, dict[str, Any]] = {}
 
 

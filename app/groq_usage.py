@@ -94,9 +94,13 @@ def parse_quota_message(detail: str) -> dict[str, Any]:
 def _rate_limit_headers(headers: Any) -> dict[str, str]:
     """Keep only `x-ratelimit-*`, lowercased.
 
-    These are per-minute/per-request counters — Groq never exposes the daily
+    These are per-minute/per-request counters — no provider here exposes a daily
     token balance in a header — but they are the cheapest way to show that a
     limit is being approached, and they cost nothing to retain.
+
+    Several providers send these header NAMES with different meanings and
+    different units behind them, which is why the caller must file them under
+    the provider that sent them rather than in one shared slot.
     """
     out: dict[str, str] = {}
     if headers is None:
@@ -207,7 +211,11 @@ class UsageStore:
                 entry["firstCallAt"] = now_ms
             rl = _rate_limit_headers(headers)
             if rl:
-                day["rateLimit"] = rl
+                # Per-PROVIDER. These header names mean different things at
+                # different providers (and DeepSeek and NIM send them too), so a
+                # single day-level slot showed one provider's live rate-limit
+                # counters while another provider was selected.
+                day.setdefault("rateLimits", {})[provider] = rl
             self._prune()
             self._write()
 
@@ -336,8 +344,24 @@ class UsageStore:
                 }
                 for name, entry in sorted(mine.items(), key=lambda kv: -int(kv[1].get("tokens", 0)))
             ],
-            "rateLimit": day.get("rateLimit") or {},
+            "rateLimit": self._rate_limits_for(day, provider),
         }
+
+    @staticmethod
+    def _rate_limits_for(day: dict[str, Any], provider: str) -> dict[str, str]:
+        """This provider's last-seen `x-ratelimit-*` headers, or {}.
+
+        Tolerates the old single-slot `day["rateLimit"]`: that was written only
+        by Groq, so it belongs to Groq and must not be shown to anyone else.
+        """
+        per_provider = day.get("rateLimits")
+        if isinstance(per_provider, dict):
+            scoped = per_provider.get(provider)
+            return scoped if isinstance(scoped, dict) else {}
+        legacy = day.get("rateLimit")
+        if isinstance(legacy, dict) and legacy and provider == "groq":
+            return legacy
+        return {}
 
     @staticmethod
     def _reported_for(day: dict[str, Any], provider: str) -> dict[str, Any]:

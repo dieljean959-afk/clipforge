@@ -428,6 +428,13 @@ export interface UsageDto {
    * report one provider's spend against another's limit.
    */
   provider?: DetectionProvider;
+  /**
+   * False when the active backend has no daily token budget to meter at all
+   * (Ollama is local and free; Gemini has no published daily ceiling). The
+   * numbers are then zeroed placeholders, not a real allowance — the UI says
+   * so rather than drawing a meter against an invented denominator.
+   */
+  budgeted?: boolean;
   /** Display name for the active provider ("NVIDIA", "Groq", ...). */
   providerLabel?: string;
 }
