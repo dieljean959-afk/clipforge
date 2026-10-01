@@ -301,6 +301,43 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
     return f"crop={out_w}:{out_h}:{expr}:0"
 
 
+#: Container flags every rendered clip MUST carry.
+#:
+#: `-movflags +faststart` is the single most important line in the whole
+#: render. Without it ffmpeg writes the `moov` atom (the index that says where
+#: every frame lives) at the END of the file, so a browser cannot start
+#: playback until it has downloaded the clip in full. On a phone over a
+#: proxied connection that either times out — surfacing as "This browser could
+#: not play the rendered file" even though the downloaded MP4 is perfectly
+#: fine — or it succeeds so late that `preload="metadata"` never yields a
+#: duration and the player sits at "0:00 / --:--". Moving `moov` to the front
+#: costs one extra pass over the file and fixes both symptoms.
+MP4_MOVFLAGS = ["-movflags", "+faststart"]
+#: Audio bitrate for the deliverable. 128k AAC is transparent for speech and
+#: is what every platform's own re-encode targets, so 160k was paying ~25% more
+#: for nothing on every clip.
+AUDIO_ARGS = ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
+#: H.264 profile/level are pinned rather than left to x264's defaults. A clip
+#: that came out as High 4.4 (x264 raises the level to fit the bitrate) is
+#: refused outright by older mobile decoders and by some in-app webviews, which
+#: is another way a good file fails to play. High 4.0 covers 1080x1920 and is
+#: universally supported.
+VIDEO_PROFILE_ARGS = ["-profile:v", "high", "-level:v", "4.0"]
+
+
+def browser_safe_args(encoder: str = "") -> list[str]:
+    """Container + profile args that make an MP4 playable everywhere.
+
+    `+faststart` applies to every encoder. The pinned profile/level is skipped
+    for VAAPI, whose muxer path rejects `-profile:v`/`-level:v` outright on
+    most builds — passing them there fails the whole render, which is a far
+    worse outcome than the encoding mismatch they would have prevented.
+    """
+    if encoder == "h264_vaapi":
+        return list(MP4_MOVFLAGS)
+    return [*MP4_MOVFLAGS, *VIDEO_PROFILE_ARGS]
+
+
 def render_clip(
     src: Path,
     dest: Path,
@@ -410,7 +447,8 @@ def render_clip(
             "-filter_complex", f"[0:v]{vf}[base];" + ";".join(chain),
             "-map", prev, "-map", "0:a?",
             *codec_args,
-            "-c:a", "aac", "-b:a", "160k",
+            *AUDIO_ARGS,
+            *browser_safe_args(enc.encoder),
             "-f", "mp4", str(dest),
         ]
         logger.info(f"[video] libass unavailable — burning {len(caption_cues)} caption PNGs via Pillow overlay")
@@ -419,7 +457,8 @@ def render_clip(
             ffmpeg_bin(), "-y", *seek,
             "-vf", f"{vf},subtitles={ass_escaped}",
             *codec_args,
-            "-c:a", "aac", "-b:a", "160k",
+            *AUDIO_ARGS,
+            *browser_safe_args(enc.encoder),
             "-f", "mp4", str(dest),
         ]
     else:
@@ -427,7 +466,8 @@ def render_clip(
             ffmpeg_bin(), "-y", *seek,
             "-vf", vf,
             *codec_args,
-            "-c:a", "aac", "-b:a", "160k",
+            *AUDIO_ARGS,
+            *browser_safe_args(enc.encoder),
             "-f", "mp4", str(dest),
         ]
     # Per-CLIP deadline derived from the clip's own length, not one flat

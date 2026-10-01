@@ -338,12 +338,19 @@ ollama_timeout_sec = 600
 # the non-English tracks below.
 #
 # Off by default: it adds one LLM call per language per batch of cues.
-enabled = false
+# ON: each clip also gets sidecar SRT/VTT tracks per language, downloadable
+# from the clip card. "en" is the source track and is copied straight from the
+# transcript, never machine-translated, so it costs nothing.
+#
+# Cost is the whole trade-off: 11 extra languages x one call per 30 cues x one
+# batch per clip. A 13-clip job is ~143 calls. Trim `languages` to what you
+# actually publish on — ["en", "es", "fr"] is a fraction of the full list.
+enabled = true
 
 # Target languages, emitted in this order. "en" is the source/original track
 # and is written straight from the transcript, never machine-translated.
 # Supported: en fr es pt de ru it ja ko zh ar hi
-languages = ["en"]
+languages = ["en", "es", "fr", "pt", "de", "it", "ru", "ar", "hi", "zh", "ja", "ko"]
 
 # Brand / product / speaker names that must survive translation verbatim.
 # A term is only checked when it actually appears in the source line, and any

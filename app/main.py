@@ -1514,12 +1514,33 @@ def list_clips(jobId: str | None = None, limit: int = 96) -> list[dict]:
     return store.list_all_clips(limit=limit)
 
 
-@app.get("/api/clips/{clip_id}/video")
+#: Cache policy for rendered media.
+#:
+#: `no-cache` still allows caching but forces revalidation, which is exactly
+#: what is wanted for a URL whose contents change under the same id: a clip is
+#: re-rendered in place after "Re-detect"/"Re-transcribe", and with a long
+#: `max-age` the browser keeps showing the previous encode — the classic "I
+#: re-rendered and it still plays the old clip". `must-revalidate` stops any
+#: intermediary (the preview proxy included) from serving a stale body without
+#: asking. Range requests are unaffected: Starlette answers 206 from the file
+#: on disk, with Content-Length, Content-Range and Accept-Ranges.
+MEDIA_CACHE_CONTROL = "no-cache, must-revalidate"
+
+
+@app.api_route("/api/clips/{clip_id}/video", methods=["GET", "HEAD"])
 def clip_video(clip_id: str) -> FileResponse:
     """Stream the rendered clip for <video> playback.
 
     Content-Disposition stays inline — 'attachment' makes browsers refuse to
     play the stream. Downloads go through /download instead.
+
+    Range support is what makes seeking and progressive playback work at all:
+    Starlette's FileResponse answers a `Range:` header with 206 Partial
+    Content plus Content-Range/Accept-Ranges, and a bare GET with a real
+    Content-Length. It is asserted rather than assumed in
+    tools/playback_test.py, because a regression here (a hand-rolled
+    StreamingResponse, or a proxy that strips Range) is invisible until every
+    clip in the UI stops playing.
     """
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
@@ -1527,10 +1548,17 @@ def clip_video(clip_id: str) -> FileResponse:
     p = Path(clip["videoPath"])
     if not p.exists():
         raise HTTPException(404, f"clip file missing on disk: {p.name}")
-    return FileResponse(p, media_type="video/mp4")
+    return FileResponse(
+        p,
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": MEDIA_CACHE_CONTROL,
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
-@app.get("/api/clips/{clip_id}/thumb")
+@app.api_route("/api/clips/{clip_id}/thumb", methods=["GET", "HEAD"])
 def clip_thumb(clip_id: str) -> FileResponse:
     """Real first frame of the rendered clip — inline image, no generated art."""
     clip = store.get_clip(clip_id)
@@ -1539,10 +1567,14 @@ def clip_thumb(clip_id: str) -> FileResponse:
     p = Path(clip["thumbPath"])
     if not p.exists():
         raise HTTPException(404, "thumbnail file missing")
-    return FileResponse(p, media_type="image/jpeg")
+    return FileResponse(
+        p,
+        media_type="image/jpeg",
+        headers={"Cache-Control": MEDIA_CACHE_CONTROL},
+    )
 
 
-@app.get("/api/clips/{clip_id}/download")
+@app.api_route("/api/clips/{clip_id}/download", methods=["GET", "HEAD"])
 def clip_download(clip_id: str) -> FileResponse:
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
@@ -1555,7 +1587,11 @@ def clip_download(clip_id: str) -> FileResponse:
         p,
         media_type="video/mp4",
         filename=f"{clip['order'] + 1:02d}-{safe}.mp4",
-        headers={"Content-Disposition": f'attachment; filename="{clip["order"] + 1:02d}-{safe}.mp4"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{clip["order"] + 1:02d}-{safe}.mp4"',
+            "Cache-Control": MEDIA_CACHE_CONTROL,
+            "Accept-Ranges": "bytes",
+        },
     )
 
 
