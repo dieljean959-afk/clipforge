@@ -43,25 +43,32 @@ export interface ShareEntry {
 
 export type ShareListener = (clipId: string, entry: ShareEntry) => void;
 
-/** Cap on concurrent prefetches. More thrashes a phone radio and slows the page. */
-const MAX_CONCURRENT = 2;
+/**
+ * Cap on concurrent prefetches.
+ *
+ * Three, not two: with the server-side copies already built these are static
+ * downloads rather than transcodes, so the wall-clock cost is bandwidth and
+ * this is the only dial on how fast a whole grid turns green.
+ */
+const MAX_CONCURRENT = 3;
 
 /**
  * Cap on how many clips may prefetch at once, queued plus in flight.
  *
- * The share endpoint is not a static file server: on a miss it transcodes, and
- * that competes with the host's CPU for every other job. Prefetching a whole
- * batch therefore queues work that mostly finishes long after the user stopped
- * looking — a 13-clip grid is ~33 MB of mobile data and ~13 transcodes, and
- * measured on the 1-CPU reference host the last card did not reach Ready until
- * well past the point anyone would wait.
+ * Sized to cover a WHOLE batch on purpose. Every clip is meant to reach Ready
+ * so that any of them can be sent as an MP4 straight from the grid — a cap
+ * that silently left the ninth card on the link path meant the feature was
+ * half-present, with no indication of which half.
  *
- * Past the cap a card stays on the link path. That is not a downgrade: the
- * share link IS this clip served from this origin, and tapping it is instant.
- * The cap only stops the app from eagerly spending a phone's data and a
- * server's CPU on clips the user may never share.
+ * That is affordable only because the copies are built server-side while the
+ * job finishes (`_prewarm_share_copies`); `/share` now answers from disk
+ * instead of transcoding on the tap. The previous cap of 4 existed to stop
+ * thirteen on-demand transcodes from queueing behind each other on a 1-CPU
+ * host, and that cost is gone rather than merely bounded.
+ *
+ * `prefetchAllowed()` still suppresses all of this for Save-Data and 2G.
  */
-const MAX_PREFETCH = 4;
+const MAX_PREFETCH = 16;
 
 /**
  * Retries, with backoff. Three attempts is deliberate: a prefetch that keeps

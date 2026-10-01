@@ -257,7 +257,8 @@ def test_abort_is_not_an_error() -> None:
 def test_prefetch() -> None:
     section("5. prefetch is bounded, resumable and network-aware")
     cache = _ts_code("src/lib/clip-share-cache.ts")
-    check("at most 2 concurrent prefetches", "MAX_CONCURRENT = 2" in cache)
+    check("concurrent prefetches stay bounded (3)",
+          "MAX_CONCURRENT = 3" in cache)
     check("attempts are bounded", "MAX_ATTEMPTS = 3" in cache)
     check("retries back off exponentially",
           "BACKOFF_MS" in cache and re.search(r"BACKOFF_MS\s*=\s*\[\s*0,\s*600,\s*2000\s*\]", cache) is not None)
@@ -312,6 +313,11 @@ def test_spinner_terminates() -> None:
     cause was not a slow server: `invalidate` dropped the bookkeeping for an
     in-flight fetch but never aborted it, so the request kept running, kept
     emitting progress, and the ring the button had just cancelled came back.
+
+    The second half guards the reason the cap could be lifted: share copies are
+    built during the render stage, so `/share` is a static download rather than
+    a transcode on the tap. Without that, warming every clip would just move
+    the queue from the browser to the server.
     """
 
     section("7. a cancelled prefetch really stops, and not the whole batch")
@@ -335,13 +341,24 @@ def test_spinner_terminates() -> None:
           re.search(r"if \(signal\.aborted\) \{[^}]*inFlight: false", cache)
           is not None)
 
-    # A batch is not prefetched wholesale: 13 cards would otherwise queue ~33 MB
-    # of mobile data and a transcoder's worth of work for clips nobody taps.
-    check("prefetching a whole batch is capped",
-          "MAX_PREFETCH" in cache and "jobs.size >= MAX_PREFETCH" in cache)
-    check("the cap is small enough to be a real cap",
-          re.search(r"const MAX_PREFETCH = (\d+);", cache) is not None
-          and int(re.search(r"const MAX_PREFETCH = (\d+);", cache).group(1)) <= 6)
+    # Every clip must be able to reach Ready, so the cap has to cover a whole
+    # batch. It is only affordable because the copies are built server-side.
+    cap = re.search(r"const MAX_PREFETCH = (\d+);", cache)
+    check("prefetching a whole batch is capped", cap is not None
+          and "jobs.size >= MAX_PREFETCH" in cache)
+    check("the cap covers a full 13-clip batch", cap is not None
+          and int(cap.group(1)) >= 13, cap.group(1) if cap else "missing")
+
+    task = _ts("app/task.py")
+    check("share copies are built while the job finishes",
+          "_prewarm_share_copies" in task)
+    check("prewarming never fails a rendered batch",
+          re.search(r"except Exception as exc:.*?never fail the batch", task, re.S)
+          is not None)
+    check("prewarming is off the critical path (daemon thread)",
+          re.search(r"threading\.Thread\(\s*\n\s*target=self\._prewarm_share_copies",
+                    task) is not None
+          and "daemon=True" in task)
 
     btn = _ts_code("src/components/clipforge/ShareButton.tsx")
     ms = re.search(r"const READY_TIMEOUT_MS = ([\d_]+);", btn)

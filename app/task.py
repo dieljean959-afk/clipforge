@@ -17,8 +17,10 @@ the job's errorDetail — never swallowed.
 
 from __future__ import annotations
 
+import threading
 import time
 import traceback
+from concurrent import futures as cf
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ from app import (
     eta,
     llm,
     reframe,
+    share_video,
     subtitle,
     translate,
     vad,
@@ -949,6 +952,68 @@ class Pipeline:
         job["clipCount"] = total
         job["totalClipsSec"] = sum((c["end"] - c["start"]) for c in candidates)
         self.store.write_job(job)
+
+        # Share copies are built HERE, in the background, rather than on the
+        # tap. `/share` is not a static file server: on a miss it transcodes,
+        # which on a small host costs ~15s of the one CPU per clip. Thirteen
+        # clips on demand is ~33MB and three minutes of queueing, so a user
+        # opening the grid could never get more than the first card to Ready.
+        # Warming them while the job finishes turns every later request into a
+        # plain static download, and the button goes green immediately.
+        #
+        # Off the critical path on purpose: the batch is already durable and
+        # the job must reach `complete` now, not three minutes later. A clip
+        # tapped before its copy exists still works - `/share` transcodes on
+        # demand - so prewarming can only ever make it faster.
+        threading.Thread(
+            target=self._prewarm_share_copies,
+            args=(job_id,),
+            name=f"share-prewarm-{job_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _prewarm_share_copies(self, job_id: str) -> None:
+        """Build every clip's share copy ahead of the first tap.
+
+        Strictly best-effort: a share copy is an optimisation for the file
+        share path, so a failure here is logged and dropped rather than
+        failing a batch whose MP4s are all already rendered and served.
+        """
+        masters: list[Path] = []
+        for clip in self.store.list_clips(job_id):
+            if clip.get("renderState") != "done":
+                continue
+            raw = str(clip.get("videoPath") or "")
+            if not raw:
+                continue
+            path = Path(raw)
+            if path.is_file():
+                masters.append(path)
+
+        if not masters:
+            return
+
+        def warm(master: Path) -> str:
+            try:
+                share_video.build_share_version(master)
+                return ""
+            except Exception as exc:  # noqa: BLE001 - never fail the batch
+                return f"{master.name}: {exc}"
+
+        # Two at a time: enough to overlap the transcode's I/O with its encode,
+        # not so many that they fight the worker pool for a single core.
+        workers = min(2, max(1, len(masters)))
+        problems: list[str] = []
+        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+            problems = [p for p in pool.map(warm, masters) if p]
+
+        if problems:
+            logger.warning(
+                f"[share] prewarm incomplete for {job_id}: {len(problems)} of "
+                f"{len(masters)} clip(s) failed ({problems[0]})"
+            )
+        else:
+            logger.info(f"[share] prewarmed {len(masters)} share copies for {job_id}")
 
     # ------------------------------------------------------------------
 
