@@ -615,6 +615,35 @@ def _is_json_validation_error(detail: str) -> bool:
     return bool(_JSON_VALIDATION.search(detail or ""))
 
 
+#: An exhausted balance is a BILLING state, not a transport hiccup. DeepSeek
+#: answers 402 "Insufficient Balance" and OpenAI-compatible gateways answer 403
+#: with the same words; neither is fixed by waiting, and the wording is what
+#: distinguishes them from a real permission problem, where a different key
+#: WOULD help and the operator deserves to be told exactly that.
+_BILLING_EXHAUSTED = re.compile(
+    r"insufficient[_ ]balance|insufficient[_ ]funds|insufficient[_ ]credit|"
+    r"billing|out of credit|payment required|quota exceeded|"
+    r"exceeded your current quota",
+    re.IGNORECASE,
+)
+
+
+def _is_billing_exhausted(status: int, detail: str) -> bool:
+    """True when the account is out of credit — permanent until topped up.
+
+    This is the single most expensive non-failure in the ladder. A 402 falls
+    through to the generic retry branch, so one exhausted balance cost
+    ``max_retries`` backoffs, then all four JSON-ladder rungs, then the
+    fallback provider — roughly 15 doomed HTTP calls before the job saw the
+    error. Called once per caption language per clip, that turned a 13-clip
+    batch into an apparent infinite loop pinned at "clip 1 of 13, 0%".
+    """
+    if _BILLING_EXHAUSTED.search(detail or ""):
+        return True
+    # 402 is Payment Required and means exactly one thing on these APIs.
+    return status == 402
+
+
 def _format_unsupported(detail: str) -> bool:
     """True when the model cannot do Structured Outputs at all."""
     return bool(_NO_RESPONSE_FORMAT.search(detail or ""))
@@ -893,6 +922,17 @@ def _groq_single(
                     f"{cfg.label} rejected model {model!r}: {msg[:200]}. "
                     f"Pick a current model from {cfg.docs_url} and set "
                     f"[{pace_key}] model in config.toml."
+                ) from exc
+            # Checked BEFORE the retry budget and before the ladder can
+            # escalate: no amount of backing off or reformatting revives an
+            # empty balance, and failing fast here is what stops one dead
+            # account from looking like a hung render.
+            if _is_billing_exhausted(exc.status, msg):
+                raise LlmError(
+                    f"{cfg.label} account is out of credit ({msg[:200]}). "
+                    f"This is a billing limit, not a bad request — retrying "
+                    f"cannot fix it. Top up the {cfg.label} account or set "
+                    f"[llm] fallback_provider to a funded backend."
                 ) from exc
             if attempt >= cfg.max_retries:
                 break

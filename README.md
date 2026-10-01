@@ -950,6 +950,7 @@ python3 tools/boot_guard_test.py      # the boot guard never reload-storms a slo
 python3 tools/playback_e2e.py      # the same, over real HTTP with curl -I and curl -r
 python3 tools/subtitle_langs_test.py  # multi-language caption tracks: timing, wrapping, SRT/VTT
 python3 tools/restore_test.py      # a deleted job is restorable; retention can be disabled
+python3 tools/render_loop_test.py  # an empty balance must not look like a hung render
 python3 tools/remux_faststart.py --apply   # move moov to the front of already-rendered clips
 ```
 

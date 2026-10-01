@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
@@ -403,9 +404,21 @@ def track_filename(clip_index: int, lang: str, ext: str) -> str:
     return f"{stem}_{lang}.{ext}"
 
 
+#: Wall-clock ceiling for the caption sidecars of ONE clip, in seconds.
+#:
+#: Translation is a nice-to-have that runs after the video already exists, so
+#: it must never be able to hold a finished batch open. Without a ceiling a
+#: provider that accepts the request and then stalls pays the full retry ladder
+#: per language: twelve languages times a multi-minute timeout is an hour of
+#: "still rendering" for files that were finished the whole time. Past the
+#: budget the remaining languages are recorded as skipped, not attempted.
+CAPTION_BUDGET_SEC = 90.0
+
+
 def write_tracks(out_dir: Any, clip_index: int, cues: Sequence[dict], settings: Any,
                  call: Callable[[str, Any], str] | None = None,
-                 log: Callable[[str], None] | None = None) -> list[dict]:
+                 log: Callable[[str], None] | None = None,
+                 budget_sec: float | None = None) -> list[dict]:
     """Write per-language SRT/VTT sidecars for one clip. Returns track records.
 
     Deliberately NEVER raises. By the time this runs the render has already
@@ -415,12 +428,19 @@ def write_tracks(out_dir: Any, clip_index: int, cues: Sequence[dict], settings: 
 
     An existing non-empty file doubles as a resume cache: a re-render reuses it
     rather than paying for the same translation twice.
+
+    ``budget_sec`` caps the wall clock spent here. Once it is spent the
+    remaining languages are recorded with ``skipped`` rather than silently
+    dropped, so the clip reports honestly on which tracks it actually has.
     """
     from pathlib import Path  # noqa: PLC0415 - only needed on this path
 
     cfg = getattr(settings, "translate", None)
     if cfg is None or not getattr(cfg, "enabled", False) or not cues:
         return []
+
+    limit = CAPTION_BUDGET_SEC if budget_sec is None else max(0.0, float(budget_sec))
+    started = time.monotonic()
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -441,6 +461,22 @@ def write_tracks(out_dir: Any, clip_index: int, cues: Sequence[dict], settings: 
                 tracks.append({"lang": code, "source": False, "cached": True,
                                "files": {ext: str(out_dir / track_filename(clip_index, code, ext))
                                          for ext in cfg.formats}})
+                continue
+            spent = time.monotonic() - started
+            if spent >= limit:
+                # Skip THIS language and keep going rather than breaking out.
+                # The source track costs no call, so wherever it sits in the
+                # configured order it is still written; a blanket break would
+                # throw that away for free whenever it came after the cutoff.
+                logger.warning(
+                    f"[translate] clip {clip_index}: caption budget ({limit:.0f}s) "
+                    f"spent after {spent:.0f}s — {code} track skipped"
+                )
+                if log:
+                    log(f"clip {clip_index}: caption budget spent after {spent:.0f}s "
+                        f"— {code} track skipped")
+                tracks.append({"lang": code, "source": False, "skipped": True,
+                               "files": {}})
                 continue
             try:
                 localized = translate_cues(cues, code, settings, terms,

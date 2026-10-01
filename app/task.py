@@ -847,9 +847,6 @@ class Pipeline:
             # silence cuts for this clip
             cuts_for_clip = vad.silence_cuts_for_clip(speech, c0, c1, self.settings) if speech else []
 
-            # ---- sidecar multi-language tracks (SRT/VTT) -------------------
-            tracks = self._write_caption_tracks(job_id, idx + 1, cues)
-
             # ---- stage: captions (ASS per clip, preset-aware) --------------
             ass_path = ws.stage_dir("captions") / f"clip_{idx + 1:02d}.ass"
             subtitle.write_ass(
@@ -894,9 +891,22 @@ class Pipeline:
                     "uncertainCues": sum(1 for c in cues if c.get("uncertain")),
                     "captionPreset": preset,
                     "captionStyle": style_id,
-                    "translationTracks": tracks,
                 })
                 self.store.write_clip(clip_doc)
+
+                # ---- sidecar multi-language tracks (SRT/VTT) ---------------
+                # AFTER the encode, never before it. These are LLM calls (one
+                # batch per language, twelve languages) and the MP4 is the
+                # thing the user is waiting for. Translating first meant a slow
+                # or unfunded backend stalled the encode of every single clip,
+                # so the batch sat at "Rendering clip 1 of 13, 0%" for hours
+                # while the video it was holding hostage was already available.
+                # The render is now durable before the first caption is asked
+                # for, and the tracks patch onto the finished clip doc after.
+                tracks = self._write_caption_tracks(job_id, idx + 1, cues)
+                if tracks:
+                    clip_doc["translationTracks"] = tracks
+                    self.store.write_clip(clip_doc)
                 captions_txt_parts.append(
                     f"=== Clip {idx + 1}: {clip_doc['title']} (score {clip_doc['score']:.0f}) ==="
                 )

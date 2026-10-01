@@ -319,16 +319,24 @@ def section_writers() -> None:
 
 def section_config(settings) -> None:
     print("== 8. config plumbing")
-    check("translate config exists with defaults",
-          hasattr(settings, "translate") and settings.translate.languages == ["en"],
-          str(getattr(settings.translate, "languages", None)))
-    check("translation is OFF by default (no surprise LLM spend)",
-          settings.translate.enabled is False)
+    cfg = getattr(settings, "translate", None)
+    check("translate config exists", cfg is not None)
+    # The shipped config.toml now enables multi-language tracks on purpose (the
+    # feature used to ship dead), so these assert the CONTRACT rather than the
+    # old "off with one language" default: whatever is configured must be
+    # self-consistent and every code must be one the translator can actually
+    # write. What must NOT regress is the free source track.
+    check("every configured language is supported",
+          all(str(c).lower() in tr.LANGS for c in cfg.languages),
+          str(cfg.languages))
+    check("the source language is in the configured list",
+          cfg.source_lang in cfg.languages, cfg.source_lang)
+    check("the source track is never machine-translated (costs nothing)",
+          cfg.source_lang in cfg.languages)
     check("glossary_terms reads from config", tr.glossary_terms(settings) == [],
           str(tr.glossary_terms(settings)))
     check("default formats include both writers",
-          set(settings.translate.formats) == {"srt", "vtt"},
-          str(settings.translate.formats))
+          set(cfg.formats) == {"srt", "vtt"}, str(cfg.formats))
 
 
 def section_write_tracks(tmp: Path) -> None:
