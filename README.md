@@ -922,6 +922,9 @@ python3 tools/compile_check.py   # compile + undefined-name check every backend 
 python3 tools/transcribe_unit_test.py  # chunking, repetition, engine logic, .wav.part regression
 python3 tools/asr_engine_test.py       # mocked queue/retry + ETA checks
 python3 tools/detect_backend_test.py   # provider dispatch, text-only payloads
+python3 tools/deepseek_provider_test.py # DeepSeek wire contract, thinking-mode field, failover
+python3 tools/nvidia_provider_test.py  # NIM as a selectable provider, pacing isolation
+python3 tools/usage_isolation_test.py  # daily counters survive restarts, per-provider budgets
 python3 tools/llm_provider_test.py     # Groq wire contract, 429 backoff, pacing, key handling
 python3 tools/caption_preset_test.py   # caption preset -> ASS style line + clip-relative timing
 python3 tools/caption_social_test.py   # post-caption rules + social readiness/OAuth/error mapping

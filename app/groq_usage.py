@@ -121,11 +121,26 @@ class UsageStore:
         self._data: dict[str, Any] = self._read()
 
     def _read(self) -> dict[str, Any]:
+        """Load the whole document. `self._data["days"]` is ALWAYS the day map.
+
+        Returning the OUTER document matters. An earlier version returned
+        `loaded["days"]` — the inner map — while `_write` persisted `self._data`
+        wrapped in a `days` key. So the first read after any write unwrapped one
+        level too far, `_day()`'s `setdefault("days", {})` then opened a fresh
+        empty namespace, and the real totals were ignored: the daily counter
+        silently reset to 0 on every process restart, which is exactly when an
+        operator is checking whether the badge is lying about their budget.
+        """
         try:
             if self.path.exists():
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
-                    return loaded.setdefault("days", {})
+                    # `days` is the only legitimate top-level key, so normalise
+                    # to exactly that. A file from the buggy writer also carries
+                    # day keys at the top level; keeping them would re-introduce
+                    # the same unwrap confusion one reader away.
+                    nested = loaded.get("days")
+                    return {"days": nested if isinstance(nested, dict) else {}}
         except Exception as exc:  # noqa: BLE001 - never break a job over telemetry
             logger.warning(f"[groq-usage] unreadable usage file ({exc}) — starting fresh")
         return {"days": {}}
@@ -157,48 +172,82 @@ class UsageStore:
     # ------------------------------------------------------------------ #
 
     def record_call(
-        self, model: str, total_tokens: int | None = None, headers: Any = None
+        self,
+        model: str,
+        total_tokens: int | None = None,
+        headers: Any = None,
+        provider: str = "groq",
     ) -> None:
-        """Add one successful call's billed tokens to today's counter."""
+        """Add one successful call's billed tokens to today's counter.
+
+        `provider` tags the bucket. The daily budgets are not comparable — a
+        200k tokens/day Groq ceiling and a DeepSeek balance — so a shared
+        counter would report one provider's spend against another's limit and
+        show a false "quota exhausted" warning on a provider that never spent
+        anything.
+        """
         now_ms = int(time.time() * 1000)
         with self._lock:
             day = self._day(today_key())
             entry = day["models"].setdefault(model, {"tokens": 0, "calls": 0})
+            # A model name is only unique within a provider, so keep the
+            # provider on the entry rather than trusting the name to be global.
+            entry["provider"] = provider
             entry["calls"] = int(entry.get("calls", 0)) + 1
             if total_tokens and total_tokens > 0:
                 entry["tokens"] = int(entry.get("tokens", 0)) + int(total_tokens)
             day["calls"] = int(day.get("calls", 0)) + 1
             if not day.get("firstCallAt"):
                 day["firstCallAt"] = now_ms
+            # Also per-model, so the refill estimate can use THIS provider's
+            # first call of the day rather than whichever provider happened to
+            # call first — otherwise switching providers mid-day reports a
+            # window that opened before the provider was even in use.
+            if not entry.get("firstCallAt"):
+                entry["firstCallAt"] = now_ms
             rl = _rate_limit_headers(headers)
             if rl:
                 day["rateLimit"] = rl
             self._prune()
             self._write()
 
-    def record_quota_error(self, model: str, detail: str) -> dict[str, Any]:
+    def record_quota_error(
+        self, model: str, detail: str, provider: str = "groq"
+    ) -> dict[str, Any]:
         """Record Groq's authoritative daily numbers from a 429 body.
 
         This is the only source that reports the REAL daily counter, so it is
         stored verbatim rather than being added to the local sum — adding it
         would double-count every token already tallied from `usage`.
+
+        Groq ONLY. `parse_quota_message` understands Groq's tokens-per-DAY
+        wording, and it overwrites the denominator for the whole day, so
+        letting another provider's 429 land here would restate one provider's
+        ceiling as another's. A non-Groq 429 still backs off normally; it just
+        does not get to define a budget.
         """
+        if provider != "groq":
+            return {}
         info = parse_quota_message(detail)
         if not info:
             return {}
         now_ms = int(time.time() * 1000)
         with self._lock:
             day = self._day(today_key())
-            day["reported"] = {
+            day.setdefault("reported", {})
+            day["reported"][provider] = {
                 "used": int(info["used"]),
                 "limit": int(info["limit"]),
                 "at": now_ms,
             }
             if info.get("requested") is not None:
-                day["reported"]["requested"] = int(info["requested"])
+                day["reported"][provider]["requested"] = int(info["requested"])
             if info.get("retry_after_sec") is not None:
-                day["reported"]["refillAt"] = now_ms + int(float(info["retry_after_sec"]) * 1000)
+                day["reported"][provider]["refillAt"] = (
+                    now_ms + int(float(info["retry_after_sec"]) * 1000)
+                )
             entry = day["models"].setdefault(model, {"tokens": 0, "calls": 0})
+            entry["provider"] = provider
             entry["quotaErrorAt"] = now_ms
             self._prune()
             self._write()
@@ -217,16 +266,30 @@ class UsageStore:
     # Reporting
     # ------------------------------------------------------------------ #
 
-    def snapshot(self, *, default_limit: int, model: str = "") -> dict[str, Any]:
-        """Today's usage, preferring Groq's own number when we have one."""
+    def snapshot(
+        self, *, default_limit: int, model: str = "", provider: str = "groq"
+    ) -> dict[str, Any]:
+        """Today's usage for ONE provider, preferring that provider's own number.
+
+        Scoped to `provider` on purpose. The budgets are not comparable, so a
+        combined figure would divide one provider's spend by another's ceiling.
+        """
         now = time.time()
         with self._lock:
             day = dict(self._day(today_key()))
             models = {k: dict(v) for k, v in (day.get("models") or {}).items()}
-        reported = day.get("reported") or {}
+        # Entries written before providers were distinguished carry no tag;
+        # Groq is the correct owner because it was the only provider that could
+        # write them, so today's file keeps its numbers instead of zeroing.
+        mine = {
+            k: v
+            for k, v in models.items()
+            if str(v.get("provider") or "groq") == provider
+        }
+        reported = self._reported_for(day, provider)
 
         local_tokens = 0
-        for entry in models.values():
+        for entry in mine.values():
             local_tokens += int(entry.get("tokens", 0))
 
         # Groq's number is authoritative while it is same-day. If the local sum
@@ -239,13 +302,17 @@ class UsageStore:
         remaining = max(0, limit - used) if limit else 0
 
         refill_at: int | None = reported.get("refillAt")
-        if not refill_at and day.get("firstCallAt"):
+        first_call = next(
+            (int(e["firstCallAt"]) for e in mine.values() if e.get("firstCallAt")),
+            0,
+        ) or int(day.get("firstCallAt") or 0)
+        if not refill_at and first_call:
             # No 429 seen, so no provider estimate. The window is a rolling 24
             # hours, so the best available guess is that the first call of the
             # local day begins ageing out then.
-            refill_at = int(day["firstCallAt"]) + 24 * 3600 * 1000
+            refill_at = first_call + 24 * 3600 * 1000
 
-        active = models.get(model) if model else None
+        active = mine.get(model) if model else None
         return {
             "used": used,
             "limit": limit,
@@ -253,10 +320,11 @@ class UsageStore:
             "percentUsed": round((used / limit) * 100, 1) if limit else 0.0,
             "localTokens": local_tokens,
             "reportedUsed": int(reported.get("used", 0)) if reported else None,
-            "source": "groq-report" if reported else "local-sum",
+            "source": "provider-report" if reported else "local-sum",
+            "provider": provider,
             "refillAt": refill_at,
             "refillSec": max(0, int((refill_at - now * 1000) / 1000)) if refill_at else None,
-            "calls": int(day.get("calls", 0)),
+            "calls": sum(int(e.get("calls", 0)) for e in mine.values()),
             "activeModel": model,
             "activeModelTokens": int((active or {}).get("tokens", 0)),
             "models": [
@@ -266,10 +334,27 @@ class UsageStore:
                     "calls": int(entry.get("calls", 0)),
                     "active": name == model,
                 }
-                for name, entry in sorted(models.items(), key=lambda kv: -int(kv[1].get("tokens", 0)))
+                for name, entry in sorted(mine.items(), key=lambda kv: -int(kv[1].get("tokens", 0)))
             ],
             "rateLimit": day.get("rateLimit") or {},
         }
+
+    @staticmethod
+    def _reported_for(day: dict[str, Any], provider: str) -> dict[str, Any]:
+        """This provider's authoritative 429 numbers, tolerating the old shape.
+
+        `day["reported"]` used to be a single flat dict written only by Groq.
+        Reading a legacy file must not crash and must not hand Groq's ceiling
+        to whichever provider is active now.
+        """
+        reported = day.get("reported") or {}
+        if not isinstance(reported, dict):
+            return {}
+        if "used" in reported or "limit" in reported:
+            # Legacy flat record: Groq's, by construction.
+            return reported if provider == "groq" else {}
+        scoped = reported.get(provider)
+        return scoped if isinstance(scoped, dict) else {}
 
     def reset(self) -> None:
         with self._lock:

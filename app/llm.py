@@ -852,7 +852,7 @@ def _groq_single(
     # Pacing is per PROVIDER, not global: an NIM call must never wait out
     # Groq's 30-rpm floor, or a job that failed over to the backup would run
     # at half speed for no reason.
-    pace_key = str(getattr(cfg, "label", "groq")).lower()
+    pace_key = _provider_key(cfg)
     for attempt in range(cfg.max_retries + 1):
         _groq_wait_turn(cfg.min_interval_sec, pace_key)
         # Pace on TOKENS as well as requests: the request floor keeps a burst
@@ -878,6 +878,7 @@ def _groq_single(
                     model,
                     total_tokens=(data.get("usage") or {}).get("total_tokens"),
                     headers=resp_headers,
+                    provider=_provider_key(cfg),
                 )
             except Exception as exc:  # noqa: BLE001 - telemetry must never fail a job
                 logger.debug(f"[groq-usage] could not record usage: {exc}")
@@ -906,7 +907,7 @@ def _groq_single(
                 # The daily-quota rejection is the only place Groq states the real
                 # tokens-per-day balance — record it before deciding what to do.
                 try:
-                    _usage_store().record_quota_error(model, msg)
+                    _usage_store().record_quota_error(model, msg, provider=_provider_key(cfg))
                 except Exception as qexc:  # noqa: BLE001 - telemetry only
                     logger.debug(f"[groq-usage] could not record quota error: {qexc}")
                 fallback = min(90.0, (2 ** attempt) * 4.0 + random.random() * 2)
@@ -1081,10 +1082,12 @@ def _usage_store() -> "Any":
 _SETTINGS_HOLDER: list[Any] = [None]
 
 
-def note_usage_call(model: str, total_tokens: Any = None, headers: Any = None) -> None:
-    """Record one Groq call. Public so tests and the ollama path can drive it."""
+def note_usage_call(
+    model: str, total_tokens: Any = None, headers: Any = None, provider: str = "groq"
+) -> None:
+    """Record one hosted detection call. Public so tests can drive it."""
     try:
-        _usage_store().record_call(model, total_tokens, headers)
+        _usage_store().record_call(model, total_tokens, headers, provider=provider)
     except Exception as exc:  # noqa: BLE001 - telemetry must never fail a job
         logger.debug(f"[groq-usage] could not record call: {exc}")
 
@@ -1267,6 +1270,21 @@ def _call_provider(which: str, chunk_text_prompt: str, settings: Settings) -> st
     if which == PROVIDER_NVIDIA:
         return call_nvidia(chunk_text_prompt, settings)
     return call_groq(chunk_text_prompt, settings)
+
+
+def _provider_key(cfg: Any) -> str:
+    """Stable provider identity for telemetry buckets (usage, pacing ledgers).
+
+    Taken from the config's own `provider` field, never from its display
+    `label`. The label is prose an operator-facing string may be reworded to
+    ("NVIDIA NIM"), and a usage bucket that silently changes key when that
+    happens reports one provider's spend against another's ceiling. Falls back
+    to the label for any config that predates the field, then to "groq".
+    """
+    name = str(getattr(cfg, "provider", "") or "").strip().lower()
+    if name:
+        return name
+    return str(getattr(cfg, "label", "") or "groq").strip().lower()
 
 
 def _provider_ready(which: str, settings: Settings) -> bool:

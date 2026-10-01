@@ -144,8 +144,17 @@ export function LocalWorkerCard({ className }: { className?: string }) {
     groq: health?.llmGroq,
     gemini: health?.llm,
   };
-  const llm = KEY_STATUS[activeProvider] ?? health?.llmGroq;
-  const llmProblem = llm?.problem ?? null;
+  // No fallback to another vendor's state. Ollama has no key at all, so the
+  // old `?? health?.llmGroq` made an unreachable local server report GROQ's key
+  // problem ("encrypted dotenvx…", "no key found") and told the user to paste a
+  // Groq key for a backend that needs none — contradicting the dialog two
+  // lines below, which correctly says Ollama needs no key.
+  const llm = KEY_STATUS[activeProvider];
+  const isOllama = activeProvider === "ollama";
+  // For Ollama the honest "problem" is the server's reachability, not a key.
+  const ollamaDetail =
+    typeof detection?.detail === "string" ? detection.detail : "Ollama is not responding.";
+  const llmProblem = isOllama ? null : (llm?.problem ?? null);
   const llmSource = typeof llm?.source === "string" ? llm.source : "";
   // Per-vendor key facts. Kept as one table rather than nested ternaries so a
   // new provider is one row here instead of a new branch in five places.
@@ -175,14 +184,16 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       keysUrl: "console.gemini.google.com/apikey",
     },
   };
-  const vendor = VENDOR[activeProvider] ?? VENDOR.deepseek;
-  const llmEnvName = vendor.env;
-  const llmKeyPrefix = vendor.prefix;
-  const llmVendor = vendor.name;
-  const llmKeyUrl = vendor.keysUrl;
+  const vendor = VENDOR[activeProvider];
+  // With no key to manage there is no vendor to name: these stay blank rather
+  // than borrowing DeepSeek's, so no prompt can ever say "DeepSeek API key"
+  // while the selected backend is Ollama.
+  const llmEnvName = vendor?.env ?? "";
+  const llmKeyPrefix = vendor?.prefix ?? "";
+  const llmVendor = vendor?.name ?? "Ollama";
+  const llmKeyUrl = vendor?.keysUrl ?? "";
   // Ollama needs no key: the local server's reachability IS the check.
-  const llmOk =
-    activeProvider === "ollama" ? detection?.ready === true : llm?.keyLoaded === true;
+  const llmOk = isOllama ? detection?.ready === true : llm?.keyLoaded === true;
   const [switchingBackend, setSwitchingBackend] = useState(false);
   const switchBackend = async (provider: DetectionProvider) => {
     if (!detection || provider === detection.provider) return;
@@ -462,14 +473,25 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               )}
               title={
                 llmOk
-                  ? `${llmVendor} key loaded on the server (${llmSource})`
-                  : llmProblem ?? `No ${llmEnvName} on the server yet`
+                  ? isOllama
+                    ? ollamaDetail
+                    : `${llmVendor} key loaded on the server (${llmSource})`
+                  : (llmProblem ?? (isOllama ? ollamaDetail : `No ${llmEnvName} on the server yet`))
               }
             >
               {llmOk ? <HardDrive className="size-3" /> : <KeyRound className="size-3" />}
-              {llmOk ? "AI detection ready" : llmProblem ? "AI detection blocked" : "AI detection offline — no key"}
+              {llmOk
+                ? "AI detection ready"
+                : isOllama
+                  ? "AI detection offline — Ollama unreachable"
+                  : llmProblem
+                    ? "AI detection blocked"
+                    : "AI detection offline — no key"}
             </span>
-            {/* key manager: Set key / Re-check — always tappable, no hover-only UI */}
+            {/* key manager: Set key / Re-check — always tappable, no hover-only UI.
+                Hidden for Ollama: there is no key to set, and Re-check only
+                re-reads the env files, so both would be dead controls. */}
+            {!isOllama && (
             <button
               type="button"
               onClick={openKeyDialog}
@@ -484,7 +506,8 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               <Pencil className="size-3" />
               {llmOk ? "Replace key" : "Set key"}
             </button>
-            {!llmOk && (
+            )}
+            {!llmOk && !isOllama && (
               <button
                 type="button"
                 onClick={() => void runRecheck()}
@@ -554,7 +577,12 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       )}
       {!llmOk && health && (
         <p className="mt-2 max-w-3xl text-[11px] leading-relaxed text-amber-300/90">
-          {llmProblem ? (
+          {isOllama ? (
+            <>
+              <span className="font-semibold">Why: </span>{ollamaDetail} Detection
+              re-runs locally once the server is up — no API key is involved.
+            </>
+          ) : llmProblem ? (
             <>
               <span className="font-semibold">Why: </span>{llmProblem}{" "}
               Use <span className="font-semibold">Set key</span> to replace it right
@@ -586,7 +614,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             </DialogTitle>
             <DialogDescription>
               {activeProvider === "ollama"
-                ? "Ollama runs locally and needs no API key. Switch the detection backend to nvidia or groq to use a hosted key here."
+                ? "Ollama runs locally and needs no API key. Switch the detection backend to deepseek, nvidia or groq to use a hosted key here."
                 : llmOk
                   ? `A key is active (source: ${llmSource}). Saving replaces it; removing takes AI detection offline.`
                   : llmProblem

@@ -178,7 +178,7 @@ export function GroqUsageBadge({
             <div className="flex justify-between gap-2">
               <dt>Source</dt>
               <dd className="text-right">
-                {usage.source === "groq-report" ? `${vendor} 429 report` : "local tally"}
+                {usage.source === "provider-report" ? `${vendor} 429 report` : "local tally"}
               </dd>
             </div>
             <div className="flex justify-between gap-2">

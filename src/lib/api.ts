@@ -401,11 +401,14 @@ export interface UsageDto {
   remaining: number;
   percentUsed: number;
   /**
-   * `groq-report` = from a Groq 429 body (authoritative). `local-sum` = our own
-   * tally, which is the only source on providers that report credits rather
-   * than a per-model daily token ceiling.
+   * `provider-report` = the provider's own 429 figure (authoritative, Groq
+   * only). `local-sum` = our own tally, which is the only source on providers
+   * that bill a balance rather than publishing a per-model daily token
+   * ceiling. Every number here is scoped to the ACTIVE provider — the daily
+   * budgets are not comparable, so mixing them would report one provider's
+   * spend against another's limit.
    */
-  source: "groq-report" | "local-sum";
+  source: "provider-report" | "local-sum";
   localTokens: number;
   reportedUsed: number | null;
   /** Epoch ms when the daily window next frees capacity, or null if unknown. */
@@ -418,11 +421,13 @@ export interface UsageDto {
   rateLimit: Record<string, string>;
   configured: boolean;
   /**
-   * Which provider `limit`/`used` describe. The denominator follows the ACTIVE
-   * backend because the two budgets are not comparable: Groq states a real
-   * per-model tokens-per-day ceiling, NIM has only an operator-set one.
+   * Which provider `limit`/`used` describe, and the ONLY provider they count.
+   * The figures are scoped to it, not a cross-provider total: the budgets are
+   * not comparable (Groq states a real per-model tokens-per-day ceiling;
+   * DeepSeek and NIM bill a balance or credits), so a combined total would
+   * report one provider's spend against another's limit.
    */
-  provider?: string;
+  provider?: DetectionProvider;
   /** Display name for the active provider ("NVIDIA", "Groq", ...). */
   providerLabel?: string;
 }

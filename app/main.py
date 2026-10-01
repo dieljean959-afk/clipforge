@@ -752,7 +752,7 @@ def usage() -> dict:
     limit = int(getattr(cfg, "daily_token_limit", 0) or 0)
     model = str(getattr(cfg, "model", "") or "")
     snap = groq_usage.store(settings.app.paths.data_dir).snapshot(
-        default_limit=limit, model=model
+        default_limit=limit, model=model, provider=active
     )
     snap["configured"] = bool(model)
     snap["provider"] = active

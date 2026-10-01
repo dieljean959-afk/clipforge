@@ -807,6 +807,11 @@ class GroqConfig:
     daily_token_limit: int = 200000
     #: Provider name used in log lines and error text, so one shared call path
     #: can say "Groq" or "NVIDIA" without hardcoding either.
+    #: Stable provider identity ("groq"). NOT the display label: telemetry,
+    #: pacing ledgers and usage buckets are keyed by this, because a label is
+    #: prose that someone can reword. Inferring identity from `label.lower()`
+    #: happens to work today and silently misfiles spend the day it does not.
+    provider: str = "groq"
     label: str = "Groq"
     #: Where an operator goes to pick a current model after a 404. Named in the
     #: error rather than guessed at: a retired model has no safe auto-replacement.
@@ -815,7 +820,7 @@ class GroqConfig:
 
 @dataclass
 class NvidiaConfig:
-    """NVIDIA NIM (integrate.api.nvidia.com) — the PRIMARY detection backend.
+    """NVIDIA NIM (integrate.api.nvidia.com) — an ALTERNATIVE detection backend.
 
     NIM is OpenAI-compatible, so these fields are deliberately the SAME names
     and with the SAME meanings as GroqConfig: one call path serves both
@@ -863,6 +868,7 @@ class NvidiaConfig:
     daily_token_limit: int = 2000000
     #: Provider name used in log lines and error text, so a single call path can
     #: say "NVIDIA" or "Groq" without hardcoding either.
+    provider: str = "nvidia"
     label: str = "NVIDIA"
     #: Where an operator goes to pick a current model after a 404.
     docs_url: str = "build.nvidia.com/models"
@@ -926,6 +932,7 @@ class DeepSeekConfig:
     #: `thinking: {type: ...}` control parameter.
     thinking_mode: str = "disabled"
     #: Provider name for logs/errors, so one call path can say "DeepSeek".
+    provider: str = "deepseek"
     label: str = "DeepSeek"
     #: Where an operator goes to pick a current model after a 404.
     docs_url: str = "api-docs.deepseek.com/quick_start/pricing"
