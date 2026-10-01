@@ -39,6 +39,13 @@ class ToolbarErrorBoundary extends React.Component<
 }
 
 /** Hard guard so runtime errors never leave the preview as a blank page. */
+declare global {
+  interface Window {
+    /** Set by main.tsx the moment React owns the page; see index.html. */
+    __clipforgeBooted?: boolean;
+  }
+}
+
 class RootErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { hasError: boolean; message: string; stack: string }
@@ -52,7 +59,10 @@ class RootErrorBoundary extends React.Component<
     };
   }
   componentDidCatch(err: Error) {
+    // Also surface it in the document title and body class, so a crash is
+    // visible even in a screenshot of a stripped-down preview shell.
     console.error("[WebContainer preview] Root crash:", err);
+    document.title = `ClipForge error: ${err.message || "runtime failure"}`;
   }
   render() {
     if (this.state.hasError) {
@@ -99,8 +109,36 @@ function RouteSyncer() {
   return null;
 }
 
-createRoot(document.getElementById("root")!).render(
+/** Removes the static boot fallback from index.html, once React has committed.
+ *
+ *  Deliberately a component rather than a line before `createRoot`: React only
+ *  runs effects AFTER it has successfully committed, so the fallback stays on
+ *  screen through any render-time throw and is removed only once the app is
+ *  genuinely up. A sibling of the error boundary (not a child) so it still
+ *  mounts when the boundary catches — otherwise a crash would leave both the
+ *  fallback and the error panel on screen.
+ */
+function BootCleanup() {
+  useEffect(() => {
+    document.getElementById("boot")?.remove();
+  }, []);
+  return null;
+}
+
+const rootEl = document.getElementById("root");
+if (!rootEl) {
+  // Should be impossible (index.html ships the element), but a missing mount
+  // point is otherwise a silent blank page.
+  throw new Error("ClipForge: #root is missing from index.html");
+}
+
+// Tell index.html's guards that React has taken over, so its 15s timeout and
+// its error listeners stop reporting on a page that is working fine.
+window.__clipforgeBooted = true;
+
+createRoot(rootEl).render(
   <StrictMode>
+    <BootCleanup />
     <RootErrorBoundary>
       <ToolbarErrorBoundary>
         <VlyToolbar />
