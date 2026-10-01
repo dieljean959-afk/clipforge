@@ -945,6 +945,7 @@ python3 tools/queue_truthfulness_test.py  # a queued job must look queued
 python3 tools/delete_cancels_test.py       # deleting a job must actually stop it
 python3 tools/export_memory_test.py        # zip export must not OOM the server
 python3 tools/playback_test.py     # rendered MP4s are browser-playable (faststart, Range, player)
+python3 tools/preview_layout_test.py  # the preview fills its 9:16 card and actually plays
 python3 tools/playback_e2e.py      # the same, over real HTTP with curl -I and curl -r
 python3 tools/subtitle_langs_test.py  # multi-language caption tracks: timing, wrapping, SRT/VTT
 python3 tools/restore_test.py      # a deleted job is restorable; retention can be disabled

@@ -64,13 +64,12 @@ export function ClipCard({
     <div className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card transition hover:border-primary/40">
       <div className="relative p-2">
         <ClipPreview clip={clip} className="w-full" />
-        {/* clickable overlay above the control bar opens the detail dialog */}
-        <button
-          type="button"
-          onClick={() => onOpen?.(clip)}
-          className="absolute inset-x-2 top-2 bottom-12 cursor-pointer rounded-t-xl"
-          aria-label={`Preview ${clip.title}`}
-        />
+        {/* No overlay button over the video. One used to sit here covering the
+            whole frame to open the detail dialog, and it swallowed every tap:
+            the <video> underneath never received a click, so play() was never
+            called and no clip could be previewed from the grid at all. The
+            detail view is now reached from the expand button in the player's
+            own control bar, and from the title below. */}
         <div className="pointer-events-none absolute left-3 top-3 flex items-center gap-1">
           <span
             className={cn(

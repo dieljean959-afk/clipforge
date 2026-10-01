@@ -338,6 +338,40 @@ def browser_safe_args(encoder: str = "") -> list[str]:
     return [*MP4_MOVFLAGS, *VIDEO_PROFILE_ARGS]
 
 
+def build_output_chain(
+    crop_windows: list[dict] | None,
+    src_w: int,
+    src_h: int,
+    crop_w: int,
+    out_w: int,
+    out_h: int,
+) -> str:
+    """The crop → scale → crop → setsar filter chain every render shares.
+
+    Extracted (and unit-tested in tools/preview_layout_test.py) because this is
+    where a vertical-video bug hides. Two rules make the output a true 9:16
+    frame rather than something that merely *looks* like one in the editor:
+
+    * `force_original_aspect_ratio=increase` then an exact `crop` — never
+      `decrease` + `pad`. Padding is what puts black bars in a clip that is
+      supposed to be full-bleed.
+    * `setsar=1`. Without it the output inherits the SOURCE's sample aspect
+      ratio, and any non-square-pixel source (anamorphic downloads always are,
+      phone footage often is) yields a stream whose pixels are not square. The
+      player then letterboxes that inside an already-9:16 box — black bars the
+      render never drew. Pinning SAR makes 1080x1920 mean what it says.
+    """
+    chain: list[str] = []
+    if crop_windows:
+        chain.append(crop_pan_filter(crop_windows, src_w, src_h, crop_w, src_h))
+    else:
+        chain.append(f"crop={crop_w}:{src_h}:(in_w-{crop_w})/2:0")
+    chain.append(f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase")
+    chain.append(f"crop={out_w}:{out_h}")
+    chain.append("setsar=1")
+    return ",".join(chain)
+
+
 def render_clip(
     src: Path,
     dest: Path,
@@ -399,15 +433,9 @@ def render_clip(
     src_w, src_h = src_meta["width"] or out_w, src_meta["height"] or out_h
     crop_w = min(int(src_h * out_w / out_h), src_w)
 
-    chain: list[str] = []
-    if crop_windows:
-        chain.append(crop_pan_filter(crop_windows, src_w, src_h, crop_w, src_h))
-    else:
-        chain.append(f"crop={crop_w}:{src_h}:(in_w-{crop_w})/2:0")
-    chain.append(f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase")
-    chain.append(f"crop={out_w}:{out_h}")
-
-    vf = ",".join(chain)
+    vf = build_output_chain(
+        crop_windows, src_w, src_h, crop_w, out_w, out_h,
+    )
     if silence_cuts:
         trim_graph, _ = silence_trim_filter(silence_cuts, clip_dur)
         if trim_graph:
