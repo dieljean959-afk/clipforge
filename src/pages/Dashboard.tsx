@@ -15,6 +15,7 @@ import { RightsNotice } from "@/components/clipforge/RightsNotice";
 import { NewJobForm } from "@/components/clipforge/NewJobForm";
 import { JobCard } from "@/components/clipforge/JobCard";
 import { ClipCard, ScoreBadge } from "@/components/clipforge/ClipCard";
+import { ShareReadinessSummary } from "@/components/clipforge/ShareButton";
 import { ClipPreview } from "@/components/clipforge/ClipPreview";
 import { ExportDialog } from "@/components/clipforge/ExportDialog";
 import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
@@ -453,6 +454,13 @@ export default function Dashboard() {
                   />
                 ))}
               </div>
+              {/* Says plainly which clips will share as a video and which still
+                  share as a link, so the per-card badge is never a mystery. */}
+              {clips.length > 0 && (
+                <div className="mt-2">
+                  <ShareReadinessSummary clips={clips} />
+                </div>
+              )}
               {clips.length === 0 && (
                 <p className="mt-3 text-sm text-muted-foreground">
                   Clips are loading...

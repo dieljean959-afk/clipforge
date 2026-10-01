@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { ClipPreview } from "./ClipPreview";
 import { PostMenu } from "./PostMenu";
+import { ShareButton, XQuickButton } from "./ShareButton";
 import { buildClipSrt, copyClipMeta, downloadClipMp4 } from "@/lib/clip-export";
 import { scoreBand, fmtDuration } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
@@ -173,9 +174,11 @@ export function ClipCard({
             .srt
           </Button>
         </div>
-        {/* "Post to..." gets its OWN row. Social is strictly additive: it can
+        {/* "Share..." gets its OWN row. Social is strictly additive: it can
             never take space from, reorder or hide the download above. */}
         <div className="flex flex-wrap items-center gap-1.5">
+          <ShareButton clip={clip} rendered={rendered} />
+          <XQuickButton clip={clip} />
           <PostMenu clip={clip} rendered={rendered} />
         </div>
         <CaptionTracks clip={clip} />

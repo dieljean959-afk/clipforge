@@ -143,6 +143,23 @@ if (!rootEl) {
 // its error listeners stop reporting on a page that is working fine.
 window.__clipforgeBooted = true;
 
+// HTTP-layer backstop for share-sized clips.
+//
+// Registered ONLY in a production build. In dev this would sit in front of the
+// Vite module graph, and a cache-first worker that ever touched an app module
+// would serve stale code and break HMR for the whole session. It also matches
+// only /api/clips/<id>/share (see public/share-sw.js) and passes everything
+// else straight through, so even in production it cannot cache app code.
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("/share-sw.js", { scope: "/" })
+      .catch(() => {
+        /* the IndexedDB prefetch cache still works without it */
+      });
+  });
+}
+
 createRoot(rootEl).render(
   <StrictMode>
     <BootCleanup />

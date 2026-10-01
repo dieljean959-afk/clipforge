@@ -22,7 +22,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from app import caption_style, clipcount, eta, hosting, hostlimits, jobstatus
+from app import caption_style, clipcount, eta, hosting, hostlimits, jobstatus, share_video
 from app import encode as encode_mod
 from app import llm as llm_mod
 from app import subtitle as subtitle_svc
@@ -1526,6 +1526,12 @@ def list_clips(jobId: str | None = None, limit: int = 96) -> list[dict]:
 #: on disk, with Content-Length, Content-Range and Accept-Ranges.
 MEDIA_CACHE_CONTROL = "no-cache, must-revalidate"
 
+#: The share copy is immutable and content-addressed by its ETag, so it is safe
+#: — and necessary — to let a CDN and the browser keep it for a year. Without
+#: this the 3 MB share file is re-fetched on every page load, which is the exact
+#: cost the prefetch cache exists to avoid.
+SHARE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
 
 @app.api_route("/api/clips/{clip_id}/video", methods=["GET", "HEAD"])
 def clip_video(clip_id: str) -> FileResponse:
@@ -1541,6 +1547,11 @@ def clip_video(clip_id: str) -> FileResponse:
     tools/playback_test.py, because a regression here (a hand-rolled
     StreamingResponse, or a proxy that strips Range) is invisible until every
     clip in the UI stops playing.
+
+    `immutable` + an ETag derived from the file's size and mtime is what lets
+    a CDN and the browser cache this for a year. That is only safe because the
+    ETag changes when the bytes do: a re-render produces a new mtime, so the
+    old URL is never reused for new footage.
     """
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
@@ -1554,6 +1565,68 @@ def clip_video(clip_id: str) -> FileResponse:
         headers={
             "Cache-Control": MEDIA_CACHE_CONTROL,
             "Accept-Ranges": "bytes",
+            "ETag": _media_etag(p),
+        },
+    )
+
+
+def _media_etag(p: Path) -> str:
+    """Weak-ish ETag from size+mtime: changes exactly when the bytes change."""
+    try:
+        st = p.stat()
+    except OSError:
+        return '"0"'
+    return f'"{int(st.st_mtime)}-{st.st_size}"'
+
+
+@app.api_route("/api/clips/{clip_id}/share", methods=["GET", "HEAD"])
+def clip_share(clip_id: str) -> FileResponse:
+    """A small, share-sized copy of the clip, built on first request.
+
+    This is what the Web Share sheet consumes. It exists because
+    `navigator.share({files})` needs the whole file as a `File` synchronously
+    inside the click handler, and the 1080p master is 6-10 MB — long enough on
+    a phone that the user-activation window expires and `share()` fails.
+
+    The copy is 720x1280 H.264 + AAC 96k with +faststart, capped at 3 MB (see
+    app/share_video.py). It is built lazily and cached on disk, keyed by the
+    master's size+mtime, so a re-render rebuilds rather than serving a stale
+    lighter version.
+
+    Cache-Control is `immutable` and safe here for the same reason as on
+    /video: the ETag is derived from the file, so new bytes are a new identity.
+
+    A transcode failure is NOT a failed request. The client falls back to
+    sharing the caption plus the clip URL, which always works, so this returns
+    503 with a readable reason instead of an opaque 500.
+    """
+    clip = store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "rendered video not available for this clip")
+    if not clip.get("videoPath"):
+        # 409, matching /post: the clip EXISTS, it just has no render yet. A 404
+        # would tell the client the clip is gone and offer no way forward, when
+        # the honest answer is "not rendered yet".
+        raise HTTPException(409, "this clip has no rendered MP4 to share yet")
+    master = Path(clip["videoPath"])
+    if not master.exists():
+        raise HTTPException(404, f"clip file missing on disk: {master.name}")
+    try:
+        share = share_video.build_share_version(master)
+    except share_video.ShareRenderError as exc:
+        # 503 + a reason the UI can act on. The whole point of the link
+        # fallback is that a missing share copy must never be a dead end.
+        logger.warning(f"[share] {master.name}: {exc}")
+        raise HTTPException(
+            503, f"share-sized copy unavailable ({exc}); share the link instead",
+        ) from exc
+    return FileResponse(
+        share,
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": SHARE_CACHE_CONTROL,
+            "Accept-Ranges": "bytes",
+            "ETag": _media_etag(share),
         },
     )
 

@@ -19,7 +19,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { api, type ClipDto, type SocialPlatformDto, type SocialSlug } from "@/lib/api";
-import { buildPostCaption, clipFileName } from "@/lib/clip-export";
+import { buildPostCaption } from "@/lib/clip-export";
 import {
   clipShareUrl,
   intentUrl,
@@ -120,29 +120,20 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
       share?: (data: ShareData) => Promise<void>;
     };
 
-    // 1. Share TEXT + LINK FIRST. This is instant and transfers nothing: the
-    //    clip is already served from this origin, so the link IS the clip.
-    //
-    //    This used to be third, behind a full-file fetch. On a phone that
-    //    meant every tap pulled an 8 MB MP4 over the network before the share
-    //    sheet could even appear — on a 50 KB/s link that is minutes of
-    //    nothing, and it is why "Share" felt broken. Nothing about the link
-    //    needs the bytes, so it must never wait on them.
-    //
-    //    `canShare` is deliberately not consulted here: it is frequently
-    //    undefined for text-only shares even where `share` works fine.
+    // 1. Share TEXT + LINK FIRST. Instant, transfers nothing: the clip is
+    //    already served from this origin, so the link IS the clip. This must
+    //    never wait on bytes — `navigator.share` needs transient user
+    //    activation, and a network wait spends that window.
     if (nav.share && link) {
       try {
         await nav.share({ text: caption, url: link, title: clip.title });
         return;
       } catch {
         // Dismissed by the user, or this platform rejects text/url shares.
-        // Fall through to the file.
       }
     }
 
-    // 2. Copy the caption + link. Always works, transfers nothing, and leaves
-    //    the user in control. This is the floor of the ladder.
+    // 2. Copy the caption + link. Always works, transfers nothing.
     if (link) {
       try {
         await navigator.clipboard.writeText(`${caption}\n\n${link}`);
@@ -151,55 +142,16 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
         });
         return;
       } catch {
-        // Clipboard blocked (needs a secure context / permission). Keep going.
+        // Clipboard blocked (needs a secure context / permission).
       }
     }
 
-    // 3. Only now, with an explicit warning, fetch the actual FILE. This is
-    //    the expensive path (mediaBytes, typically 6-10 MB), so it announces
-    //    itself and says how long it may take rather than appearing to hang.
-    const mb = (clip.mediaBytes ?? 0) / (1024 * 1024);
-    const size = mb >= 0.1 ? `${mb.toFixed(1)} MB` : "the full clip";
-    toast.loading(`Preparing ${size} to share...`, {
-      description: "On a slow connection this can take a minute.",
+    // 3. Last resort, and only with the reason stated. The Share button on the
+    //    card shares the CACHED small file instead; reaching here means this
+    //    clip was never prefetched.
+    toast.error("This browser can't share links.", {
+      description: "Use the Share button, or the MP4 button above.",
     });
-    const name = clipFileName(clip);
-    let blob: Blob | null = null;
-    try {
-      const res = await fetch(api.clipDownloadUrl(clip._id));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      blob = await res.blob();
-    } catch {
-      toast.error("Could not load the clip — use a platform row above instead.");
-      return;
-    }
-
-    if (nav.share) {
-      const file = new File([blob, ], name, { type: "video/mp4" });
-      if (nav.canShare?.({ files: [file] })) {
-        try {
-          await nav.share({ files: [file], text: caption, title: clip.title });
-          return;
-        } catch {
-          // Dismissed. One last option below.
-        }
-      }
-      try {
-        await nav.share({ text: caption, url: link, title: clip.title });
-        return;
-      } catch {
-        // Unsupported too.
-      }
-    }
-
-    // 4. Announced download, never silent. The user is told this is a
-    //    download and that it was not avoidable on this device.
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast.success(`Downloaded ${name} — this device can't share files or links.`);
   };
 
   /** Open one platform's own composer with the caption (and link) filled in. */

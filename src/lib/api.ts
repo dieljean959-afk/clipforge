@@ -611,6 +611,13 @@ export const api = {
       body: JSON.stringify({ clipIds }),
     }),
   clipVideoUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/video`,
+  /**
+   * The small, share-sized copy (<=3 MB, 720x1280, faststart) built on first
+   * request by app/share_video.py. This is what the Web Share sheet consumes:
+   * the 1080p master is 6-10 MB and would blow the user-activation window
+   * before `navigator.share()` could be called.
+   */
+  clipShareUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/share`,
   clipThumbUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/thumb`,
   clipDownloadUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/download`,
   clipSrtUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/srt`,

@@ -34,6 +34,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 MENU = (ROOT / "src" / "components" / "clipforge" / "PostMenu.tsx").read_text()
+# The FILE share moved out of PostMenu and into ShareButton, where the prefetch
+# cache makes it instant. PostMenu now only offers links and platform
+# composers, so the share-ladder assertions belong to ShareButton.
+SHARE_BTN = (ROOT / "src" / "components" / "clipforge" / "ShareButton.tsx").read_text()
 INTENTS_PATH = ROOT / "src" / "lib" / "share-intents.ts"
 INTENTS_TS = INTENTS_PATH.read_text()
 
@@ -234,56 +238,53 @@ def test_intent_urls() -> None:
 
 
 def test_ladder_order() -> None:
-    section("3. the share ladder never waits on the network to share a link")
+    section("3. PostMenu never waits on the network to share a link")
     body = MENU[MENU.find("const shareVia"):MENU.find("const shareTo")]
-    # Strip comments: the JSDoc discusses canShare in prose, and a raw search
-    # would flag that explanation as if it were a gate in the code.
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
     body = re.sub(r"^\s*//.*$", "", body, flags=re.M)
-    at_text = body.find("await nav.share({ text:")
-    at_clip = body.find("navigator.clipboard.writeText")
-    at_fetch = body.find("await fetch(api.clipDownloadUrl")
-    at_file = body.find("files: [file]")
-    at_dl = body.find("a.download = name")
+    check("it tries text+link first", "await nav.share({ text: caption, url: link" in body)
+    check("it falls back to the clipboard",
+          "navigator.clipboard.writeText" in body)
+    check("it no longer fetches the 8 MB master at all",
+          "clipDownloadUrl" not in body and "await fetch(" not in body,
+          "the file share now lives in ShareButton, on the cached small copy")
+    check("it never downloads", "a.download" not in body and "createObjectURL" not in body)
+    check("the dead end names the real alternative",
+          "This browser can't share links." in body)
 
-    check("the ladder tries text+link first", at_text != -1)
-    check("then the clipboard", at_clip != -1 and at_clip > at_text)
-    # The regression: fetching 8 MB before sharing anything made Share feel
-    # broken on a phone. The link is already served from this origin, so it
-    # must not wait on the bytes.
-    check(
-        "the 8 MB fetch happens AFTER the link paths, never before them",
-        at_fetch != -1 and at_text != -1 and at_fetch > at_text
-        and at_fetch > at_clip,
-        f"text@{at_text} clip@{at_clip} fetch@{at_fetch}",
-    )
-    check("the file share is still available as a later option",
-          at_file != -1 and at_file > at_fetch)
-    check(
-        "the fetch is announced with its size and a slow-connection warning",
-        "toast.loading" in body and "mediaBytes" in body,
-    )
 
-    # A download may still exist, but only as the LAST resort and never
-    # silently: it has to say so.
-    check("any download is the final branch", at_dl != -1 and at_dl > at_file)
-    check("the download is announced as a download",
-          "this device can't share files or links" in body)
-    check("no download happens before the link paths",
-          "a.download" not in body[:at_text])
+def test_share_button_ladder() -> None:
+    section("3b. ShareButton shares the CACHED file, never fetches on tap")
+    body = SHARE_BTN[SHARE_BTN.find("const onShare"):SHARE_BTN.find("const pct =")]
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"^\s*//.*$", "", body, flags=re.M)
 
-    # canShare is unreliable for files on Android; the text path must not
-    # depend on it, and it must not gate on it either.
-    # The navigator type DECLARES canShare; that is not a gate. What matters is
-    # that no canShare(...) CALL stands between the top of the function and the
-    # link share.
-    check(
-        "the link share is not gated on a canShare() call",
-        "canShare(" not in body[:at_text],
-        repr(body[max(0, at_text - 120):at_text]),
-    )
-    guard = body.find("if (nav.canShare?.({ files: [file] })) {")
-    check("the canShare(files) guard exists for the FILE path", guard != -1)
+    # The whole point: nothing on the tap path may suspend, or transient user
+    # activation expires and share() throws NotAllowedError.
+    for bad, label in (
+        ("await navigator.share", "an await before navigator.share"),
+        ("await fetch", "a fetch inside the handler"),
+        ("await cache.", "an await on the cache"),
+    ):
+        check(f"no {label}", bad not in body, repr(bad))
+
+    check("the cached File is read synchronously", "cache.get(" in body)
+    check("canShare is checked before sharing a file",
+          "cache.canShareFile()" in body)
+    check("the uncached path shares text+url instantly",
+          "url: publicUrl" in body)
+    check("no download on any path", "a.download" not in body)
+
+    # Prefetch must be wired to the CARD (an effect), not to the tap. The
+    # handler body deliberately contains neither call.
+    check("prefetch is NOT triggered by the click handler",
+          "cache.prefetch(" not in body and "cache.hydrate(" not in body,
+          "prefetching on tap is the exact bug being fixed")
+    check("prefetch starts from a card-mount effect",
+          "cache.prefetch(" in SHARE_BTN
+          and "cache.prefetch(clip._id" in SHARE_BTN)
+    check("a restored blob is hydrated from IndexedDB",
+          "cache.hydrate(" in SHARE_BTN)
 
 
 def test_ui_offers() -> None:
@@ -312,6 +313,7 @@ def main() -> int:
     test_no_silent_download()
     test_intent_urls()
     test_ladder_order()
+    test_share_button_ladder()
     test_ui_offers()
     print(f"\n{'=' * 60}\n  {PASS} passed, {FAIL} failed\n{'=' * 60}")
     return 1 if FAIL else 0

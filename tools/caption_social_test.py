@@ -557,16 +557,26 @@ check(
     "the share row is marked as instant and needing no download",
     "instant, no download" in share_row,
 )
-# The shared bytes must be the finished render, via the same endpoint the MP4
-# button uses — never a source file or a proxy.
-check("sharing uses the real download endpoint", "api.clipDownloadUrl(clip._id)" in menu)
-check("the MP4 button and the share path hit the same endpoint",
+# The shared bytes must be a real rendered clip, never a source file or a proxy.
+#
+# The file share no longer lives here: it moved to ShareButton, which prefetches
+# a SMALL (<=3 MB) copy of the same render into IndexedDB so navigator.share()
+# can be called synchronously on tap. The 1080p master is still what the MP4
+# button downloads, unchanged.
+_share_btn = (ROOT / "src" / "components" / "clipforge" / "ShareButton.tsx").read_text()
+_share_cache = (ROOT / "src" / "lib" / "clip-share-cache.ts").read_text()
+check("the share path uses the clip's own /share endpoint",
+      "api.clipShareUrl(clip._id)" in _share_btn or "clipShareUrl(" in _share_btn)
+check("the share endpoint is wired in the API client",
+      "/api/clips/${clipId}/share" in (ROOT / "src" / "lib" / "api.ts").read_text())
+check("the MP4 button still downloads the full-quality render",
       "/download" in (ROOT / "src" / "lib" / "clip-export.ts").read_text())
 check("the shared file is named after the clip, not 'clip-1.mp4'",
-      "clipFileName(clip)" in menu and "`clip-${clip.order + 1}.mp4`" not in menu)
-check("the clip is fetched once, not twice (an 80 MB clip was downloaded twice "
-      "on every fallback)",
-      menu.count("api.clipDownloadUrl(clip._id)") == 1)
+      "clipFileName(clip)" in _share_btn and "`clip-${clip.order + 1}.mp4`" not in _share_btn)
+check("the share bytes are prefetched once and reused, not re-fetched on tap",
+      "new File([blob], fileName" in _share_cache and "cache.get(" in _share_btn)
+check("PostMenu no longer downloads the clip on a share tap",
+      "clipDownloadUrl" not in menu)
 
 # --------------------------------------------------------------------------- #
 # Delete a batch: one path, one confirmation, nothing else touched.
