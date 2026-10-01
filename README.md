@@ -31,19 +31,35 @@ viral clips". See [LICENSE](LICENSE).
 
    | Backend | Speed | Cost / privacy | Needs |
    |---|---|---|---|
-   | `nvidia` (default) | **Fast** — the request overlaps local CPU work | Hosted API, OpenAI-compatible (NVIDIA NIM). No per-model daily token ceiling like Groq's, so a long source cannot die half way through detection | `NVIDIA_API_KEY` |
+   | `deepseek` (default) | **Fast** — the request overlaps local CPU work | Hosted API, OpenAI-compatible (DeepSeek platform). Billed against a **balance**, not a fixed daily token ceiling, so a long source cannot die half way through detection — and the cheapest of the hosted options (~$0.15/1M input, ~$0.60/1M output off-peak) | `DEEPSEEK_API_KEY` |
+   | `nvidia` | **Fast** | Hosted alternative (NVIDIA NIM) on the same wire format. Hosts its own `deepseek-*` models, but on an **NVIDIA quota**, not a DeepSeek balance | `NVIDIA_API_KEY` |
    | `groq` (backup) | **Fast** | Hosted API, OpenAI-compatible. ~30 req/min and a **200k tokens-per-DAY** ceiling per model on the free tier; calls are paced below the request limit, but a spent daily quota can only be waited out | `GROQ_API_KEY` |
    | `gemini` | **Fast** | Hosted alternative, selectable without a redeploy | `GEMINI_API_KEY` |
    | `ollama` | **Slower** — it shares the same CPU as Whisper, so it runs sequentially after the transcript exists | **Free and fully private** — the transcript never leaves the machine | `ollama serve` + the model pulled, no API key |
 
-   `NVIDIA_API_KEY` is the one to paste in the Keys tab. `config.toml`
+   `DEEPSEEK_API_KEY` is the one to paste in the Keys tab. `config.toml`
    `[llm] fallback_provider = "groq"` makes a chunk that fails on the primary
    (spent quota, endpoint down) retry on Groq before it is skipped; blank
    disables that, and a missing PRIMARY key is always a loud config error
-   rather than a silent downgrade. Both providers share one code path — the
+   rather than a silent downgrade. All providers share one code path — the
    JSON-repair ladder, pacing and the model chain are per-provider config, not
    per-provider code — and each provider's rate budget is tracked separately,
-   so an NVIDIA call never waits out Groq's 30-rpm floor.
+   so a DeepSeek call never waits out Groq's 30-rpm floor.
+
+   **DeepSeek specifics.** DeepSeek's thinking mode is **on by default** at
+   high effort, and while it is on it *ignores* `temperature` (plus the
+   presence/frequency penalties) — the docs say such parameters "will not
+   trigger an error but will also have no effect". It also returns the
+   chain-of-thought in `reasoning_content`, billed as **output** tokens. So
+   `config.toml` `[deepseek] thinking_mode = "disabled"` is what actually makes
+   the `temperature = 0.0` determinism and the JSON-retry ladder mean anything;
+   leave it on and every retry pays for reasoning that is then thrown away.
+   Its documented ceiling is a **concurrency** limit (2500 for
+   `deepseek-flash`, 500 for `deepseek-v4-pro`), not a tokens-per-minute one,
+   so `tokens_per_min` is only a burst guard. Note that DeepSeek keys are `sk-…`
+   and come from `platform.deepseek.com/api_keys` — they are *not* NVIDIA's
+   `nvapi-…`, even though both providers happen to host a model called
+   "DeepSeek".
 
    This choice affects **detection only**. Transcription is always
    faster-whisper/WhisperX, and the dashboard says so next to the toggle.
@@ -105,7 +121,8 @@ button forces an immediate re-read with the result in a toast. The chip
 follows the **active** detection backend, so it never shows Gemini's key
 state while Groq is the one actually making calls.
 
-Supported names: `NVIDIA_API_KEY` (canonical), plus `NVIDIA_KEY`,
+Supported names: `DEEPSEEK_API_KEY` (canonical) or `DEEPSEEK_KEY`;
+`NVIDIA_API_KEY` (canonical), plus `NVIDIA_KEY`,
 `NVIDIA_NIM_API_KEY`, `NGC_API_KEY`; `GROQ_API_KEY` (canonical) or
 `GROQ_KEY`; `GEMINI_API_KEY`
 (canonical), plus `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY`,

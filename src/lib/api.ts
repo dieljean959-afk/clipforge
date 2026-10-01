@@ -6,7 +6,7 @@ import type { ClipStage } from "@/lib/clipforge";
 // NVIDIA NIM is the primary hosted backend; Groq is the backup and shares the
 // same OpenAI-compatible wire format. Order matters — it is the order the
 // dashboard renders the backend picker in.
-export type DetectionProvider = "nvidia" | "groq" | "gemini" | "ollama";
+export type DetectionProvider = "deepseek" | "nvidia" | "groq" | "gemini" | "ollama";
 
 /** One row of the per-stage time plan. */
 export interface StagePlanEntry {
@@ -246,8 +246,10 @@ export interface HealthDto {
   llm: KeyStatusDto;
   /** Live GROQ_API_KEY state — the key for the BACKUP detection backend. */
   llmGroq?: KeyStatusDto;
-  /** Live NVIDIA_API_KEY state — the key for the DEFAULT detection backend. */
+  /** Live NVIDIA_API_KEY state — an alternative detection backend. */
   llmNvidia?: KeyStatusDto;
+  /** Live DEEPSEEK_API_KEY state — the key for the DEFAULT detection backend. */
+  llmDeepSeek?: KeyStatusDto;
   detection?: DetectionDto;
   // Resolved engine/model/compute (already host-limit adjusted). The raw
   // config.toml request, when it differs, is `configuredModel`.
@@ -501,12 +503,28 @@ export const api = {
       KeyStatusDto & {
         groq?: KeyStatusDto;
         nvidia?: KeyStatusDto;
+        deepseek?: KeyStatusDto;
         activeProvider?: string;
       }
     >(
       "/api/settings/reload-secrets",
       { method: "POST" },
     ),
+  /** Save/replace DEEPSEEK_API_KEY in the backend's env file. */
+  setDeepseekKey: (key: string) =>
+    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+      "/api/settings/deepseek-key",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      },
+    ),
+  /** Delete DEEPSEEK_API_KEY from the backend's env file. */
+  deleteDeepseekKey: () =>
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/deepseek-key", {
+      method: "DELETE",
+    }),
   /** Save/replace NVIDIA_API_KEY in the backend's env file. */
   setNvidiaKey: (key: string) =>
     request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(

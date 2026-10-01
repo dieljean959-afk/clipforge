@@ -387,13 +387,19 @@ def test_detect_clips_end_to_end() -> None:
 
 def test_provider_roster() -> None:
     print("\n[provider] roster and dispatch")
-    check("nvidia is the default", load_config(quiet=True).llm.provider == "nvidia")
+    check("deepseek is the default", load_config(quiet=True).llm.provider == "deepseek")
     check("groq is the configured backup",
           load_config(quiet=True).llm.fallback_provider == "groq")
-    check("all four are offered",
-          llm_mod.PROVIDERS == ("nvidia", "groq", "gemini", "ollama"),
+    check("all five are offered",
+          llm_mod.PROVIDERS == ("deepseek", "nvidia", "groq", "gemini", "ollama"),
           str(llm_mod.PROVIDERS))
     s = load_config(quiet=True)
+    s.llm.provider = "deepseek"
+    check("deepseek still dispatches to its own client",
+          "deepseek" in llm_mod.provider_label(s))
+    s.llm.provider = "nvidia"
+    check("nvidia still dispatches to its own client",
+          "nvidia" in llm_mod.provider_label(s))
     s.llm.provider = "ollama"
     check("ollama still dispatches to its own client",
           "ollama" in llm_mod.provider_label(s))
@@ -440,7 +446,9 @@ def test_no_gemini_shaped_strings():
     check("the pipeline surfaces the exception's own provider-accurate message",
           re.search(r"AI detection offline\s*—\s*\{exc\}", task_code) is not None)
 
-    check("llm.py names NVIDIA_API_KEY when the primary's key is missing",
+    check("llm.py names DEEPSEEK_API_KEY when the primary's key is missing",
+          "DEEPSEEK_API_KEY" in llm_src)
+    check("llm.py names NVIDIA_API_KEY when NVIDIA's key is missing",
           "NVIDIA_API_KEY" in llm_src)
     check("llm.py names GROQ_API_KEY when Groq's key is missing",
           "GROQ_API_KEY" in llm_src)

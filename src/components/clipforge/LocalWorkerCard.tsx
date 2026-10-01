@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { useHealth } from "@/hooks/use-poll";
 import { SocialAccounts } from "./SocialAccounts";
-import { api, type DetectionProvider } from "@/lib/api";
+import { api, type DetectionProvider, type KeyStatusDto } from "@/lib/api";
 import { fmtBytes } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -128,26 +128,34 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const maxMin = typeof health?.limits?.maxSourceMin === "number" ? health.limits.maxSourceMin : null;
   const retentionH = typeof health?.limits?.retentionHours === "number" ? health.limits.retentionHours : null;
 
-  // AI highlight-DETECTION backend (NVIDIA = hosted default, Groq = hosted
-  // backup, Gemini = alternative, Ollama = local). Separate from the ASR engine
-  // on purpose: switching this never touches faster-whisper, and the UI says so.
+  // AI highlight-DETECTION backend (DeepSeek = hosted default, NVIDIA/Groq =
+  // hosted alternatives, Gemini = alternative, Ollama = local). Separate from
+  // the ASR engine on purpose: switching this never touches faster-whisper,
+  // and the UI says so.
   const detection = health?.detection;
 
-  // Live key state for the ACTIVE detection backend. NVIDIA is the default, so
-  // this must follow the selected provider — showing Groq's key while NVIDIA
-  // is the one actually making calls would be a lie.
-  const activeProvider = detection?.provider ?? "nvidia";
-  const llm =
-    activeProvider === "gemini"
-      ? health?.llm
-      : activeProvider === "nvidia"
-        ? health?.llmNvidia
-        : health?.llmGroq;
+  // Live key state for the ACTIVE detection backend. DeepSeek is the default,
+  // so this must follow the selected provider — showing Groq's key while
+  // DeepSeek is the one actually making calls would be a lie.
+  const activeProvider = detection?.provider ?? "deepseek";
+  const KEY_STATUS: Partial<Record<DetectionProvider, KeyStatusDto | undefined>> = {
+    deepseek: health?.llmDeepSeek,
+    nvidia: health?.llmNvidia,
+    groq: health?.llmGroq,
+    gemini: health?.llm,
+  };
+  const llm = KEY_STATUS[activeProvider] ?? health?.llmGroq;
   const llmProblem = llm?.problem ?? null;
   const llmSource = typeof llm?.source === "string" ? llm.source : "";
   // Per-vendor key facts. Kept as one table rather than nested ternaries so a
   // new provider is one row here instead of a new branch in five places.
   const VENDOR: Record<string, { env: string; prefix: string; name: string; keysUrl: string }> = {
+    deepseek: {
+      env: "DEEPSEEK_API_KEY",
+      prefix: "sk-",
+      name: "DeepSeek",
+      keysUrl: "platform.deepseek.com/api_keys",
+    },
     nvidia: {
       env: "NVIDIA_API_KEY",
       prefix: "nvapi-",
@@ -167,7 +175,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       keysUrl: "console.gemini.google.com/apikey",
     },
   };
-  const vendor = VENDOR[activeProvider] ?? VENDOR.nvidia;
+  const vendor = VENDOR[activeProvider] ?? VENDOR.deepseek;
   const llmEnvName = vendor.env;
   const llmKeyPrefix = vendor.prefix;
   const llmVendor = vendor.name;
@@ -184,11 +192,13 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       toast.success(
         provider === "ollama"
           ? "AI detection switched to local Ollama — free and private, but slower (it shares the CPU with Whisper)."
-          : provider === "nvidia"
-            ? "AI detection switched to NVIDIA — OpenAI-compatible, with no per-model daily token ceiling like Groq's free tier."
-            : provider === "groq"
-              ? "AI detection switched to Groq — the backup. ~30 req/min and a 200k/day ceiling on the free tier; calls are paced below that."
-              : "AI detection switched to Gemini — a hosted alternative when the primary's quota is spent.",
+          : provider === "deepseek"
+            ? "AI detection switched to DeepSeek — OpenAI-compatible, billed against a balance instead of a fixed daily token ceiling, and the cheapest of the hosted options."
+            : provider === "nvidia"
+              ? "AI detection switched to NVIDIA — same OpenAI-compatible path, hosting its own deepseek-* models on an NVIDIA quota."
+              : provider === "groq"
+                ? "AI detection switched to Groq — the backup. ~30 req/min and a 200k/day ceiling on the free tier; calls are paced below that."
+                : "AI detection switched to Gemini — a hosted alternative when the primary's quota is spent.",
       );
       void refreshHealth();
     } catch (err) {
@@ -205,9 +215,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       const active =
         activeProvider === "gemini"
           ? status
-          : activeProvider === "nvidia"
-            ? status.nvidia
-            : status.groq;
+          : activeProvider === "deepseek"
+            ? status.deepseek
+            : activeProvider === "nvidia"
+              ? status.nvidia
+              : status.groq;
       if (active?.keyLoaded) {
         toast.success(`${llmVendor} key detected (${active.source}) — AI detection is live.`);
       } else if (active?.problem) {
@@ -243,9 +255,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       const status =
         activeProvider === "gemini"
           ? await api.setGeminiKey(raw)
-          : activeProvider === "nvidia"
-            ? await api.setNvidiaKey(raw)
-            : await api.setGroqKey(raw);
+          : activeProvider === "deepseek"
+            ? await api.setDeepseekKey(raw)
+            : activeProvider === "nvidia"
+              ? await api.setNvidiaKey(raw)
+              : await api.setGroqKey(raw);
       toast.success(
         `Key saved and live. Verify it: starts ${status.storedShape.first6}, ends ${status.storedShape.last4} (${status.storedShape.length} chars).`,
       );
@@ -264,9 +278,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       const status =
         activeProvider === "gemini"
           ? await api.deleteGeminiKey()
-          : activeProvider === "nvidia"
-            ? await api.deleteNvidiaKey()
-            : await api.deleteGroqKey();
+          : activeProvider === "deepseek"
+            ? await api.deleteDeepseekKey()
+            : activeProvider === "nvidia"
+              ? await api.deleteNvidiaKey()
+              : await api.deleteGroqKey();
       toast.info(`Key removed (${status.linesRemoved} line(s) cleaned). AI detection is offline until a new key is set.`);
       setKeyDialogOpen(false);
       void refreshHealth();

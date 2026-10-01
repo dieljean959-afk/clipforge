@@ -170,7 +170,7 @@ def check_llm(settings: Settings) -> list[Check]:
             "" if ok else "run `ollama serve` + `ollama pull <model>`, or switch "
                           "[llm] provider back to groq",
         )]
-    if llm_mod.provider(settings) in (llm_mod.PROVIDER_NVIDIA, llm_mod.PROVIDER_GROQ):
+    if llm_mod.provider(settings) in llm_mod.OPENAI_PROVIDER_KEYS:
         return _check_hosted(settings)
     live = live_gemini_key()
     live.refresh(force=True)
@@ -198,22 +198,20 @@ def check_llm(settings: Settings) -> list[Check]:
 def _check_hosted(settings: Settings) -> list[Check]:
     """Hosted-provider key presence + optional live probe of the models endpoint.
 
-    Covers NVIDIA NIM and Groq, which are the same OpenAI-compatible shape, so
-    the probe is identical: a GET /models rather than a chat call, because it
-    costs no quota and still proves both the key AND the network path work.
+    Covers DeepSeek, NVIDIA NIM and Groq, which are the same OpenAI-compatible
+    shape, so the probe is identical: a GET /models rather than a chat call,
+    because it costs no quota and still proves both the key AND the network
+    path work.
     """
     from app import llm as llm_mod  # noqa: PLC0415 - avoids an import cycle at boot
-    from app.config import live_groq_key, live_nvidia_key  # noqa: PLC0415
     from app.llm import GROQ_USER_AGENT  # noqa: PLC0415 - same edge-block guard
 
     which = llm_mod.provider(settings)
     cfg = llm_mod.openai_cfg(settings, which)
-    env_name = "NVIDIA_API_KEY" if which == llm_mod.PROVIDER_NVIDIA else "GROQ_API_KEY"
-    api_key = (
-        settings.nvidia_api_key if which == llm_mod.PROVIDER_NVIDIA else settings.groq_api_key
-    )
+    env_name = llm_mod.OPENAI_PROVIDER_KEYS[which][1]
+    api_key = llm_mod.openai_api_key(which, settings)
 
-    live = live_nvidia_key() if which == llm_mod.PROVIDER_NVIDIA else live_groq_key()
+    live = llm_mod._LIVE_KEY_RESOLVERS[which]()
     live.refresh(force=True)
     status = live.status()
     if not status.get("keyLoaded"):

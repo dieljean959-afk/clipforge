@@ -161,15 +161,23 @@ GROQ_KEY_ALIASES = (
     "GROQ_KEY",
 )
 
-# NVIDIA NIM (integrate.api.nvidia.com) is the PRIMARY detection backend and
-# Groq is the backup. NIM speaks the same OpenAI chat-completions wire format,
-# so it reuses the whole Groq call path; only the endpoint, model and rate
-# budget differ. Keys are `nvapi-…`.
+# NVIDIA NIM (integrate.api.nvidia.com) hosts DeepSeek models, but with
+# NVIDIA's own keys (`nvapi-…`). A DeepSeek-platform key (`sk-…`, from
+# platform.deepseek.com) authenticates against DeepSeek's OWN API instead, so
+# the two are separate providers with separate keys — hence separate sections
+# below. Both speak the same OpenAI chat-completions dialect, so both reuse the
+# one hosted call path.
 NVIDIA_KEY_ALIASES = (
     "NVIDIA_API_KEY",
     "NVIDIA_KEY",
     "NVIDIA_NIM_API_KEY",
     "NGC_API_KEY",
+)
+
+# DeepSeek's own API (api.deepseek.com). Keys are `sk-…`.
+DEEPSEEK_KEY_ALIASES = (
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_KEY",
 )
 
 _PLACEHOLDER_VALUES = {
@@ -353,6 +361,46 @@ def _resolve_nvidia_key(environ: dict[str, str]) -> tuple[str | None, str, str |
     return None, "", None
 
 
+def _resolve_deepseek_key(environ: dict[str, str]) -> tuple[str | None, str, str | None]:
+    """Find the DeepSeek-platform key under any supported name.
+
+    Same (key, source, problem) contract as the other resolvers. DeepSeek keys
+    are `sk-…`; the prefix is a warning, never a rejection, so a future key
+    format cannot lock the user out of their own provider.
+    """
+    for name in DEEPSEEK_KEY_ALIASES:
+        value = (environ.get(name) or "").strip()
+        if not value:
+            continue
+        if value.startswith(_ENC_PREFIX):
+            if _empty_encrypted(value):
+                return None, f"{name} (empty)", (
+                    f"{name} is an EMPTY save — the platform stored an encrypted envelope "
+                    "with no key inside. Paste the full key (starts with sk-) in the "
+                    "Keys/API keys tab again, then hit Re-check."
+                )
+            return None, f"{name} (encrypted)", (
+                f"{name} is stored in the platform's encrypted dotenvx format and could "
+                "not be decrypted inside the app — re-save it in the Keys/API keys tab, "
+                "then hit Re-check."
+            )
+        if value.lower() in _PLACEHOLDER_VALUES:
+            return None, f"{name} (placeholder)", (
+                f"{name} still contains placeholder text — paste the real DeepSeek API key."
+            )
+        if " " in value:
+            return None, f"{name} (malformed)", (
+                f"{name} contains spaces — it should be the raw key with no quotes or spaces."
+            )
+        if not value.lower().startswith("sk-") and len(value) < 20:
+            return value, f"{name} (short — verify)", (
+                f"{name} is only {len(value)} characters and does not start with sk- — "
+                "double-check the paste from platform.deepseek.com/api_keys."
+            )
+        return value, name, None
+    return None, "", None
+
+
 def _as_list(value: object) -> list[object]:
     """Coerce a config value to a list.
 
@@ -468,6 +516,7 @@ class _LiveKeyState:
 _live_key: _LiveKeyState | None = None
 _live_groq: _LiveKeyState | None = None
 _live_nvidia: _LiveKeyState | None = None
+_live_deepseek: _LiveKeyState | None = None
 
 
 def live_gemini_key() -> _LiveKeyState:
@@ -499,6 +548,19 @@ def live_nvidia_key() -> _LiveKeyState:
             label="NVIDIA",
         )
     return _live_nvidia
+
+
+def live_deepseek_key() -> _LiveKeyState:
+    """Process-wide live DeepSeek-key state (created on first use)."""
+    global _live_deepseek
+    if _live_deepseek is None:
+        _live_deepseek = _LiveKeyState(
+            ROOT,
+            resolver=_resolve_deepseek_key,
+            aliases=DEEPSEEK_KEY_ALIASES,
+            label="DeepSeek",
+        )
+    return _live_deepseek
 
 
 # --------------------------------------------------------------------------- #
@@ -582,6 +644,16 @@ def sync_nvidia_env_after_save(value: str) -> None:
 def sync_nvidia_env_for_delete() -> list[str]:
     """Drop NVIDIA key aliases from the process env before a file delete."""
     return _sync_env_for_delete(NVIDIA_KEY_ALIASES, "NVIDIA_API_KEY")
+
+
+def sync_deepseek_env_after_save(value: str) -> None:
+    """Mirror a freshly written DEEPSEEK_API_KEY into the process env."""
+    os.environ["DEEPSEEK_API_KEY"] = value
+
+
+def sync_deepseek_env_for_delete() -> list[str]:
+    """Drop DeepSeek key aliases from the process env before a file delete."""
+    return _sync_env_for_delete(DEEPSEEK_KEY_ALIASES, "DEEPSEEK_API_KEY")
 
 
 def _sync_env_for_delete(aliases: tuple[str, ...], primary: str) -> list[str]:
@@ -797,6 +869,69 @@ class NvidiaConfig:
 
 
 @dataclass
+class DeepSeekConfig:
+    """DeepSeek's OWN API (api.deepseek.com) — the PRIMARY detection backend.
+
+    Distinct from [nvidia] even though both serve DeepSeek MODELS: NVIDIA NIM
+    is NVIDIA's hosted copy authenticated with an `nvapi-` key, while this is
+    DeepSeek's own service authenticated with an `sk-` key. A key from one does
+    not work against the other, which is why they are separate sections rather
+    than one section with a swappable URL.
+
+    Two defaults here are not cosmetic — they come from DeepSeek's own docs and
+    both would otherwise silently weaken this stage:
+
+      * ``thinking_mode = "disabled"``. DeepSeek enables thinking mode BY
+        DEFAULT at high effort. Thinking mode returns a chain of thought in
+        `reasoning_content` before the answer: pure waste for a task that is
+        copying word indices out of a transcript, billed as output tokens.
+      * Because of that, ``temperature`` MUST be sent with thinking OFF. The
+        docs are explicit that thinking mode ignores `temperature` —
+        "will not trigger an error but will also have no effect". So a
+        temperature-0.0 request against a default (thinking) DeepSeek is a
+        no-op that still LOOKS deterministic, and the extraction quietly goes
+        non-deterministic — which is precisely the failure mode the JSON retry
+        ladder exists to absorb, at full price.
+
+    `max_tokens` stays modest (3200) for the same reason: CoT would eat that
+    budget and truncate the JSON, which is the most common real cause of a
+    malformed reply.
+    """
+
+    model: str = "deepseek-flash"
+    #: The documented OpenAI-format base. NOT `/v1` — our transport appends
+    #: `/chat/completions` itself, and the docs name this exact root.
+    base_url: str = "https://api.deepseek.com"
+    max_retries: int = 3
+    timeout_sec: int = 120
+    min_interval_sec: float = 0.0
+    temperature: float = 0.0
+    response_format: str = "json_object"
+    max_tokens: int = 3200
+    max_tokens_ceiling: int = 8192
+    json_retries: int = 3
+    json_retry_temperature: float = 0.2
+    #: Empty by default: DeepSeek publishes two current model names and rotates
+    #: them, so a stale hard-coded second entry would 404 on every chunk.
+    fallback_models: tuple[str, ...] = ()
+    #: DeepSeek documents a CONCURRENCY ceiling (not a token-per-minute one),
+    #: so this is a burst guard only. Detection is sequential anyway.
+    tokens_per_min: int = 120000
+    #: Only the denominator the usage badge divides by. DeepSeek bills from a
+    #: topped-up balance rather than publishing a daily token ceiling, and there
+    #: is no 429 body carrying one, so this is an operator-set soft budget that
+    #: drives the pre-submit warning — not a limit the provider enforces.
+    daily_token_limit: int = 2000000
+    #: "disabled" (recommended) or "enabled". Sent as the OpenAI-compat
+    #: `thinking: {type: ...}` control parameter.
+    thinking_mode: str = "disabled"
+    #: Provider name for logs/errors, so one call path can say "DeepSeek".
+    label: str = "DeepSeek"
+    #: Where an operator goes to pick a current model after a 404.
+    docs_url: str = "api-docs.deepseek.com/quick_start/pricing"
+
+
+@dataclass
 class LlmConfig:
     """Which backend runs the AI clip/highlight DETECTION stage.
 
@@ -823,7 +958,7 @@ class LlmConfig:
     logged per chunk so the provenance is never a surprise.
     """
 
-    provider: str = "nvidia"
+    provider: str = "deepseek"
     #: "" disables automatic failover. Otherwise one of PROVIDERS.
     fallback_provider: str = ""
     ollama_url: str = "http://127.0.0.1:11434"
@@ -973,6 +1108,7 @@ class Settings:
     gemini: GeminiConfig
     groq: GroqConfig
     nvidia: NvidiaConfig
+    deepseek: DeepSeekConfig
     llm: LlmConfig
     translate: TranslateConfig
     subtitle: SubtitleConfig
@@ -1003,6 +1139,13 @@ class Settings:
     def nvidia_api_key(self) -> str | None:
         """LIVE NVIDIA key — re-resolved whenever the env files change."""
         state = live_nvidia_key()
+        state.refresh()
+        return state.key
+
+    @property
+    def deepseek_api_key(self) -> str | None:
+        """LIVE DeepSeek key — re-resolved whenever the env files change."""
+        state = live_deepseek_key()
         state.refresh()
         return state.key
 
@@ -1192,15 +1335,31 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         env_base_url="NVIDIA_BASE_URL",
     )
 
+    ds = raw.get("deepseek", {})
+    _thinking = str(ds.get("thinking_mode", "disabled")).strip().lower()
+    if _thinking not in {"enabled", "disabled"}:
+        errors.append(
+            f'deepseek.thinking_mode "{_thinking}" is not one of enabled/disabled'
+        )
+        _thinking = "disabled"
+    deepseek = replace(
+        _load_openai_provider(
+            ds, "deepseek", defaults=DeepSeekConfig(), errors=errors,
+            env_model="DEEPSEEK_MODEL", env_base_url="DEEPSEEK_BASE_URL",
+        ),
+        thinking_mode=_thinking,
+    )
+
     lc = raw.get("llm", {})
     provider = str(
-        os.getenv("CLIPFORGE_LLM_PROVIDER") or lc.get("provider", "nvidia")
+        os.getenv("CLIPFORGE_LLM_PROVIDER") or lc.get("provider", "deepseek")
     ).strip().lower()
-    if provider not in {"nvidia", "groq", "gemini", "ollama"}:
+    if provider not in {"deepseek", "nvidia", "groq", "gemini", "ollama"}:
         errors.append(
-            f'llm.provider "{provider}" is not one of nvidia/groq/gemini/ollama'
+            f'llm.provider "{provider}" is not one of '
+            "deepseek/nvidia/groq/gemini/ollama"
         )
-        provider = "nvidia"
+        provider = "deepseek"
     # Automatic failover is opt-in (see LlmConfig). An unset, blank, or
     # self-referential value means "no failover" rather than a config error:
     # pointing the fallback at the primary would burn a whole second ladder
@@ -1208,10 +1367,12 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     fallback_provider = str(lc.get("fallback_provider", "") or "").strip().lower()
     if fallback_provider == provider:
         fallback_provider = ""
-    if fallback_provider and fallback_provider not in {"nvidia", "groq", "gemini", "ollama"}:
+    if fallback_provider and fallback_provider not in {
+        "deepseek", "nvidia", "groq", "gemini", "ollama"
+    }:
         errors.append(
             f'llm.fallback_provider "{fallback_provider}" is not one of '
-            "nvidia/groq/gemini/ollama"
+            "deepseek/nvidia/groq/gemini/ollama"
         )
         fallback_provider = ""
     sc = raw.get("social", {})
@@ -1354,6 +1515,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     # NEVER snapshotted into Settings — every read re-resolves.
     live_gemini_key().refresh(force=True)
     live_nvidia_key().refresh(force=True)
+    live_deepseek_key().refresh(force=True)
 
     if errors:
         raise ConfigError(
@@ -1369,6 +1531,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         gemini=gemini,
         groq=groq,
         nvidia=nvidia,
+        deepseek=deepseek,
         llm=llm,
         translate=translate,
         subtitle=subtitle,
@@ -1432,8 +1595,11 @@ def boot_banner(settings: Settings) -> None:
     # Report the key for the ACTIVE backend. Printing only Gemini made a
     # fully-working deployment look unconfigured, and printing only Groq would
     # now do the same for an NVIDIA-primary one.
-    if active == "nvidia":
-        live: _LiveKeyState = live_nvidia_key()
+    if active == "deepseek":
+        live: _LiveKeyState = live_deepseek_key()
+        env_name = "DEEPSEEK_API_KEY"
+    elif active == "nvidia":
+        live = live_nvidia_key()
         env_name = "NVIDIA_API_KEY"
     elif active == "groq":
         live = live_groq_key()

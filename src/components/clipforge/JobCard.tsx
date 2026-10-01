@@ -655,7 +655,7 @@ function friendlyError(error: string | null | undefined, where?: string | null):
   // One rule for every hosted provider: the message is the same whichever key
   // is missing, so list the providers rather than growing a branch each time
   // the primary changes.
-  if (/(NVIDIA|GROQ|GEMINI)_API_KEY missing/i.test(raw)) {
+  if (/(DEEPSEEK|NVIDIA|GROQ|GEMINI)_API_KEY missing/i.test(raw)) {
     return "No AI provider key is configured. Add it in the Keys/API keys tab.";
   }
   if (/no longer available|decommissioned/i.test(raw)) {

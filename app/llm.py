@@ -53,13 +53,42 @@ from loguru import logger
 
 from app import clipcount, jsonfix
 from app.caption_format import finalize_clip_caption, normalize_hashtags, shorten_caption
-from app.config import GeminiConfig, Settings, live_gemini_key, live_groq_key, live_nvidia_key
+from app.config import (
+    GeminiConfig,
+    Settings,
+    live_deepseek_key,
+    live_gemini_key,
+    live_groq_key,
+    live_nvidia_key,
+)
 
+PROVIDER_DEEPSEEK = "deepseek"
 PROVIDER_NVIDIA = "nvidia"
 PROVIDER_GROQ = "groq"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OLLAMA = "ollama"
-PROVIDERS = (PROVIDER_NVIDIA, PROVIDER_GROQ, PROVIDER_GEMINI, PROVIDER_OLLAMA)
+PROVIDERS = (
+    PROVIDER_DEEPSEEK,
+    PROVIDER_NVIDIA,
+    PROVIDER_GROQ,
+    PROVIDER_GEMINI,
+    PROVIDER_OLLAMA,
+)
+
+#: The hosted OpenAI-compatible backends, in the order they are preferred.
+#: `key_attr` is the Settings property holding the live key; `live()` is the
+#: resolver used for the "no key" error message, so a new provider is one line
+#: here plus one in `openai_cfg` rather than a scatter of if/elif branches.
+OPENAI_PROVIDER_KEYS: dict[str, tuple[str, str]] = {
+    PROVIDER_DEEPSEEK: ("deepseek_api_key", "DEEPSEEK_API_KEY"),
+    PROVIDER_NVIDIA: ("nvidia_api_key", "NVIDIA_API_KEY"),
+    PROVIDER_GROQ: ("groq_api_key", "GROQ_API_KEY"),
+}
+_LIVE_KEY_RESOLVERS = {
+    PROVIDER_DEEPSEEK: live_deepseek_key,
+    PROVIDER_NVIDIA: live_nvidia_key,
+    PROVIDER_GROQ: live_groq_key,
+}
 
 
 #: Ceiling on detection API calls per job, whatever the source length, so a
@@ -86,7 +115,7 @@ class LlmError(Exception):
 
 def provider(settings: Settings) -> str:
     """Which detection backend is active. Defaults to the hosted one."""
-    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_NVIDIA)
+    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_DEEPSEEK)
 
 
 def provider_label(settings: Settings) -> str:
@@ -114,14 +143,24 @@ def settings_llm_fallback(settings: Settings) -> str:
 
 
 def openai_cfg(settings: Settings, which: str | None = None) -> Any:
-    """The OpenAI-compatible config for a hosted provider (nvidia / groq).
+    """The OpenAI-compatible config for a hosted provider (deepseek/nvidia/groq).
 
-    Both providers share one call path, so everything downstream takes the
-    CONFIG rather than the provider name — the name is only needed for text
-    (logs, errors) and for pacing isolation, both of which the config carries.
+    All three share one call path, so everything downstream takes the CONFIG
+    rather than the provider name — the name is only needed for text (logs,
+    errors) and for pacing isolation, both of which the config carries.
     """
     name = which or provider(settings)
-    return settings.groq if name == PROVIDER_GROQ else settings.nvidia
+    if name == PROVIDER_GROQ:
+        return settings.groq
+    if name == PROVIDER_NVIDIA:
+        return settings.nvidia
+    return settings.deepseek
+
+
+def openai_api_key(which: str, settings: Settings) -> str | None:
+    """The live key for a hosted provider, resolved on every read."""
+    attr, _ = OPENAI_PROVIDER_KEYS.get(which, ("", ""))
+    return getattr(settings, attr) if attr else None
 
 
 # Model names rot: Google retires old flash models with a 404 that names the
@@ -621,6 +660,18 @@ def call_nvidia(chunk_text_prompt: str, settings: Settings) -> str:
     return _call_openai_chat(chunk_text_prompt, settings, PROVIDER_NVIDIA)
 
 
+def call_deepseek(chunk_text_prompt: str, settings: Settings) -> str:
+    """One detection call to the DeepSeek platform.
+
+    Same OpenAI-compatible wire format and the same ladder as Groq/NIM, so this
+    is the same function pointed at a different config object. DeepSeek is a
+    provider in its own right, NOT the NVIDIA-hosted `deepseek-*` models: its
+    keys are `sk-…` from platform.deepseek.com and are billed against a
+    balance, not an NVIDIA quota.
+    """
+    return _call_openai_chat(chunk_text_prompt, settings, PROVIDER_DEEPSEEK)
+
+
 def _call_openai_chat(chunk_text_prompt: str, settings: Settings, which: str) -> str:
     """One detection call to an OpenAI-compatible backend, with a repair ladder.
 
@@ -655,7 +706,7 @@ def _call_openai_chat(chunk_text_prompt: str, settings: Settings, which: str) ->
     LlmError when the whole chain is exhausted.
     """
     cfg = openai_cfg(settings, which)
-    api_key = settings.groq_api_key if which == PROVIDER_GROQ else settings.nvidia_api_key
+    api_key = openai_api_key(which, settings)
     if not api_key:
         raise LlmNotConfigured(
             f"{cfg.label.upper()}_API_KEY missing — add it in the Keys/API keys tab."
@@ -785,6 +836,16 @@ def _groq_single(
     fmt = _response_format_for(mode)
     if fmt is not None:
         body["response_format"] = fmt
+    # DeepSeek-only wire field, guarded by getattr so the other providers are
+    # untouched. Thinking mode is ON by default at high effort and, while on,
+    # it IGNORES temperature/presence_penalty/frequency_penalty ("will not
+    # trigger an error but will also have no effect") — so with it enabled our
+    # temperature-0 ladder would be decorative and every retry would bill the
+    # chain-of-thought as output tokens. Disabling it is what actually makes
+    # the determinism apply. Raw wire shape is a top-level object.
+    thinking = getattr(cfg, "thinking_mode", "")
+    if thinking:
+        body["thinking"] = {"type": thinking}
 
     last_err: Exception | None = None
     est = _est_tokens(prompt, max_tokens)
@@ -1201,6 +1262,8 @@ def _call_provider(which: str, chunk_text_prompt: str, settings: Settings) -> st
         return call_ollama(chunk_text_prompt, settings)
     if which == PROVIDER_GEMINI:
         return call_gemini(chunk_text_prompt, settings)
+    if which == PROVIDER_DEEPSEEK:
+        return call_deepseek(chunk_text_prompt, settings)
     if which == PROVIDER_NVIDIA:
         return call_nvidia(chunk_text_prompt, settings)
     return call_groq(chunk_text_prompt, settings)
@@ -1217,7 +1280,9 @@ def _provider_ready(which: str, settings: Settings) -> bool:
         return ok
     if which == PROVIDER_GEMINI:
         return settings.gemini_api_key is not None
-    return bool(settings.nvidia_api_key if which == PROVIDER_NVIDIA else settings.groq_api_key)
+    if which in OPENAI_PROVIDER_KEYS:
+        return bool(openai_api_key(which, settings))
+    return False
 
 
 class ChunkCache:
@@ -1293,18 +1358,14 @@ def detect_clips(
                 f"Run `ollama serve` and `ollama pull {settings.llm.ollama_model}`, "
                 f"or switch the detection backend back to the hosted one."
             )
-    elif provider(settings) in (PROVIDER_NVIDIA, PROVIDER_GROQ):
+    elif provider(settings) in OPENAI_PROVIDER_KEYS:
         # The PRIMARY must have a key even when a fallback is configured: a
         # missing primary key is a misconfiguration to fix, not a transient
         # failure to route around.
         if not _provider_ready(provider(settings), settings):
-            live = (
-                live_nvidia_key()
-                if provider(settings) == PROVIDER_NVIDIA
-                else live_groq_key()
-            )
+            live = _LIVE_KEY_RESOLVERS[provider(settings)]()
             live.refresh(force=True)
-            var = "NVIDIA_API_KEY" if provider(settings) == PROVIDER_NVIDIA else "GROQ_API_KEY"
+            var = OPENAI_PROVIDER_KEYS[provider(settings)][1]
             detail = live.problem or (
                 f"no key found under any supported name ({', '.join(live.status()['aliases'])})"
             )

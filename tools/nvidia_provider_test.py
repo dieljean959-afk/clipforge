@@ -142,6 +142,11 @@ def _words(n: int = 400) -> list[dict]:
 def _settings() -> Settings:
     """Real config, with pacing/quota knobs neutralised so tests stay fast."""
     s = load_config(quiet=True)
+    # NIM is not the shipped default (DeepSeek is), so pin it explicitly here:
+    # this suite is about NIM as the SELECTED provider, and a call_llm() test
+    # that silently inherited whatever the default happened to be would stop
+    # testing failover at all.
+    s.llm.provider = "nvidia"
     for cfg in (s.nvidia, s.groq):
         cfg.base_url = "http://127.0.0.1:1/v1"  # never reached: every test sets its own
         cfg.min_interval_sec = 0.0
@@ -187,7 +192,13 @@ class _Keys:
 def test_config() -> None:
     print("\n[config] NVIDIA primary, Groq backup")
     s = load_config(quiet=True)
-    check("default provider is nvidia", s.llm.provider == "nvidia", s.llm.provider)
+    # NIM is no longer the SHIPPED default (DeepSeek is), so this suite pins
+    # NIM as a fully-wired SELECTABLE provider rather than asserting the
+    # default. Everything below holds whichever provider is active.
+    check("nvidia is a selectable provider", "nvidia" in llm_mod.PROVIDERS,
+          str(llm_mod.PROVIDERS))
+    check("the default is a valid provider",
+          s.llm.provider in llm_mod.PROVIDERS, s.llm.provider)
     check("fallback provider is groq", s.llm.fallback_provider == "groq",
           s.llm.fallback_provider)
     check("nvidia endpoint is NIM",
@@ -203,8 +214,8 @@ def test_config() -> None:
     check("nvidia daily limit is its own, not groq's",
           s.nvidia.daily_token_limit != s.groq.daily_token_limit,
           f"{s.nvidia.daily_token_limit} vs {s.groq.daily_token_limit}")
-    check("providers list leads with nvidia",
-          llm_mod.PROVIDERS[0] == "nvidia", str(llm_mod.PROVIDERS))
+    check("providers list leads with the configured default",
+          llm_mod.PROVIDERS[0] == s.llm.provider, str(llm_mod.PROVIDERS))
     check("label names the vendor", s.nvidia.label == "NVIDIA" and s.groq.label == "Groq",
           f"{s.nvidia.label}/{s.groq.label}")
 
@@ -432,10 +443,12 @@ def test_api_surface() -> None:
     from app import main as main_mod  # noqa: PLC0415
 
     client = TestClient(main_mod.app)
+    active = main_mod.settings.llm.provider
+    active_cfg = llm_mod.openai_cfg(main_mod.settings, active)
     status = client.get("/api/health").json()["detection"]
-    check("health reports nvidia as the provider", status["provider"] == "nvidia",
+    check("health reports the configured provider", status["provider"] == active,
           str(status.get("provider")))
-    check("...lists the nvidia model", bool(status["models"].get("nvidia")),
+    check("...lists the active model", bool(status["models"].get(active)),
           str(status["models"]))
     check("...offers nvidia as a switchable option",
           any(o["value"] == "nvidia" for o in status["options"]), str(status["options"]))
@@ -443,13 +456,14 @@ def test_api_surface() -> None:
           str(status.get("fallbackProvider")))
 
     usage = client.get("/api/usage").json()
-    check("usage reports which provider it describes", usage.get("provider") == "nvidia",
+    check("usage reports which provider it describes", usage.get("provider") == active,
           str(usage.get("provider")))
-    check("usage carries a display label", usage.get("providerLabel") == "NVIDIA",
+    check("usage carries a display label",
+          usage.get("providerLabel") == getattr(active_cfg, "label", active),
           str(usage.get("providerLabel")))
-    check("usage limit is nvidia's, not groq's",
-          usage["limit"] == main_mod.settings.nvidia.daily_token_limit,
-          f"{usage['limit']} vs {main_mod.settings.nvidia.daily_token_limit}")
+    check("usage limit is the active provider's, not groq's",
+          usage["limit"] == active_cfg.daily_token_limit,
+          f"{usage['limit']} vs {active_cfg.daily_token_limit}")
 
     # The key endpoints exist for the primary, like the existing Groq ones.
     routes = {r.path for r in main_mod.app.routes if hasattr(r, "methods")}

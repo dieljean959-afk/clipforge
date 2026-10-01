@@ -144,18 +144,95 @@ fallback_models = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 # and overrides this for the day. Raise it on a paid tier.
 daily_token_limit = 200000
 
-[nvidia]
-# PRIMARY detection backend. NVIDIA NIM (build.nvidia.com) is OpenAI-compatible
-# and speaks the same /chat/completions dialect as Groq, so it reuses that whole
-# call path — endpoint, model and rate budget are the only differences.
-# NVIDIA_API_KEY comes from the Keys/API keys tab.
+[deepseek]
+# PRIMARY detection backend: the DeepSeek platform (platform.deepseek.com).
+# Keys there are `sk-...`, distinct from NVIDIA's `nvapi-...` — this section
+# talks to DeepSeek's own API and is billed against your DeepSeek balance.
+# It is OpenAI-compatible, so it reuses the same /chat/completions call path
+# as Groq and NIM; endpoint, model and rate budget are the only differences.
+# DEEPSEEK_API_KEY comes from the Keys/API keys tab.
 #
 # Why primary: Groq's free tier enforces a hard tokens-per-DAY ceiling PER MODEL
 # (200k, rolling 24h). A 54-minute source spends ~87k detecting and a 2-hour
 # source blows through the whole day's budget part way through, which used to
-# end the job at "chunk 3/7, retrying". NIM has no comparable per-model daily
-# wall, so the primary no longer dies on a quota that is invisible until it is
-# gone.
+# end the job at "chunk 3/7, retrying". DeepSeek bills a balance instead of a
+# fixed daily wall, so the primary no longer dies on a quota that is invisible
+# until it is gone.
+model = "deepseek-flash"
+# NOT `https://api.deepseek.com/v1`. DeepSeek documents the OpenAI-compatible
+# base WITHOUT `/v1` (both are accepted today), and this transport appends
+# `/chat/completions` itself — so `/v1` here would produce a doubled path.
+# Overridable with DEEPSEEK_BASE_URL (used by the test suite to point at a
+# local OpenAI-compatible stub instead of the real API).
+base_url = "https://api.deepseek.com"
+max_retries = 3
+timeout_sec = 180
+# 0.0 disables the per-request floor. Groq NEEDS 2.1s (its free tier is ~30
+# rpm); DeepSeek's ceiling is a 2500-request CONCURRENCY limit, so pacing a
+# 20-chunk run at 2.1s would cost 40 seconds of wall time for nothing.
+min_interval_sec = 0.0
+# THE ONE SETTING THAT IS NOT OBVIOUS. DeepSeek's thinking mode is ON by
+# default at high effort, and while it is on it IGNORES temperature (plus
+# presence/frequency penalty) — the docs say such parameters "will not trigger
+# an error but will also have no effect". It also returns the chain-of-thought
+# in `reasoning_content`, which is billed as OUTPUT tokens. So with thinking
+# left on, the temperature = 0.0 below (and the whole JSON-retry ladder built
+# on it) would be decorative, and every retry would pay for reasoning we then
+# throw away. "disabled" turns it off so temperature actually applies.
+# "enabled" is a valid choice for genuinely hard reasoning passes, just not
+# for deterministic transcript extraction.
+thinking_mode = "disabled"
+# Detection is EXTRACTION (copying word indices out of a transcript), so the
+# same reasoning as [groq] applies: no creativity to sample, and every degree
+# of temperature is another chance to emit a body that fails validation.
+temperature = 0.0
+# "json_object", NOT "json_schema". DeepSeek supports JSON Output in the
+# OpenAI mode; strict Structured Outputs are a Groq feature. A `json_object`
+# prompt MUST also contain the word "json" — `_groq_envelope_prompt` asks for
+# a JSON object explicitly, so the contract holds on every rung of the ladder.
+response_format = "json_object"
+# Output budget per call, and the ceiling the JSON-retry ladder grows towards.
+# Truncation at the token ceiling is the usual real cause of a malformed
+# reply, so each ladder step raises this rather than re-asking for the same
+# truncated budget. DeepSeek's own max output is 384k, so this is a
+# clip-extraction budget, not a platform limit.
+max_tokens = 3200
+max_tokens_ceiling = 8192
+# Attempts per chunk on a JSON-validation failure, each at lower temperature
+# and a higher max_tokens. Same reasoning and same cap as [groq].
+json_retries = 3
+json_retry_temperature = 0.2
+# Tried in order when the primary model still cannot produce valid JSON after
+# the whole ladder. `deepseek-v4-pro` is the other current model; a wrong name
+# here would add a hard 404 to every chunk's ladder, so leave it empty unless
+# you have verified it.
+fallback_models = []
+# Self-imposed tokens-per-minute share — a burst guard, not survival pacing.
+# DeepSeek's documented limit is a concurrency ceiling (2500 for flash, 500
+# for pro), not a tokens/minute one, so this is generous by design; 0 would
+# leave only the request floor.
+tokens_per_min = 120000
+# ONLY the denominator the usage badge divides by. DeepSeek bills a balance
+# and sends no daily-token limit in a 429 body, so there is no authoritative
+# number to learn — this is whatever daily spend you intend to allow. Pricing
+# is far below the hosted alternatives: ~$0.15/1M input and ~$0.60/1M output
+# off-peak, doubling during the UTC peak windows (01:00-04:00, 06:00-10:00 on
+# weekdays). See api-docs.deepseek.com/quick_start/pricing.
+daily_token_limit = 2000000
+
+[nvidia]
+# ALTERNATIVE detection backend: NVIDIA NIM (build.nvidia.com) is
+# OpenAI-compatible and speaks the same /chat/completions dialect, so it reuses
+# that whole call path — endpoint, model and rate budget are the only
+# differences. NVIDIA_API_KEY comes from the Keys/API keys tab.
+#
+# Kept fully wired, not deprecated: NIM hosts its own `deepseek-*` models, but
+# those are a DIFFERENT thing from the [deepseek] section above and are billed
+# against an NVIDIA quota rather than a DeepSeek balance. Pick this section when
+# you have an `nvapi-...` key and no DeepSeek balance.
+#
+# The `deepseek-*` name below is an NVIDIA-hosted model, not the DeepSeek
+# platform. Swap it if NVIDIA rotates the catalog.
 model = "deepseek-ai/deepseek-v4.1-flash"
 # Overridable with NVIDIA_BASE_URL (used by the test suite to point at a local
 # OpenAI-compatible stub instead of the real API).
@@ -205,11 +282,14 @@ daily_token_limit = 2000000
 # Which backend runs AI clip/highlight DETECTION — NOT transcription.
 # Transcription is always faster-whisper (see [whisper] above); this choice
 # never changes the ASR engine.
-#
-#   nvidia  (default) — hosted, OpenAI-compatible, PRIMARY. No per-model daily
-#                       token wall like Groq's, so a long source cannot die half
-#                       way through detection. Needs NVIDIA_API_KEY.
-#   groq             — hosted BACKUP. Same wire format, same code path. ~30
+##   deepseek (default) — hosted, OpenAI-compatible, PRIMARY. Billed against a
+#                      balance rather than a fixed daily token wall like Groq's,
+#                      so a long source cannot die half way through detection.
+#                      Needs DEEPSEEK_API_KEY.
+#   nvidia            — hosted alternative on the same code path. NIM hosts its
+#                      own `deepseek-*` models, but on an NVIDIA quota, not a
+#                      DeepSeek balance. Needs NVIDIA_API_KEY.
+#   groq              — hosted BACKUP. Same wire format, same code path. ~30
 #                      req/min and a 200k/day ceiling on the free tier, so calls
 #                      are paced client-side. Needs GROQ_API_KEY.
 #   gemini           — hosted alternative, selectable without a redeploy.
@@ -225,9 +305,10 @@ daily_token_limit = 2000000
 # with a model you did not pick.
 #
 # Env overrides: CLIPFORGE_LLM_PROVIDER, OLLAMA_URL, OLLAMA_MODEL,
-#                GROQ_MODEL, GROQ_BASE_URL, NVIDIA_MODEL, NVIDIA_BASE_URL.
+#                GROQ_MODEL, GROQ_BASE_URL, NVIDIA_MODEL, NVIDIA_BASE_URL,
+#                DEEPSEEK_MODEL, DEEPSEEK_BASE_URL.
 # The dashboard shows the active backend and its tradeoff, and can switch it.
-provider = "nvidia"
+provider = "deepseek"
 
 # Automatic failover: when a chunk FAILS on the primary (quota spent, endpoint
 # down, key rejected), retry that chunk on the backup before skipping it. Blank

@@ -35,10 +35,13 @@ from app.config import (
     delete_env_var,
     ffmpeg_bin,
     ffprobe_bin,
+    live_deepseek_key,
     live_gemini_key,
     live_groq_key,
     live_nvidia_key,
     load_config,
+    sync_deepseek_env_after_save,
+    sync_deepseek_env_for_delete,
     sync_gemini_env_after_save,
     sync_gemini_env_for_delete,
     sync_groq_env_after_save,
@@ -424,16 +427,20 @@ def verify_clips(jobId: str | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# detection backend (NVIDIA = hosted default, Groq = backup, Gemini, Ollama = local)
+# detection backend (DeepSeek = hosted default, NVIDIA/Groq = hosted alts, Gemini, Ollama = local)
 # --------------------------------------------------------------------------- #
 
 # Shown verbatim in the UI so the tradeoff is visible BEFORE the user picks.
 DETECTION_TRADEOFFS = {
-    "nvidia": "Hosted, OpenAI-compatible chat completions, and the DEFAULT. NVIDIA NIM "
-              "has no per-model daily token ceiling like Groq's free tier, so a long "
-              "source cannot run out of quota half way through detection. Needs an "
-              "NVIDIA API key.",
-    "groq": "Hosted BACKUP. Same wire format and the same code path as NVIDIA, but its "
+    "deepseek": "Hosted, OpenAI-compatible chat completions, and the DEFAULT. The DeepSeek "
+                "platform bills a balance rather than a fixed tokens-per-DAY ceiling like "
+                "Groq's free tier, so a long source cannot run out of quota half way through "
+                "detection — and its rates are the cheapest of the hosted options. Needs a "
+                "DeepSeek API key.",
+    "nvidia": "Hosted alternative, selectable without a redeploy. NVIDIA NIM is the same "
+              "wire format and the same code path, and hosts its own `deepseek-*` models — "
+              "but on an NVIDIA quota, not a DeepSeek balance. Needs an NVIDIA API key.",
+    "groq": "Hosted BACKUP. Same wire format and the same code path as DeepSeek, but its "
             "free tier is ~30 requests per minute with a 200k tokens-per-DAY ceiling "
             "per model — the app paces calls below the request limit and retries 429s, "
             "but a spent daily quota can only be waited out. Needs a Groq API key.",
@@ -462,6 +469,7 @@ def detection_status(probe: bool = True) -> dict:
             for p in llm_mod.PROVIDERS
         ],
         "models": {
+            "deepseek": settings.deepseek.model,
             "nvidia": settings.nvidia.model,
             "groq": settings.groq.model,
             "gemini": settings.gemini.model,
@@ -487,9 +495,9 @@ def detection_status(probe: bool = True) -> dict:
             out["ready"] = ok
             out["probed"] = True
             out["detail"] = reason
-    elif active in ("nvidia", "groq"):
-        live = live_nvidia_key() if active == "nvidia" else live_groq_key()
-        var = "NVIDIA_API_KEY" if active == "nvidia" else "GROQ_API_KEY"
+    elif active in llm_mod.OPENAI_PROVIDER_KEYS:
+        live = llm_mod._LIVE_KEY_RESOLVERS[active]()
+        var = llm_mod.OPENAI_PROVIDER_KEYS[active][1]
         # force=True re-reads the env each call, which is what makes a key
         # saved after boot appear on the next poll. It is a local env lookup,
         # never a request to the provider, so it is safe in the health path.
@@ -620,6 +628,13 @@ def health() -> dict:
                 **live_nvidia_key().status(),
             },
         ),
+        "llmDeepSeek": _block(
+            "llmDeepSeek",
+            lambda: {
+                "provider": llm_mod.PROVIDER_DEEPSEEK,
+                **live_deepseek_key().status(),
+            },
+        ),
         # probe=False: key presence only, never a vendor round trip. A Groq or
         # Ollama outage must not be able to fail our own health endpoint.
         "detection": _block("detection", detection_status, probe=False),
@@ -719,16 +734,21 @@ def usage() -> dict:
     been spent today, it still answers with a zeroed but well-formed shape so
     the UI has no empty state to handle.
 
-    The denominator follows the ACTIVE provider, because the two budgets are
-    not comparable: Groq states a real per-model tokens-per-day ceiling in its
-    429 body, while NIM reports credits and has no equivalent number, so its
-    limit is whatever the operator configured. Showing Groq's 200k while
-    running on NVIDIA would report a badge that is both wrong and alarming.
+    The denominator follows the ACTIVE provider, because the budgets are not
+    comparable: Groq states a real per-model tokens-per-day ceiling in its
+    429 body, while DeepSeek and NIM bill a balance or credits and send no
+    equivalent number, so their limits are whatever the operator configured.
+    Showing Groq's 200k while running on DeepSeek would report a badge that is
+    both wrong and alarming.
     """
     from app import groq_usage
 
     active = llm_mod.provider(settings)
-    cfg = llm_mod.openai_cfg(settings, active) if active in ("nvidia", "groq") else settings.groq
+    cfg = (
+        llm_mod.openai_cfg(settings, active)
+        if active in llm_mod.OPENAI_PROVIDER_KEYS
+        else settings.groq
+    )
     limit = int(getattr(cfg, "daily_token_limit", 0) or 0)
     model = str(getattr(cfg, "model", "") or "")
     snap = groq_usage.store(settings.app.paths.data_dir).snapshot(
@@ -755,11 +775,14 @@ def reload_secrets() -> dict:
     groq_live.refresh(force=True)
     nvidia_live = live_nvidia_key()
     nvidia_live.refresh(force=True)
+    deepseek_live = live_deepseek_key()
+    deepseek_live.refresh(force=True)
     logger.info(f"[config] secrets re-checked — key loaded: {status['keyLoaded']} ({status['source']})")
     return {
         **status,
         "groq": groq_live.status(),
         "nvidia": nvidia_live.status(),
+        "deepseek": deepseek_live.status(),
         "activeProvider": llm_mod.provider(settings),
     }
 
@@ -811,6 +834,11 @@ def remove_gemini_key() -> dict:
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
 
 
+# --------------------------------------------------------------------------- #
+# caption style
+# --------------------------------------------------------------------------- #
+
+
 @app.post("/api/settings/groq-key")
 def set_groq_key(body: SetKeyIn) -> dict:
     """Save/replace GROQ_API_KEY in .env.local.
@@ -851,6 +879,11 @@ def remove_groq_key() -> dict:
         f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
     )
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
+
+
+# --------------------------------------------------------------------------- #
+# caption style
+# --------------------------------------------------------------------------- #
 
 
 @app.post("/api/settings/nvidia-key")
@@ -898,6 +931,57 @@ def remove_nvidia_key() -> dict:
 # --------------------------------------------------------------------------- #
 # caption style
 # --------------------------------------------------------------------------- #
+
+
+@app.post("/api/settings/deepseek-key")
+def set_deepseek_key(body: SetKeyIn) -> dict:
+    """Save/replace DEEPSEEK_API_KEY in .env.local.
+
+    Mirrors set_groq_key so a phone-only operator can paste a key from
+    platform.deepseek.com without a terminal. Returns the live status plus a
+    verification shape (first 6 / last 4 chars only — never the key).
+    """
+    raw = body.key.strip()
+    if raw.lower().startswith("encrypted:"):
+        raise HTTPException(400, "That looks like an encrypted blob — paste the raw sk-... key.")
+    if " " in raw:
+        raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
+    if raw.startswith("nvapi-"):
+        # Platform keys are `sk-…`; an `nvapi-…` pasted here is a real NVIDIA
+        # key, and accepting it would produce a confusing 401 from DeepSeek
+        # rather than pointing at the tab that actually issued it.
+        raise HTTPException(
+            400,
+            "That is an NVIDIA key (nvapi-...). DeepSeek keys start with sk- and come "
+            "from platform.deepseek.com/api_keys — save that one under NVIDIA instead.",
+        )
+    write_env_var("DEEPSEEK_API_KEY", raw)
+    # Mirror into the process env: the live resolver prefers OS env, so a stale
+    # copy from an older .env.local would otherwise shadow the new value.
+    sync_deepseek_env_after_save(raw)
+    live = live_deepseek_key()
+    live.refresh(force=True)
+    status = live.status()
+    logger.info("[config] DEEPSEEK_API_KEY updated via dashboard — verification: "
+                f"{raw[:6]}…{raw[-4:]} ({len(raw)} chars)")
+    return {
+        **status,
+        "storedShape": {"first6": raw[:6], "last4": raw[-4:], "length": len(raw)},
+    }
+
+
+@app.delete("/api/settings/deepseek-key")
+def remove_deepseek_key() -> dict:
+    """Delete DEEPSEEK_API_KEY from .env.local."""
+    dropped = sync_deepseek_env_for_delete()
+    removed = delete_env_var("DEEPSEEK_API_KEY")
+    live = live_deepseek_key()
+    live.refresh(force=True)
+    logger.info(
+        f"[config] DEEPSEEK_API_KEY deleted via dashboard "
+        f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
+    )
+    return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
 
 class CaptionStyleIn(BaseModel):
     # All optional: the dialog sends the whole set it knows about, and a
