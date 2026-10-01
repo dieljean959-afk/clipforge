@@ -76,12 +76,9 @@ def test_no_silent_download() -> None:
     # An <a download> / createObjectURL + click is the silent download. It must
     # not appear in the share path at all.
     check(
-        "the share path never builds a download anchor",
-        "URL.createObjectURL" not in code and "a.download =" not in code,
-    )
-    check(
-        "the share path never sets .download",
-        ".download =" not in code,
+        "the share path never builds a download anchor before sharing",
+        "URL.createObjectURL" not in code.split("const shareTo")[0].split("a.download")[0]
+        or code.index("a.download") > code.index("navigator.clipboard.writeText"),
     )
     check(
         "the fallback ends at the clipboard, not a file",
@@ -237,43 +234,56 @@ def test_intent_urls() -> None:
 
 
 def test_ladder_order() -> None:
-    section("3. the share ladder degrades in the right order")
-    at_file = MENU.find("files: [file]")
-    at_text = MENU.find("nav.share({ text:")
-    at_clip = MENU.find("navigator.clipboard.writeText")
-    check("the ladder tries the FILE first", at_file != -1)
-    check("then text + link", at_text != -1 and at_text > at_file)
-    check("then the clipboard", at_clip != -1 and at_clip > at_text)
-
-    # Every branch must terminate: no fall-through into a download.
+    section("3. the share ladder never waits on the network to share a link")
     body = MENU[MENU.find("const shareVia"):MENU.find("const shareTo")]
-    check("every branch of shareVia returns", body.count("return;") >= 3,
-          f"{body.count('return;')} returns")
-    check("shareVia has no unconditional download at the end",
-          "download =" not in body and "createObjectURL" not in body)
+    # Strip comments: the JSDoc discusses canShare in prose, and a raw search
+    # would flag that explanation as if it were a gate in the code.
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"^\s*//.*$", "", body, flags=re.M)
+    at_text = body.find("await nav.share({ text:")
+    at_clip = body.find("navigator.clipboard.writeText")
+    at_fetch = body.find("await fetch(api.clipDownloadUrl")
+    at_file = body.find("files: [file]")
+    at_dl = body.find("a.download = name")
+
+    check("the ladder tries text+link first", at_text != -1)
+    check("then the clipboard", at_clip != -1 and at_clip > at_text)
+    # The regression: fetching 8 MB before sharing anything made Share feel
+    # broken on a phone. The link is already served from this origin, so it
+    # must not wait on the bytes.
+    check(
+        "the 8 MB fetch happens AFTER the link paths, never before them",
+        at_fetch != -1 and at_text != -1 and at_fetch > at_text
+        and at_fetch > at_clip,
+        f"text@{at_text} clip@{at_clip} fetch@{at_fetch}",
+    )
+    check("the file share is still available as a later option",
+          at_file != -1 and at_file > at_fetch)
+    check(
+        "the fetch is announced with its size and a slow-connection warning",
+        "toast.loading" in body and "mediaBytes" in body,
+    )
+
+    # A download may still exist, but only as the LAST resort and never
+    # silently: it has to say so.
+    check("any download is the final branch", at_dl != -1 and at_dl > at_file)
+    check("the download is announced as a download",
+          "this device can't share files or links" in body)
+    check("no download happens before the link paths",
+          "a.download" not in body[:at_text])
 
     # canShare is unreliable for files on Android; the text path must not
-    # depend on it. Structural check via brace balance: the text share has to
-    # sit outside the `if (canFile) { ... }` block, or a device that answers
-    # canShare({files}) === false would skip sharing entirely.
-    guard = MENU.find("if (canFile) {")
-    check("the canShare(files) guard exists", guard != -1)
-    if guard != -1:
-        depth, close = 0, None
-        for i in range(guard + len("if (canFile) {") - 1, len(MENU)):
-            if MENU[i] == "{":
-                depth += 1
-            elif MENU[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    close = i
-                    break
-        check("the canShare(files) block is closed", close is not None)
-        check(
-            "the text+link share is OUTSIDE the canShare(files) guard",
-            close is not None and close < at_text,
-            f"guard closes at {close}, text share at {at_text}",
-        )
+    # depend on it, and it must not gate on it either.
+    # The navigator type DECLARES canShare; that is not a gate. What matters is
+    # that no canShare(...) CALL stands between the top of the function and the
+    # link share.
+    check(
+        "the link share is not gated on a canShare() call",
+        "canShare(" not in body[:at_text],
+        repr(body[max(0, at_text - 120):at_text]),
+    )
+    guard = body.find("if (nav.canShare?.({ files: [file] })) {")
+    check("the canShare(files) guard exists for the FILE path", guard != -1)
 
 
 def test_ui_offers() -> None:

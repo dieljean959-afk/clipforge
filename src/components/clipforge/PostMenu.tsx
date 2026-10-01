@@ -115,62 +115,91 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
   const shareVia = async () => {
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
     const link = clipShareUrl(clip._id);
-    const name = clipFileName(clip);
     const nav = navigator as Navigator & {
       canShare?: (data: ShareData) => boolean;
       share?: (data: ShareData) => Promise<void>;
     };
 
-    // 1. Share the FILE, if this browser can take files. Cheapest for the user
-    //    (no re-upload, the finished MP4 goes straight to their app).
-    let blob: Blob | null = null;
-    try {
-      const res = await fetch(api.clipDownloadUrl(clip._id));
-      if (res.ok) blob = await res.blob();
-    } catch {
-      blob = null;
-    }
-
-    if (blob && nav.share) {
-      const file = new File([blob], name, { type: "video/mp4" });
-      const canFile = nav.canShare?.({ files: [file] }) ?? false;
-      if (canFile) {
-        try {
-          await nav.share({ files: [file], text: caption, title: clip.title });
-          return;
-        } catch {
-          // Aborted by the user, or the platform rejected the file. Fall
-          // through to the link, which needs nothing from the device.
-        }
-      }
-      // 2. Share TEXT + LINK. `canShare` is often undefined here even when
-      //    `share` works, so this is attempted whenever share exists.
+    // 1. Share TEXT + LINK FIRST. This is instant and transfers nothing: the
+    //    clip is already served from this origin, so the link IS the clip.
+    //
+    //    This used to be third, behind a full-file fetch. On a phone that
+    //    meant every tap pulled an 8 MB MP4 over the network before the share
+    //    sheet could even appear — on a 50 KB/s link that is minutes of
+    //    nothing, and it is why "Share" felt broken. Nothing about the link
+    //    needs the bytes, so it must never wait on them.
+    //
+    //    `canShare` is deliberately not consulted here: it is frequently
+    //    undefined for text-only shares even where `share` works fine.
+    if (nav.share && link) {
       try {
         await nav.share({ text: caption, url: link, title: clip.title });
         return;
       } catch {
-        // Dismissed, or unsupported. One more option before the download.
+        // Dismissed by the user, or this platform rejects text/url shares.
+        // Fall through to the file.
       }
     }
 
-    // 3. Copy the caption + link. Always works, never silently downloads, and
-    //    it is the one fallback that leaves the user in control.
+    // 2. Copy the caption + link. Always works, transfers nothing, and leaves
+    //    the user in control. This is the floor of the ladder.
+    if (link) {
+      try {
+        await navigator.clipboard.writeText(`${caption}\n\n${link}`);
+        toast.success("Caption and clip link copied — paste it anywhere.", {
+          description: link,
+        });
+        return;
+      } catch {
+        // Clipboard blocked (needs a secure context / permission). Keep going.
+      }
+    }
+
+    // 3. Only now, with an explicit warning, fetch the actual FILE. This is
+    //    the expensive path (mediaBytes, typically 6-10 MB), so it announces
+    //    itself and says how long it may take rather than appearing to hang.
+    const mb = (clip.mediaBytes ?? 0) / (1024 * 1024);
+    const size = mb >= 0.1 ? `${mb.toFixed(1)} MB` : "the full clip";
+    toast.loading(`Preparing ${size} to share...`, {
+      description: "On a slow connection this can take a minute.",
+    });
+    const name = clipFileName(clip);
+    let blob: Blob | null = null;
     try {
-      await navigator.clipboard.writeText(link ? `${caption}\n\n${link}` : caption);
-      toast.success("Caption and clip link copied — paste it anywhere.", {
-        description: link || undefined,
-      });
-      return;
+      const res = await fetch(api.clipDownloadUrl(clip._id));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      blob = await res.blob();
     } catch {
-      toast.error(
-        "This browser can't share files and can't reach the clipboard.",
-        { description: "Use the MP4 button, or a platform row above." },
-      );
+      toast.error("Could not load the clip — use a platform row above instead.");
       return;
     }
 
-    // 4. Never reached: 3 always returns. Kept out deliberately so a silent
-    //    download can never come back as the default outcome.
+    if (nav.share) {
+      const file = new File([blob, ], name, { type: "video/mp4" });
+      if (nav.canShare?.({ files: [file] })) {
+        try {
+          await nav.share({ files: [file], text: caption, title: clip.title });
+          return;
+        } catch {
+          // Dismissed. One last option below.
+        }
+      }
+      try {
+        await nav.share({ text: caption, url: link, title: clip.title });
+        return;
+      } catch {
+        // Unsupported too.
+      }
+    }
+
+    // 4. Announced download, never silent. The user is told this is a
+    //    download and that it was not avoidable on this device.
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast.success(`Downloaded ${name} — this device can't share files or links.`);
   };
 
   /** Open one platform's own composer with the caption (and link) filled in. */
@@ -407,14 +436,14 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
             >
               <span className="flex w-full min-w-0 items-center gap-2 text-sm">
                 <Share2 className="size-3.5 shrink-0" />
-                <span className="min-w-0 font-medium">Share the MP4 file...</span>
+                <span className="min-w-0 font-medium">Share link...</span>
                 <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-                  no account needed
+                  instant, no download
                 </span>
               </span>
               <span className="pl-6 text-[10px] leading-tight text-muted-foreground">
-                Sends the rendered MP4 (captions burned in) to this phone&apos;s share
-                sheet. Different from posting above.
+                Opens this phone&apos;s share sheet with the caption and a link to the clip.
+                Different from posting above.
               </span>
             </button>
 

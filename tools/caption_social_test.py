@@ -529,13 +529,13 @@ check("TS caption cap matches Python", "MAX_CAPTION_CHARS = 150" in ts_src)
 # Share via... vs Post to... — two different things, two different words.
 # --------------------------------------------------------------------------- #
 menu = (ROOT / "src" / "components" / "clipforge" / "PostMenu.tsx").read_text()
-share_row = div_block_from(menu, "Share the MP4 file...", "button")
+share_row = div_block_from(menu, "Share link...", "button")
 # JSX wraps prose across lines, so match against a whitespace-collapsed copy:
 # "share\n  sheet" is the same sentence a reader sees as "share sheet".
 share_flat = " ".join(share_row.split())
 check(
-    "the share-sheet action is labelled as sending the FILE",
-    "Share the MP4 file..." in menu,
+    "the share-sheet action is labelled as sharing a LINK",
+    "Share link..." in menu,
 )
 check(
     "the old ambiguous label is gone ('Share sheet / download instead' next to "
@@ -546,16 +546,16 @@ check(
 # it is no longer only about posting through a connected account.
 check("the trigger says 'Share...'", "Share..." in menu)
 check(
-    "the share row says what it actually does (share sheet + burned-in captions)",
-    "share sheet" in share_flat and "captions burned in" in share_flat,
+    "the share row says what it actually does (share sheet + a link to the clip)",
+    "share sheet" in share_flat and "link to the clip" in share_flat,
 )
 check(
     "the two paths are described as different",
     "Different from posting above" in share_row,
 )
 check(
-    "the share row is marked as needing no account",
-    "no account needed" in share_row,
+    "the share row is marked as instant and needing no download",
+    "instant, no download" in share_row,
 )
 # The shared bytes must be the finished render, via the same endpoint the MP4
 # button uses — never a source file or a proxy.
