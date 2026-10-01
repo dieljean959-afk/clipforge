@@ -822,9 +822,30 @@ def set_gemini_key(body: SetKeyIn) -> dict:
     }
 
 
+def _require_delete_confirmation(confirm: bool, env_name: str) -> None:
+    """Refuse to destroy a key without an explicit `?confirm=true`.
+
+    These deletes are irreversible from inside the app: the value is removed
+    from .env.local and from the process env, and the platform's own copy is
+    not something we can read back. That is a big, sharp button for something a
+    stray request, a bad retry, or a careless test can trigger — and a key that
+    is gone mid-session takes AI detection offline with it.
+
+    428 (Precondition Required) rather than 400: nothing is wrong with the
+    request, it is missing the deliberate step.
+    """
+    if not confirm:
+        raise HTTPException(
+            428,
+            f"Deleting {env_name} is permanent. Re-send with ?confirm=true once you are "
+            "sure — the value cannot be read back out of the server afterwards.",
+        )
+
+
 @app.delete("/api/settings/gemini-key")
-def remove_gemini_key() -> dict:
+def remove_gemini_key(confirm: bool = False) -> dict:
     """Delete GEMINI_API_KEY from .env.local (the missing Delete button)."""
+    _require_delete_confirmation(confirm, "GEMINI_API_KEY")
     # Purge the process-env copies FIRST — the live resolver prefers OS env,
     # so a leftover injected value would keep keyLoaded=True after the file
     # line was removed.
@@ -873,8 +894,9 @@ def set_groq_key(body: SetKeyIn) -> dict:
 
 
 @app.delete("/api/settings/groq-key")
-def remove_groq_key() -> dict:
+def remove_groq_key(confirm: bool = False) -> dict:
     """Delete GROQ_API_KEY from .env.local."""
+    _require_delete_confirmation(confirm, "GROQ_API_KEY")
     dropped = sync_groq_env_for_delete()
     removed = delete_env_var("GROQ_API_KEY")
     live = live_groq_key()
@@ -920,8 +942,9 @@ def set_nvidia_key(body: SetKeyIn) -> dict:
 
 
 @app.delete("/api/settings/nvidia-key")
-def remove_nvidia_key() -> dict:
+def remove_nvidia_key(confirm: bool = False) -> dict:
     """Delete NVIDIA_API_KEY from .env.local."""
+    _require_delete_confirmation(confirm, "NVIDIA_API_KEY")
     dropped = sync_nvidia_env_for_delete()
     removed = delete_env_var("NVIDIA_API_KEY")
     live = live_nvidia_key()
@@ -976,8 +999,9 @@ def set_deepseek_key(body: SetKeyIn) -> dict:
 
 
 @app.delete("/api/settings/deepseek-key")
-def remove_deepseek_key() -> dict:
+def remove_deepseek_key(confirm: bool = False) -> dict:
     """Delete DEEPSEEK_API_KEY from .env.local."""
+    _require_delete_confirmation(confirm, "DEEPSEEK_API_KEY")
     dropped = sync_deepseek_env_for_delete()
     removed = delete_env_var("DEEPSEEK_API_KEY")
     live = live_deepseek_key()

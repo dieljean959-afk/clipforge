@@ -51,7 +51,7 @@ def main() -> int:
         time.sleep(5)
         try:
             # 1. clean the broken empty blob
-            r1 = call("/api/settings/gemini-key", method="DELETE")
+            r1 = call("/api/settings/gemini-key?confirm=true", method="DELETE")
             results.append(f"1. DELETE broken blob: linesRemoved={r1.get('linesRemoved')}, keyLoaded={r1.get('keyLoaded')}")
 
             # 2. health after delete
@@ -70,7 +70,7 @@ def main() -> int:
             results.append(f"4. health after set: keyLoaded={h4.get('keyLoaded')}, source={h4.get('source')!r}")
 
             # 5. delete again (clean state)
-            r5 = call("/api/settings/gemini-key", method="DELETE")
+            r5 = call("/api/settings/gemini-key?confirm=true", method="DELETE")
             results.append(f"5. final DELETE: linesRemoved={r5.get('linesRemoved')} (clean state restored)")
         finally:
             import os

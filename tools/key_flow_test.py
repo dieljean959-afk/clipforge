@@ -122,8 +122,17 @@ def main() -> int:
             r = client.post("/api/settings/reload-secrets")
             check("reload-secrets → keyLoaded", r.status_code == 200 and r.json().get("keyLoaded") is True)
 
-            # 5. delete
-            r = client.delete("/api/settings/gemini-key")
+            # 5. delete. The endpoint now demands ?confirm=true, so this also
+            # pins the guard: an unconfirmed delete must be REFUSED (and must
+            # leave the key alone) rather than silently destroying it.
+            r_unsafe = client.delete("/api/settings/gemini-key")
+            check("unconfirmed DELETE is refused", r_unsafe.status_code == 428,
+                  str(r_unsafe.status_code))
+            h_guard = client.get("/api/health").json().get("llm", {})
+            check("a refused delete leaves the key intact",
+                  h_guard.get("keyLoaded") is True, str(h_guard.get("keyLoaded")))
+
+            r = client.delete("/api/settings/gemini-key?confirm=true")
             body = r.json() if r.status_code == 200 else {}
             check("DELETE gemini-key → 200", r.status_code == 200, str(r.status_code))
             check("linesRemoved ≥ 1", body.get("linesRemoved", 0) >= 1, str(body.get("linesRemoved")))

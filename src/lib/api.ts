@@ -534,7 +534,7 @@ export const api = {
     ),
   /** Delete DEEPSEEK_API_KEY from the backend's env file. */
   deleteDeepseekKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/deepseek-key", {
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/deepseek-key?confirm=true", {
       method: "DELETE",
     }),
   /** Save/replace NVIDIA_API_KEY in the backend's env file. */
@@ -549,7 +549,7 @@ export const api = {
     ),
   /** Delete NVIDIA_API_KEY from the backend's env file. */
   deleteNvidiaKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/nvidia-key", {
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/nvidia-key?confirm=true", {
       method: "DELETE",
     }),
   /** Save/replace GROQ_API_KEY in the backend's env file. */
@@ -564,7 +564,7 @@ export const api = {
     ),
   /** Delete GROQ_API_KEY from the backend's env file. */
   deleteGroqKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/groq-key", {
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/groq-key?confirm=true", {
       method: "DELETE",
     }),
   /** Save/replace GEMINI_API_KEY in the backend's env file (missing Edit button). */
@@ -579,7 +579,9 @@ export const api = {
     ),
   /** Delete GEMINI_API_KEY from the backend's env file (missing Delete button). */
   deleteGeminiKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/gemini-key", { method: "DELETE" }),
+    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/gemini-key?confirm=true", {
+      method: "DELETE",
+    }),
   /** Switch the AI-detection backend. Transcription engine is untouched. */
   setDetectionBackend: (provider: DetectionProvider) =>
     request<DetectionDto>("/api/settings/detection", {

@@ -185,7 +185,22 @@ export function clipforgeBackend(): Plugin {
     enforce: "pre",
 
     async configureServer(server) {
-      await startBackend();
+      // Start the backend, but do NOT block the dev server on it.
+      //
+      // This used to `await startBackend()`, which holds Vite's startup for up
+      // to 30 seconds while it polls /api/health. The backend's cold boot is
+      // not instant — it imports faster-whisper, probes host limits, and on a
+      // cold container may pull model files — so a slow boot made the ENTIRE
+      // site unreachable, not just the API: Vite was not listening yet, so the
+      // browser got no HTML, no JS and no /api at all, and the preview looked
+      // dead rather than "warming up".
+      //
+      // The respawn middleware below already waits on an in-flight boot, so
+      // publishing `state.starting` here gives the same guarantee for the
+      // first API call without holding the whole dev server hostage.
+      state.starting = startBackend().finally(() => {
+        state.starting = null;
+      });
 
       // Respawn guard: any proxied /api request revives a dead backend first.
       //
