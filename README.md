@@ -763,6 +763,33 @@ redeploys — the retention cleaner also deletes finished job artifacts 24h
 after completion (`[hosted] retention_hours`), so treat the hosted storage as
 temporary: download your clips.
 
+### Surviving a restarted server
+
+The sandbox periodically restarts the whole web process, which SIGKILLs the
+pipeline child mid-job. That is an external event, not a pipeline fault, and it
+used to surface as *"The worker stopped while this job was in progress and
+never reported back"* — a message that named no cause, burned a resume-budget
+slot, and left a job whose work was 99% cached looking permanently dead.
+
+| | |
+|---|---|
+| An orphaned stage is **re-queued** | Reconciliation resumes the job from its stage markers instead of failing it. |
+| The message names the real cause | *"the server restarted during 'Rendering 9:16' — 5 restart(s) so far"*, derived from counts only — never from its own previous output. |
+| Evidence survives | The interrupt reason, count and last signal are preserved for the next diagnosis. |
+| The budget counts progress, not restarts | A restart that advanced the job costs nothing. Only `STALLED_RESUME_LIMIT` consecutive restarts that made **no** progress stop the loop. |
+| Nothing escapes the process | `sys.excepthook`, `threading.excepthook`, `sys.unraisablehook` and a `SIGTERM` handler all write a real failure onto the job first. |
+| One clip costs one clip | A failed render retries once with safer settings, is verified (exists, non-empty, probes, right duration), then is **skipped and logged** — the batch still finishes. |
+| Nothing stacks | At most 2 ffmpeg children host-wide (1 on a single-vCPU or low-RAM host), reentrant per thread so a probe inside a render never deadlocks. |
+| The disk is checked first | A job that cannot fit fails up front with the megabytes it needs and has, not at clip 9 of 10. |
+| Scratch is cleaned | The 16 kHz WAVs are deleted when the job completes. |
+
+`STALL_TIMEOUT_SEC` is 3 minutes, and the heartbeat spans the **whole**
+pipeline — every stage beats every 5s, so the watchdog distinguishes "slow"
+from "stuck" instead of killing working transcodes.
+
+Run `python3 tools/reliability_test.py` to prove all of it end to end on a real
+short video, printing PASS/FAIL for every stage.
+
 ### Worker queue and live ETA
 
 Jobs run FIFO in dedicated child processes. The pool size is bounded by both
@@ -955,6 +982,7 @@ python3 tools/share_intents_test.py   # sharing never silently downloads
 python3 tools/share_instant_test.py   # the share copy is small/faststart; the tap path awaits nothing
 python3 tools/share_endpoint_test.py  # /share over real HTTP: immutable, ETag, Range, 206, concurrency
 python3 tools/heartbeat_test.py      # long steps prove liveness without faking progress
+python3 tools/reliability_test.py    # END TO END on a real short video: PASS/FAIL per stage
 python3 tools/detect_concurrency_test.py  # concurrent detection == sequential, exactly
 python3 tools/perf_bench.py verify <jobId>  # correctness gate: framing, sync, audio, count
 python3 tools/perf_bench.py render <jobId>  # sequential vs concurrent ffmpeg, measured

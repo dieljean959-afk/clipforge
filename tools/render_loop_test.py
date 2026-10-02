@@ -135,11 +135,20 @@ def test_billing_is_permanent() -> None:
 def test_translation_after_render() -> None:
     section("2. the encode happens before the first caption is requested")
     src = inspect.getsource(task_mod.Pipeline._stage_render)
-    render_at = src.find("video.render_clip(")
+    # The encode call moved into _render_one_clip (which owns the verify /
+    # retry / cleanup for one clip), so follow the call rather than the literal.
+    # What this guards is the ORDER: the MP4 is finished and durable before any
+    # sidecar translation is requested.
+    helper = inspect.getsource(task_mod.Pipeline._render_one_clip)
+    calls_helper = "_render_one_clip(" in src
+    render_in_helper = "video.render_clip(" in helper
+    render_at = src.find("_render_one_clip(")
     tracks_at = src.find("_write_caption_tracks(")
-    check("_stage_render calls render_clip", render_at != -1)
+    check("the encode is reached from _stage_render",
+          calls_helper or render_at != -1)
+    check("the helper that runs the encode calls render_clip", render_in_helper)
     check("_stage_render writes caption tracks", tracks_at != -1)
-    check("render_clip runs BEFORE _write_caption_tracks",
+    check("the encode runs BEFORE _write_caption_tracks",
           render_at != -1 and tracks_at != -1 and render_at < tracks_at,
           f"render@{render_at} tracks@{tracks_at}")
 

@@ -70,6 +70,41 @@ def verify_source(path: Path) -> None:
     logger.info(f"[video] source verified: {meta['width']}x{meta['height']}, {meta['duration']:.1f}s")
 
 
+def verify_output(path: Path, *, expected_sec: float | None = None) -> dict[str, Any]:
+    """Prove a rendered clip is a real, playable file before we call it done.
+
+    A clip that is recorded as rendered but is zero bytes, truncated, or has no
+    video stream is worse than a clip that failed: the UI shows it green, the
+    player spins, and nothing anywhere reports an error. ffmpeg can exit 0 and
+    still leave one of these behind when the disk fills or a frame thread is
+    killed, so success has to be checked rather than inferred from the exit
+    code alone.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise RenderError(f"{path.name} was not written ({exc})") from exc
+    if size <= 0:
+        raise RenderError(f"{path.name} is empty (0 bytes) — the encode produced no data")
+    meta = probe(path)
+    if meta.get("width", 0) <= 0 or meta.get("height", 0) <= 0:
+        raise RenderError(f"{path.name} has no video stream — ffprobe could not read it")
+    if expected_sec is not None and expected_sec > 0:
+        got = float(meta.get("duration") or 0.0)
+        # Generous tolerance: a seek lands on the nearest keyframe, so the
+        # first frame can be trimmed and the tail padded by the muxer.
+        if got < expected_sec * 0.5:
+            raise RenderError(
+                f"{path.name} is only {got:.1f}s but should be ~{expected_sec:.1f}s "
+                f"— the encode was cut short"
+            )
+    logger.info(
+        f"[video] verified {path.name}: {size / 1024:.0f} KB, "
+        f"{meta['width']}x{meta['height']}, {meta['duration']:.1f}s"
+    )
+    return meta
+
+
 # ffmpeg writes progress to stderr as carriage-return updates, so these lines
 # dominate any naive tail of the output.
 _FFMPEG_PROGRESS = re.compile(r"^\s*frame=\s*\d+.*(fps=|size=|time=)")
@@ -461,6 +496,7 @@ def render_clip(
     crop_windows: list[dict] | None = None,
     silence_cuts: list[dict] | None = None,
     src_fps: float | None = None,
+    safe: bool = False,
 ) -> dict[str, Any]:
     """Cut + reframe + burn captions into one 9:16 clip. Returns metadata.
 
@@ -468,11 +504,26 @@ def render_clip(
     encoder is used when the host has one, and on a CPU-only host the x264
     preset is lowered and the deadline is the long CPU one — both logged, so a
     slower render is never a silent surprise.
+
+    `safe=True` is the SECOND attempt for a clip that already failed: fewer
+    threads, the lowest-cost settings, and no captions filter. It is a
+    deliberately worse render whose only job is to produce a playable file, so
+    one bad clip costs one clip instead of the whole batch.
     """
     t0 = time.time()
     dest.parent.mkdir(parents=True, exist_ok=True)
     out_w, out_h = settings.video.width, settings.video.height
     clip_dur = end - start
+    if safe:
+        # "Safer" means: cheapest encode that still yields a real 9:16 file.
+        # Dropping to 60% linear resolution and turning off every optional
+        # filter is what a starved host needs; the captions are skipped too so
+        # libass is not part of the failure surface on the retry.
+        out_w, out_h = int(out_w * 0.6) // 2 * 2, int(out_h * 0.6) // 2 * 2
+        ass_path = None
+        caption_cues = None
+        crop_windows = None
+        logger.warning("[video] retrying this clip with safer, lower settings")
     enc = encode.choose(settings)
     for note in enc.notes:
         logger.info(f"[video] {note}")

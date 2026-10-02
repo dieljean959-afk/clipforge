@@ -221,6 +221,47 @@ def _load_model(settings: Settings) -> asr.LoadedEngine:
     return asr.load(settings)
 
 
+# Per-chunk retry policy. Three attempts with exponential backoff, then one
+# attempt on a smaller model. Constants (not literals) so the test suite can
+# assert the policy and a deployment can reason about the worst-case cost of a
+# chunk: 3 + 1 attempts and 1+2+4 = 7s of backoff.
+CHUNK_ATTEMPTS = 3
+CHUNK_BACKOFF_SEC = 1.0
+# Ordered smallest first. `tiny` fits anywhere; `base` is the smallest model
+# that is still worth shipping, so it is tried before `tiny`.
+_FALLBACK_MODELS = ("base.en", "base", "tiny.en", "tiny")
+
+
+def _load_smaller_model(settings: Settings, current: asr.LoadedEngine) -> asr.LoadedEngine:
+    """Load a smaller Whisper model for one stubborn chunk.
+
+    Returns the CURRENT engine when nothing smaller is available, so the
+    caller can tell "we retried with a genuinely smaller model" from "we had
+    nothing to fall back to".
+    """
+    from dataclasses import replace as _replace
+
+    for name in _FALLBACK_MODELS:
+        if name == current.model_name:
+            continue
+        try:
+            smaller = _replace(settings.whisper, model=name)
+            engine = asr.load(_replace(settings, whisper=smaller))
+        except Exception as exc:  # noqa: BLE001 - try the next candidate
+            logger.warning(f"[subtitle] fallback model '{name}' unavailable: {exc}")
+            continue
+        logger.warning(
+            f"[subtitle] falling back to the smaller model '{name}' for one chunk "
+            f"(was '{current.model_name}')"
+        )
+        return engine
+    logger.warning(
+        f"[subtitle] no smaller model available than '{current.model_name}' — "
+        f"retrying with the same model"
+    )
+    return current
+
+
 def _extract_audio(path: Path, dest: Path) -> Path:
     """Decode the WHOLE source to 16kHz mono WAV once (no per-chunk ffmpeg).
 
@@ -500,13 +541,54 @@ def transcribe(
                     on_progress(min(1.0, (_w_start + local_end) / duration))
 
             t0 = time.time()
-            try:
-                words, _detected = loaded.asr_words(audio, language, on_segment=on_segment)
-            except Exception as exc:
+            words = None
+            # A chunk is retried on its own before the whole job is failed.
+            # Whisper on a shared, memory-constrained box fails transiently
+            # far more often than it fails permanently: a cgroup reclaim, a
+            # ctranslate2 thread that could not allocate, an interrupted read.
+            # After CHUNK_ATTEMPTS the chunk falls back to a SMALLER model,
+            # which needs a fraction of the memory and still produces correct
+            # words with correct timings -- a slightly worse transcript beats
+            # a failed batch, and the offsets are computed from w_start either
+            # way so a fallback cannot desynchronise the captions.
+            for attempt in range(1, CHUNK_ATTEMPTS + 2):
+                engine = loaded
+                if attempt > CHUNK_ATTEMPTS:
+                    engine = _load_smaller_model(settings, loaded)
+                try:
+                    words, _detected = engine.asr_words(
+                        audio, language, on_segment=on_segment,
+                    )
+                    if attempt > 1:
+                        logger.warning(
+                            f"[subtitle] chunk {idx + 1}/{len(windows)} decoded on "
+                            f"attempt {attempt} using '{engine.model_name}'"
+                        )
+                    break
+                except Exception as exc:  # noqa: BLE001 - retried, then escalated
+                    if attempt > CHUNK_ATTEMPTS and engine is loaded:
+                        # even the small model failed on the last attempt
+                        raise TranscribeError(
+                            f"{loaded.engine} decode failed on chunk "
+                            f"{idx + 1}/{len(windows)} ({w_start:.0f}-{w_end:.0f}s) "
+                            f"{CHUNK_ATTEMPTS} times and the smaller fallback model "
+                            f"also failed: {exc}"
+                        ) from exc
+                    if attempt <= CHUNK_ATTEMPTS:
+                        back = CHUNK_BACKOFF_SEC * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"[subtitle] chunk {idx + 1}/{len(windows)} attempt "
+                            f"{attempt}/{CHUNK_ATTEMPTS} failed ({exc}) — retrying "
+                            f"in {back:.0f}s"
+                        )
+                        if on_progress:
+                            on_progress(min(1.0, w_start / duration))
+                        time.sleep(back)
+            if words is None:
                 raise TranscribeError(
                     f"{loaded.engine} decode failed on chunk {idx + 1}/{len(windows)} "
-                    f"({w_start:.0f}-{w_end:.0f}s): {exc}"
-                ) from exc
+                    f"({w_start:.0f}-{w_end:.0f}s)"
+                )
             chunk_wall = time.time() - t0
             chunk_audio = audio.size / sample_rate
             decoded_seconds += chunk_audio

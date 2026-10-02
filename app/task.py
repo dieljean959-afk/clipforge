@@ -17,6 +17,7 @@ the job's errorDetail — never swallowed.
 
 from __future__ import annotations
 
+import shutil
 import threading
 import time
 import traceback
@@ -397,15 +398,15 @@ class Pipeline:
         t_start = time.time()
         # The heartbeat spans the WHOLE pipeline, not just the encode and the
         # decode. The stall deadline is now 3 minutes, and every stage has a
-        # step that legitimately exceeds that while doing nothing observable:
-        # a Whisper chunk, an LLM call sitting in the provider's rate-limit
-        # queue, a reframe analysis. Without a process-wide heartbeat those
-        # are indistinguishable from a hang and the watchdog kills work that is
-        # working. It still proves nothing but liveness -- `progress` is never
+        # step that legitimately exceeds it while reporting nothing: a Whisper
+        # chunk, an LLM call parked in the provider's rate-limit queue, a
+        # reframe analysis. Without a process-wide heartbeat those look
+        # identical to a hang and the watchdog kills work that is working. It
+        # still proves liveness and nothing more -- `progress` is never
         # invented -- and it stops the instant the block exits.
         try:
-            with self._heartbeat(job_id, f"pipeline {job.get('stage', 'starting')}"):
-                self._run_stages(job_id, job)
+            with self._heartbeat(job_id, f"pipeline ({job.get('stage') or 'starting'})"):
+                self._stages(job_id, job, t_start)
         except subtitle.TranscriptionPaused as pause:
             self.mark_paused(job_id, "transcribing")
             self._log(job_id, f"transcription paused: {pause}")
@@ -440,82 +441,55 @@ class Pipeline:
             logger.exception(f"[job {job_id}] unexpected pipeline error")
             self._fail(job_id, f"Pipeline error: {exc}", self._detail(exc))
 
-    def _run_stages(self, job_id: str, job: dict[str, Any]) -> None:
-        """The stage sequence, isolated from the failure handling in run()."""
-        if True:
-            # ---- remote dispatch mode: hand off, then the agent reports via
-            # /api/internal/* — this thread's work is done after handoff.
-            if self.settings.hosted.worker_url:
-                # Remote dispatch still needs the source fetched locally first;
-                # the source pointer is reused by the worker-agent handoff.
-                ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
-                src = self._stage_fetch(job, ws)
-                ack = dispatch_job(self.settings, job, src)
-                job = self.store.get_job(job_id) or job
-                job.update({
-                    "stage": "rendering",
-                    "progress": 10,
-                    "progressDetail": "Your worker is rendering — this page updates live.",
-                })
-                self.store.write_job(job)
-                self._log(
-                    job_id,
-                    f"dispatched to worker {self.settings.hosted.worker_url} "
-                    f"(agent {ack.get('version', '?')}) — heavy rendering runs on your machine",
-                )
-                return
+    def _stages(self, job_id: str, job: dict[str, Any], t_start: float) -> None:
+        """The stage sequence, isolated from run()'s failure handling.
 
+        Split out only so the heartbeat context manager can span every stage at
+        once — it must stay open from the first fetch to the last export.
+        """
+        # ---- remote dispatch mode: hand off, then the agent reports via
+        # /api/internal/* — this thread's work is done after handoff.
+        if self.settings.hosted.worker_url:
+            # Remote dispatch still needs the source fetched locally first;
+            # the source pointer is reused by the worker-agent handoff.
             ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
-            resume_from = ws.first_incomplete()
-            done_before = [s for s in STAGES if ws.is_done(s)]
-            if done_before:
-                self._log(
-                    job_id,
-                    f"resume: stages already complete = {done_before or 'none'}; "
-                    f"starting at '{resume_from or 'export'}'",
-                )
-
             src = self._stage_fetch(job, ws)
-            self._checkpoint(job_id, "fetch")
-            transcript = self._stage_transcribe(job, src, ws)
-            self._checkpoint(job_id, "transcribing")
-            candidates = self._stage_detect(job, transcript, ws)
-            self._checkpoint(job_id, "finding")
-            self._stage_render(job, src, transcript, candidates, ws)
-            self._finish(job_id, time.time() - t_start)
-        except subtitle.TranscriptionPaused as pause:
-            self.mark_paused(job_id, "transcribing")
-            self._log(job_id, f"transcription paused: {pause}")
-        except _PauseRequested as pause:
-            # A user-requested stop, not an error. Whatever completed is on
-            # disk; the job reports itself paused and resume picks it up from
-            # the same stage via the ordinary stage-marker resume.
-            self.mark_paused(job_id, str(pause) or "the current stage")
-        except llm.DetectionPaused as pause:
-            self.mark_paused(job_id, "finding")
-            self._log(job_id, f"detection paused: {pause}")
-        except DispatchError as exc:
-            # remote worker refused/unreachable — honest error, job stays failed
-            self._fail(job_id, f"Could not hand the job to your worker: {exc}", self._detail(exc))
-        except llm.LlmNotConfigured as exc:
-            # The exception already names the right backend and variable
-            # ("GROQ_API_KEY missing…", "ollama server unreachable…"). A
-            # hardcoded "add GEMINI_API_KEY" overrode it and sent users hunting
-            # for a key that was never the one being used.
-            self._fail(job_id, f"AI detection offline — {exc}", self._detail(exc))
-        except llm.LlmError as exc:
-            self._fail(job_id, f"AI detection failed: {exc}", self._detail(exc))
-        except download.DownloadError as exc:
-            self._fail(job_id, f"Could not fetch video: {exc}", self._detail(exc))
-        except asr.AsrError as exc:
-            # covers subtitle.TranscribeError too — one class of readable
-            # transcription failure reaches the UI either way
-            self._fail(job_id, f"Transcription failed: {exc}", self._detail(exc))
-        except video.RenderError as exc:
-            self._fail(job_id, f"Render failed: {exc}", self._detail(exc))
-        except Exception as exc:  # noqa: BLE001 - the UI must see the real error
-            logger.exception(f"[job {job_id}] unexpected pipeline error")
-            self._fail(job_id, f"Pipeline error: {exc}", self._detail(exc))
+            ack = dispatch_job(self.settings, job, src)
+            job = self.store.get_job(job_id) or job
+            job.update({
+                "stage": "rendering",
+                "progress": 10,
+                "progressDetail": "Your worker is rendering — this page updates live.",
+            })
+            self.store.write_job(job)
+            self._log(
+                job_id,
+                f"dispatched to worker {self.settings.hosted.worker_url} "
+                f"(agent {ack.get('version', '?')}) — heavy rendering runs on your machine",
+            )
+            return
+
+        ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
+        self._check_disk_space(job_id, 0.0)
+        resume_from = ws.first_incomplete()
+        done_before = [s for s in STAGES if ws.is_done(s)]
+        if done_before:
+            self._log(
+                job_id,
+                f"resume: stages already complete = {done_before or 'none'}; "
+                f"starting at '{resume_from or 'export'}'",
+            )
+
+        src = self._stage_fetch(job, ws)
+        self._checkpoint(job_id, "fetch")
+        transcript = self._stage_transcribe(job, src, ws)
+        self._checkpoint(job_id, "transcribing")
+        candidates = self._stage_detect(job, transcript, ws)
+        self._checkpoint(job_id, "finding")
+        self._stage_render(job, src, transcript, candidates, ws)
+        self._finish(job_id, time.time() - t_start)
+        # Scratch audio is dead weight once the clips exist.
+        self._cleanup_job_temps(job_id, StageWorkspace(self.settings.app.paths.data_dir, job_id))
 
     @staticmethod
     def _detail(exc: BaseException) -> str:
@@ -786,6 +760,11 @@ class Pipeline:
     ) -> None:
         job_id = job["_id"]
         opts = job.get("options", {}) or {}
+        # Check the disk BEFORE encoding anything. Running out of space at
+        # clip 9 of 10 wastes the whole batch; refusing up front costs nothing.
+        # `src` is the probed source path; its duration is the real driver of
+        # how much rendered output this job will produce.
+        self._check_disk_space(job_id, float(video.probe(src).get("duration") or 0.0))
         # The caption knobs the dashboard can change are re-read ONCE, here.
         # Resolving per job (not per clip, not per request) is what keeps a
         # batch internally consistent: someone saving a new burst length while
@@ -958,26 +937,19 @@ class Pipeline:
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                # The heartbeat spans ONLY the encode. Nothing in it reports
-                # progress -- ffmpeg's own output is read for errors, not
-                # percentages -- so without this a long clip looks dead, and
-                # the watchdog can kill a render that is working.
-                with self._heartbeat(job_id, f"render clip {idx + 1}"):
-                    meta = video.render_clip(
-                        src, out_path,
-                        start=c0, end=c1,
-                        settings=self.settings,
-                        ass_path=ass_path if cues else None,
-                        caption_cues=cues if cues else None,
-                        crop_windows=crop_windows,
-                        silence_cuts=cuts_for_clip,
-                        # The adaptive bitrate ceiling is derived from the
-                        # output geometry INCLUDING frame rate, so the source
-                        # fps has to reach the encoder. Without it a 30fps
-                        # source would be sized as if it were 60 and waste
-                        # half its budget.
-                        src_fps=float(src_meta.get("fps") or 30.0),
-                    )
+                # Each clip is its own isolated ffmpeg, with its own verify,
+                # its own retry and its own cleanup. One clip that cannot be
+                # encoded must cost ONE clip, not the batch — a batch is
+                # often hours of work by the time it gets here.
+                meta = self._render_one_clip(
+                    job_id, idx + 1, total,
+                    src=src, out_path=out_path, start=c0, end=c1,
+                    ass_path=ass_path if cues else None,
+                    cues=cues if cues else None,
+                    crop_windows=crop_windows,
+                    silence_cuts=cuts_for_clip,
+                    src_fps=float(src_meta.get("fps") or 30.0),
+                )
                 thumb = self.settings.app.paths.outputs_dir / job_id / f"clip_{idx + 1:02d}.jpg"
                 video.render_first_frame_thumb(out_path, thumb)
                 clip_doc.update({
@@ -1023,9 +995,22 @@ class Pipeline:
                         f"{self._srt_time(cue['end'])}\n{cue['text']}\n"
                     )
             except video.RenderError as exc:
+                # SKIP, do not fail the batch. The remaining clips are still
+                # worth rendering and the finished ones are already durable.
+                # This used to raise, which turned one bad encode into a red
+                # job and threw away the other nine.
                 clip_doc.update({"renderState": "failed", "mediaError": str(exc)})
                 self.store.write_clip(clip_doc)
-                self._log(job_id, f"clip {idx + 1} render FAILED: {exc}")
+                self._log(
+                    job_id,
+                    f"clip {idx + 1} of {total} could not be rendered and was "
+                    f"skipped: {exc}",
+                )
+                self._progress(
+                    job_id, "rendering", (idx + 1) / max(1, total),
+                    f"Clip {idx + 1} skipped after 2 attempts — continuing",
+                    unit_label="clips", units_done=idx + 1, units_total=total,
+                )
 
             self._progress(
                 job_id, "rendering", (idx + 1) / max(1, total),
@@ -1033,18 +1018,27 @@ class Pipeline:
                 unit_label="clips", units_done=idx + 1, units_total=total,
             )
 
-        # A failed clip is a failed pipeline, not a successful batch with
-        # missing media. Leave the stage markers incomplete so Retry resumes
-        # this render stage and keeps already-finished clips.
+        # Skipped clips are reported, not fatal: the batch is still a batch.
+        # Retry re-attempts ONLY the clips marked failed, so a retry that
+        # happens to get a healthier host finishes the stragglers.
         failed_renders = [
             c for c in self.store.list_clips(job_id) if c.get("renderState") == "failed"
         ]
         if failed_renders:
-            detail = "; ".join(
-                f"clip {c.get('order', 0) + 1}: {c.get('mediaError') or 'render failed'}"
-                for c in failed_renders
+            names = ", ".join(str(c.get("order", 0) + 1) for c in failed_renders)
+            self._log(
+                job_id,
+                f"{len(failed_renders)} of {total} clip(s) could not be rendered "
+                f"and were skipped (clip {names}). Every other clip is ready. "
+                f"Hit Retry to attempt just those again.",
             )
-            raise video.RenderError(detail)
+            self._patch_job(
+                job_id,
+                progressDetail=(
+                    f"{total - len(failed_renders)} of {total} clips ready — "
+                    f"clip {names} skipped after 2 attempts"
+                ),
+            )
 
         # ---- stage: export (final state on disk) --------------------------
         ws.mark_done("captions", artifacts=[])
@@ -1075,6 +1069,142 @@ class Pipeline:
             name=f"share-prewarm-{job_id[:8]}",
             daemon=True,
         ).start()
+
+    def _render_one_clip(
+        self,
+        job_id: str,
+        number: int,
+        total: int,
+        *,
+        src: Path,
+        out_path: Path,
+        start: float,
+        end: float,
+        ass_path: Path | None,
+        cues: list[dict[str, Any]] | None,
+        crop_windows: list[dict[str, Any]] | None,
+        silence_cuts: list[dict[str, Any]] | None,
+        src_fps: float,
+    ) -> dict[str, Any]:
+        """Encode one clip, verify it, retry once safely, then give up on it.
+
+        Returns the encoder metadata on success. Raises RenderError only after
+        BOTH attempts fail — the caller records the clip as skipped and moves
+        on to the next one.
+
+        The verification is not decoration. ffmpeg can exit 0 and leave a
+        zero-byte or truncated MP4 behind (out of space, a killed frame
+        thread), and a clip that is marked `renderState="done"` with no
+        playable file is exactly the failure that surfaces much later as a
+        player that spins forever.
+        """
+        last: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                # The heartbeat spans ONLY the encode. Nothing in it reports
+                # progress -- ffmpeg's own output is read for errors, not
+                # percentages -- so without this a long clip looks dead, and
+                # the watchdog can kill a render that is working.
+                with self._heartbeat(job_id, f"render clip {number}"):
+                    meta = video.render_clip(
+                        src, out_path,
+                        start=start, end=end,
+                        settings=self.settings,
+                        ass_path=ass_path,
+                        caption_cues=cues,
+                        crop_windows=crop_windows,
+                        silence_cuts=silence_cuts,
+                        src_fps=src_fps,
+                        safe=attempt == 2,
+                    )
+                video.verify_output(out_path, expected_sec=end - start)
+                if attempt == 2:
+                    self._log(
+                        job_id,
+                        f"clip {number} of {total}: first attempt failed "
+                        f"({last}); the safer retry produced a usable file",
+                    )
+                return meta
+            except Exception as exc:  # noqa: BLE001 - retried below, then skipped
+                last = exc
+                # Never let a half-written MP4 be mistaken for a finished one
+                # by the resume path or by /share.
+                try:
+                    out_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if attempt == 1:
+                    self._log(
+                        job_id,
+                        f"clip {number} of {total} failed on attempt 1/2 "
+                        f"({type(exc).__name__}: {exc}) — retrying 2/3 with "
+                        f"safer settings",
+                    )
+                    self._progress(
+                        job_id, "rendering",
+                        (number - 1) / max(1, total),
+                        f"Clip {number} failed, retrying 2/3 with safer settings",
+                        unit_label="clips", units_done=number - 1,
+                        units_total=total,
+                    )
+        raise video.RenderError(str(last) if last else "render failed")
+
+    def _cleanup_job_temps(self, job_id: str, ws: StageWorkspace) -> None:
+        """Delete the scratch files a job leaves behind once it is finished.
+
+        The 16 kHz WAV used for transcription is ~19 MB per 5-minute chunk of
+        extraction and is by far the largest temporary artefact; the reframe
+        analysis WAV is another full copy of the source audio. Neither is
+        needed after the job completes, and on a 4 GB sandbox disk a handful of
+        finished batches silently fills it.
+        """
+        removed = 0
+        freed = 0
+        for stage, name in (("transcribe", "source.wav"), ("reframe", "audio.wav")):
+            path = ws.stage_dir(stage) / name
+            try:
+                if path.exists():
+                    freed += path.stat().st_size
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        if removed:
+            logger.info(
+                f"[job {job_id}] cleanup: removed {removed} temp file(s), "
+                f"freed {freed / 1024 / 1024:.0f} MB"
+            )
+
+    def _free_disk_mb(self) -> int:
+        """Free space on the volume holding outputs/, in MB."""
+        try:
+            usage = shutil.disk_usage(self.settings.app.paths.outputs_dir)
+            return usage.free // (1024 * 1024)
+        except Exception:
+            return 1 << 30
+
+    def _check_disk_space(self, job_id: str, duration_sec: float) -> None:
+        """Fail early and clearly when the disk cannot hold the render.
+
+        Discovering this at the 9th of 10 clips is the worst place to find out:
+        the earlier clips were rendered, the download is still on disk, and the
+        user is told only that something went wrong. Estimated need is the
+        rendered MP4 size we have actually been producing plus the downloaded
+        source, with a safety floor.
+        """
+        needed = int(max(500.0, duration_sec * 3.0))
+        free = self._free_disk_mb()
+        if free < needed:
+            raise download.DownloadError(
+                f"Not enough free disk space to finish this job: about "
+                f"{needed} MB is needed but only {free} MB is left. Delete an "
+                f"older batch (or its clips) and Retry — everything already "
+                f"rendered is cached and will not be redone."
+            )
+        self._log(
+            job_id,
+            f"disk check: {free} MB free, ~{needed} MB needed for this render",
+        )
 
     def _prewarm_share_copies(self, job_id: str) -> None:
         """Build every clip's share copy ahead of the first tap.

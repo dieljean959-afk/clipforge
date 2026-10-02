@@ -266,8 +266,11 @@ export function JobCard({
               {job.interruptCount ? ` (attempt ${job.interruptCount})` : ""}
             </div>
             <div className="mt-0.5 text-xs text-muted-foreground">
-              {job.interruptReason ??
-                "The worker was stopped externally, not by a pipeline error. Completed stages are reused, so progress is not lost."}
+              {/* Clamped: this text comes off the job record, and a derived
+                  field must never be able to grow without bound in the card. */}
+              {(job.interruptReason ??
+                "The worker was stopped externally, not by a pipeline error. Completed stages are reused, so progress is not lost."
+              ).slice(0, 220)}
             </div>
           </div>
         </div>
@@ -662,7 +665,26 @@ function friendlyError(error: string | null | undefined, where?: string | null):
     return "The configured AI model is no longer available. Pick a current one in config.toml.";
   }
   if (/no active worker|never reported back/i.test(raw)) {
-    return "The worker stopped without reporting back. Retry — finished stages are cached.";
+    // The backend no longer emits this string — reconciliation re-queues the
+    // job and names the real cause instead. Kept only so an old stored record
+    // still renders as something truthful rather than as a mystery.
+    return "The server restarted during this job. Finished stages are cached — Retry resumes from the last checkpoint.";
+  }
+  // Name the unit, not just the stage: "Clip 7 failed, retrying 2/3" tells the
+  // user exactly how far the batch got and what is being done about it.
+  const clipRetry = /clip\s+(\d+)(?:\s+of\s+(\d+))?[^.]*\b(retrying|retry)\b\s*(\d+\/\d+)/i.exec(raw);
+  if (clipRetry) {
+    return `Clip ${clipRetry[1]}${clipRetry[2] ? ` of ${clipRetry[2]}` : ""} failed — retrying ${clipRetry[4]}.`;
+  }
+  const clipSkip = /clip\s+(\d+)(?:\s+of\s+(\d+))?[^.]*\b(skipped|skipped after)/i.exec(raw);
+  if (clipSkip) {
+    return `Clip ${clipSkip[1]}${clipSkip[2] ? ` of ${clipSkip[2]}` : ""} could not be rendered and was skipped. Every other clip is ready.`;
+  }
+  if (/not enough free disk/i.test(raw)) {
+    return raw;
+  }
+  if (/the server restarted \d+ times/i.test(raw)) {
+    return raw;
   }
   if (where && raw.toLowerCase().includes(where)) {
     // Already names the stage; leave the operator's own text alone.

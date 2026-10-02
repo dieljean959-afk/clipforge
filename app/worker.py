@@ -790,6 +790,8 @@ class InProcessWorker:
             how = signal.Signals(-rc).name
         except ValueError:
             how = f"signal {-rc}"
+        # `interruptReason` is the operator-facing sentence and is rebuilt from
+        # these primitive fields every time — see _describe_orphan.
         reason = (
             f"Host terminated the worker with {how} during "
             f"'{STAGE_LABELS.get(stage, stage or 'the job')}' — this is an "
@@ -801,6 +803,7 @@ class InProcessWorker:
             "resumeSignature": signature,
             "interrupted": True,
             "interruptReason": reason,
+            "lastInterruptSignal": how,
             "error": None,
             "progressDetail": (
                 f"Interrupted by a host restart — resuming "
@@ -970,15 +973,26 @@ class InProcessWorker:
         which is a restatement of the symptom and told the user nothing. Every
         orphan we see in production has a cause we can name: the host restarted
         the web process, or a signal killed the child. Say which.
+
+        DERIVED FROM COUNTS ONLY — never from the previously stored reason.
+        The first version read `interruptReason` and then wrote its own output
+        back into that same field, so every restart wrapped the last message
+        inside the next one and the dashboard grew an unreadable sentence
+        hundreds of characters deep. A derived value must never be stored back
+        into its own input.
         """
         count = int(job.get("interruptCount") or 0)
         label = STAGE_LABELS.get(stage, stage or "an unknown stage")
-        reason = job.get("interruptReason")
-        if reason:
-            return f"host restart during '{label}' ({reason})"
-        if count:
-            return f"server restarted during '{label}' — {count} restart(s) so far"
-        return f"the worker process vanished during '{label}' (server restart)"
+        signal_name = job.get("lastInterruptSignal")
+        if signal_name:
+            text = f"the server restarted during '{label}' (worker killed by {signal_name})"
+        elif count:
+            text = f"the server restarted during '{label}' — {count} restart(s) so far"
+        else:
+            text = f"the worker process vanished during '{label}' (server restart)"
+        # Belt and braces: this string is rendered in the job card, so it must
+        # stay one readable sentence no matter what is on the document.
+        return text[:200]
 
     def _resume_is_worthwhile(self, job: dict[str, Any]) -> bool:
         """Is re-queueing this orphan useful, or is it a restart loop?
