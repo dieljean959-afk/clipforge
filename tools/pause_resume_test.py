@@ -161,8 +161,17 @@ def main() -> int:
             # ---- 3. a PARTIAL cache resumes from the next chunk ------
             # This is the "paused at chunk 5 of 7" case.
             partial = llm_mod.DictChunkCache()
+            # Well-separated windows. These three used to be 0-10, 1-11 and
+            # 2-12 — which OVERLAP each other by nine seconds, so they describe
+            # the same moment three times. Detection now drops near-duplicate
+            # windows across chunks (llm.drop_overlapping), which is correct
+            # and made this fixture collapse from 3 candidates to 1. A chunk
+            # covering a different part of a video returns candidates from a
+            # different part of it, so the fixture is fixed to do that, and the
+            # duplicate case is asserted on its own below rather than being
+            # smuggled in here.
             for i in range(3):
-                partial.put(i, [{"start": float(i), "end": float(i) + 10,
+                partial.put(i, [{"start": float(i) * 30.0, "end": float(i) * 30.0 + 10,
                                  "score": 90 - i, "title": f"c{i}", "hook_text": "h"}])
 
             api_hits: list = []
@@ -190,6 +199,17 @@ def main() -> int:
                 partial_out[0]["score"] == 90,
                 f"top score {partial_out[0]['score']}",
             )
+            # The other half of the same contract: cached chunks that DO
+            # describe the same moment are collapsed, not rendered twice.
+            dupes = llm_mod.DictChunkCache()
+            for i in range(3):
+                dupes.put(i, [{"start": float(i), "end": float(i) + 10,
+                               "score": 90 - i, "title": f"d{i}", "hook_text": "h"}])
+            api_hits.clear()
+            dupe_out = llm_mod.detect_clips(words, settings, chunk_cache=dupes)
+            check("near-duplicate windows from different chunks are collapsed",
+                  len(dupe_out) == 1, f"{len(dupe_out)} candidates: "
+                                       f"{[(c['start'], c['end']) for c in dupe_out]}")
 
             # ---- 4. pause at a chunk boundary stops the stage ---------
             #

@@ -38,6 +38,7 @@ from app import (
     llm,
     reframe,
     share_video,
+    sharelink,
     subtitle,
     translate,
     vad,
@@ -1234,7 +1235,11 @@ class Pipeline:
 
         def warm(master: Path) -> str:
             try:
-                share_video.build_share_version(master)
+                share = share_video.build_share_version(master)
+                # The share link is minted HERE, at the end of rendering, so
+                # every finished clip already has a public URL and the badge
+                # can go green without the user tapping anything.
+                self._mark_share_ready(master, share)
                 return ""
             except Exception as exc:  # noqa: BLE001 - never fail the batch
                 return f"{master.name}: {exc}"
@@ -1255,6 +1260,27 @@ class Pipeline:
             logger.info(f"[share] prewarmed {len(masters)} share copies for {job_id}")
 
     # ------------------------------------------------------------------
+
+    def _mark_share_ready(self, master: Path, share: Path) -> None:
+        """Record the clip's real share state after a successful prewarm.
+
+        Written to the clip document rather than computed per request, so the
+        batch list can answer "Ready" from the payload it already sends. The
+        probe is still the source of truth — this only records what the probe
+        just concluded.
+        """
+        state, detail = sharelink.probe(share)
+        job_dir = master.parent
+        for clip in self.store.list_all_clips(limit=1000):
+            if str(clip.get("videoPath") or "") != str(master):
+                continue
+            clip["shareId"] = sharelink.ensure_id(clip)
+            clip["shareState"] = state
+            clip["shareDetail"] = detail
+            try:
+                self.store.write_clip(clip)
+            except Exception as exc:  # noqa: BLE001 - telemetry, never fatal
+                logger.warning(f"[share] could not record state for {job_dir.name}: {exc}")
 
     def _finish(self, job_id: str, elapsed: float) -> None:
         job = self.store.get_job(job_id)

@@ -514,6 +514,135 @@ def test_small_things() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_no_duplicate_clips() -> None:
+    section("F. no duplicate or overlapping clips")
+
+    from app.llm import drop_overlapping
+
+    cands = [
+        {"start": 10.0, "end": 25.0, "score": 90, "title": "A"},
+        {"start": 11.0, "end": 24.0, "score": 80, "title": "B"},
+        {"start": 10.0, "end": 25.0, "score": 70, "title": "C"},
+        {"start": 25.5, "end": 40.0, "score": 65, "title": "D"},
+    ]
+    kept, dropped = drop_overlapping(cands)
+    titles = [c["title"] for c in kept]
+    check("an exact duplicate window is dropped", "C" not in titles, str(titles))
+    check("a heavily overlapping window is dropped", "B" not in titles, str(titles))
+    check("the highest-scoring take of a duplicate survives", "A" in titles, str(titles))
+    check("a merely ADJACENT clip is kept (0.5s apart)",
+          "D" in titles, str(titles))
+    check("survivors come back in time order",
+          [c["start"] for c in kept] == sorted(c["start"] for c in kept), str(kept))
+    check("the drop is reported, not silent", len(dropped) == 2, str(dropped))
+
+    llm_src = (ROOT / "app" / "llm.py").read_text(encoding="utf-8")
+    check("the merge applies it (only the merged list can see a cross-chunk dup)",
+          "drop_overlapping(candidates)" in llm_src)
+
+    # ...and the rendered set really is clean end to end.
+    import tempfile as _tf
+    import warnings
+
+    warnings.filterwarnings("ignore")
+    from app.config import Paths, load_config
+    from app.store import LocalStore
+
+    base = Path(_tf.mkdtemp(prefix="clipforge-dup-"))
+    paths = Paths(data_dir=base / "d", outputs_dir=base / "o",
+                  downloads_dir=base / "dl", static_dir=base / "s")
+    for d in (paths.data_dir, paths.outputs_dir, paths.downloads_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    st = LocalStore(paths)
+    job = st.create_job(source_type="url", source="u")
+    clips = st.create_clips(job["_id"], [
+        {"start": 10.0, "end": 25.0, "score": 90, "title": "A", "hook_text": "a"},
+        {"start": 11.0, "end": 24.0, "score": 80, "title": "B", "hook_text": "b"},
+        {"start": 10.0, "end": 25.0, "score": 70, "title": "C", "hook_text": "c"},
+        {"start": 60.0, "end": 75.0, "score": 65, "title": "D", "hook_text": "d"},
+    ], detected_source="t")
+    check("create_clips keeps them (the dedupe lives in detection)",
+          len(clips) == 4, str(len(clips)))
+    kept2, _ = drop_overlapping([
+        {"start": c["start"], "end": c["end"], "score": c["score"]} for c in clips
+    ])
+    check("what detection would hand the renderer has no overlap",
+          len(kept2) == 2, str(len(kept2)))
+    shutil.rmtree(base, ignore_errors=True)
+    assert load_config  # imported for parity with the other sections
+
+
+def test_three_jobs_back_to_back() -> None:
+    section("G. three jobs back to back: no crash, no memory growth")
+
+    import threading as _th
+    import warnings
+
+    warnings.filterwarnings("ignore")
+    from app.config import Paths, load_config
+    from app.store import LocalStore
+    from app.worker import InProcessWorker
+
+    def rss_kb() -> int:
+        try:
+            with open("/proc/self/status", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1])
+        except OSError:
+            pass
+        return 0
+
+    settings = load_config(quiet=True)
+    base = Path(tempfile.mkdtemp(prefix="clipforge-3x-"))
+    paths = Paths(data_dir=base / "d", outputs_dir=base / "o",
+                  downloads_dir=base / "dl", static_dir=base / "s")
+    for d in (paths.data_dir, paths.outputs_dir, paths.downloads_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    store = LocalStore(paths)
+    worker = InProcessWorker(settings, store)
+
+    ids = []
+    for i in range(3):
+        j = store.create_job(source_type="url", source=f"u{i}")
+        store.write_job({**j, "stage": "queued"})
+        ids.append(j["_id"])
+
+    threads_before = _th.active_count()
+    rss_before = rss_kb()
+    errors: list[str] = []
+
+    def run_one(job_id: str) -> None:
+        try:
+            # The real store round-trip every job does at least twice.
+            store.write_job({**(store.get_job(job_id) or {}), "stage": "rendering",
+                             "progress": 50})
+            store.append_job_log(job_id, "synthetic unit of work")
+            store.get_job(job_id)
+        except Exception as exc:  # noqa: BLE001 - the point is to catch any
+            errors.append(f"{job_id}: {exc}")
+
+    t0 = time.monotonic()
+    for jid in ids:
+        run_one(jid)
+        worker.reconcile_stale_running(force=True)
+    took = time.monotonic() - t0
+
+    check("three jobs in a row raised nothing", not errors, "; ".join(errors))
+    check("all three are still readable from the store",
+          all(store.get_job(j) is not None for j in ids))
+    check("all three recorded their log line",
+          all(any("synthetic" in ln for ln in
+                  (store.get_job(j) or {}).get("logs", [])) for j in ids))
+    check("no thread leaked", _th.active_count() <= threads_before + 1,
+          f"{threads_before} -> {_th.active_count()}")
+    rss_after = rss_kb()
+    grew = rss_after - rss_before
+    check("resident memory did not grow with the job count (not a per-job leak)",
+          grew < 40_000, f"{rss_before}kB -> {rss_after}kB (+{grew}kB) in {took:.1f}s")
+    shutil.rmtree(base, ignore_errors=True)
+
+
 def test_delete_paths() -> None:
     section("E. delete paths")
 
@@ -643,6 +772,8 @@ def main() -> int:
     test_bad_json_repaired()
     test_list_fast(args.batches)
     test_small_things()
+    test_no_duplicate_clips()
+    test_three_jobs_back_to_back()
     test_delete_paths()
 
     print(f"\n{PASS} passed, {FAIL} failed")

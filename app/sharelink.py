@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import re
 import secrets
-import string
 import threading
 from pathlib import Path
 from typing import Any
@@ -100,7 +99,9 @@ def probe(path: Path | None) -> tuple[str, str]:
     an MP4 box header.
     """
     if path is None:
-        return STATE_MISSING, "no share copy on disk"
+        # No copy yet is PREPARING, not "missing": "missing" means the clip has
+        # no id at all, which is a different problem with a different fix.
+        return STATE_PREPARING, "share copy not built yet"
     try:
         if not path.exists():
             return STATE_PREPARING, "share copy not built yet"

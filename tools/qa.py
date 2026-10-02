@@ -38,6 +38,7 @@ AREAS: dict[str, list[tuple[str, list[str], int]]] = {
     "pipeline": [
         ("transcribe_unit_test", ["--fast"], 150),
         ("encode_profile_test", [], 90),
+        ("e2e_render_test", [], 150),
         ("render_loop_test", [], 120),
         ("playback_test", [], 90),
         ("job_status_test", [], 90),
@@ -70,6 +71,7 @@ AREAS: dict[str, list[tuple[str, list[str], int]]] = {
         ("export_memory_test", [], 120),
     ],
     "share": [
+        ("share_public_test", [], 150),
         ("share_instant_test", [], 150),
         ("share_endpoint_test", [], 120),
         ("share_intents_test", [], 120),

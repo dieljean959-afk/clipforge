@@ -16,13 +16,28 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from app import caption_style, clipcount, eta, hosting, hostlimits, jobstatus, share_video
+from app import (
+    caption_style,
+    clipcount,
+    eta,
+    hosting,
+    hostlimits,
+    jobstatus,
+    share_video,
+    sharelink,
+)
 from app import encode as encode_mod
 from app import llm as llm_mod
 from app import subtitle as subtitle_svc
@@ -124,6 +139,36 @@ def _do_warmup() -> None:
         logger.exception("[boot] Whisper warmup failed")
 
 
+def _share_backfill() -> dict[str, int]:
+    """Give every pre-existing clip a share id, and report what it did.
+
+    Runs in the BACKGROUND. A deployment that gains share links overnight has
+    hundreds of clips with no id; minting them is a few file writes, but doing
+    it inline would delay the boot that has to re-queue interrupted jobs, and
+    those jobs are the urgent thing. So: one cheap pass inline is enough for a
+    fresh install, and the thread finishes the backlog behind the UI.
+    """
+    started = sharelink.backfill(store)
+    if started["minted"]:
+        logger.info(
+            f"[share] minted {started['minted']} share link(s) for existing clips"
+        )
+
+    def _finish() -> None:
+        try:
+            rest = sharelink.backfill(store, limit=2000)
+            if rest["minted"]:
+                logger.info(
+                    f"[share] backfilled {rest['minted']} more share link(s) "
+                    f"({rest['scanned']} clips scanned)"
+                )
+        except Exception as exc:  # noqa: BLE001 - telemetry only
+            logger.warning(f"[share] background backfill failed: {exc}")
+
+    threading.Thread(target=_finish, name="share-backfill", daemon=True).start()
+    return started
+
+
 def _boot() -> None:
     global settings, store, worker, retention, accounts
     try:
@@ -157,6 +202,14 @@ def _boot() -> None:
     #      re-render clips that already exist.
     # Bounded by INTERRUPT_MAX_RESUMES so a job that cannot survive a restart
     # loop eventually stops instead of cycling forever.
+    # Share ids are minted at clip creation, so this only mints for clips that
+    # predate the feature. It is cheap (no transcoding) and it runs BEFORE the
+    # job reconciliation below so a restored batch already has its links.
+    try:
+        _share_backfill()
+    except Exception as exc:  # noqa: BLE001 - never block boot
+        logger.warning(f"[boot] share-link backfill skipped: {exc}")
+
     recoverable = {"grabbing", "transcribing", "finding", "rendering", "queued"}
     for job in store.list_jobs():
         # A job can be stamped stage=failed by a LATER attempt after a good
@@ -1736,7 +1789,7 @@ def list_clips(jobId: str | None = None, limit: int = 96) -> Response:
     if jobId:
         return _cached(
             f"clips:{jobId}",
-            lambda: JSONResponse(store.list_clips_for_list(jobId)),
+            lambda: JSONResponse(_attach_share_state(store.list_clips_for_list(jobId))),
         )
     return _cached(
         f"clips-all:{limit}",
@@ -1859,6 +1912,207 @@ def clip_share(clip_id: str) -> FileResponse:
             "ETag": _media_etag(share),
         },
     )
+
+
+# --------------------------------------------------------------------------- #
+# public share links: /s/<id>.mp4 and /s/<id>
+# --------------------------------------------------------------------------- #
+
+
+def _clip_for_share_id(share_id: str) -> dict | None:
+    """The clip a public share id belongs to, or None.
+
+    A short public id in a URL is an enumeration surface: the id has to be
+    matched EXACTLY against what was minted, never used to build a path. The
+    regex in app.sharelink already rejects anything that is not a 10-character
+    id from the fixed alphabet, so this only ever compares against a literal.
+    """
+    if not sharelink.valid_id(share_id):
+        return None
+    for clip in store.list_all_clips(limit=1000):
+        if clip.get("shareId") == share_id:
+            return clip
+    return None
+
+
+def _share_copy_for(clip: dict) -> Path | None:
+    """Where this clip's share-sized MP4 lives, building it if needed."""
+    master = clip.get("videoPath")
+    if not master:
+        return None
+    master_path = Path(master)
+    if not master_path.exists():
+        return None
+    try:
+        return share_video.build_share_version(master_path)
+    except share_video.ShareRenderError as exc:
+        logger.warning(f"[share] {master_path.name}: {exc}")
+        return None
+
+
+@app.api_route("/s/{share_id}.mp4", methods=["GET", "HEAD"])
+def public_share_mp4(share_id: str) -> FileResponse:
+    """The public MP4 for a share id.
+
+    Public on purpose: no login, no expiry, no session. That is the whole
+    point of a share link, and it is why it serves the share-SIZED copy
+    (720x1280, a few MB) rather than the 1080x1920 master.
+
+    Range requests come from Starlette's FileResponse, which answers `Range:`
+    with 206 + Content-Range. CORS is explicit because these bytes are fetched
+    by pages on other origins — an embed, a social unfurler — and the
+    app-wide middleware already allows any origin for /api but not for /s.
+    """
+    raw = share_id[:-4] if share_id.lower().endswith(".mp4") else share_id
+    clip = _clip_for_share_id(raw)
+    if clip is None:
+        raise HTTPException(404, "this share link does not exist")
+    share = _share_copy_for(clip)
+    if share is None or not share.exists():
+        raise HTTPException(503, "this share link is still being prepared")
+    return FileResponse(
+        share,
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": SHARE_CACHE_CONTROL,
+            "Accept-Ranges": "bytes",
+            "ETag": _media_etag(share),
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "Range, Content-Type",
+            "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+        },
+    )
+
+
+def _og_escape(text: str) -> str:
+    return (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+@app.get("/s/{share_id}")
+def public_share_page(share_id: str, request: Request) -> HTMLResponse:
+    """A public page for a share id, with the tags a social app unfurls.
+
+    When a link is pasted into X, WhatsApp or Slack, the app fetches this page
+    and reads the og:* tags. Without them the link unfurls as a bare URL.
+
+    The absolute base comes from the request, so the tags are correct on the
+    generated *.freebuff.dev domain, on localhost, and behind any proxy —
+    there is no configured public origin to drift out of date.
+    """
+    clip = _clip_for_share_id(share_id)
+    if clip is None:
+        raise HTTPException(404, "this share link does not exist")
+    share = _share_copy_for(clip)
+    if share is None or not share.exists():
+        raise HTTPException(503, "this share link is still being prepared")
+    base = str(request.base_url).rstrip("/")
+    vid = f"{base}/s/{clip['shareId']}.mp4"
+    thumb_path = clip.get("thumbPath")
+    img = f"{base}/api/clips/{clip['_id']}/thumb" if thumb_path else ""
+    title = _og_escape(clip.get("title") or clip.get("hookText") or "ClipForge clip")
+    hook = _og_escape(clip.get("hookText") or clip.get("title") or "")
+    w = int(clip.get("mediaWidth") or 1080)
+    h = int(clip.get("mediaHeight") or 1920)
+
+    tags = [
+        '<meta property="og:type" content="video.other">',
+        f'<meta property="og:title" content="{title}">',
+        f'<meta property="og:description" content="{hook}">',
+        f'<meta property="og:url" content="{base}/s/{clip["shareId"]}">',
+        f'<meta property="og:video" content="{vid}">',
+        '<meta property="og:video:type" content="video/mp4">',
+        f'<meta property="og:video:width" content="{w}">',
+        f'<meta property="og:video:height" content="{h}">',
+        '<meta name="twitter:card" content="player">',
+
+        f'<meta name="twitter:player" content="{vid}">',
+        f'<meta name="twitter:player:width" content="{w}">',
+        f'<meta name="twitter:player:height" content="{h}">',
+        f'<meta name="twitter:title" content="{title}">',
+    ]
+    if img:
+        tags.append(f'<meta property="og:image" content="{img}">')
+        tags.append(f'<meta name="twitter:image" content="{img}">')
+    html = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+{chr(10).join(tags)}
+<style>
+ body{{margin:0;background:#0b0b0d;color:#f4f4f5;font:16px/1.5 system-ui,sans-serif;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      min-height:100vh;gap:18px;padding:24px;text-align:center}}
+ video{{max-width:min(420px,92vw);max-height:78vh;border-radius:14px;background:#000}}
+ a{{color:#7dd3a0}}
+ small{{color:#a1a1aa}}
+</style></head>
+<body>
+  <video src="{vid}" controls playsinline preload="metadata"
+         poster="{img}"></video>
+  <div>
+    <p style="font-size:18px;font-weight:700;margin:0 0 6px">{title}</p>
+    <p style="color:#a1a1aa;margin:0 0 10px">{hook}</p>
+    <a href="{vid}" download>Download MP4</a>
+  </div>
+  <small>Made with ClipForge</small>
+</body></html>"""
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": SHARE_CACHE_CONTROL,
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.post("/api/clips/{clip_id}/share-link")
+def ensure_share_link(clip_id: str) -> dict:
+    """Mint/verify this clip's public link and report its real state.
+
+    This is the endpoint behind the Share button's "Preparing… -> ✓ Ready".
+    It is idempotent: the same clip returns the same id forever, and calling
+    it on an already-ready clip costs one stat().
+    """
+    clip = store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "clip not found")
+    sid = sharelink.ensure_id(clip)
+    if not sharelink.valid_id(sid):
+        raise HTTPException(500, "could not mint a share id for this clip")
+    share = _share_copy_for(clip)
+    state = sharelink.share_state(clip, share)
+    if state["shareState"] != sharelink.STATE_READY:
+        clip["shareState"] = state["shareState"]
+        store.write_clip(clip)
+    return state
+
+
+def _attach_share_state(clips: list[dict]) -> list[dict]:
+    """Add the share facts to each clip, without building anything.
+
+    A HEAD check the UI can trust has to answer from the filesystem, so this
+    probes the share copy that already exists and says "preparing" for the rest.
+    It never transcodes — that happens at the end of a render, or on the first
+    request to the public URL.
+    """
+    out = []
+    for clip in clips:
+        share = None
+        master = clip.get("videoPath")
+        if master:
+            try:
+                share = share_video.share_path_for(Path(master))
+            except Exception:  # noqa: BLE001 - never fail a list over a poster
+                share = None
+        out.append({**clip, **sharelink.share_state(clip, share)})
+    return out
 
 
 @app.api_route("/api/clips/{clip_id}/thumb", methods=["GET", "HEAD"])

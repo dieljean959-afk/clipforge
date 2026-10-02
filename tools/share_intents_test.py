@@ -294,7 +294,11 @@ def test_ui_offers() -> None:
     check("there is a copy caption + link action",
           "Copy caption + link" in MENU)
     check("the copy action writes both the caption and the link",
-          "clipShareUrl(clip._id)" in MENU)
+          "clipShareUrl(clip._id" in MENU)
+    # ...and it is the PUBLIC link. A recipient has no account here, so an
+    # authenticated /api/clips/<id>/video URL unfurls to nothing for them.
+    check("the link it copies is the public /s/<id> one, not the session URL",
+          "clip.shareId" in MENU and "clipShareUrl(clip._id, clip.shareId)" in MENU)
     check("intents open in a new tab without leaking the opener",
           "noopener" in (ROOT / "src" / "lib" / "share-intents.ts").read_text())
     check("the share link is absolute, not a relative path",

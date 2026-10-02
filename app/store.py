@@ -6,8 +6,6 @@ restarts without any external database. All writes are atomic (tmp + rename).
 
 from __future__ import annotations
 
-from app import sharelink
-
 import json
 import os
 import threading
@@ -19,6 +17,7 @@ from typing import Any
 
 from loguru import logger
 
+from app import sharelink
 from app.config import Paths
 
 try:  # POSIX advisory locking — guards read-modify-write across processes

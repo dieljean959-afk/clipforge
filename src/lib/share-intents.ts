@@ -44,10 +44,20 @@ export interface ShareIntent {
  * is no usable origin, which makes the callers fall back to text-only intents
  * rather than posting a broken link.
  */
-export function clipShareUrl(clipId: string): string {
+/**
+ * The URL to hand to another person.
+ *
+ * The public share page when the clip has one: `/s/<id>` opens with the video
+ * and the Open Graph tags, needs no account, and keeps working after the batch
+ * and the host are gone. The authenticated `/api/clips/<id>/video` fallback is
+ * only for clips minted before share links existed, and it is a poor substitute
+ * — the recipient sees nothing.
+ */
+export function clipShareUrl(clipId: string, shareId?: string | null): string {
   if (typeof window === "undefined") return "";
   const origin = window.location.origin;
   if (!origin || origin === "null") return "";
+  if (shareId) return `${origin}/s/${encodeURIComponent(shareId)}`;
   return `${origin}/api/clips/${encodeURIComponent(clipId)}/video`;
 }
 

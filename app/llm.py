@@ -681,6 +681,43 @@ def _response_format_for(mode: str) -> dict[str, Any] | None:
     return None
 
 
+#: How much two clips may overlap before the second is treated as a repeat of
+#: the first. A shared boundary word is normal — two moments can be adjacent —
+#: so this is deliberately not zero. It IS enough to catch the real failure:
+#: detection chunks are built from OVERLAPPING transcript windows, so the tail
+#: of chunk 3 and the head of chunk 4 describe the same moment, and without
+#: this the user is handed the same clip twice and pays to render it twice.
+OVERLAP_TOLERANCE_SEC = 1.0
+
+
+def drop_overlapping(
+    candidates: list[dict[str, Any]], tolerance: float = OVERLAP_TOLERANCE_SEC
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep the best of each overlapping group; return `(kept, dropped)`.
+
+    Highest score wins, so a duplicate never costs the user the stronger take.
+    Order of the survivors is preserved by start time, which is what the render
+    loop and the grid both expect.
+    """
+    ordered = sorted(
+        candidates,
+        key=lambda c: (-float(c.get("score") or 0.0), float(c.get("start") or 0.0)),
+    )
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for cand in ordered:
+        start = float(cand.get("start") or 0.0)
+        end = float(cand.get("end") or 0.0)
+        clash = any(
+            start < float(k.get("end") or 0.0) - tolerance
+            and end > float(k.get("start") or 0.0) + tolerance
+            for k in kept
+        )
+        (dropped if clash else kept).append(cand)
+    kept.sort(key=lambda c: float(c.get("start") or 0.0))
+    return kept, dropped
+
+
 class _JsonRetry(Exception):
     """Internal: this attempt produced unusable JSON, escalate the ladder.
 
@@ -1944,6 +1981,28 @@ def detect_clips(
                 f"(chunk {where}). The rest of the video was detected normally — "
                 f"hit Re-detect to retry just those."
             )
+
+    # ---- one clip per moment --------------------------------------------
+    # Detected chunk boundaries are derived from OVERLAPPING transcript
+    # windows, so the tail of one chunk and the head of the next routinely
+    # describe the same moment. Merged without this step the user gets that
+    # moment twice — rendered, captioned, exported and paid for twice — and a
+    # duplicate is indistinguishable from a genuinely repeated beat in the
+    # source. Done here, on the merged list, because no per-chunk filter can
+    # see a neighbour in another chunk.
+    candidates, dupes = drop_overlapping(candidates)
+    if dupes:
+        logger.info(
+            f"[llm] dropped {len(dupes)} overlapping/duplicate candidate(s) "
+            f"across chunks (tolerance {OVERLAP_TOLERANCE_SEC}s)"
+        )
+        if on_log:
+            on_log(
+                f"Removed {len(dupes)} near-duplicate moment(s) that two chunks "
+                f"both picked up — each moment now appears once."
+            )
+        if report is not None:
+            report["duplicateClipsDropped"] = len(dupes)
 
     # Keep only the strong ones, up to the cap. The cap is a ceiling and the
     # score floor is the gate: a source with three genuinely good moments

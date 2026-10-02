@@ -178,6 +178,17 @@ export interface ClipDto {
   renderMs?: number | null;
   /** Sidecar caption tracks written by [translate], one record per language. */
   translationTracks?: TranslationTrack[] | null;
+  /** Short permanent public id for this clip, minted at creation. */
+  shareId?: string | null;
+  /** missing | preparing | ready | failed — from a real probe of the file. */
+  shareState?: "missing" | "preparing" | "ready" | "failed";
+  /** Why it is in that state, safe to show as-is. */
+  shareDetail?: string;
+  /** True only when the public URL is really serving bytes. */
+  shareReady?: boolean;
+  /** Relative public URLs, ready to hand to a social app. */
+  shareUrl?: string | null;
+  sharePageUrl?: string | null;
 }
 
 export interface TranslationTrack {
@@ -714,6 +725,29 @@ export const api = {
    * before `navigator.share()` could be called.
    */
   clipShareUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/share`,
+  /**
+   * The PUBLIC mp4 URL, `/s/<id>.mp4`.
+   *
+   * Public on purpose: no login, no expiry, survives the batch and the host.
+   * This is what "Share link" copies and what a social app is pointed at.
+   */
+  clipPublicMp4Url: (shareId: string) => `${BASE}/s/${shareId}.mp4`,
+  /** The public OG page, `/s/<id>` — what X and "Share..." post. */
+  clipPublicPageUrl: (shareId: string) => `${BASE}/s/${shareId}`,
+  /**
+   * Mint/verify this clip's share link and read back its real state.
+   * Idempotent: an already-ready clip costs one stat, and the returned id is
+   * the same one forever.
+   */
+  ensureShareLink: (clipId: string) =>
+    request<{
+      shareId: string | null;
+      shareState: "missing" | "preparing" | "ready" | "failed";
+      shareDetail: string;
+      shareReady: boolean;
+      shareUrl: string | null;
+      sharePageUrl: string | null;
+    }>(`/api/clips/${encodeURIComponent(clipId)}/share-link`, { method: "POST" }),
   clipThumbUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/thumb`,
   clipDownloadUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/download`,
   clipSrtUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/srt`,

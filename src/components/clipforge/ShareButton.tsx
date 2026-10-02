@@ -39,9 +39,47 @@ import { cn } from "@/lib/utils";
  */
 const READY_TIMEOUT_MS = 25_000;
 
+/**
+ * How long to keep asking the server whether a share link is live.
+ *
+ * Three attempts with backoff, as promised: the share copy is built by a
+ * transcode, and a host with one core can take a few seconds for the first
+ * clip. Giving up early would strand a badge on "Preparing…" for a link that
+ * becomes valid a moment later.
+ */
+const SHARE_CHECK_DELAYS_MS = [600, 1_800, 4_000];
+
+/** Copy text and confirm it. Resolves false when the clipboard refused. */
+async function copyLink(url: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+      return true;
+    }
+  } catch {
+    /* fall through to the legacy path */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = url;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boolean }) {
   const [entry, setEntry] = useState<cache.ShareEntry>(() => cache.getEntry(clip._id));
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [linkReady, setLinkReady] = useState(clip.shareReady === true);
   const readyRef = useRef(false);
 
   const fileName = clipFileName(clip);
@@ -87,6 +125,60 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
     return () => clearTimeout(t);
   }, [entry.inFlight, clip._id]);
 
+  // ---- the SERVER's share link, not this browser's cache -----------------
+  // The badge has to mean "the public URL works for anyone", not "this phone
+  // finished downloading a blob": a per-device cache resets, and a green tick
+  // on a link the recipient cannot open is worse than no tick. So the state
+  // comes from a real probe of the share copy, and it is re-checked with
+  // backoff while the copy is still being built.
+  useEffect(() => {
+    if (!rendered) return;
+    if (clip.shareReady === true) {
+      setLinkReady(true);
+      return;
+    }
+    let alive = true;
+    let timer: number | undefined;
+    for (const delay of SHARE_CHECK_DELAYS_MS) {
+      timer = window.setTimeout(() => {
+        if (!alive) return;
+        void api
+          .ensureShareLink(clip._id)
+          .then((s) => {
+            if (alive) setLinkReady(s.shareReady);
+          })
+          .catch(() => {
+            /* a link that is not ready yet is not an error to shout about */
+          });
+      }, delay);
+    }
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [clip._id, clip.shareReady, rendered]);
+
+  /** Copy the public MP4 link. This is the whole of "Share link". */
+  const onCopyLink = useCallback(() => {
+    const sid = clip.shareId;
+    if (!sid) {
+      toast.error("This clip has no share link yet.");
+      return;
+    }
+    const url = api.clipPublicMp4Url(sid);
+    setBusy(true);
+    void copyLink(url).then((ok) => {
+      setBusy(false);
+      if (!ok) {
+        toast.error("Could not copy the link.", { description: url });
+        return;
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2_000);
+      toast.success("Copied ✓", { description: url });
+    });
+  }, [clip.shareId, clip._id]);
+
   const onShare = useCallback(() => {
     // --- SYNCHRONOUS FROM HERE. No await, no fetch, no state set. -----------
     setBusy(true);
@@ -104,7 +196,7 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
     }
 
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
-    const publicUrl = clipShareUrl(clip._id);
+    const publicUrl = clipShareUrl(clip._id, clip.shareId);
     const file = readyRef.current ? cache.get(clip._id, fileName) : null;
 
     // Some apps drop the text field when a file is attached, so the caption is
@@ -151,6 +243,12 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
 
   const pct = cache.progressOf(clip._id);
   const showRing = entry.inFlight && !entry.ready;
+  // Two different things, deliberately: `fileReady` is about this device
+  // holding the bytes for navigator.share, `linkReady` is about the public URL
+  // working for a recipient. Only the second one earns the green tick.
+  const fileReady = entry.ready;
+  const label = fileReady ? "Share" : "Share link";
+  const onClick = fileReady ? onShare : onCopyLink;
 
   return (
     <Button
@@ -160,14 +258,16 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       disabled={!rendered || busy}
       title={
         rendered
-          ? readyRef.current
+          ? fileReady
             ? "Share the rendered MP4"
-            : "Share the clip link now — the file is still downloading"
+            : "Copy the public share link for this clip"
           : "No rendered MP4 yet"
       }
-      onClick={onShare}
+      onClick={onClick}
     >
-      {entry.ready ? (
+      {copied ? (
+        <Check className="size-3.5 text-primary" />
+      ) : fileReady ? (
         <Check className="size-3.5 text-primary" />
       ) : showRing ? (
         // A determinate ring when the server sent a Content-Length, an
@@ -183,9 +283,14 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       ) : (
         <Share2 className="size-3.5" />
       )}
-      {entry.ready ? "Share" : "Share link"}
-      {entry.ready && (
+      {copied ? "Copied ✓" : label}
+      {linkReady && (
         <span className="ml-auto text-[10px] font-normal text-primary">Ready</span>
+      )}
+      {!linkReady && rendered && (
+        <span className="ml-auto text-[10px] font-normal text-muted-foreground">
+          Preparing…
+        </span>
       )}
     </Button>
   );
