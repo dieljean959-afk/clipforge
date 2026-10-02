@@ -6,6 +6,8 @@ restarts without any external database. All writes are atomic (tmp + rename).
 
 from __future__ import annotations
 
+from app import sharelink
+
 import json
 import os
 import threading
@@ -444,6 +446,13 @@ class LocalStore:
                     "silenceCuts": [],
                     "cropBox": None,
                     "aspect": "9:16",
+                    # Minted at CREATION, not at share time: the public link
+                    # then exists from the moment the clip does, so a user who
+                    # copies it while the batch is still rendering gets a link
+                    # that starts working the moment the copy finishes rather
+                    # than a 404 that never resolves.
+                    "shareId": sharelink.new_id(),
+                    "shareState": sharelink.STATE_PREPARING,
                 }
             else:
                 # resume: keep the id, rendered file paths and renderState so

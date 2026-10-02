@@ -33,6 +33,7 @@ import json
 import sys
 import tempfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -191,15 +192,31 @@ def main() -> int:
             )
 
             # ---- 4. pause at a chunk boundary stops the stage ---------
+            #
+            # What is actually guaranteed, and what these checks pin:
+            #
+            #   * a pause is honoured — the stage raises DetectionPaused;
+            #   * NOTHING ALREADY PAID FOR IS THROWN AWAY — every chunk whose
+            #     call went out is written to the cache, so a resume cannot
+            #     bill the same chunk twice. This is the bug: the pause used to
+            #     raise BEFORE the cache write, so a paid-for chunk was lost and
+            #     re-billed on resume;
+            #   * the overshoot is BOUNDED. A pause raised by a call cannot be
+            #     observed until that call returns, so with `concurrency` calls
+            #     in flight it can overshoot by up to concurrency-1 chunks. The
+            #     bound is asserted rather than wished away, and the sequential
+            #     path below still stops EXACTLY on the boundary.
             api_hits.clear()
             pause_after = 2
             seen = {"n": 0}
+            lock = threading.Lock()
 
             def pause_now() -> bool:
                 return seen["n"] >= pause_after
 
             def pausing_call(prompt, s):  # noqa: ANN001
-                seen["n"] += 1
+                with lock:
+                    seen["n"] += 1
                 return counting(prompt, s)
 
             llm_mod.call_llm = pausing_call  # type: ignore[assignment]
@@ -211,15 +228,18 @@ def main() -> int:
                 paused = True
                 detail = str(exc)
             check("pause stops detection at a chunk boundary", paused, detail if paused else "no pause raised")
+            concurrency = int(getattr(settings.llm, "detect_concurrency", 1) or 1)
             check(
-                "it stopped at the boundary, not mid-chunk",
-                seen["n"] == pause_after,
-                f"{seen['n']} chunks done before pausing",
+                "the overshoot past the pause is bounded by the window",
+                pause_after <= seen["n"] <= pause_after + max(0, concurrency - 1),
+                f"{seen['n']} chunks billed for a pause after {pause_after} "
+                f"(window {concurrency})",
             )
+            cached_n = sum(1 for i in range(n_chunks) if fresh.get(i) is not None)
             check(
-                "completed chunks are kept for the resume",
-                sum(1 for i in range(n_chunks) if fresh.get(i) is not None) == pause_after,
-                f"{sum(1 for i in range(n_chunks) if fresh.get(i) is not None)} cached",
+                "EVERY chunk that was paid for is kept for the resume",
+                cached_n == seen["n"],
+                f"{seen['n']} calls, {cached_n} cached — nothing paid for is lost",
             )
 
             # and the resume after the pause only does the remainder
@@ -228,9 +248,42 @@ def main() -> int:
             llm_mod.detect_clips(words, settings, chunk_cache=fresh)
             check(
                 "resuming after a pause re-bills only the remainder",
-                len(api_hits) == n_chunks - pause_after,
-                f"{len(api_hits)} calls for {n_chunks - pause_after} remaining",
+                len(api_hits) == n_chunks - cached_n,
+                f"{len(api_hits)} calls for {n_chunks - cached_n} remaining",
             )
+
+            # ---- 4b. with no window, the boundary is EXACT ------------
+            # The same guarantee with concurrency 1, where there is no
+            # in-flight call to overshoot: the stage must stop on the chunk
+            # boundary and keep exactly the chunks it finished.
+            serial_settings = replace(settings.llm, detect_concurrency=1)
+            settings.llm = serial_settings
+            try:
+                seen2 = {"n": 0}
+                seq_cache = llm_mod.DictChunkCache()
+
+                def seq_pause() -> bool:
+                    return seen2["n"] >= pause_after
+
+                def seq_call(prompt, s):  # noqa: ANN001
+                    seen2["n"] += 1
+                    return counting(prompt, s)
+
+                llm_mod.call_llm = seq_call  # type: ignore[assignment]
+                seq_paused = False
+                try:
+                    llm_mod.detect_clips(
+                        words, settings, chunk_cache=seq_cache, should_pause=seq_pause
+                    )
+                except llm_mod.DetectionPaused:
+                    seq_paused = True
+                check("with no window the pause is exact", seq_paused and seen2["n"] == pause_after,
+                      f"paused={seq_paused} after {seen2['n']} chunks")
+                seq_cached = sum(1 for i in range(n_chunks) if seq_cache.get(i) is not None)
+                check("and it keeps exactly the chunks it finished",
+                      seq_cached == pause_after, f"{seq_cached} cached")
+            finally:
+                settings.llm = replace(settings.llm, detect_concurrency=concurrency)
 
             # ---- 5. the API surface: pause a QUEUED job is instant ----
             # Two shapes matter: a job sitting in the live queue, and one left

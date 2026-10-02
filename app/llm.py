@@ -682,7 +682,24 @@ def _response_format_for(mode: str) -> dict[str, Any] | None:
 
 
 class _JsonRetry(Exception):
-    """Internal: this attempt produced unusable JSON, escalate the ladder."""
+    """Internal: this attempt produced unusable JSON, escalate the ladder.
+
+    `transient` separates the two reasons a rung can fail, and they need
+    OPPOSITE treatment. A provider that rejected the OUTPUT (a 400
+    json_validate_failed) is healthy — the next rung is a different STRATEGY
+    (lower temperature, bigger budget, no response_format, another model) and
+    waiting changes nothing. A provider that is rate limiting, 5xx-ing or
+    dropping the connection is UNHEALTHY, and only a pause gives it room.
+
+    Getting this backwards cost 7 seconds of dead time per doomed model on
+    every chunk: a run that could not possibly succeed took 22.6s to admit it.
+    """
+
+    transient: bool = False
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 class _FormatUnsupported(Exception):
@@ -813,6 +830,7 @@ def _groq_attempt_chain(
     survives a model whose structured-output path is broken but whose plain
     generation is fine — and `app.jsonfix` cleans up whatever comes back.
     """
+    last_exc: _JsonRetry | None = None
     for attempt in range(cfg.json_retries + 1):
         # temperature can only go DOWN from the configured base
         temp = max(0.0, min(cfg.temperature, cfg.json_retry_temperature))
@@ -826,17 +844,30 @@ def _groq_attempt_chain(
                 cfg.max_tokens_ceiling,
                 cfg.max_tokens * (2 ** attempt) if attempt else cfg.max_tokens,
             )
-        # Exponential backoff BETWEEN ladder steps. The steps were fired back
-        # to back with no pause, so a provider that rejected one JSON reply
-        # (a transient 400 json_validate_failed, a rate-limit blip) got the
-        # identical retry inside the same second and the whole ladder burned
-        # itself out in well under a second. 1s, 2s, 4s… gives the provider
-        # room to recover between genuinely different strategies.
-        if attempt:
+        # Back off between ladder steps ONLY when the provider is the problem.
+        #
+        # The steps used to be fired back to back with no pause (a provider
+        # that rejected one JSON reply got the identical retry inside the same
+        # second, and the whole ladder burned itself out in under a second),
+        # so a blanket 1s, 2s, 4s… was added. That fixed the spin and created
+        # a worse problem: the common failure is a model whose output does not
+        # satisfy the schema, which no amount of waiting can fix, so every
+        # doomed chunk paid 7s per model before admitting it.
+        #
+        # Now there is no ladder sleep at all, because a provider-health
+        # failure no longer continues up the ladder: it breaks out to the NEXT
+        # MODEL (see the transient branch below). A rate limited model is not
+        # going to start honouring json_schema after a sleep, so climbing its
+        # remaining rungs was four wasted calls and ~30s of sleeping per model.
+        if attempt and last_exc is not None and last_exc.transient:
+            # Unreachable in practice (the transient branch breaks), but kept so
+            # a future rung that decides to continue a rate-limited model has a
+            # stated policy rather than an accidental instant retry.
             backoff = min(16.0, 2.0 ** (attempt - 1)) * (0.75 + random.random() * 0.5)
             logger.info(
                 f"[llm] backing off {backoff:.1f}s before JSON ladder step "
-                f"{attempt + 1}/{cfg.json_retries + 1}"
+                f"{attempt + 1}/{cfg.json_retries + 1} "
+                f"(previous rung failed on a rate limit or transport error)"
             )
             time.sleep(backoff)
         try:
@@ -855,14 +886,29 @@ def _groq_attempt_chain(
                 )
             except (_JsonRetry, _FormatUnsupported) as inner:
                 problems.append(f"{model}/plain: {str(inner)[:140]}")
+                if isinstance(inner, _JsonRetry):
+                    last_exc = inner
                 break
         except _JsonRetry as exc:
+            last_exc = exc
             reason = str(exc)
             problems.append(f"{model}/{mode}/t{temp}/mt{budget}: {reason[:140]}")
             logger.warning(
                 f"[llm] JSON ladder step {attempt + 1}/{cfg.json_retries + 1} for "
                 f"{model} (mode={mode}, temp={temp}, max_tokens={budget}): {reason[:180]}"
             )
+            if exc.transient:
+                # Rate limited, 5xx-ing or dropping the connection — the MODEL
+                # is unhealthy, its JSON strategy is irrelevant. Climbing the
+                # remaining rungs of this model would be three more calls and
+                # three more sleeps to learn the same thing. Go to the next
+                # model in the chain, which is the only move that can help.
+                logger.warning(
+                    f"[llm] {model} is rate limited or unreachable — skipping its "
+                    f"remaining {cfg.json_retries - attempt} ladder step(s) and "
+                    f"trying the next model instead"
+                )
+                break
     raise _ModelExhausted(problems[-1] if problems else "no usable JSON")
 
 
@@ -967,8 +1013,6 @@ def _groq_single(
                     f"cannot fix it. Top up the {cfg.label} account or set "
                     f"[llm] fallback_provider to a funded backend."
                 ) from exc
-            if attempt >= cfg.max_retries:
-                break
             if exc.status == 403 and "1010" in msg:
                 # Cloudflare edge ban on the request signature, NOT a bad key.
                 raise LlmError(
@@ -976,6 +1020,39 @@ def _groq_single(
                     f"API key — Cloudflare blocked the request before it reached "
                     f"{cfg.label}. Sent User-Agent: {GROQ_USER_AGENT!r}."
                 ) from exc
+            # ---- CLASSIFY BEFORE THE RETRY BUDGET ----------------------
+            # This block used to sit BELOW `if attempt >= cfg.max_retries:
+            # break`, which meant that on the final attempt every 4xx fell out
+            # of the loop and was re-reported as "transport/rate failures
+            # exhausted" — the generic catch-all at the bottom of the function.
+            # That mislabelling is invisible on its own and catastrophic once
+            # something reads it: a DeepSeek model with no Structured Outputs
+            # was reported as a rate-limited transport failure, so the ladder
+            # escalated to the next MODEL instead of trying the very next rung
+            # (the same model without response_format) that exists to handle
+            # exactly this. Classification is not a retry decision, so it does
+            # not belong under the retry budget.
+            if exc.status == 400 and _is_json_validation_error(msg):
+                # The point of the ladder: a 400 that means "your OUTPUT was
+                # bad" is retryable with a different strategy (lower temp, bigger
+                # budget, no format, another model). Do not spend the in-attempt
+                # backoff on it, and do not fail the job over it.
+                raise _JsonRetry(f"400 {msg[:200]}")
+            if exc.status in (400, 422) and _format_unsupported(msg):
+                # The model has no Structured Outputs. Drop response_format
+                # entirely and repair the reply locally rather than failing the
+                # whole job over an output-formatting nicety.
+                raise _FormatUnsupported(f"{exc.status} {msg[:200]}")
+            if exc.status == 400:
+                # A genuinely permanent 400: the same request fails again. Fail
+                # fast rather than re-bill it.
+                raise LlmError(
+                    f"{cfg.label} rejected the request permanently (400): {msg[:220]}"
+                )
+            # Everything left IS retryable (429, 413, 5xx, transport), so this
+            # is where the budget applies.
+            if attempt >= cfg.max_retries:
+                break
             if exc.status == 429:
                 # The daily-quota rejection is the only place Groq states the real
                 # tokens-per-day balance — record it before deciding what to do.
@@ -984,9 +1061,16 @@ def _groq_single(
                 except Exception as qexc:  # noqa: BLE001 - telemetry only
                     logger.debug(f"[groq-usage] could not record quota error: {qexc}")
                 fallback = min(90.0, (2 ** attempt) * 4.0 + random.random() * 2)
-                asked = exc.retry_after or 0.0
-                wait = max(asked, fallback)
-                if asked > MAX_INLINE_RATE_LIMIT_WAIT:
+                asked = exc.retry_after
+                # The server's own instruction WINS when it gave one — and
+                # `Retry-After: 0` is an instruction ("now"), not an absence.
+                # This was `max(asked, fallback)`, which treated Retry-After as
+                # a floor to exceed rather than an answer: a provider that said
+                # "retry immediately" still cost 4.8s, then 9.6s, and a rate
+                # limited chunk spent minutes asleep inside one rung. Only a
+                # provider that says NOTHING gets the local exponential.
+                wait = fallback if asked is None else max(0.0, asked)
+                if asked is not None and asked > MAX_INLINE_RATE_LIMIT_WAIT:
                     # A DAILY token limit answers with an hour-scale wait
                     # ("1h25m40s"). Sleeping that inside a retry loop looks like
                     # a hung job, burns the retries, and fails an hour later with
@@ -1001,23 +1085,6 @@ def _groq_single(
                     f"{' (tokens/min)' if 'tokens per minute' in msg else ''}"
                     f"{f', server asked for {asked:.0f}s' if asked else ''}"
                     f" — backing off {wait:.1f}s (attempt {attempt + 1})"
-                )
-            elif exc.status == 400 and _is_json_validation_error(msg):
-                # The point of the ladder: a 400 that means "your OUTPUT was
-                # bad" is retryable with a different strategy (lower temp, bigger
-                # budget, no format, another model). Do not spend the in-attempt
-                # backoff on it, and do not fail the job over it.
-                raise _JsonRetry(f"400 {msg[:200]}")
-            elif exc.status in (400, 422) and _format_unsupported(msg):
-                # The model has no Structured Outputs. Drop response_format
-                # entirely and repair the reply locally rather than failing the
-                # whole job over an output-formatting nicety.
-                raise _FormatUnsupported(f"{exc.status} {msg[:200]}")
-            elif exc.status == 400:
-                # A genuinely permanent 400: the same request fails again. Fail
-                # fast rather than re-bill it.
-                raise LlmError(
-                    f"{cfg.label} rejected the request permanently (400): {msg[:220]}"
                 )
             else:
                 # 413 is NOT permanent — Groq uses it for "Request too large ...
@@ -1040,7 +1107,9 @@ def _groq_single(
             time.sleep(wait)
         except _FormatUnsupported:
             raise  # handled by the ladder; never spend the backoff on it
-    raise _JsonRetry(f"transport/rate failures exhausted: {last_err}")
+    raise _JsonRetry(
+        f"transport/rate failures exhausted: {last_err}", transient=True
+    )
 
 
 #: Providers that rate-limit by TOKENS state the wait in prose rather than a
@@ -1570,6 +1639,26 @@ def detect_clips(
     if on_log:
         on_log(f"Detecting highlights on {len(chunks)} chunk(s) via {label}...")
 
+    #: Written into the caller's `report` on EVERY exit path, including the
+    #: heuristic fallbacks below. It used to be built only at the successful
+    #: return, so a run that fell back to transcript density reported NO chunk
+    #: accounting at all — and the one number that explains a short batch
+    #: ("3 of 4 chunks failed") is exactly the number a fallback hides.
+    def _chunk_report() -> dict[str, Any]:
+        return {
+            "chunksTotal": len(chunks),
+            "chunksSkipped": len(skipped),
+            "chunksSkippedAt": [i + 1 for i in skipped],
+            "chunksReused": reused,
+        }
+
+    def _finish_report(extra: dict[str, Any] | None = None) -> None:
+        if report is None:
+            return
+        report.update(_chunk_report())
+        if extra:
+            report.update(extra)
+
     if not chunks:
         # The transcript is empty, so there is nothing to send and nothing to
         # repair. Saying "returned no valid clip candidates" here blamed the AI
@@ -1592,7 +1681,26 @@ def detect_clips(
                     f"Fallback: {len(local)} clip(s) chosen from the video's timing "
                     "instead of AI scoring. Add captions manually if needed."
                 )
-        return local
+            if report is not None:
+                report["detectionFallback"] = "transcript_heuristic"
+                report["detectionFallbackReason"] = why
+                # No chunks existed, so there is nothing to skip — but the keys
+                # are still written, so a consumer never has to distinguish
+                # "zero chunks" from "the report forgot to say".
+                report["chunksTotal"] = 0
+                report["chunksSkipped"] = 0
+                report["chunksSkippedAt"] = []
+            return local
+        # Neither a transcript NOR a duration: there is no input of any kind to
+        # fall back to. This used to `return local` — an empty list — so the
+        # job went on to "succeed" with zero clips, no error, and an empty
+        # grid the user could only interpret as a broken app. Say what is
+        # actually missing instead.
+        raise LlmError(
+            f"{why}, and the video's length is unknown too, so no clips can be "
+            f"chosen from it at all. Re-submit the video (Re-transcribe to try "
+            f"the audio again), or check that the file actually contains sound."
+        )
 
     candidates: list[dict[str, Any]] = []
     reused = 0
@@ -1640,18 +1748,49 @@ def detect_clips(
             logger.info(
                 f"[llm] detecting {len(todo)} chunk(s) {concurrency}-way concurrently"
             )
+            # Pause has to be re-checked per LAUNCH, not once for the whole
+            # window. The window used to be fired off with no gate at all, so a
+            # pause requested during chunk 1 still paid for all five chunks and
+            # the pause only took effect after every one of them — then the
+            # loop below raised BEFORE writing any of them to the cache, so the
+            # resume re-billed work that had already been paid for.
+            #
+            # The dispatcher below is the fix, and it must be ORDERED. A lock
+            # alone is not enough: it serialises the launches but says nothing
+            # about which chunk gets the next turn, so the calls that did go out
+            # could be chunks 0 and 3 — and the loop then stopped at chunk 1,
+            # which had never been paid for, discarding chunk 0's paid answer
+            # and re-billing it on resume.
+            #
+            # The honest limit of this: a pause raised by a call cannot be seen
+            # until that call returns, so with `concurrency` calls in flight a
+            # pause can overshoot by up to concurrency-1 chunks. That is the
+            # price of overlapping the round trips, and it is bounded and
+            # asserted. What is NOT acceptable — and what this fixes — is work
+            # that has already been paid for being thrown away.
             with cf.ThreadPoolExecutor(
                 max_workers=min(concurrency, len(todo))
             ) as pool:
-                # map() blocks and preserves order, but results land in their
-                # own dict slots, so a fast chunk cannot overtake a slow one in
-                # the merge below.
-                list(pool.map(_prefetch, todo))
+                launched: list[cf.Future] = []
+                for index in todo:
+                    if should_pause is not None and should_pause():
+                        break  # a pause is in: do not bill another chunk
+                    launched.append(pool.submit(_prefetch, index))
+                for future in launched:
+                    # _prefetch records its own outcome; a raise here would be a
+                    # bug in it, and must not be swallowed.
+                    future.result()
     for i, (start_index, chunk) in enumerate(chunks):
         # Pause is honoured at a chunk boundary: never between the API call
         # and the cache write, which is the window where a kill would lose
         # work we already paid for.
-        if should_pause is not None and should_pause():
+        #
+        # A chunk whose call already went out is finished WITH that pause or
+        # without it — the money is spent and the only question is whether the
+        # answer is kept. Pausing before its cache write threw that answer
+        # away and made the resume pay for it twice.
+        already_paid = i in prefetched or i in failures
+        if should_pause is not None and should_pause() and not already_paid:
             raise DetectionPaused(
                 f"paused after chunk {i}/{len(chunks)} — {reused} chunk(s) reused, "
                 f"{len(candidates)} candidate(s) kept"
@@ -1838,6 +1977,7 @@ def detect_clips(
                     f"{label} returned no valid clip candidates across "
                     f"{len(chunks)} chunk(s)"
                 )
+            _finish_report()
             return local
         # Nothing to rank either: no transcript AND no duration. Fail, but name
         # the chunk count so the user sees why nothing happened.
@@ -1859,10 +1999,8 @@ def detect_clips(
             "belowFloor": below_floor,
             "topScore": float(top[0]["score"]),
             "lowestKept": float(top[-1]["score"]),
-            "chunksTotal": len(chunks),
-            "chunksSkipped": len(skipped),
-            "chunksSkippedAt": [i + 1 for i in skipped],
         })
+        _finish_report()
     logger.info(
         f"[llm] selected {len(top)} clip(s) (cap {cfg.max_clips}, score floor "
         f"{cfg.min_score:.0f}): {above_floor} candidate(s) cleared the floor, "

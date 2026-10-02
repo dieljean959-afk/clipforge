@@ -404,12 +404,25 @@ def test_format_unsupported_degrades() -> None:
 def test_detect_skips_failed_chunk() -> None:
     print("\n[4] a failing chunk is skipped; the rest of the job continues")
     calls = {"n": 0}
-
+    lock = threading.Lock()
+    # Which prompt is the FIRST chunk's? Detection chunks are built from
+    # consecutive word windows, so the first chunk is the one whose prompt
+    # carries the lowest start index. The failure is keyed off THAT, not off a
+    # global call counter: with detect_concurrency=4 four ladders are in
+    # flight at once, so "the first two HTTP calls fail" lands on two
+    # DIFFERENT chunks, each of which then recovers on its own second rung and
+    # nothing is ever skipped. The scenario under test is "one chunk's whole
+    # ladder fails"; that has to be expressed in a way that does not depend on
+    # how many calls happen to be in flight. Every assertion below is
+    # unchanged.
     def handler(body: dict) -> tuple[int, dict]:
-        calls["n"] += 1
-        # Every rung of the FIRST chunk's ladder fails (2 rungs, no fallbacks).
-        # Later chunks succeed immediately.
-        if calls["n"] <= 2:
+        with lock:
+            calls["n"] += 1
+        prompt = json.dumps(body)
+        # The transcript in the prompt is globally numbered, and the first
+        # chunk is the one that starts at word index 0 — so "[0] " on its own
+        # line identifies it no matter how the calls are scheduled.
+        if re.search(r"\[0\] \d+\.\d+s", prompt):
             return _json400()
         return 200, _reply(_candidates_for_prompt(body, 2))
 
@@ -439,22 +452,75 @@ def test_detect_skips_failed_chunk() -> None:
           any("chunk 1/" in line for line in logs), str(logs[:4]))
     check("progress still advanced past the failed chunk",
           progress and progress[-1][0] > 0, str(progress[-1:]))
+    # A skipped chunk is one whose ladder was EXHAUSTED, not one that failed
+    # once: there must have been more HTTP calls than there are chunks.
+    n_chunks = len(llm_mod.chunk_words(_words(1600)))
+    check("the failed chunk was retried before being skipped",
+          calls["n"] > n_chunks,
+          f"{calls['n']} calls for {n_chunks} chunks")
 
 
-def test_all_chunks_failing_still_fails() -> None:
-    print("\n[4b] when EVERY chunk fails the stage must still fail loudly")
+def test_all_chunks_failing_falls_back_then_still_fails_when_it_cannot() -> None:
+    """[4b] What happens when EVERY chunk fails.
+
+    The contract this asserts is the one the product now promises: a batch
+    whose transcript is already transcribed and paid for must never die with
+    "returned no valid clip candidates". The ladder is exhausted, the backup
+    model is asked, and then the transcript itself is ranked locally — so the
+    job delivers clips and SAYS they were not AI-picked.
+
+    The original assertion here was the opposite ("raises rather than
+    reporting an empty success"), which is right for the one case where there
+    is genuinely nothing to fall back to and wrong for the case where there
+    is. Both are asserted now, plus the labelling, so this is a wider net than
+    the one it replaces rather than a quieter one.
+    """
+    print("\n[4b] every chunk fails: heuristic fallback, and a loud failure only "
+          "when there is nothing to fall back to")
+    logs: list[str] = []
+    report: dict = {}
     with _Stub(lambda b: _json400()) as stub:
         s = _with_key(
             _settings(stub.base, json_retries=0, fallback_models=()),
             "gsk_test_key_0123456789",
         )
         err = None
+        out: list = []
         try:
-            llm_mod.detect_clips(_words(600), s)
+            out = llm_mod.detect_clips(
+                _words(600), s, on_log=logs.append, report=report
+            )
         except llm_mod.LlmError as exc:
             err = str(exc)
-    check("raises rather than reporting an empty success", err is not None, str(err))
-    check("names how many chunks failed", "chunk" in (err or "").lower(), str(err))
+    check("the job does NOT die with 'no valid clip candidates'", err is None, str(err))
+    check("it still delivers clips from the transcript", len(out) > 0, str(len(out)))
+    check("every clip is labelled as not AI-picked",
+          all(c.get("detection_source") == "transcript_heuristic" for c in out),
+          str([c.get("detection_source") for c in out][:3]))
+    check("the report names the fallback",
+          report.get("detectionFallback") == "transcript_heuristic",
+          str(report.get("detectionFallback")))
+    check("the user is told the clips were chosen by timing, not AI",
+          any("density" in line or "timing" in line for line in logs), str(logs[-2:]))
+
+    # No transcript AND no duration: there is nothing to rank and nothing to
+    # space out. This is the empty success the old assertion was written to
+    # catch, and it must still be a loud, named failure.
+    with _Stub(lambda b: _json400()) as stub:
+        s = _with_key(
+            _settings(stub.base, json_retries=0, fallback_models=()),
+            "gsk_test_key_0123456789",
+        )
+        err2 = None
+        try:
+            llm_mod.detect_clips([], s)
+        except llm_mod.LlmError as exc:
+            err2 = str(exc)
+    check("with nothing to fall back on it raises rather than returning []",
+          err2 is not None, str(err2))
+    check("that failure says what is missing",
+          "empty" in (err2 or "").lower() or "no speech" in (err2 or "").lower(),
+          str(err2))
 
 
 def test_unparseable_reply_is_skipped_not_fatal() -> None:
@@ -557,7 +623,7 @@ def main() -> int:
         test_json_classifier()
         test_format_unsupported_degrades()
         test_detect_skips_failed_chunk()
-        test_all_chunks_failing_still_fails()
+        test_all_chunks_failing_falls_back_then_still_fails_when_it_cannot()
         test_unparseable_reply_is_skipped_not_fatal()
         test_cache_preserved_across_failure()
         test_missing_key_still_raises()

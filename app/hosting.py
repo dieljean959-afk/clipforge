@@ -422,7 +422,14 @@ class RetentionCleaner:
         if clips_dir.exists():
             for f in clips_dir.glob("*.json"):
                 try:
-                    if f.stat().st_mtime <= cutoff:
+                    # OLDER than the cutoff is the orphan; a fresh one is left
+                    # alone. This comparison was inverted (`<= cutoff` to
+                    # continue), so the sweeper deleted clip documents the
+                    # instant they appeared and kept the stale ones forever —
+                    # the exact opposite of the 24h rule every other branch
+                    # here obeys, and the one place it could quietly discard a
+                    # record that a job was about to re-adopt.
+                    if f.stat().st_mtime > cutoff:
                         continue
                     clip = json.loads(f.read_text(encoding="utf-8"))
                 except Exception:

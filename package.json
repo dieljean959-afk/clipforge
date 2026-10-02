@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "qa": ".venv/bin/python -u tools/qa.py",
+    "qa:list": ".venv/bin/python -u tools/qa.py --list"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

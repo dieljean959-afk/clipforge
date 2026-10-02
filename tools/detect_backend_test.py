@@ -169,6 +169,26 @@ def main() -> int:
 
     # Hosted call path: stub the SDK so no network is touched, and assert the
     # prompt handed to it is plain text derived from the transcript.
+    #
+    # The key resolver has to be stubbed too, not just the transport:
+    # `detect_clips` now refuses to call a backend whose key is missing — on
+    # purpose, because a missing key is a misconfiguration to fix rather than a
+    # transient failure to route around — so with only `call_gemini` stubbed
+    # the run stopped at the key check and never reached the call path this
+    # section is about. The assertions are unchanged; the fixture now provides
+    # the key the product insists on.
+    class _HasKey:
+        key = "test-gemini-key-0123456789"
+        source = "test"
+        problem = None
+
+        def refresh(self, force: bool = False) -> None:
+            return None
+
+        def status(self) -> dict:
+            return {"keyLoaded": True, "source": "test",
+                    "problem": "", "aliases": ["GEMINI_API_KEY"]}
+
     captured: dict[str, str] = {}
 
     def _fake_gemini(prompt: str, _settings) -> str:
@@ -178,6 +198,9 @@ def main() -> int:
                             "hashtags": ["#hosted"]}])
 
     real_call_gemini = llm.call_gemini
+    has_key = _HasKey()
+    cfg_mod.live_gemini_key = lambda: has_key  # type: ignore[assignment]
+    llm_mod.live_gemini_key = lambda: has_key  # type: ignore[assignment]
     llm.call_gemini = _fake_gemini  # type: ignore[assignment]
     try:
         settings.llm.provider = "gemini"
@@ -192,6 +215,8 @@ def main() -> int:
               and "base64" not in captured["prompt"].lower())
     finally:
         llm.call_gemini = real_call_gemini  # type: ignore[assignment]
+        cfg_mod.live_gemini_key = real_status  # type: ignore[assignment]
+        llm_mod.live_gemini_key = real_status  # type: ignore[assignment]
 
     # --- 3. local backend against a stub Ollama server --------------------
     print()
