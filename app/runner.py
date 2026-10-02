@@ -12,7 +12,105 @@ Usage:  python -m app.runner <job_id>
 
 from __future__ import annotations
 
+import signal
 import sys
+import threading
+import time
+import traceback
+
+
+def _describe(exc: BaseException) -> str:
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
+
+
+def _install_process_handlers(job_id: str, store, settings) -> None:
+    """Make sure NOTHING this process can raise takes the job down silently.
+
+    Before this, an exception raised anywhere outside Pipeline.run's
+    ``except Exception`` — a `BaseException` subclass, an exception escaping a
+    daemon thread, an exception in a `__del__`, or the interpreter failing to
+    shut down — killed the process with only a traceback on stderr. The
+    supervisor then found a job frozen on a live stage with nobody behind it,
+    which is exactly the state that surfaced to users as "the worker stopped
+    while this job was in progress and never reported back".
+
+    Every one of those now writes a real, readable failure onto the job first.
+    Python's equivalents of Node's `uncaughtException` / `unhandledRejection`
+    are `sys.excepthook`, `threading.excepthook` and `sys.unraisablehook`.
+    """
+    def fail(message: str, detail: str) -> None:
+        try:
+            job = store.get_job(job_id)
+            if job is None:
+                return
+            if job.get("stage") in {"complete", "failed", "paused"}:
+                return
+            from app import jobstatus
+
+            stage = job.get("stage")
+            job.update({
+                "stage": "failed",
+                "failedStage": stage,
+                "error": message,
+                "errorDetail": detail,
+                "interrupted": False,
+                "completedAt": int(time.time() * 1000),
+            })
+            jobstatus.describe(job)
+            store.write_job(job)
+            store.append_job_log(job_id, f"FAILED: {message}")
+        except Exception:
+            pass
+
+    def hook(exc_type, exc, tb):
+        detail = "".join(traceback.format_exception(exc_type, exc, tb))[-4000:]
+        sys.__excepthook__(exc_type, exc, tb)
+        fail(
+            "The worker hit an unhandled error and stopped. "
+            "Finished work is cached — Retry resumes from the last checkpoint.",
+            detail,
+        )
+
+    def thread_hook(args):
+        detail = "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        )[-4000:]
+        fail(
+            "A worker thread crashed. Finished work is cached — Retry resumes "
+            "from the last checkpoint.",
+            detail,
+        )
+
+    def unraisable_hook(args):
+        detail = (
+            f"{getattr(args, 'err_msg', '')}\n"
+            f"{''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))}"
+        )[-4000:]
+        fail(
+            "The worker hit an unrecoverable error while cleaning up. "
+            "Finished work is cached — Retry resumes from the last checkpoint.",
+            detail,
+        )
+
+    def term_handler(signum, _frame):
+        # A graceful SIGTERM: record WHY we are going so the next boot knows
+        # this was an external stop and not a pipeline fault.
+        how = signal.Signals(signum).name
+        fail(
+            f"The worker was stopped by the server ({how}) during "
+            f"{settings and 'the job'}. It resumes automatically.",
+            f"received {how}",
+        )
+        raise SystemExit(143)
+
+    sys.excepthook = hook
+    threading.excepthook = thread_hook
+    sys.unraisablehook = unraisable_hook
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, term_handler)
+        except (ValueError, OSError):
+            pass
 
 
 def main(argv: list[str]) -> int:
@@ -26,7 +124,56 @@ def main(argv: list[str]) -> int:
 
     settings = load_config(quiet=True)
     store = LocalStore(settings.app.paths)
-    Pipeline(settings, store).run(job_id)
+    _install_process_handlers(job_id, store, settings)
+    # Keep large native allocations from pushing the process into swap-less
+    # OOM territory where the kernel picks a victim.
+    try:
+        import resource
+
+        soft = 6 * 1024 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (soft, soft))
+    except Exception:
+        pass
+    try:
+        Pipeline(settings, store).run(job_id)
+    except BaseException as exc:  # noqa: BLE001 - the job must never die silently
+        # Pipeline.run already catches Exception and records it. This is the
+        # backstop for BaseException (SystemExit from a handler, a
+        # KeyboardInterrupt) and for a failure inside the recording itself.
+        if isinstance(exc, SystemExit) and exc.code in (0, None, 143):
+            raise
+        sys.stderr.write(
+            f"[runner] unhandled {type(exc).__name__}: {exc}\n"
+            + _describe(exc)
+        )
+        try:
+            job = store.get_job(job_id)
+            if job is not None and job.get("stage") not in {"complete", "failed", "paused"}:
+                from app import jobstatus
+
+                job.update({
+                    "stage": "failed",
+                    "failedStage": job.get("stage"),
+                    "error": (
+                        f"The worker stopped with an unhandled {type(exc).__name__}. "
+                        f"Finished work is cached — Retry resumes from the last "
+                        f"checkpoint."
+                    ),
+                    "errorDetail": _describe(exc),
+                    "completedAt": int(time.time() * 1000),
+                })
+                jobstatus.describe(job)
+                store.write_job(job)
+        except Exception:
+            pass
+        raise
+    # Flush anything buffered so the supervisor's log tailer sees it before we
+    # exit; a silent final line is indistinguishable from a hang.
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
     return 0
 
 

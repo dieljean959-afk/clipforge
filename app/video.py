@@ -12,16 +12,18 @@ crop is framed per shot and never interpolates across a cut.
 from __future__ import annotations
 
 import json
+import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from app import encode
+from app import encode, hostlimits
 from app import subtitle as subtitle_svc
 from app.config import Settings, ffmpeg_bin, ffprobe_bin
 
@@ -96,6 +98,76 @@ def _ffmpeg_error_tail(stderr: str, limit: int = 8) -> str:
     return "(ffmpeg produced no output)"
 
 
+def _ffmpeg_slots() -> int:
+    """How many ffmpeg children may run at once on this host.
+
+    Hard-capped at 2 by policy, and at 1 on a host with a single effective CPU
+    or less than ~1.5 GiB of RAM. Two encodes at once on one vCPU is not
+    faster — measured 1.01x, a no-op — but it does double peak RSS, and a
+    memory-starved ffmpeg is exactly the thing that dies without writing a
+    traceback. The share prewarm runs its own ffmpeg threads concurrently with
+    the render loop, so without this gate the two can stack without bound.
+    """
+    override = os.environ.get("CLIPFORGE_MAX_FFMPEG")
+    if override and override.isdigit():
+        return max(1, min(2, int(override)))
+    if hostlimits.effective_cpus() <= 1:
+        return 1
+    mem = hostlimits.effective_memory_bytes()
+    if mem is not None and mem < int(1.5 * 1024**3):
+        return 1
+    return 2
+
+
+_FFMPEG_SEM: threading.BoundedSemaphore = threading.BoundedSemaphore(_ffmpeg_slots())
+_FFMPEG_LIMIT = _ffmpeg_slots()
+# Per-thread depth, because the calls are NESTED: probe() runs ffprobe through
+# _run(), and render_clip() probes the file it just encoded. A plain semaphore
+# would take two slots from one thread and deadlock outright the moment the
+# host limit is 1.
+_FFMPEG_DEPTH = threading.local()
+
+
+class _FfmpegSlot:
+    """Context manager that holds one of the host's ffmpeg slots.
+
+    Reentrant per thread (see `_FFMPEG_DEPTH`): nested ffmpeg/ffprobe calls
+    from the same thread count once, so a probe inside a render never waits on
+    the slot the render already holds.
+    """
+
+    def __init__(self, what: str) -> None:
+        self.what = what
+        self.waited = 0.0
+        self._acquired = False
+
+    def __enter__(self) -> _FfmpegSlot:
+        depth = getattr(_FFMPEG_DEPTH, "n", 0)
+        if depth:
+            _FFMPEG_DEPTH.n = depth + 1
+            return self
+        t0 = time.monotonic()
+        _FFMPEG_SEM.acquire()
+        self.waited = time.monotonic() - t0
+        if self.waited > 1.0:
+            logger.info(
+                f"[video] waited {self.waited:.1f}s for an ffmpeg slot "
+                f"({_FFMPEG_LIMIT} allowed on this host) before {self.what}"
+            )
+        _FFMPEG_DEPTH.n = 1
+        self._acquired = True
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        depth = getattr(_FFMPEG_DEPTH, "n", 0)
+        if depth > 1:
+            _FFMPEG_DEPTH.n = depth - 1
+            return
+        _FFMPEG_DEPTH.n = 0
+        if self._acquired:
+            _FFMPEG_SEM.release()
+
+
 def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
     """Run ffmpeg, failing with a message that says WHICH deadline was hit.
 
@@ -103,6 +175,11 @@ def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
     time is never confused with a broken encode on a GPU host.
     """
     logger.debug("[video] " + " ".join(cmd))
+    with _FfmpegSlot("ffmpeg"):
+        _run_locked(cmd, timeout=timeout, mode=mode)
+
+
+def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:

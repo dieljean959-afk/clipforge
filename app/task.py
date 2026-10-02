@@ -395,7 +395,54 @@ class Pipeline:
             logger.error(f"[job {job_id}] missing at pipeline start")
             return
         t_start = time.time()
+        # The heartbeat spans the WHOLE pipeline, not just the encode and the
+        # decode. The stall deadline is now 3 minutes, and every stage has a
+        # step that legitimately exceeds that while doing nothing observable:
+        # a Whisper chunk, an LLM call sitting in the provider's rate-limit
+        # queue, a reframe analysis. Without a process-wide heartbeat those
+        # are indistinguishable from a hang and the watchdog kills work that is
+        # working. It still proves nothing but liveness -- `progress` is never
+        # invented -- and it stops the instant the block exits.
         try:
+            with self._heartbeat(job_id, f"pipeline {job.get('stage', 'starting')}"):
+                self._run_stages(job_id, job)
+        except subtitle.TranscriptionPaused as pause:
+            self.mark_paused(job_id, "transcribing")
+            self._log(job_id, f"transcription paused: {pause}")
+        except _PauseRequested as pause:
+            # A user-requested stop, not an error. Whatever completed is on
+            # disk; the job reports itself paused and resume picks it up from
+            # the same stage via the ordinary stage-marker resume.
+            self.mark_paused(job_id, str(pause) or "the current stage")
+        except llm.DetectionPaused as pause:
+            self.mark_paused(job_id, "finding")
+            self._log(job_id, f"detection paused: {pause}")
+        except DispatchError as exc:
+            # remote worker refused/unreachable — honest error, job stays failed
+            self._fail(job_id, f"Could not hand the job to your worker: {exc}", self._detail(exc))
+        except llm.LlmNotConfigured as exc:
+            # The exception already names the right backend and variable
+            # ("GROQ_API_KEY missing…", "ollama server unreachable…"). A
+            # hardcoded "add GEMINI_API_KEY" overrode it and sent users hunting
+            # for a key that was never the one being used.
+            self._fail(job_id, f"AI detection offline — {exc}", self._detail(exc))
+        except llm.LlmError as exc:
+            self._fail(job_id, f"AI detection failed: {exc}", self._detail(exc))
+        except download.DownloadError as exc:
+            self._fail(job_id, f"Could not fetch video: {exc}", self._detail(exc))
+        except asr.AsrError as exc:
+            # covers subtitle.TranscribeError too — one class of readable
+            # transcription failure reaches the UI either way
+            self._fail(job_id, f"Transcription failed: {exc}", self._detail(exc))
+        except video.RenderError as exc:
+            self._fail(job_id, f"Render failed: {exc}", self._detail(exc))
+        except Exception as exc:  # noqa: BLE001 - the UI must see the real error
+            logger.exception(f"[job {job_id}] unexpected pipeline error")
+            self._fail(job_id, f"Pipeline error: {exc}", self._detail(exc))
+
+    def _run_stages(self, job_id: str, job: dict[str, Any]) -> None:
+        """The stage sequence, isolated from the failure handling in run()."""
+        if True:
             # ---- remote dispatch mode: hand off, then the agent reports via
             # /api/internal/* — this thread's work is done after handoff.
             if self.settings.hosted.worker_url:
