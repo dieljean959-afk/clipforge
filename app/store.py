@@ -26,6 +26,29 @@ except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None  # type: ignore[assignment]
 
 
+def _uploads_root(paths: Paths) -> Path:
+    """Where new source files are written: inside the codebase, by default.
+
+    ``getattr`` rather than a plain attribute because tests (and any caller)
+    may hand in a duck-typed paths object; falling back to ``data/uploads``
+    keeps every such caller working and matches the real default anyway.
+    """
+    return getattr(paths, "uploads_dir", None) or (paths.data_dir / "uploads")
+
+
+def _job_source_dirs(paths: Paths, job_id: str) -> tuple[Path, ...]:
+    """Every directory that can hold this job's source file, best first.
+
+    Mirrors ``Paths.job_source_dirs`` with the same duck-typing tolerance: a
+    job uploaded before this change still lives in the legacy ``downloads/``
+    tree, so reads must fan out across both and neither may be assumed.
+    """
+    fn = getattr(paths, "job_source_dirs", None)
+    if callable(fn):
+        return tuple(fn(job_id))
+    return (_uploads_root(paths) / job_id, paths.downloads_dir / job_id)
+
+
 class LocalStore:
     """Thread- AND process-safe JSON document store rooted at data_dir.
 
@@ -42,6 +65,8 @@ class LocalStore:
         self._paths.data_dir.mkdir(parents=True, exist_ok=True)
         self._paths.outputs_dir.mkdir(parents=True, exist_ok=True)
         self._paths.downloads_dir.mkdir(parents=True, exist_ok=True)
+        uploads = _uploads_root(self._paths)
+        uploads.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # cross-process write primitives
@@ -617,10 +642,32 @@ class LocalStore:
     # ------------------------------------------------------------------
 
     def find_source_file(self, job_id: str) -> Path | None:
-        d = self._paths.downloads_dir / job_id
-        if not d.exists():
-            return None
-        for p in sorted(d.glob("*")):
-            if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv", ".m4a"}:
-                return p
+        """Locate a job's source video across BOTH storage locations.
+
+        `job_source_dirs()` returns the new in-codebase location first and the
+        old `downloads/` symlink second, so a job whose source is in either
+        place is found. Never raises: a job with no readable source returns
+        None and the caller reports it.
+        """
+        for d in _job_source_dirs(self._paths, job_id):
+            if not d.exists():
+                continue
+            for p in sorted(d.glob("*")):
+                if p.is_file() and p.suffix.lower() in {
+                    ".mp4", ".mov", ".webm", ".mkv", ".m4a",
+                }:
+                    return p
         return None
+
+    def job_source_dir_for_write(self, job_id: str) -> Path:
+        """Where a NEW upload is written: inside the codebase, never `downloads`.
+
+        Writing is deliberately single-target. The previous incident where two
+        trees drifted apart came from writing into one location while other
+        code read from another; reads fan out (`find_source_file`), writes do
+        not.
+        """
+        base = _uploads_root(self._paths)
+        d = base / job_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d

@@ -441,6 +441,7 @@ def transcribe(
     on_progress=None,
     cache_dir: Path | None = None,
     should_pause=None,
+    on_chunk=None,
 ) -> Transcript:
     """Word-level transcription through the configured ASR engine.
 
@@ -457,6 +458,13 @@ def transcribe(
     `cache_dir` enables INCREMENTAL resume: each completed chunk is written to
     cache_dir/chunk_XXXXX.json as it decodes, so a retry after a crash/stall
     skips the chunks already done (at most one chunk of work is lost).
+
+    `on_chunk(done, total, *, phase, resuming)` is the caller's progress hook
+    for CHUNK-granular reporting. It fires when a chunk STARTS and when one
+    FINISHES, which is what makes the dashboard show "Transcribing chunk 4 of
+    11" instead of a percentage that sits at 0% until the first chunk lands.
+    `on_progress` (fractions of audio) is still called, but it is a secondary,
+    smoother signal — the two together give a number that never stalls at zero.
     """
     loaded = _load_model(settings)
     duration = _probe_duration(path)
@@ -508,6 +516,12 @@ def transcribe(
                 )
             if on_progress and duration > 0:
                 on_progress(min(1.0, w_start / duration))
+            # Announce the chunk BEFORE decoding it. The old code only moved
+            # the number once a chunk finished, so a 54-minute source showed
+            # "Transcribing 0%" for the whole first chunk (~90s here, longer on
+            # a busier host) and read as a hang.
+            if on_chunk is not None:
+                on_chunk(idx, len(windows), phase="start")
 
             # ---- incremental resume: reuse an already-decoded chunk --------
             cache_file = None
@@ -524,6 +538,8 @@ def transcribe(
                             )
                             if on_progress and duration > 0:
                                 on_progress(min(1.0, w_end / duration))
+                            if on_chunk is not None:
+                                on_chunk(idx, len(windows), phase="done", resuming=True)
                             continue
                     except Exception as exc:
                         logger.warning(f"[subtitle] unreadable chunk cache {cache_file.name}: {exc}")
@@ -533,6 +549,8 @@ def transcribe(
             if audio.size < sample_rate // 4:  # under 0.25s — nothing to decode
                 if on_progress and duration > 0:
                     on_progress(min(1.0, w_end / duration))
+                if on_chunk is not None:
+                    on_chunk(idx, len(windows), phase="done")
                 continue
 
             def on_segment(local_end: float, _w_start=w_start) -> None:
@@ -620,6 +638,8 @@ def transcribe(
 
             if on_progress and duration > 0:
                 on_progress(min(1.0, w_end / duration))
+            if on_chunk is not None:
+                on_chunk(idx, len(windows), phase="done")
     finally:
         reader.close()
         del reader

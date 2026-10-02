@@ -215,7 +215,7 @@ export function fmtEta(sec: number): string {
  *   It mirrors CLIPFORGE_STALL_TIMEOUT_SEC.
  */
 export const QUIET_THRESHOLD_MS = 75_000;
-export const STALL_THRESHOLD_MS = 600_000;
+export const STALL_THRESHOLD_MS = 90_000;
 
 /** True while a job is doing work we can meaningfully watch. */
 export function isActiveJob(job: JobDoc): boolean {

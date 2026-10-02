@@ -350,17 +350,22 @@ class RetentionCleaner:
         for job in self.store.list_jobs():
             done_at = job.get("completedAt")
             stage = job.get("stage")
-            expired = (stage in {"complete", "failed"} and done_at and done_at < cutoff) or (
-                stage not in {"complete", "failed"}
-                and job.get("createdAt", 0) < cutoff - 24 * 3600 * 1000
-            )
+            # ONLY a finished job is ever expired. The old second clause
+            # ("any stage, if createdAt is old enough") could delete a job that
+            # was still queued or mid-render: a long source sitting in the queue
+            # behind another job ages past the clock, and cleanup then removed
+            # the source out from under a pipeline about to read it. Retention
+            # is for finished work; orphans (the `sweep_orphans` path) already
+            # handle records that no longer exist at all.
+            if stage not in {"complete", "failed"}:
+                continue
+            expired = bool(done_at and done_at < cutoff)
             if expired:
                 job_id = job["_id"]
                 self.store.delete_job(job_id)
                 import shutil as _shutil
 
-                for d in (
-                    self.settings.app.paths.downloads_dir / job_id,
+                for d in self.settings.app.paths.job_source_dirs(job_id) + (
                     self.settings.app.paths.outputs_dir / job_id,
                 ):
                     _shutil.rmtree(d, ignore_errors=True)
@@ -379,7 +384,7 @@ class RetentionCleaner:
     #: that a job mid-restart — where the record and the folder are briefly out
     #: of step — is never mistaken for one, and short enough that the disk does
     #: not carry yesterday's debris forever.
-    ORPHAN_MAX_AGE_SEC = float(os.getenv("CLIPFORGE_ORPHAN_MAX_AGE_SEC", "86400"))
+    ORPHAN_MAX_AGE_SEC = float(os.getenv("CLIPFORGE_ORPHAN_MAX_AGE_SEC", str(7 * 86400)))
 
     def sweep_orphans(self) -> int:
         """Delete artefacts whose job record no longer exists, plus stale temps.
@@ -395,15 +400,26 @@ class RetentionCleaner:
         workspace is never a candidate, whatever its age.
         """
         known = {j["_id"] for j in self.store.list_jobs()}
+        # Belt and braces alongside the `known` check: a job that is queued or
+        # running right now must never be swept even if its record somehow
+        # fails to load. The sweeper runs from a daemon thread in the web
+        # process, so "the record exists" is checked against a snapshot taken
+        # microseconds earlier than the delete.
+        active = {
+            j["_id"] for j in self.store.list_jobs()
+            if j.get("stage") in {"queued", "grabbing", "transcribing", "finding",
+                                  "rendering", "captions", "export"}
+        }
         cutoff = time.time() - self.ORPHAN_MAX_AGE_SEC
         removed = 0
         paths = self.settings.app.paths
 
-        for root in (paths.downloads_dir, paths.outputs_dir, paths.data_dir / "work"):
+        for root in (paths.downloads_dir, paths.uploads_dir or (paths.data_dir / "uploads"),
+                   paths.outputs_dir, paths.data_dir / "work"):
             if not root.exists():
                 continue
             for child in root.iterdir():
-                if not child.is_dir() or child.name in known:
+                if not child.is_dir() or child.name in known or child.name in active:
                     continue
                 try:
                     if child.stat().st_mtime > cutoff:
@@ -438,7 +454,8 @@ class RetentionCleaner:
                     f.unlink(missing_ok=True)
                     removed += 1
 
-        for root in (paths.downloads_dir, paths.outputs_dir):
+        for root in (paths.downloads_dir, paths.uploads_dir or (paths.data_dir / "uploads"),
+                   paths.outputs_dir):
             if not root.exists():
                 continue
             for f in root.rglob("*"):

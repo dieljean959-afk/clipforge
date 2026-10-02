@@ -74,10 +74,15 @@ def test_orphan_sweep() -> None:
     )
     for d in (paths.data_dir, paths.outputs_dir, paths.downloads_dir):
         d.mkdir(parents=True, exist_ok=True)
+    uploads_root = paths.uploads_dir or (paths.data_dir / "uploads")
+    uploads_root.mkdir(parents=True, exist_ok=True)
 
     check(
-        "orphans must be 24h old before they are touched",
-        RetentionCleaner.ORPHAN_MAX_AGE_SEC == 86400,
+        # 7 days, not 24h. A sandbox restore can take a while, and a job whose
+        # record survived while its source folder looked "old" was the reason
+        # 11 of 18 live jobs lost their sources. Debris only goes after a week.
+        "orphans must be 7 days old before they are touched",
+        RetentionCleaner.ORPHAN_MAX_AGE_SEC == 7 * 86400,
         f"{RetentionCleaner.ORPHAN_MAX_AGE_SEC}s",
     )
 
@@ -99,14 +104,24 @@ def test_orphan_sweep() -> None:
     )
 
     # Debris: folders and files with NO job record.
-    for name in ("ghost_old", "ghost_new"):
+    for name in ("ghost_old", "ghost_new", "ghost_mid"):
         d = paths.downloads_dir / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "source.mp4").write_bytes(b"z" * 32)
-        _age(d, 2 * 86400 if name == "ghost_old" else 60)
+        _age(d, {"ghost_old": 8 * 86400, "ghost_mid": 2 * 86400}.get(name, 60))
+    # The same debris under the NEW upload root, which the sweeper must also
+    # watch — uploads moving inside the codebase must not create a blind spot.
+    ghost_up = uploads_root / "ghost_upload"
+    ghost_up.mkdir(parents=True, exist_ok=True)
+    (ghost_up / "source.mp4").write_bytes(b"z" * 32)
+    _age(ghost_up, 8 * 86400)
+    ghost_up_fresh = uploads_root / "ghost_upload_fresh"
+    ghost_up_fresh.mkdir(parents=True, exist_ok=True)
+    (ghost_up_fresh / "source.mp4").write_bytes(b"z" * 32)
+    _age(ghost_up_fresh, 60)
     stale_out = paths.outputs_dir / "ghost_out"
     stale_out.mkdir(parents=True, exist_ok=True)
-    _age(stale_out, 2 * 86400)
+    _age(stale_out, 8 * 86400)
     fresh_out = paths.outputs_dir / "ghost_fresh"
     fresh_out.mkdir(parents=True, exist_ok=True)
     _age(fresh_out, 60)
@@ -114,7 +129,7 @@ def test_orphan_sweep() -> None:
     # A temp file left behind by a process killed mid-write.
     old_part = paths.downloads_dir / "chunk.part"
     old_part.write_bytes(b"p" * 8)
-    _age(old_part, 2 * 86400)
+    _age(old_part, 8 * 86400)
     new_part = paths.downloads_dir / "chunk2.part"
     new_part.write_bytes(b"p" * 8)
     _age(new_part, 60)
@@ -124,7 +139,7 @@ def test_orphan_sweep() -> None:
     orphan_clip.write_text(
         json.dumps({"_id": "orphan_0", "jobId": "no_such_job"}), encoding="utf-8"
     )
-    _age(orphan_clip, 2 * 86400)
+    _age(orphan_clip, 8 * 86400)
     live_clip = clips_dir / f"{live_id}_1.json"
     live_clip.write_text(
         json.dumps({"_id": f"{live_id}_1", "jobId": live_id}), encoding="utf-8"
@@ -139,10 +154,16 @@ def test_orphan_sweep() -> None:
     cleaner = RetentionCleaner(settings, store)
     removed = cleaner.sweep_orphans()
 
-    check("a 2-day-old orphan folder is removed",
+    check("an 8-day-old orphan folder is removed",
           not (paths.downloads_dir / "ghost_old").exists())
-    check("a 2-day-old orphan output folder is removed", not stale_out.exists())
-    check("a 1-minute-old orphan folder is KEPT (under 24h)",
+    check("an 8-day-old orphan output folder is removed", not stale_out.exists())
+    check("an 8-day-old orphan under data/uploads is removed",
+          not ghost_up.exists())
+    check("a fresh orphan under data/uploads is KEPT",
+          ghost_up_fresh.exists())
+    check("a 2-day-old orphan folder is KEPT (inside the 7-day grace)",
+          (paths.downloads_dir / "ghost_mid").exists())
+    check("a 1-minute-old orphan folder is KEPT (under 7 days)",
           (paths.downloads_dir / "ghost_new").exists())
     check("a fresh orphan output folder is KEPT", fresh_out.exists())
     check("a stale .part temp file is removed", not old_part.exists())
@@ -156,14 +177,14 @@ def test_orphan_sweep() -> None:
           (paths.downloads_dir / live_id / "source.mp4").exists())
     check("the live job's rendered clips survive",
           all((out_dir / f"clip_{i:02d}.mp4").exists() for i in (1, 2)))
-    check("the sweep reported what it removed", removed >= 4, str(removed))
+    check("the sweep reported what it removed", removed >= 5, str(removed))
 
     # Retention OFF must not disable the orphan sweep — that is the only thing
     # standing between a full disk and a failed job.
     settings.hosted.retention_hours = 0
     ghost2 = paths.downloads_dir / "ghost_two"
     ghost2.mkdir(parents=True, exist_ok=True)
-    _age(ghost2, 3 * 86400)
+    _age(ghost2, 8 * 86400)
     cleaner.sweep()
     check("orphans are still swept when retention is disabled", not ghost2.exists())
     check("and a live job is still untouched with retention off",

@@ -56,6 +56,7 @@ AREAS: dict[str, list[tuple[str, list[str], int]]] = {
         ("queue_truthfulness_test", [], 90),
         ("health_resilience_test", [], 90),
         ("export_memory_test", [], 120),
+        ("pipeline_resilience_test", [], 120),
     ],
     "ai": [
         ("jsonfix_test", [], 60),

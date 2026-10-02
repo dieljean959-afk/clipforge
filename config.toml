@@ -474,7 +474,24 @@ max_source_min = 120
 # Finished downloads/outputs are deleted this long after a job completes.
 # 0 = never auto-delete. Keep it 0 unless you actively want batches to expire:
 # the sweep is destructive and, before trash existed, unrecoverable.
+#
+# DELIBERATELY LEFT AT 0. Turning this on deletes the finished BATCH ITSELF
+# (record + clips + source), not just scratch files, so a 48h setting would
+# silently destroy every clip this account has already made. The 48h figure
+# from the rebuild brief is implemented and enforced by the retention sweeper —
+# set this to 48 when you actually want batches to expire.
+#
+# Scratch files (extracted WAVs, per-chunk transcript caches) ARE cleaned up
+# automatically and unconditionally the moment a job finishes; that path does
+# not depend on this setting.
 retention_hours = 0
+
+# Largest upload accepted, in megabytes. Rejected at submit time with a 413
+# rather than after the bytes are already on disk. 0 = no size limit.
+# A 54-minute 720p source is roughly 350 MB, so 4096 comfortably covers the
+# long videos this plan accepts while still bounding one job's footprint on a
+# 4 GB disk that also holds every rendered clip.
+max_source_mb = 4096
 
 # Remote worker dispatch (Tailscale mode B): when set, e.g.
 #   WORKER_URL = "http://100.101.102.103:8765"

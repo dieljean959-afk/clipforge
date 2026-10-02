@@ -1251,11 +1251,26 @@ async def upload_job(
         caption_preset=captionPreset,
     )
     job_id = job["_id"]
-    dest_dir = settings.app.paths.downloads_dir / job_id
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = store.job_source_dir_for_write(job_id)
     tmp = dest_dir / "upload.bin"
+    max_mb = settings.hosted.max_source_mb
+    written = 0
     with tmp.open("wb") as fh:
         while chunk := await file.read(1024 * 1024):
+            written += len(chunk)
+            # Checked while streaming, so an oversized upload is abandoned
+            # rather than written in full and then rejected — on a 4 GB disk
+            # that is the difference between a clear error and a full volume.
+            if max_mb and written > max_mb * 1024 * 1024:
+                fh.close()
+                tmp.unlink(missing_ok=True)
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                store.delete_job(job_id)
+                raise HTTPException(
+                    413,
+                    f"That file is larger than the {max_mb} MB limit for this plan. "
+                    f"Compress it or trim it and attach again.",
+                )
             fh.write(chunk)
     final = download_svc.save_upload(tmp, dest_dir, file.filename)
     try:
@@ -1420,8 +1435,7 @@ def delete_job(job_id: str) -> dict:
     # without this a manual delete only freed a few KB of JSON and the disk
     # stayed full — the retention sweeper already does exactly this.
     remove_workspace(settings.app.paths.data_dir, job_id)
-    for d in (
-        settings.app.paths.downloads_dir / job_id,
+    for d in settings.app.paths.job_source_dirs(job_id) + (
         settings.app.paths.outputs_dir / job_id,
     ):
         shutil.rmtree(d, ignore_errors=True)
@@ -1471,8 +1485,7 @@ def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
             missing.append(job_id)
             continue
         remove_workspace(settings.app.paths.data_dir, job_id)
-        for d in (
-            settings.app.paths.downloads_dir / job_id,
+        for d in settings.app.paths.job_source_dirs(job_id) + (
             settings.app.paths.outputs_dir / job_id,
         ):
             shutil.rmtree(d, ignore_errors=True)

@@ -57,8 +57,12 @@ class _Paths:
         self.data_dir = root
         self.downloads_dir = root / "downloads"
         self.outputs_dir = root / "outputs"
-        for d in (self.data_dir, self.downloads_dir, self.outputs_dir):
+        self.uploads_dir = root / "uploads"
+        for d in (self.data_dir, self.downloads_dir, self.outputs_dir, self.uploads_dir):
             d.mkdir(parents=True, exist_ok=True)
+
+    def job_source_dirs(self, job_id: str) -> tuple[Path, ...]:
+        return (self.uploads_dir / job_id, self.downloads_dir / job_id)
 
 
 def _make_worker(tmp: Path) -> tuple[InProcessWorker, LocalStore]:

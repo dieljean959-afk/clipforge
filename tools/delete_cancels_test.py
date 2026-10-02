@@ -144,7 +144,7 @@ def main() -> int:
         )
         delete_fn = main_src.split("def delete_job(")[1].split("\n@app.")[0]
         check(
-            "downloads_dir / job_id" in delete_fn and "outputs_dir / job_id" in delete_fn,
+            "job_source_dirs(job_id)" in delete_fn and "outputs_dir / job_id" in delete_fn,
             "deleting a job also removes its downloads/ and outputs/ folders",
         )
         check(

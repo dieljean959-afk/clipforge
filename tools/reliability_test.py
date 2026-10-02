@@ -113,6 +113,13 @@ def main() -> int:
 
     store = LocalStore(paths)
     job_id = f"reltest{int(time.time())}"
+    # This suite runs against the REAL store on purpose (it is the only end-to-end
+    # test that exercises the live paths object), so every job it creates is a
+    # card on the user's dashboard until it is removed. Collected here and
+    # deleted in the finally block — otherwise every QA run left three fake
+    # "complete" batches behind, which is exactly the debris this project keeps
+    # trying to stop showing people.
+    created: list[str] = []
     scratch = Path("/tmp/clipforge-reliability")
     src = scratch / f"{job_id}.mp4"
     timings: dict[str, float] = {}
@@ -144,6 +151,7 @@ def main() -> int:
         stage("job setup")
         job = store.create_job(source_type="upload", source=src.name)
         job_id = job["_id"]
+        created.append(job_id)
         jdir = paths.downloads_dir / job_id
         jdir.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, jdir / "source.mp4")
@@ -325,6 +333,7 @@ def main() -> int:
         # (attempt 2)" forever) — so it fails once, honestly, instead.
         orphan = store.create_job(source_type="upload", source="x.mp4")
         oid = orphan["_id"]
+        created.append(oid)
         # Give it the file a real upload would have left behind, so this is the
         # restart case rather than the lost-upload case.
         src_dir = settings.app.paths.downloads_dir / oid
@@ -334,6 +343,7 @@ def main() -> int:
                          "interruptCount": 2, "lastProgressAt": int(time.time() * 1000)})
         lost = store.create_job(source_type="upload", source="gone.mp4")
         lid = lost["_id"]
+        created.append(lid)
         store.write_job({**lost, "stage": "rendering", "progress": 30,
                          "lastProgressAt": int(time.time() * 1000)})
         worker = InProcessWorker(settings, store)
@@ -382,6 +392,22 @@ def main() -> int:
         check(f"run completed without crashing ({type(exc).__name__})", False, str(exc)[:300])
     finally:
         timings["total"] = time.time() - t_all
+        # Take the test's own batches off the dashboard, and their bytes with
+        # them. Best-effort: a cleanup failure must never fail the suite.
+        removed = 0
+        for jid in ([] if args.keep else created):
+            try:
+                store.delete_job(jid)
+                for d in paths.job_source_dirs(jid) + (paths.outputs_dir / jid,):
+                    shutil.rmtree(d, ignore_errors=True)
+                from app.stages import workspace_root
+
+                shutil.rmtree(workspace_root(paths.data_dir, jid), ignore_errors=True)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                print(f"  (cleanup skipped {jid}: {exc})")
+        if removed:
+            print(f"cleaned up {removed} test job(s) from the live store")
 
     print(f"\n{'=' * 66}")
     for r in RESULTS:

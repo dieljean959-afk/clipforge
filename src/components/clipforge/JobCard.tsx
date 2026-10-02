@@ -58,12 +58,13 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
  * Global stall watchdog: mirror the server's silence watchdog so the UI does
  * not claim a long transcription is dead while it is progressing — and, just
  * as importantly, does NOT stay silent for twice as long as the server will
- * actually wait. The server's budget is 10 minutes (CLIPFORGE_STALL_TIMEOUT_SEC);
- * the UI used to hold off for 20, so a job the server had already killed and
- * auto-retried still showed a spinner with no explanation.
+ * actually wait. The server's budget is 3 minutes
+ * (app/worker.py STALL_TIMEOUT_SEC = 180); this used to hold off for 10, so a
+ * job the server had already killed and auto-retried still showed a spinner
+ * with no explanation for seven more minutes.
  * 2s poll mirrors the progress cadence.
  */
-const STALL_THRESHOLD_MS = 600_000;
+const STALL_THRESHOLD_MS = 90_000;
 
 /** Re-render once a second so "12s ago" actually counts up on its own. */
 function useNow(active: boolean): number {
@@ -444,23 +445,40 @@ export function JobCard({
             </ul>
           )}
           {quiet && !stalled && (
+            /* Name the real state instead of guessing. "One long unit of work"
+               was wrong: with the chunk reporter every transcription window
+               updates this field, and the render stage reports per clip, so
+               whatever is on screen is the exact thing the worker is doing. */
             <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90">
-              No recent activity ({fmtAgo(silenceMs(job, now))}). The job may just be
-              inside one long unit of work — a single encode or transcription
-              window produces no progress lines for a while. Nothing is wrong
-              yet: the server kills and auto-retries a job only after{" "}
-              {STALL_THRESHOLD_MS / 60000} minutes of silence.
+              No progress reported for {fmtAgo(silenceMs(job, now))}. The worker is
+              still at{" "}
+              <span className="font-mono">{job.stage}</span>
+              {typeof job.unitsDone === "number" && job.unitsDone > 0
+                ? ` — ${job.unitsDone} of ${job.unitsTotal ?? "?"} ${job.unitLabel ?? "units"} finished`
+                : ""}
+              , last reporting:{" "}
+              <span className="font-semibold">
+                {job.progressDetail ?? STAGE_LABELS[job.stage as ClipStage]}
+              </span>
+              . The server restarts and resumes this job after{" "}
+              {STALL_THRESHOLD_MS / 60000} minutes of silence, picking up from the
+              last finished unit.
             </div>
           )}
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress
               from the worker for {STALL_THRESHOLD_MS / 60000} minutes at stage{" "}
-              <span className="font-mono">{job.stage}</span>. Long videos can legitimately
-              spend many minutes inside one transcription window — check the logs for
-              the exact stage. If it stays stuck, the server kills the worker and
-              retries the job automatically once, resuming from the last completed
-              clip.
+              <span className="font-mono">{job.stage}</span>
+              {typeof job.unitsDone === "number" && job.unitsDone > 0
+                ? `, stuck after ${job.unitsDone} of ${job.unitsTotal ?? "?"} ${job.unitLabel ?? "units"}`
+                : ""}
+              . Last reported:{" "}
+              <span className="font-semibold">
+                {job.progressDetail ?? STAGE_LABELS[job.stage as ClipStage]}
+              </span>
+              . The server kills the worker and retries the job automatically once,
+              resuming from the last finished unit — finished clips are kept.
             </div>
           )}
         </div>

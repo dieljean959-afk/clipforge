@@ -56,6 +56,13 @@ from app.store import LocalStore
 HEARTBEAT_SEC = 5.0
 
 
+def _chunk_cached(cache_dir: Path | None, index: int) -> bool:
+    """Is this transcript chunk already on disk from an earlier attempt?"""
+    if cache_dir is None:
+        return False
+    return (cache_dir / f"chunk_{index:05d}.json").exists()
+
+
 class JobPaused(Exception):
     """The user paused this job; the pipeline stopped at a safe boundary.
 
@@ -122,6 +129,10 @@ class Pipeline:
         # Remaining-time prior for the CURRENT stage (e.g. duration x RTF while
         # transcribing). Reset by _progress whenever the stage changes.
         self._prior_eta_sec: float | None = None
+        # Heartbeat writes that failed. Surfaced by the stall check so a job
+        # whose liveness signal could not be recorded is diagnosed as
+        # "the worker is alive but cannot report", not "the worker died".
+        self._heartbeat_faults = 0
 
     # ------------------------------------------------------------------
     # progress / logging helpers
@@ -270,7 +281,13 @@ class Pipeline:
                 except Exception as exc:  # noqa: BLE001 - never fail a job
                     # A heartbeat that cannot write must not raise into the
                     # render; the watchdog's own timeout remains the backstop.
-                    logger.debug(f"[heartbeat] {what}: {exc}")
+                    # WARNING, not debug: this is the exact failure behind the
+                    # dashboard's "updated 4m ago" while the worker was alive
+                    # and busy. A silently-dropping heartbeat makes a healthy
+                    # job look stalled to both the user and the watchdog, so it
+                    # must be visible in the log without stopping the render.
+                    logger.warning(f"[heartbeat] {what}: could not write: {exc}")
+                    self._heartbeat_faults += 1
 
         thread = threading.Thread(
             target=beat, name=f"heartbeat-{job_id[:8]}", daemon=True,
@@ -517,13 +534,32 @@ class Pipeline:
         self._log(job_id, f"Stage: fetch — {job['source'][:80]}")
 
         if job.get("sourceType") == "upload":
-            src = dest_dir / f"source{Path(job['source']).suffix.lower() or '.mp4'}"
-            if not src.exists():
+            # Search BOTH storage locations. The expected name is tried first
+            # so a job whose recorded filename is authoritative still resolves
+            # the same way it always did; the general sweep is the fallback for
+            # a job written under the other root.
+            expected = f"source{Path(job['source']).suffix.lower() or '.mp4'}"
+            src: Path | None = None
+            for candidate_dir in self.settings.app.paths.job_source_dirs(job_id):
+                named = candidate_dir / expected
+                if named.exists() and named.stat().st_size > 0:
+                    src = named
+                    break
+            if src is None:
+                src = self.store.find_source_file(job_id)
+            if src is None:
+                searched = ", ".join(
+                    str(d) for d in self.settings.app.paths.job_source_dirs(job_id)
+                )
                 raise download.DownloadError(
-                    f"uploaded file missing at {src} — re-submit with 'Attach file'"
+                    f"The uploaded file for this batch is no longer on the server. "
+                    f"It was looked for as '{expected}' in: {searched}. Nothing else "
+                    f"was deleted — every finished clip from this batch is still "
+                    f"downloadable. Re-submit the file with 'Attach file' to start a "
+                    f"new batch."
                 )
             self._progress(job_id, "grabbing", 100, "Upload verified on disk")
-            self._log(job_id, f"upload present: {src.name}")
+            self._log(job_id, f"upload present: {src.name} ({src.stat().st_size} bytes)")
         else:
             def on_progress(frac: float, _eta: float | None) -> None:
                 self._progress(job_id, "grabbing", frac, "Clippy is grabbing the video...")
@@ -591,14 +627,69 @@ class Pipeline:
         detail = f"{engine.engine} is transcribing word timings..."
         self._progress(job_id, "transcribing", 0, detail, prior_eta_sec=prior_eta)
 
+        # Chunk counting. This is the fix for "transcription sits at 0%": the
+        # fraction alone cannot distinguish "0% because it just started" from
+        # "0% because nothing is happening", because a Whisper batch yields no
+        # segment until the whole batch decodes. Naming the chunk answers the
+        # question the percentage could not — and `done/total` advances on every
+        # finished chunk, so the number moves at least eleven times on a
+        # 54-minute source instead of never.
+        chunk_state = {"done": 0, "total": 1, "chunk": 0}
+        # Hoisted so `on_chunk` can tell a cache reuse from a real decode in
+        # the log line, and so both callbacks and `transcribe` agree on the one
+        # cache location.
+        chunk_cache_dir = ws.stage_dir("transcribe") / "chunks"
+
+        def on_chunk(index: int, total: int, *, phase: str, resuming: bool = False) -> None:
+            chunk_state["total"] = max(1, total)
+            if phase == "start":
+                chunk_state["chunk"] = index + 1
+                # Deliberately leaves `progress` alone on a chunk START. Faking
+                # movement that has not happened is worse than a number that
+                # is merely still — the text is what tells the user work is in
+                # flight, and the heartbeat keeps the liveness timestamp fresh.
+                self._progress(
+                    job_id, "transcribing",
+                    chunk_state["done"] / chunk_state["total"],
+                    f"Transcribing chunk {index + 1} of {total}",
+                    unit_label="chunks",
+                    units_done=chunk_state["done"], units_total=chunk_state["total"],
+                    prior_eta_sec=prior_eta,
+                )
+                self._log(
+                    job_id,
+                    f"chunk {index + 1}/{total} "
+                    + ("resuming from cache" if _chunk_cached(chunk_cache_dir, index) else "decoding"),
+                )
+            else:
+                chunk_state["done"] = max(chunk_state["done"], index + 1)
+                self._progress(
+                    job_id, "transcribing",
+                    chunk_state["done"] / chunk_state["total"],
+                    (
+                        f"Transcribing chunk {index + 1} of {total}"
+                        + (" (from cache)" if resuming else " — done")
+                    ),
+                    unit_label="chunks",
+                    units_done=chunk_state["done"], units_total=chunk_state["total"],
+                    prior_eta_sec=prior_eta,
+                )
+
         def on_progress(frac: float) -> None:
-            now_job = self.store.get_job(job_id)
-            total = (now_job.get("durationSec") or 0) if now_job else 0
+            # Sub-chunk smoothing only. It must never move the bar BACKWARDS
+            # past what the chunk counter already proved, which is what makes
+            # the first chunk usable instead of a dead 0%.
+            base = chunk_state["done"] / chunk_state["total"]
+            frac = max(frac, base)
             self._progress(
-                job_id, "transcribing", frac, detail,
-                unit_label="min",
-                units_done=round(frac * (total / 60), 1),
-                units_total=round(total / 60, 1),
+                job_id, "transcribing", frac,
+                (
+                    f"Transcribing chunk {chunk_state['chunk']} "
+                    f"of {chunk_state['total']}"
+                    if chunk_state["total"] > 1 else detail
+                ),
+                unit_label="chunks",
+                units_done=chunk_state["done"], units_total=chunk_state["total"],
                 prior_eta_sec=prior_eta,
             )
 
@@ -608,8 +699,9 @@ class Pipeline:
         with self._heartbeat(job_id, "transcribe"):
             transcript = subtitle.transcribe(
                 src, self.settings, on_progress=on_progress,
-                cache_dir=ws.stage_dir("transcribe") / "chunks",
+                cache_dir=chunk_cache_dir,
                 should_pause=lambda: self.pause_requested(job_id),
+                on_chunk=on_chunk,
             )
         # Record what this host actually achieved so the next job's ETA starts
         # from a measurement instead of the documented prior.

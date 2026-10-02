@@ -794,6 +794,41 @@ class Paths:
     data_dir: Path
     static_dir: Path
     storage_dir: Path | None = None
+    #: Where an UPLOADED file is stored. Deliberately inside the codebase
+    #: (`data/uploads/`), NOT under `downloads_dir`.
+    #:
+    #: `downloads_dir` is symlinked to `<codebase>/../clipforge-data`, which
+    #: exists to keep media out of the Vite watch set. Measured on this host,
+    #: that is exactly the directory that does NOT survive a redeploy: after a
+    #: restore, `outputs/` and `data/` (real directories in the codebase) were
+    #: intact while the media-storage `downloads/` tree had been emptied,
+    #: so 11 of 18 job records pointed at a `downloads/{id}/` folder that no
+    #: longer existed and every one of those jobs died at Rendering with
+    #: "Source file was lost".
+    #:
+    #: An upload is the one artefact there is no way to recreate — a URL job can
+    #: always be re-downloaded, an uploaded file cannot. So uploads live where
+    #: the platform demonstrably restores bytes. `downloads_dir` stays as a
+    #: FALLBACK read path, so every job created before this change (and any job
+    #: whose source is still there) keeps working untouched.
+    uploads_dir: Path | None = None
+
+    def job_source_dirs(self, job_id: str) -> tuple[Path, ...]:
+        """Every directory a job's source file may legitimately live in.
+
+        Newest location first. Callers read from ALL of them and write to
+        ``uploads_dir`` only — never to a fallback, because writing to two
+        places is how the two trees drifted apart before.
+        """
+        dirs: list[Path] = []
+        # `None` means "not configured", not "uploads do not exist" — the
+        # default is always `data_dir/uploads`, so a hand-built Paths resolves
+        # to the same place load_config does instead of silently losing the
+        # primary root.
+        uploads = self.uploads_dir or (self.data_dir / "uploads")
+        dirs.append(uploads / job_id)
+        dirs.append(self.downloads_dir / job_id)
+        return tuple(dirs)
 
 
 @dataclass
@@ -1167,6 +1202,8 @@ class HostedConfig:
     # Plan guard: reject sources longer than this at SUBMIT time. Long sources
     # ARE supported — processing time scales proportionally, see [hosted] notes.
     max_source_min: int = 120
+    # Largest accepted upload in MB. 0 = no limit. Checked at submit time.
+    max_source_mb: int = 4096
     # Delete finished artifacts (outputs/ + downloads/) this long after a job
     # completes — hosted storage is finite and users expect cleanup.
     retention_hours: int = 24
@@ -1412,14 +1449,20 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         storage_dir = storage
         logger.info(f"[config] media storage: {storage}")
 
+    data_dir = Path(os.getenv("CLIPFORGE_DATA_DIR", root / str(app.get("data_dir", "data"))))
+    uploads_override = os.getenv("CLIPFORGE_UPLOADS_DIR", "").strip()
+
     paths = Paths(
         downloads_dir=Path(os.getenv("CLIPFORGE_DOWNLOADS_DIR", media.get("downloads", storage / "downloads"))),
         outputs_dir=Path(os.getenv("CLIPFORGE_OUTPUTS_DIR", media.get("outputs", storage / "outputs"))),
-        data_dir=Path(os.getenv("CLIPFORGE_DATA_DIR", root / str(app.get("data_dir", "data")))),
+        data_dir=data_dir,
         static_dir=root / "webui",
         storage_dir=storage_dir,
+        # Uploads live INSIDE the codebase on purpose — see Paths.uploads_dir
+        # for the measurement that motivated it.
+        uploads_dir=Path(uploads_override) if uploads_override else data_dir / "uploads",
     )
-    for name in ("downloads_dir", "outputs_dir", "data_dir"):
+    for name in ("downloads_dir", "outputs_dir", "data_dir", "uploads_dir"):
         try:
             getattr(paths, name).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -1655,6 +1698,12 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     h = raw.get("hosted", {})
     hosted = HostedConfig(
         max_source_min=max(1, int(h.get("max_source_min", os.getenv("CLIPFORGE_MAX_SOURCE_MIN", 120)))),
+        # 0 = no limit. Enforced at submit time so an oversized upload is
+        # refused before its bytes occupy the disk.
+        max_source_mb=max(0, int(
+            os.getenv("CLIPFORGE_MAX_SOURCE_MB")
+            or h.get("max_source_mb", 4096)
+        )),
         retention_hours=max(0, int(h.get("retention_hours", os.getenv("CLIPFORGE_RETENTION_HOURS", 24)))),
         worker_url=(os.getenv("WORKER_URL") or h.get("worker_url", "") or "").strip().rstrip("/"),
         worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),
@@ -1794,13 +1843,17 @@ def boot_banner(settings: Settings) -> None:
     if engine.model_note:
         print(f"[boot] WARNING: {engine.model_note}")
     print(f"[boot] Output: {settings.video.width}x{settings.video.height} @ {settings.video.fps}fps CRF {settings.video.crf}")
-    print(f"[boot] Folders: {settings.app.paths.downloads_dir} / {settings.app.paths.outputs_dir} / {settings.app.paths.data_dir}")
+    print(
+        f"[boot] Folders: uploads {settings.app.paths.uploads_dir} (new sources) "
+        f"/ downloads {settings.app.paths.downloads_dir} (legacy sources, read-only fallback) "
+        f"/ outputs {settings.app.paths.outputs_dir} / data {settings.app.paths.data_dir}"
+    )
     retention = (
         "disabled (jobs are never auto-deleted)"
         if settings.hosted.retention_hours <= 0
         else f"{settings.hosted.retention_hours}h"
     )
-    print(f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min | retention: {retention}")
+    print(        f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min / {settings.hosted.max_source_mb} MB | retention: {retention}")
     print(f"[boot] Worker pool: {settings.hosted.worker_concurrency} parallel job(s) (one child process each)")
     if settings.hosted.worker_url:
         print(f"[boot] Worker dispatch: {settings.hosted.worker_url} (rendering happens on the remote worker)")
