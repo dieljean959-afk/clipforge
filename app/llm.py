@@ -46,6 +46,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent import futures as cf
 from dataclasses import replace
 from typing import Any
 
@@ -1460,6 +1461,56 @@ def detect_clips(
     candidates: list[dict[str, Any]] = []
     reused = 0
     skipped: list[int] = []
+
+    # ---- concurrent chunk pre-fetch -------------------------------------
+    # Detection chunks are independent network round trips, so on a host with
+    # a single core the win is real: the stage spends its life WAITING on a
+    # provider, not computing, and four calls in flight hide three quarters of
+    # that latency. This is the only parallelism in the pipeline that pays on a
+    # 1-CPU box.
+    #
+    # It deliberately does NOT restructure the loop below. The concurrent part
+    # only performs the API call; the sequential loop still decides cache hits,
+    # ordering, merging, per-chunk persistence, pause checks and the
+    # skip-and-continue policy, and it re-raises each pre-fetched failure at
+    # exactly the point the sequential call would have raised it. So a chunk
+    # that failed still fails the same way, in the same order, with the same
+    # log line -- the concurrency cannot change an outcome, only when it lands.
+    concurrency = max(
+        1, min(8, int(getattr(settings.llm, "detect_concurrency", 1) or 1))
+    )
+    prefetched: dict[int, str] = {}
+    failures: dict[int, BaseException] = {}
+
+    def _prefetch(index: int) -> None:
+        start_index, chunk_words_for_chunk = chunks[index]
+        try:
+            prefetched[index] = call_llm(
+                build_prompt(chunk_words_for_chunk, cfg, start_index=start_index),
+                settings,
+            )
+        except BaseException as exc:  # noqa: BLE001 - re-raised in order below
+            failures[index] = exc
+
+    if concurrency > 1 and len(chunks) > 1:
+        todo: list[int] = []
+        for index in range(len(chunks)):
+            if should_pause is not None and should_pause():
+                break
+            if chunk_cache is not None and chunk_cache.get(index) is not None:
+                continue  # already paid for; never re-bill it to be parallel
+            todo.append(index)
+        if len(todo) > 1:
+            logger.info(
+                f"[llm] detecting {len(todo)} chunk(s) {concurrency}-way concurrently"
+            )
+            with cf.ThreadPoolExecutor(
+                max_workers=min(concurrency, len(todo))
+            ) as pool:
+                # map() blocks and preserves order, but results land in their
+                # own dict slots, so a fast chunk cannot overtake a slow one in
+                # the merge below.
+                list(pool.map(_prefetch, todo))
     for i, (start_index, chunk) in enumerate(chunks):
         # Pause is honoured at a chunk boundary: never between the API call
         # and the cache write, which is the window where a kill would lose
@@ -1495,7 +1546,12 @@ def detect_clips(
         # genuinely has nothing and the user is right to be told. A partial
         # result is reported as a warning and the job continues.
         try:
-            text = call_llm(prompt, settings)
+            if i in prefetched:
+                text = prefetched.pop(i)
+            elif i in failures:
+                raise failures.pop(i)
+            else:
+                text = call_llm(prompt, settings)
         except LlmNotConfigured:
             raise  # a missing key affects every chunk; never hide it
         except DetectionPaused:

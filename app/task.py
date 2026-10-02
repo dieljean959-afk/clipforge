@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 from concurrent import futures as cf
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,12 @@ from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
 from app.store import LocalStore
+
+#: How often a long, silent step re-asserts that the pipeline is alive.
+#:
+#: Five seconds is well inside the 600s stall timeout and comfortably longer
+#: than any real UI poll, so this is liveness only -- never progress.
+HEARTBEAT_SEC = 5.0
 
 
 class JobPaused(Exception):
@@ -231,6 +238,46 @@ class Pipeline:
             "lastProgressAt": now_ms,
         })
         self.store.write_job(job)
+
+    @contextmanager
+    def _heartbeat(self, job_id: str, what: str):
+        """Prove liveness across a long step that reports nothing.
+
+        A single ffmpeg call can run for minutes, and ffmpeg's own progress is
+        parsed only for error text -- nothing calls `_progress` while it works.
+        So `lastProgressAt` goes stale during exactly the step most likely to be
+        legitimately slow, and two things then misfire: the UI shows "no recent
+        activity", and the watchdog (which kills a job after STALL_TIMEOUT_SEC
+        of silence) terminates a render that was working fine.
+
+        This bumps `lastProgressAt` every HEARTBEAT_SEC and nothing else. It
+        deliberately does NOT touch `progress` or the ETA: inventing movement
+        that did not happen is worse than admitting the step is opaque. A
+        killed-but-healthy process cannot survive it either -- it stops the
+        moment the block exits, including on the exception path.
+        """
+        stop = threading.Event()
+
+        def beat() -> None:
+            while not stop.wait(HEARTBEAT_SEC):
+                try:
+                    job = self.store.get_job(job_id)
+                    if job is None or job.get("stage") in {"complete", "failed"}:
+                        return
+                    self._patch_job(job_id, lastProgressAt=int(time.time() * 1000))
+                except Exception as exc:  # noqa: BLE001 - never fail a job
+                    # A heartbeat that cannot write must not raise into the
+                    # render; the watchdog's own timeout remains the backstop.
+                    logger.debug(f"[heartbeat] {what}: {exc}")
+
+        thread = threading.Thread(
+            target=beat, name=f"heartbeat-{job_id[:8]}", daemon=True,
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
 
     def _current_rtf(self) -> float:
         """This host's transcription speed, measured where possible."""
@@ -533,11 +580,15 @@ class Pipeline:
                 prior_eta_sec=prior_eta,
             )
 
-        transcript = subtitle.transcribe(
-            src, self.settings, on_progress=on_progress,
-            cache_dir=ws.stage_dir("transcribe") / "chunks",
-            should_pause=lambda: self.pause_requested(job_id),
-        )
+        # A single Whisper chunk can run for minutes on a small host. The
+        # heartbeat keeps the job visibly alive across it; the chunk callback
+        # still owns the real progress numbers.
+        with self._heartbeat(job_id, "transcribe"):
+            transcript = subtitle.transcribe(
+                src, self.settings, on_progress=on_progress,
+                cache_dir=ws.stage_dir("transcribe") / "chunks",
+                should_pause=lambda: self.pause_requested(job_id),
+            )
         # Record what this host actually achieved so the next job's ETA starts
         # from a measurement instead of the documented prior.
         if transcript.rtf is not None:
@@ -860,20 +911,26 @@ class Pipeline:
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                meta = video.render_clip(
-                    src, out_path,
-                    start=c0, end=c1,
-                    settings=self.settings,
-                    ass_path=ass_path if cues else None,
-                    caption_cues=cues if cues else None,
-                    crop_windows=crop_windows,
-                    silence_cuts=cuts_for_clip,
-                    # The adaptive bitrate ceiling is derived from the output
-                    # geometry INCLUDING frame rate, so the source fps has to
-                    # reach the encoder. Without it a 30fps source would be
-                    # sized as if it were 60 and waste half its budget.
-                    src_fps=float(src_meta.get("fps") or 30.0),
-                )
+                # The heartbeat spans ONLY the encode. Nothing in it reports
+                # progress -- ffmpeg's own output is read for errors, not
+                # percentages -- so without this a long clip looks dead, and
+                # the watchdog can kill a render that is working.
+                with self._heartbeat(job_id, f"render clip {idx + 1}"):
+                    meta = video.render_clip(
+                        src, out_path,
+                        start=c0, end=c1,
+                        settings=self.settings,
+                        ass_path=ass_path if cues else None,
+                        caption_cues=cues if cues else None,
+                        crop_windows=crop_windows,
+                        silence_cuts=cuts_for_clip,
+                        # The adaptive bitrate ceiling is derived from the
+                        # output geometry INCLUDING frame rate, so the source
+                        # fps has to reach the encoder. Without it a 30fps
+                        # source would be sized as if it were 60 and waste
+                        # half its budget.
+                        src_fps=float(src_meta.get("fps") or 30.0),
+                    )
                 thumb = self.settings.app.paths.outputs_dir / job_id / f"clip_{idx + 1:02d}.jpg"
                 video.render_first_frame_thumb(out_path, thumb)
                 clip_doc.update({

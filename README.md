@@ -954,6 +954,11 @@ python3 tools/render_loop_test.py  # an empty balance must not look like a hung 
 python3 tools/share_intents_test.py   # sharing never silently downloads
 python3 tools/share_instant_test.py   # the share copy is small/faststart; the tap path awaits nothing
 python3 tools/share_endpoint_test.py  # /share over real HTTP: immutable, ETag, Range, 206, concurrency
+python3 tools/heartbeat_test.py      # long steps prove liveness without faking progress
+python3 tools/detect_concurrency_test.py  # concurrent detection == sequential, exactly
+python3 tools/perf_bench.py verify <jobId>  # correctness gate: framing, sync, audio, count
+python3 tools/perf_bench.py render <jobId>  # sequential vs concurrent ffmpeg, measured
+python3 tools/perf_bench.py report           # before/after table from saved runs
 python3 tools/remux_faststart.py --apply   # move moov to the front of already-rendered clips
 ```
 

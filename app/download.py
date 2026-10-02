@@ -122,6 +122,14 @@ def download_url(
         "quiet": True,
         "no_warnings": True,
         "retries": 3,
+        # Download DASH fragments concurrently. A single stream is a serial
+        # request/response loop that leaves the link idle between segments;
+        # eight in flight saturates a normal connection several times over.
+        # This is pure network concurrency -- it costs no extra CPU, which is
+        # what makes it one of the few speedups that still pays on a host with
+        # a single core. Capped at 8 because beyond that the gain flattens and
+        # the connection starts spending its time on contention instead.
+        "concurrent_fragment_downloads": 8,
         "progress_hooks": [],
     }
     if settings.download.cookies_from_browser:

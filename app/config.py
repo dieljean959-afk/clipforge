@@ -968,6 +968,9 @@ class LlmConfig:
     provider: str = "deepseek"
     #: "" disables automatic failover. Otherwise one of PROVIDERS.
     fallback_provider: str = ""
+    #: How many detection chunks may be in flight at once. 1 = strictly
+    #: sequential. See load_config for why overlapping is safe here.
+    detect_concurrency: int = 4
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.1:8b"
     ollama_timeout_sec: int = 600
@@ -1387,6 +1390,19 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     llm = LlmConfig(
         provider=provider,
         fallback_provider=fallback_provider,
+        # Detection chunks are INDEPENDENT network calls, so overlapping them
+        # is a real win on a host with one CPU: the work is waiting on a round
+        # trip, not on a core. Capped at 4 because that is where the gain
+        # flattens and rate limits begin to bite -- and 4 is what the provider
+        # tiers actually sustain. 1 restores the strictly sequential behaviour.
+        detect_concurrency=max(
+            1,
+            min(
+                8,
+                int(os.getenv("CLIPFORGE_DETECT_CONCURRENCY")
+                    or lc.get("detect_concurrency", 4)),
+            ),
+        ),
         ollama_url=str(
             os.getenv("OLLAMA_URL") or lc.get("ollama_url", "http://127.0.0.1:11434")
         ).strip().rstrip("/"),

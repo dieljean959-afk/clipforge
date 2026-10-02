@@ -450,7 +450,13 @@ reframe = true
 silence_trim = true
 
 [download]
-max_height = 1080
+# 720p is the source ceiling, not the output size. Every clip is re-framed to
+# 1080x1920 and re-encoded from the cropped region, so a 1080p source only
+# costs download time and bytes that the crop mostly throws away: the reframe
+# keeps a ~607px-wide slice of the source, which 720p still has. Raise to 1080
+# only if you are clipping sources that are already vertical, where the full
+# width is used.
+max_height = 720
 # Leave "" for none. Set to "chrome"/"firefox"/"edge"/"brave"/"safari" to borrow
 # that browser's cookies for age-restricted videos you can access.
 cookies_from_browser = ""
