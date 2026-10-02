@@ -318,22 +318,42 @@ def main() -> int:
               worker_mod.STALL_TIMEOUT_SEC <= 180,
               f"{worker_mod.STALL_TIMEOUT_SEC}s")
 
+        # A host restart leaves a job frozen mid-stage. Whether it can be
+        # resumed depends on one thing only: is its input still on disk? An
+        # upload whose file is gone is NOT re-queueable — re-queueing it burns
+        # a full pipeline launch per restart and fails again ("resuming
+        # (attempt 2)" forever) — so it fails once, honestly, instead.
         orphan = store.create_job(source_type="upload", source="x.mp4")
         oid = orphan["_id"]
+        # Give it the file a real upload would have left behind, so this is the
+        # restart case rather than the lost-upload case.
+        src_dir = settings.app.paths.downloads_dir / oid
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "x.mp4").write_bytes(b"not-a-real-video")
         store.write_job({**orphan, "stage": "rendering", "progress": 30,
                          "interruptCount": 2, "lastProgressAt": int(time.time() * 1000)})
+        lost = store.create_job(source_type="upload", source="gone.mp4")
+        lid = lost["_id"]
+        store.write_job({**lost, "stage": "rendering", "progress": 30,
+                         "lastProgressAt": int(time.time() * 1000)})
         worker = InProcessWorker(settings, store)
         fixed = worker.reconcile_stale_running()
         rec = store.get_job(oid)
         check("orphaned job is RECONCILED", oid in fixed)
-        check("orphan is re-queued, not failed", rec.get("stage") == "queued",
-              f"stage={rec.get('stage')}")
+        check("orphan with its file intact is re-queued, not failed",
+              rec.get("stage") == "queued", f"stage={rec.get('stage')}")
         check("requeue names the real cause",
               "restart" in (rec.get("interruptReason") or "").lower(),
               rec.get("interruptReason"))
         check("requeue reason stays one sentence",
               len(rec.get("interruptReason") or "") <= 220,
               f"{len(rec.get('interruptReason') or '')} chars")
+        gone_rec = store.get_job(lid)
+        check("an upload whose file is gone fails instead of looping",
+              gone_rec.get("stage") == "failed", f"stage={gone_rec.get('stage')}")
+        check("that failure says the source is gone",
+              "source" in (gone_rec.get("error") or "").lower(),
+              gone_rec.get("error"))
         # the bug this whole exercise exists for: repeated reconciliation must
         # not wrap the message inside itself, forever
         first = rec.get("interruptReason")
@@ -342,6 +362,7 @@ def main() -> int:
         again = (store.get_job(oid) or {}).get("interruptReason")
         check("repeated reconciliation does not grow the message",
               len(again or "") <= 220, f"{len(again or '')} chars (was {len(first or '')})")
+        shutil.rmtree(src_dir, ignore_errors=True)
 
         stage("resources")
         from app import video as _v

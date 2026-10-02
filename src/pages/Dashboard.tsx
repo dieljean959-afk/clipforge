@@ -19,6 +19,7 @@ import { ShareReadinessSummary } from "@/components/clipforge/ShareButton";
 import { ClipPreview } from "@/components/clipforge/ClipPreview";
 import { ExportDialog } from "@/components/clipforge/ExportDialog";
 import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
+import { CleanupJunkDialog } from "@/components/clipforge/CleanupJunkDialog";
 import { CaptionStyleDialog } from "@/components/clipforge/CaptionStyleDialog";
 import { GroqUsageBadge } from "@/components/clipforge/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
@@ -345,6 +346,18 @@ export default function Dashboard() {
                   rather than inside the selected-job toolbar — it has to be
                   reachable before the first batch exists. */}
               <CaptionStyleDialog />
+              {/* One-tap cleanup for the batches that produced nothing.
+                  Individual trash icons are for one batch; after a run of test
+                  uploads this is what actually clears the dashboard. */}
+              {allJobs.length > 0 && (
+                <CleanupJunkDialog
+                  className="cursor-pointer gap-1.5 text-xs"
+                  onDeleted={() => {
+                    if (selectedJobId !== null) setSelectedJobId(null);
+                    void refreshJobs();
+                  }}
+                />
+              )}
             </div>
             {selectedJob && (
               <div className="flex items-center gap-2">

@@ -510,6 +510,120 @@ def test_small_things() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# E. deleting batches actually works, from every entry point
+# --------------------------------------------------------------------------- #
+
+
+def test_delete_paths() -> None:
+    section("E. delete paths")
+
+    import warnings
+
+    warnings.filterwarnings("ignore")
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+
+    client = TestClient(main_mod.app)
+    store = main_mod.store
+    base = Path(tempfile.mkdtemp(prefix="clipforge-del-"))
+    made: list[str] = []
+    # Unique per run: a deleted id leaves a tombstone behind on purpose, and a
+    # re-run must not collide with the last run's tombstones.
+    tag = f"{int(time.time()) % 1_000_000:06d}"
+    try:
+        # Three throwaway batches: one that failed, one that finished with
+        # nothing rendered, one that is still running.
+        for i, stage in enumerate(("failed", "complete", "running")):
+            jid = f"del{tag}{i:03d}"
+            store.write_job({
+                "_id": jid,
+                "stage": stage,
+                "progress": 100 if stage != "running" else 40,
+                "source": f"source{i}.mp4",
+                "createdAt": 1_700_000_000_000 + i,
+                "clipCount": 0,
+            })
+            made.append(jid)
+
+        # 1. the junk route must not be shadowed by /api/jobs/{job_id}
+        junk = client.get("/api/jobs/junk")
+        check("GET /api/jobs/junk is not shadowed by /api/jobs/{job_id}",
+              junk.status_code == 200,
+              f"status={junk.status_code} body={junk.text[:120]}")
+        junk_ids = {j["_id"] for j in junk.json().get("jobs", [])} if junk.status_code == 200 else set()
+        check("a failed batch with no clips is offered as junk",
+              made[0] in junk_ids, f"junk={sorted(junk_ids)}")
+
+        # 2. single delete over POST (what the dashboard calls)
+        one = client.post(f"/api/jobs/{made[0]}/delete")
+        check("POST /api/jobs/{id}/delete removes the batch",
+              one.status_code == 200 and one.json().get("deleted") is True, one.text[:120])
+        check("the deleted batch is really gone from the store",
+              client.get(f"/api/jobs/{made[0]}").status_code == 404)
+
+        # 3. a missing batch is a 404 with a readable detail, not a bare code
+        gone = client.post(f"/api/jobs/{made[0]}/delete")
+        check("deleting a batch twice answers 404 'job not found'",
+              gone.status_code == 404 and "not found" in gone.text.lower(), gone.text[:120])
+
+        # 4. the DELETE verb still works for anything scripted against the API
+        verb = client.delete(f"/api/jobs/{made[1]}")
+        check("DELETE /api/jobs/{id} still works",
+              verb.status_code == 200 and verb.json().get("deleted") is True, verb.text[:120])
+
+        # 5. bulk delete, and its honest report of ids it could not find
+        bulk = client.post("/api/jobs/bulk-delete", json={"jobIds": [made[2], "nope"]})
+        body = bulk.json() if bulk.status_code == 200 else {}
+        check("bulk delete removes the batch it was given",
+              made[2] in body.get("deleted", []), bulk.text[:160])
+        check("bulk delete reports ids it could not find",
+              body.get("missing") == ["nope"], bulk.text[:160])
+        empty = client.post("/api/jobs/bulk-delete", json={"jobIds": []})
+        check("bulk delete with no ids is a 400 with a reason",
+              empty.status_code == 400 and "no job ids" in empty.text, empty.text[:120])
+
+        # 6. the error ring buffer the diagnosis depends on
+        recent = client.get("/api/errors/recent")
+        check("recent API errors are readable from the app itself",
+              recent.status_code == 200 and "errors" in recent.json(), recent.text[:120])
+        check("the 404s above were recorded",
+              any(e.get("status") == 404 for e in recent.json().get("errors", [])))
+
+        # 7. the client must not depend on the DELETE verb surviving a proxy
+        api_src = (ROOT / "src" / "lib" / "api.ts").read_text(encoding="utf-8")
+        check("the dashboard deletes over POST", "/delete`, { method: \"POST\" }" in api_src
+              or "/delete`," in api_src and 'method: "POST"' in api_src)
+        check("the client falls back to DELETE when the POST route is absent",
+              'method: "DELETE"' in api_src.split("deleteJob:")[1].split("retryJob:")[0])
+        check("a 405 (route claims the path, refuses the verb) also falls back",
+              "Method Not Allowed" in api_src or "method not allowed" in api_src)
+        check("a bare status code is no longer the whole error message",
+              "empty response" in api_src)
+        check("the UI reads the junk list", "listJunkJobs" in api_src)
+        check("the UI can list every batch at once", "listAllJobs" in api_src)
+
+        dash = (ROOT / "src" / "pages" / "Dashboard.tsx").read_text(encoding="utf-8")
+        check("the dashboard offers the one-tap cleanup",
+              "CleanupJunkDialog" in dash)
+        cleanup = (ROOT / "src" / "components" / "clipforge"
+                   / "CleanupJunkDialog.tsx").read_text(encoding="utf-8")
+        check("cleanup deletes in bulk", "bulkDeleteJobs" in cleanup)
+        check("cleanup states the count before deleting", "dead batch" in cleanup)
+        check("working batches are opt-in, never swept silently",
+              "Also delete the batches that did produce clips" in cleanup)
+
+        confirm = (ROOT / "src" / "components" / "clipforge"
+                   / "ConfirmDeleteJob.tsx").read_text(encoding="utf-8")
+        check("a retry that finds nothing left is not reported as a failure",
+              "not found|404" in confirm)
+    finally:
+        for jid in made:
+            store.delete_job(jid)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
 
 
 def main() -> int:
@@ -529,6 +643,7 @@ def main() -> int:
     test_bad_json_repaired()
     test_list_fast(args.batches)
     test_small_things()
+    test_delete_paths()
 
     print(f"\n{PASS} passed, {FAIL} failed")
     if FAILURES:

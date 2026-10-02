@@ -281,6 +281,30 @@ app.add_middleware(
 )
 
 
+#: Last 50 non-2xx API calls, newest last. The browser only ever saw
+#: "HTTP 400" — a code with no body, from a hop we do not control — and the
+#: platform web-process log is the one place the real cause existed, which the
+#: person hitting the bug cannot reach. This ring buffer puts that evidence
+#: back inside the app: GET /api/errors/recent shows what the server actually
+#: saw, including which hop looked like the caller.
+_RECENT_ERROR_MAX = 50
+_recent_api_errors: list[dict] = []
+
+
+def _record_api_error(request: Request, status: int) -> None:
+    _recent_api_errors.append({
+        "at": int(time.time() * 1000),
+        "method": request.method,
+        "path": request.url.path,
+        "status": status,
+        "userAgent": (request.headers.get("user-agent") or "")[:120],
+        "origin": (request.headers.get("origin") or "")[:120],
+        "contentLength": request.headers.get("content-length"),
+    })
+    if len(_recent_api_errors) > _RECENT_ERROR_MAX:
+        del _recent_api_errors[: len(_recent_api_errors) - _RECENT_ERROR_MAX]
+
+
 @app.middleware("http")
 async def _log_errors(request: Request, call_next):
     """Log every non-2xx API response with its exception — the dashboard only
@@ -289,9 +313,11 @@ async def _log_errors(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         logger.exception(f"[api] {request.method} {request.url.path} raised")
+        _record_api_error(request, 500)
         raise
     if response.status_code >= 400 and request.url.path.startswith("/api"):
         logger.warning(f"[api] {request.method} {request.url.path} -> {response.status_code}")
+        _record_api_error(request, response.status_code)
     return response
 
 
@@ -374,8 +400,14 @@ class RequeueIn(BaseModel):
 
 
 class BulkDeleteIn(BaseModel):
-    """An explicit list of ids. Never a filter — see /api/jobs/bulk-delete."""
-    jobIds: list[str] = Field(min_length=1, max_length=200)
+    """An explicit list of ids. Never a filter — see /api/jobs/bulk-delete.
+
+    The length is checked by the handler, not by the field: a `min_length=1`
+    here answered a 422 whose `detail` is a list of pydantic objects, which the
+    dashboard then had to render as a bare "HTTP 422". The handler's own
+    "no job ids given" is the message a person can act on.
+    """
+    jobIds: list[str] = Field(default_factory=list, max_length=200)
 
 
 class InternalProgressIn(BaseModel):
@@ -1263,6 +1295,50 @@ def _cached(key: str, build):
     return value
 
 
+@app.get("/api/errors/recent")
+def recent_api_errors() -> dict:
+    """The last API calls the server answered with an error, newest last.
+
+    Exists because "HTTP 400" with no body is what an intermediary looks like,
+    and a bug report made of that is a bug report with no information in it.
+    """
+    return {"errors": list(_recent_api_errors)}
+
+
+@app.get("/api/jobs/junk")
+def list_junk_jobs() -> dict:
+    """Failed batches with no delivered clips — the deletable ones.
+
+    MUST be declared above `@app.get("/api/jobs/{job_id}")`: FastAPI matches in
+    definition order, so the moment this sat below it, every call answered 404
+    "job not found" with a path parameter called `junk`. That was the whole
+    cleanup feature, dead on arrival, with an error message that pointed at the
+    wrong thing.
+
+    Offered as a suggestion rather than applied automatically: a failed job can
+    still hold the only cached transcript and rendered clips of a video the
+    user paid to process, and silently emptying their history is not a decision
+    this endpoint gets to make for them.
+    """
+    jobs = store.list_jobs()
+    out = []
+    for job in jobs:
+        if job.get("stage") not in {"failed", "complete"}:
+            continue
+        rendered, promised = store.clips_delivered(job["_id"], job)
+        if rendered:
+            continue
+        out.append({
+            "_id": job["_id"],
+            "title": job.get("title") or job.get("source") or job["_id"],
+            "stage": job.get("stage"),
+            "createdAt": job.get("createdAt"),
+            "reason": job.get("error") or "no clips rendered",
+        })
+    out.sort(key=lambda j: j.get("createdAt") or 0, reverse=True)
+    return {"jobs": out}
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
     job = store.get_job(job_id)
@@ -1297,6 +1373,22 @@ def delete_job(job_id: str) -> dict:
     ):
         shutil.rmtree(d, ignore_errors=True)
     return {"deleted": True, "cancelled": cancelled}
+
+
+@app.post("/api/jobs/{job_id}/delete")
+def delete_job_post(job_id: str) -> dict:
+    """The same delete, over POST.
+
+    DELETE /api/jobs/{id} answers 200 when it is called directly, through the
+    Vite proxy, and through the preview's edge — all three were verified. What
+    the browser actually did was still come back as a bodyless "HTTP 400", and
+    a verb is the one thing about that request a proxy is free to disagree
+    about. POST is what every other mutation in this API already uses, is
+    preflight-free, and is never filtered by a method allowlist, so the UI uses
+    it and this route is the one the dashboard calls. The DELETE route stays
+    for anything scripted against the API.
+    """
+    return delete_job(job_id)
 
 
 @app.post("/api/jobs/bulk-delete")
@@ -1336,34 +1428,6 @@ def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
         f"[api] bulk delete: {len(deleted)} removed, {len(missing)} not found"
     )
     return {"deleted": deleted, "missing": missing}
-
-
-@app.get("/api/jobs/junk")
-def list_junk_jobs() -> dict:
-    """Failed batches with no delivered clips — the deletable ones.
-
-    Offered as a suggestion rather than applied automatically: a failed job can
-    still hold the only cached transcript and rendered clips of a video the
-    user paid to process, and silently emptying their history is not a decision
-    this endpoint gets to make for them.
-    """
-    jobs = store.list_jobs()
-    out = []
-    for job in jobs:
-        if job.get("stage") not in {"failed", "complete"}:
-            continue
-        rendered, promised = store.clips_delivered(job["_id"], job)
-        if rendered:
-            continue
-        out.append({
-            "_id": job["_id"],
-            "title": job.get("title") or job.get("source") or job["_id"],
-            "stage": job.get("stage"),
-            "createdAt": job.get("createdAt"),
-            "reason": job.get("error") or "no clips rendered",
-        })
-    out.sort(key=lambda j: j.get("createdAt") or 0, reverse=True)
-    return {"jobs": out}
 
 
 @app.post("/api/jobs/{job_id}/restore")

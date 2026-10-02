@@ -63,7 +63,17 @@ export function ConfirmDeleteJob({
       setOpen(false);
       onDeleted?.(job._id);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Delete failed.");
+      const msg = err instanceof Error ? err.message : "Delete failed.";
+      // A retry that answers 404 means the FIRST attempt actually worked and
+      // the retry was the thing that found nothing there. Reporting that as a
+      // failure would leave the user tapping a delete that already succeeded.
+      if (/not found|404/i.test(msg)) {
+        setOpen(false);
+        onDeleted?.(job._id);
+        toast.success("Batch deleted.");
+        return;
+      }
+      toast.error(msg);
     } finally {
       setBusy(false);
     }

@@ -302,6 +302,16 @@ export interface DoctorCheck {
   fix: string;
 }
 
+/** A batch the cleanup dialog offers to delete. */
+export interface JunkJobDto {
+  _id: string;
+  title: string;
+  stage: string;
+  createdAt?: number;
+  /** Why it counts as junk: the failure text, or "no clips rendered". */
+  reason: string;
+}
+
 export interface DoctorReport {
   ok: boolean;
   summary: { fail: number; warn: number; ok: number };
@@ -327,18 +337,43 @@ const BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
 /** Same guarantee for the path half of every URL this module builds. */
 const path = (p: string) => (p.startsWith("/") ? p : `/${p}`).replace(/\/{2,}/g, "/");
 
+/**
+ * Turn a failed response into a message a human can act on.
+ *
+ * This used to read `body.detail` and fall back to `HTTP 400`, which meant the
+ * two worst cases looked identical: FastAPI saying something useful, and a hop
+ * in front of it answering with no body at all. Every report of "the deleter
+ * does nothing, it says HTTP 400" was the second kind, so the fallback now
+ * names what it saw instead of a bare status code.
+ */
+async function errorText(res: Response): Promise<string> {
+  let raw = "";
+  try {
+    raw = (await res.text()).trim();
+  } catch {
+    return `HTTP ${res.status} (no response body)`;
+  }
+  if (raw) {
+    try {
+      const body = JSON.parse(raw) as { detail?: unknown; errorMessage?: unknown };
+      if (typeof body.detail === "string") return body.detail;
+      // FastAPI validation errors are an array of objects, not a string.
+      if (Array.isArray(body.detail)) {
+        const first = body.detail[0] as { msg?: unknown; loc?: unknown } | undefined;
+        if (first && typeof first.msg === "string") return first.msg;
+      }
+      if (typeof body.errorMessage === "string") return body.errorMessage;
+    } catch {
+      // not JSON — fall through and show the text
+    }
+    return raw.slice(0, 200);
+  }
+  return `HTTP ${res.status} (empty response — the request did not reach the API)`;
+}
+
 async function request<T>(path_: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path(path_)}`, init);
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = (await res.json()) as { detail?: unknown };
-      if (typeof body.detail === "string") detail = body.detail;
-    } catch {
-      // keep default
-    }
-    throw new Error(detail);
-  }
+  if (!res.ok) throw new Error(await errorText(res));
   return (await res.json()) as T;
 }
 
@@ -456,6 +491,9 @@ export const api = {
     request<{ jobs: JobDto[]; total: number; nextBefore: number | null }>(
       `/api/jobs?limit=${limit}`,
     ),
+  /** Every batch, unpaged — used by the cleanup dialog's "delete it all". */
+  listAllJobs: () =>
+    request<{ jobs: JobDto[]; total: number; nextBefore: number | null }>("/api/jobs?all=1"),
   getJob: (jobId: string) => request<JobDto>(`/api/jobs/${jobId}`),
   createJob: (
     source: string,
@@ -483,11 +521,59 @@ export const api = {
       body: fd,
     });
   },
-  deleteJob: (jobId: string) =>
-    request<{ deleted: boolean; cancelled: "queued" | "running" | "absent" }>(
-      `/api/jobs/${jobId}`,
-      { method: "DELETE" },
-    ),
+  /**
+   * Delete one batch.
+   *
+   * POST /api/jobs/{id}/delete, not DELETE /api/jobs/{id}: a verb is the one
+   * thing a proxy in front of the app can silently refuse, and the browser's
+   * refusal arrived as a bodyless 400 with the batch still sitting in the list
+   * and no way to tell why. POST also needs no CORS preflight.
+   *
+   * Retried once. Deleting a batch is idempotent — the second attempt answers
+   * 404 if the first one actually worked — and a single bodyless 4xx from a
+   * proxy should not cost the user their cleanup.
+   */
+  deleteJob: async (jobId: string) => {
+    type DeleteResult = { deleted: boolean; cancelled: "queued" | "running" | "absent" };
+    const id = encodeURIComponent(jobId);
+    // A backend that does not know this route answers 404 "Not Found" or 405
+    // "Method Not Allowed" (the GET /api/jobs/{id} pattern claims the path and
+    // refuses the verb) — never this app's "job not found". Those two mean the
+    // route is missing, and the DELETE verb still works there.
+    const routeMissing = (msg: string) =>
+      /^not found$/i.test(msg) || /method not allowed/i.test(msg);
+    // One retry, because deleting a batch is idempotent and a single bodyless
+    // 4xx from something in the request path should not cost the user a
+    // cleanup they were owed. Never retried when the route itself is missing.
+    const withRetry = async (url: string, init: RequestInit): Promise<DeleteResult> => {
+      try {
+        return await request<DeleteResult>(url, init);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "";
+        if (routeMissing(msg) || !/^HTTP 4\d\d/.test(msg)) throw err;
+        return await request<DeleteResult>(url, init);
+      }
+    };
+    try {
+      return await withRetry(`/api/jobs/${id}/delete`, { method: "POST" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (routeMissing(msg)) {
+        return await withRetry(`/api/jobs/${id}`, { method: "DELETE" });
+      }
+      throw err;
+    }
+  },
+  /** Failed batches with nothing delivered — the deletable ones. */
+  listJunkJobs: () =>
+    request<{ jobs: JunkJobDto[] }>("/api/jobs/junk"),
+  /** Delete many batches in one call (max 200 ids per request). */
+  bulkDeleteJobs: (jobIds: string[]) =>
+    request<{ deleted: string[]; missing: string[] }>("/api/jobs/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobIds }),
+    }),
   retryJob: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/retry`, { method: "POST" }),
   /** Cooperative stop at the next safe boundary. "pausing" means the current
