@@ -197,6 +197,25 @@ def _boot() -> None:
             reason = "recorded as failed, but the cause was an external kill"
         if reason is None:
             continue
+        # A job we cannot possibly resume must not be re-queued. Its upload is
+        # gone, so every restart spent a full pipeline launch rediscovering
+        # that and failing again — the reported "resuming (attempt 2)" loop.
+        dead_end = worker_mod.unrecoverable_reason(store, job)
+        if dead_end is not None:
+            logger.warning(
+                f"[boot] job {job['_id']} cannot be resumed ({reason}): "
+                "source file is gone — failing instead of re-queueing"
+            )
+            job.update({
+                "stage": "failed",
+                "error": dead_end,
+                "errorDetail": None,
+                "interrupted": False,
+                "completedAt": job.get("completedAt") or int(time.time() * 1000),
+            })
+            store.write_job(job)
+            store.append_job_log(job["_id"], f"NOT RESUMABLE: {dead_end}")
+            continue
         resumes = int(job.get("interruptCount") or 0)
         if resumes >= worker_mod.INTERRUPT_MAX_RESUMES:
             logger.warning(
@@ -352,6 +371,11 @@ class CreateJobIn(BaseModel):
 
 class RequeueIn(BaseModel):
     jobId: str
+
+
+class BulkDeleteIn(BaseModel):
+    """An explicit list of ids. Never a filter — see /api/jobs/bulk-delete."""
+    jobIds: list[str] = Field(min_length=1, max_length=200)
 
 
 class InternalProgressIn(BaseModel):
@@ -1067,6 +1091,18 @@ def reset_caption_style() -> dict:
 def create_job(body: CreateJobIn) -> dict:
     title: str | None = None
     duration: float | None = None
+    if body.sourceType == "upload":
+        # This route accepts a FILENAME, not file bytes. Accepting it as an
+        # upload created a job whose source file was never on disk: it sat at
+        # 'queued', the fetch stage looked for downloads/<id>/source.mp4, and
+        # the job failed with "uploaded file missing" — then re-queued itself
+        # on every server restart, forever. Uploads have exactly one door:
+        # POST /api/jobs/upload, which is the only route that receives bytes.
+        raise HTTPException(
+            400,
+            "Uploads must be sent to /api/jobs/upload with the file attached — "
+            "this endpoint only creates URL jobs.",
+        )
     if body.sourceType == "url":
         info = probe_url(body.source)
         if info:
@@ -1136,7 +1172,7 @@ async def upload_job(
     with tmp.open("wb") as fh:
         while chunk := await file.read(1024 * 1024):
             fh.write(chunk)
-    final = download_svc.save_upload(tmp, dest_dir)
+    final = download_svc.save_upload(tmp, dest_dir, file.filename)
     try:
         uploaded_meta = video_svc.probe(final)
     except Exception as exc:
@@ -1163,20 +1199,68 @@ async def upload_job(
 
 
 @app.get("/api/jobs")
-def list_jobs() -> list[dict]:
+def list_jobs(
+    limit: int = 10, before: int | None = None, all: bool = False
+) -> dict:
+    """One page of batch summaries, newest first.
+
+    Was `-> list[dict]` returning EVERY job with its full document — including
+    up to 300 log lines each — and the dashboard re-fetched it every two
+    seconds. Seventeen jobs was 285 KB per poll; the clip request the user was
+    actually waiting for queued behind that, which is what "Clips are
+    loading..." meant in practice.
+
+    Now: a page of 10 (or every job with `?all=1`), a summary projection, and
+    a cursor. The full document — logs included — is still what
+    GET /api/jobs/{id} returns, and /api/jobs/{id}/logs is unchanged.
+    """
     # A job whose worker died mid-stage leaves `stage` on a live value with
     # nothing behind it. Reconciled HERE — at the single point every read goes
     # through — so no view can disagree about whether it is running.
-    worker.reconcile_stale_running()
-    jobs = store.list_jobs()
+    #
+    # Reconciling walks every job document and may re-queue one, and the
+    # dashboard polls every two seconds. Doing that on every poll spent most of
+    # the request budget proving that nothing had changed; a short floor keeps
+    # the guarantee while removing the duplicate work.
+    worker.reconcile_stale_running(min_interval_sec=LIST_RECONCILE_FLOOR_SEC)
+    page, total, next_before = store.list_job_summaries(
+        limit=0 if all else limit, before=before
+    )
     # live queue positions — a job waiting at 0% must be distinguishable from
     # one that is genuinely stuck
     positions = worker.queue_snapshot()
-    for job in jobs:
+    for job in page:
         job["queuePosition"] = positions.get(job["_id"])
     # ONE derivation for every consumer, so the list card and the job card
     # cannot read the same document and reach opposite conclusions.
-    return jobstatus.describe_all(jobs)
+    return {
+        "jobs": jobstatus.describe_all(page),
+        "total": total,
+        "nextBefore": next_before,
+        "limit": 0 if all else limit,
+    }
+
+
+#: Shortest gap between two reconciliation passes. The dashboard polls the list
+#: every 2s; reconciling on every one of those is wasted work, and the queue
+#: snapshot it consults only changes when a job actually starts.
+LIST_RECONCILE_FLOOR_SEC = float(os.getenv("CLIPFORGE_LIST_RECONCILE_SEC", "3"))
+
+#: How long a serialized list response may be reused. Job progress is written
+#: every few seconds by the runner, so a couple of seconds of staleness is
+#: invisible — and it collapses a burst of dashboard polls into one parse.
+LIST_CACHE_SEC = float(os.getenv("CLIPFORGE_LIST_CACHE_SEC", "2"))
+_list_cache: dict[str, tuple[float, "Response"]] = {}
+
+
+def _cached(key: str, build):
+    now = time.monotonic()
+    hit = _list_cache.get(key)
+    if hit is not None and now - hit[0] < LIST_CACHE_SEC:
+        return hit[1]
+    value = build()
+    _list_cache[key] = (now, value)
+    return value
 
 
 @app.get("/api/jobs/{job_id}")
@@ -1186,7 +1270,8 @@ def get_job(job_id: str) -> dict:
         raise HTTPException(404, "job not found")
     # "Check now" hits this route, so it must reconcile too — otherwise the
     # button that exists to tell the truth is the one place that cannot.
-    worker.reconcile_stale_running()
+    # Forced: a human asked for the truth RIGHT NOW.
+    worker.reconcile_stale_running(force=True)
     job = store.get_job(job_id) or job
     job["queuePosition"] = worker.queue_snapshot().get(job_id)
     return jobstatus.describe(job)
@@ -1212,6 +1297,73 @@ def delete_job(job_id: str) -> dict:
     ):
         shutil.rmtree(d, ignore_errors=True)
     return {"deleted": True, "cancelled": cancelled}
+
+
+@app.post("/api/jobs/bulk-delete")
+def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
+    """Delete many batches in one call — the test-batch janitor.
+
+    Clearing a dashboard down to the batches worth keeping was, until now, one
+    DELETE per batch with a confirmation dialog per batch. The dialogs are
+    right for a single delete and unbearable for forty, and the junk this is
+    for ("source.mp4 · 2 clips", repeated) always arrives as a crowd.
+
+    `jobs` is an explicit id list — there is no "delete everything matching X"
+    mode, because a typo in a filter is unrecoverable in a way a typo in a list
+    of ids you can see is not.
+    """
+    if not body.jobIds:
+        raise HTTPException(400, "no job ids given")
+    if len(body.jobIds) > 200:
+        raise HTTPException(400, "too many ids in one request (max 200)")
+    deleted: list[str] = []
+    missing: list[str] = []
+    for job_id in body.jobIds:
+        if not worker.cancel(job_id) and store.get_job(job_id) is None:
+            missing.append(job_id)
+            continue
+        if not store.delete_job(job_id):
+            missing.append(job_id)
+            continue
+        remove_workspace(settings.app.paths.data_dir, job_id)
+        for d in (
+            settings.app.paths.downloads_dir / job_id,
+            settings.app.paths.outputs_dir / job_id,
+        ):
+            shutil.rmtree(d, ignore_errors=True)
+        deleted.append(job_id)
+    logger.info(
+        f"[api] bulk delete: {len(deleted)} removed, {len(missing)} not found"
+    )
+    return {"deleted": deleted, "missing": missing}
+
+
+@app.get("/api/jobs/junk")
+def list_junk_jobs() -> dict:
+    """Failed batches with no delivered clips — the deletable ones.
+
+    Offered as a suggestion rather than applied automatically: a failed job can
+    still hold the only cached transcript and rendered clips of a video the
+    user paid to process, and silently emptying their history is not a decision
+    this endpoint gets to make for them.
+    """
+    jobs = store.list_jobs()
+    out = []
+    for job in jobs:
+        if job.get("stage") not in {"failed", "complete"}:
+            continue
+        rendered, promised = store.clips_delivered(job["_id"], job)
+        if rendered:
+            continue
+        out.append({
+            "_id": job["_id"],
+            "title": job.get("title") or job.get("source") or job["_id"],
+            "stage": job.get("stage"),
+            "createdAt": job.get("createdAt"),
+            "reason": job.get("error") or "no clips rendered",
+        })
+    out.sort(key=lambda j: j.get("createdAt") or 0, reverse=True)
+    return {"jobs": out}
 
 
 @app.post("/api/jobs/{job_id}/restore")
@@ -1508,10 +1660,24 @@ def job_logs(job_id: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 @app.get("/api/clips")
-def list_clips(jobId: str | None = None, limit: int = 96) -> list[dict]:
+def list_clips(jobId: str | None = None, limit: int = 96) -> Response:
+    """Clip documents for ONE batch, cached for a couple of seconds.
+
+    Only ever called for the batch the user has actually opened — the grid for
+    every other batch is never rendered — so the answer is short and stable
+    between polls. `list_clips` walks the clip directory and matches on
+    `jobId`, which is the index this store lacks; the per-job result is
+    memoised here instead.
+    """
     if jobId:
-        return store.list_clips(jobId)
-    return store.list_all_clips(limit=limit)
+        return _cached(
+            f"clips:{jobId}",
+            lambda: JSONResponse(store.list_clips_for_list(jobId)),
+        )
+    return _cached(
+        f"clips-all:{limit}",
+        lambda: JSONResponse(store.list_all_clips(limit=limit)),
+    )
 
 
 #: Cache policy for rendered media.
@@ -1633,17 +1799,32 @@ def clip_share(clip_id: str) -> FileResponse:
 
 @app.api_route("/api/clips/{clip_id}/thumb", methods=["GET", "HEAD"])
 def clip_thumb(clip_id: str) -> FileResponse:
-    """Real first frame of the rendered clip — inline image, no generated art."""
+    """Real first frame of the rendered clip — inline image, no generated art.
+
+    Posters written before thumbnails were sized were full-resolution 1080x1920
+    JPEGs of 50-70 KB, one per clip. Rewritten here on first request rather
+    than by a migration script, so every batch that already exists gets small
+    posters the moment anyone looks at it, and the rewrite is a single ffmpeg
+    call guarded by a file-size test.
+    """
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("thumbPath"):
         raise HTTPException(404, "thumbnail not available")
     p = Path(clip["thumbPath"])
     if not p.exists():
         raise HTTPException(404, "thumbnail file missing")
+    if clip.get("videoPath") and video_svc.thumb_needs_rewrite(p):
+        try:
+            video_svc.render_first_frame_thumb(Path(clip["videoPath"]), p)
+        except Exception as exc:  # noqa: BLE001 - a poster is never worth a 500
+            logger.warning(f"[thumb] could not rewrite {p.name} small: {exc}")
     return FileResponse(
         p,
         media_type="image/jpeg",
-        headers={"Cache-Control": MEDIA_CACHE_CONTROL},
+        headers={
+            "Cache-Control": MEDIA_CACHE_CONTROL,
+            "ETag": _media_etag(p),
+        },
     )
 
 

@@ -230,6 +230,25 @@ Return ONLY a JSON array (no prose, no markdown fences):
 """.strip()
 
 
+def _raw_reply_excerpt(text: str, limit: int = 1200) -> str:
+    """The model's reply, verbatim but bounded, for the job log.
+
+    Detection failures used to be undiagnosable because the only evidence was
+    "no valid clip candidates" — which does not distinguish an empty reply, a
+    markdown fence around a perfectly good object, a reply truncated by the
+    token limit, prose with the JSON glued to the end, or a rate-limit page
+    served with a200. The raw text answers that in one line.
+    """
+    if not text:
+        return "<empty reply>"
+    body = text.strip()
+    if len(body) <= limit:
+        return body
+    head = body[: limit // 2]
+    tail = body[-limit // 2 :]
+    return f"{head}\\n…[{len(body) - limit} chars elided]…\\n{tail}"
+
+
 def parse_candidates(text: str) -> list[dict[str, Any]]:
     """Extract word-index candidates from a possibly-noisy model reply.
 
@@ -807,6 +826,19 @@ def _groq_attempt_chain(
                 cfg.max_tokens_ceiling,
                 cfg.max_tokens * (2 ** attempt) if attempt else cfg.max_tokens,
             )
+        # Exponential backoff BETWEEN ladder steps. The steps were fired back
+        # to back with no pause, so a provider that rejected one JSON reply
+        # (a transient 400 json_validate_failed, a rate-limit blip) got the
+        # identical retry inside the same second and the whole ladder burned
+        # itself out in well under a second. 1s, 2s, 4s… gives the provider
+        # room to recover between genuinely different strategies.
+        if attempt:
+            backoff = min(16.0, 2.0 ** (attempt - 1)) * (0.75 + random.random() * 0.5)
+            logger.info(
+                f"[llm] backing off {backoff:.1f}s before JSON ladder step "
+                f"{attempt + 1}/{cfg.json_retries + 1}"
+            )
+            time.sleep(backoff)
         try:
             return _groq_single(prompt, cfg, model, api_key, mode, temp, budget)
         except _FormatUnsupported as exc:
@@ -1377,6 +1409,85 @@ class DictChunkCache(ChunkCache):
         self._data[index] = candidates
 
 
+def heuristic_candidates(
+    words: list[dict],
+    duration_sec: float,
+    cfg: GeminiConfig,
+) -> list[dict[str, Any]]:
+    """Rank transcript segments locally when the model gives us nothing.
+
+    Detection is the one stage whose failure used to be fatal: the AI provider
+    returned nothing usable, and the user got a failed job with zero clips even
+    though the transcript — the expensive part — was sitting right there
+    finished on disk. A batch of nothing is strictly worse than a batch of
+    decent clips, so the pipeline now picks segments itself.
+
+    With a transcript: sliding windows scored by WORDS PER SECOND (speech
+    density). Dense stretches are where the argument, the number and the
+    emphasis live; silence and filler fall to the bottom.
+
+    Without one (a silent or music-only source, where Whisper returns no
+    words): evenly spaced segments across the duration, which is the honest
+    answer — there is no highlight to find in a source with no speech.
+    """
+    lo = float(cfg.min_clip_sec or 15)
+    hi = float(cfg.max_clip_sec or 60)
+    if hi < lo:
+        lo, hi = hi, lo
+    length = max(lo, min(hi, (lo + hi) / 2.0))
+    cap = max(1, int(cfg.max_clips or 3))
+
+    scored: list[tuple[float, float, float]] = []  # (score, start, end)
+    if words:
+        span = float(words[-1].get("end") or 0.0) - float(words[0].get("start") or 0.0)
+        if span > 0:
+            stride = max(1.0, length / 3.0)
+            start = float(words[0].get("start") or 0.0)
+            while start < span + float(words[0].get("start") or 0.0):
+                end = min(start + length, float(words[-1].get("end") or 0.0))
+                inside = [
+                    w for w in words
+                    if float(w.get("start") or 0.0) >= start
+                    and float(w.get("end") or 0.0) <= end
+                ]
+                dur = max(0.001, end - start)
+                scored.append((len(inside) / dur, start, end))
+                start += stride
+    else:
+        total = float(duration_sec or 0.0)
+        if total <= 0:
+            return []
+        # Evenly spaced, centred so a short source still yields usable clips.
+        wanted = max(1, min(cap, int(total // max(length, 1.0))))
+        for i in range(wanted):
+            start = (total / wanted) * i
+            scored.append((1.0 - (i * 0.01), start, min(start + length, total)))
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    picked: list[dict[str, Any]] = []
+    for score, start, end in scored:
+        if len(picked) >= cap:
+            break
+        if end - start < min(lo, length) * 0.6:
+            continue
+        # Keep the chosen windows apart so the batch is not five copies of the
+        # same twelve seconds.
+        if any(abs(start - p["start"]) < length * 0.8 for p in picked):
+            continue
+        picked.append({
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "score": round(min(1.0, 0.5 + score / 20.0), 3),
+            "title": "Best moment",
+            "hook_text": "",
+            "hashtags": [],
+            "quote": "",
+            "detection_source": "transcript_heuristic",
+        })
+    picked.sort(key=lambda c: c["start"])
+    return picked
+
+
 def detect_clips(
     words: list[dict],
     settings: Settings,
@@ -1384,6 +1495,7 @@ def detect_clips(
     min_clip_sec: int | None = None,
     max_clip_sec: int | None = None,
     max_clips: int | None = None,
+    duration_sec: float | None = None,
     on_log=None,
     on_progress=None,
     chunk_cache: ChunkCache | None = None,
@@ -1457,6 +1569,30 @@ def detect_clips(
     logger.info(f"[llm] detecting on {len(chunks)} chunk(s), {len(words)} words via {label}")
     if on_log:
         on_log(f"Detecting highlights on {len(chunks)} chunk(s) via {label}...")
+
+    if not chunks:
+        # The transcript is empty, so there is nothing to send and nothing to
+        # repair. Saying "returned no valid clip candidates" here blamed the AI
+        # backend for what is actually a property of the SOURCE — a 40-second
+        # test clip with no speech. Say what is true, and still deliver clips
+        # from the duration instead of failing the whole batch.
+        why = (
+            f"no speech was detected in this video ({duration_sec:.0f}s), so there "
+            "was nothing for the AI to score"
+            if duration_sec
+            else "the transcript came back empty, so there was nothing for the AI to score"
+        )
+        logger.warning(f"[llm] {why} — using duration-based fallback selection")
+        if on_log:
+            on_log("No speech detected in this video — picking clips by timing instead of AI scoring.")
+        local = heuristic_candidates(words, duration_sec or 0.0, cfg)
+        if local:
+            if on_log:
+                on_log(
+                    f"Fallback: {len(local)} clip(s) chosen from the video's timing "
+                    "instead of AI scoring. Add captions manually if needed."
+                )
+        return local
 
     candidates: list[dict[str, Any]] = []
     reused = 0
@@ -1572,16 +1708,67 @@ def detect_clips(
             continue
         parsed = parse_candidates(text)
         if not parsed:
+            # The call SUCCEEDED and returned nothing usable. Nothing raised,
+            # so the provider failover in call_llm() never fired and the
+            # configured backup model was never asked — this chunk was simply
+            # marked skipped, and if every chunk behaved this way the job
+            # failed with "returned no valid clip candidates" while a funded
+            # backend sat idle with a key loaded. Ask the backup explicitly,
+            # once, before giving up on the chunk.
+            backup_reply = None
+            backup = settings_llm_fallback(settings)
+            if backup and _provider_ready(backup, settings):
+                try:
+                    logger.warning(
+                        f"[llm] chunk {i + 1}/{len(chunks)}: {label} returned "
+                        f"nothing parseable — retrying this chunk on the "
+                        f"fallback provider {backup!r}"
+                    )
+                    backup_reply = _call_provider(backup, prompt, settings)
+                    parsed = parse_candidates(backup_reply)
+                    if parsed and on_log:
+                        on_log(
+                            f"Chunk {i + 1}/{len(chunks)} came back unusable from "
+                            f"{label} — the fallback provider recovered it."
+                        )
+                except (LlmError, LlmNotConfigured) as exc:
+                    logger.warning(
+                        f"[llm] fallback provider {backup!r} could not rescue "
+                        f"chunk {i + 1}: {exc}"
+                    )
+                    backup_reply = None
+            if parsed:
+                resolved = resolve_candidates(parsed, words, start_index, cfg)
+                if chunk_cache is not None:
+                    chunk_cache.put(i, resolved)
+                candidates.extend(resolved)
+                if on_progress:
+                    on_progress(
+                        (i + 1) / len(chunks), f"Detection: chunk {i + 1}/{len(chunks)}"
+                    )
+                if on_log:
+                    on_log(f"Detection: chunk {i + 1}/{len(chunks)} → {len(resolved)} candidates")
+                continue
             # The call succeeded but nothing usable came back (prose only, or
             # every clip failed schema validation). Same treatment: skip, keep
             # going, and say so, rather than failing the run.
+            #
+            # The RAW reply is logged here because this branch was previously
+            # undiagnosable: the job said "returned no valid clip candidates"
+            # and nothing in the log said whether the model returned prose, an
+            # empty string, a truncated array or prose-and-JSON mixed
+            # together. Without the raw text, every such failure looked like
+            # "the AI is broken" and nobody could tell which of those it was.
             skipped.append(i)
+            shown = backup_reply if backup_reply is not None else text
             logger.warning(
-                f"[llm] chunk {i + 1}/{len(chunks)} returned no valid clips — skipping"
+                f"[llm] chunk {i + 1}/{len(chunks)} returned no valid clips — skipping\n"
+                f"[llm] RAW REPLY chunk {i + 1} ({len(shown)} chars):\n{_raw_reply_excerpt(shown)}"
             )
             if on_log:
                 on_log(
-                    f"⚠ Chunk {i + 1}/{len(chunks)} returned no usable clips — skipping it"
+                    f"⚠ Chunk {i + 1}/{len(chunks)} returned no usable clips "
+                    f"(raw reply: {_raw_reply_excerpt(shown, 200)}) — skipping it"
                 )
             if on_progress:
                 on_progress((i + 1) / len(chunks), f"Detection: chunk {i + 1}/{len(chunks)} (skipped)")
@@ -1626,9 +1813,34 @@ def detect_clips(
         candidates, cfg.max_clips, cfg.min_score
     )
     if not top:
-        # Every chunk failed, so there is genuinely nothing to render. This is
-        # the one case where detection must still fail the job — but the error
-        # names the chunk count, so the user sees why nothing happened.
+        # Every chunk failed, so the model gave us nothing at all. That used to
+        # be a hard job failure — which is the worst possible outcome, because
+        # the transcript was already transcribed and paid for, and the user
+        # ended up with an empty batch instead of a mediocre one. Fall back to
+        # ranking the transcript locally so the job still delivers clips, and
+        # say plainly that the clips were not AI-picked.
+        local = heuristic_candidates(words, duration_sec or 0.0, cfg)
+        if local:
+            logger.warning(
+                f"[llm] {label} produced no usable candidates across "
+                f"{len(chunks)} chunk(s) — falling back to transcript density "
+                f"({len(local)} clip(s))"
+            )
+            if on_log:
+                on_log(
+                    f"⚠ {label} returned no usable clips after all chunks — "
+                    f"picked {len(local)} clip(s) by transcript density instead. "
+                    "Re-detect with AI once the provider recovers."
+                )
+            if report is not None:
+                report["detectionFallback"] = "transcript_heuristic"
+                report["detectionFallbackReason"] = (
+                    f"{label} returned no valid clip candidates across "
+                    f"{len(chunks)} chunk(s)"
+                )
+            return local
+        # Nothing to rank either: no transcript AND no duration. Fail, but name
+        # the chunk count so the user sees why nothing happened.
         if skipped:
             raise LlmError(
                 f"{label} returned no valid clip candidates — all "

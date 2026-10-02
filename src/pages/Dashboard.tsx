@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AudioLines, BadgeCheck, Captions, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,39 @@ import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } f
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
 
+/**
+ * Placeholder cards in the clip grid's own proportions, shown while the
+ * request for the OPENED batch is genuinely in flight.
+ *
+ * "Clips are loading..." sat on an empty grid with no shape, so the wait read
+ * as a frozen page rather than as arriving content. Four skeleton cards in a
+ * 9:16 frame say the same thing as four real ones, so nothing jumps when they
+ * land. Once the request has answered, an empty grid says what it means.
+ *
+ * Its own component (rather than an inline ternary) so the grid element is a
+ * complete element: tools that read the grid block by balancing tags cannot
+ * follow a JSX ternary and would otherwise match half the page.
+ */
+function ClipGridSkeleton() {
+  return (
+    <div
+      className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4"
+      aria-label="Loading clips"
+      aria-busy="true"
+    >
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div key={i} className="rounded-xl border border-border bg-card">
+          <div className="aspect-[9/16] w-full animate-pulse bg-muted/60" />
+          <div className="space-y-2 p-3">
+            <div className="h-3 w-3/4 animate-pulse rounded bg-muted" />
+            <div className="h-2.5 w-1/2 animate-pulse rounded bg-muted" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const {
     jobs,
@@ -35,6 +68,8 @@ export default function Dashboard() {
     stale: apiStale,
     refresh: refreshJobs,
     checkOne,
+    loadMore,
+    hasMore,
   } = useJobs(2000);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [previewClip, setPreviewClip] = useState<ClipDto | null>(null);
@@ -63,7 +98,24 @@ export default function Dashboard() {
       ? selectedJobId
       : (doneJobs[0]?._id ?? null);
   const selectedJob = doneJobs.find((j) => j._id === effectiveJobId) ?? null;
-  const { clips } = useClips(effectiveJobId, 2000);
+  const { clips, loaded: clipsLoaded } = useClips(effectiveJobId, 2000);
+
+  // "Load older batches" as the reader reaches the end of the pill list. The
+  // server already returns only the newest page; without this the older ones
+  // were unreachable on a phone with more than one screen of batches.
+  const moreRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = moreRef.current;
+    if (!node || !hasMore) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadMore();
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(node);
+    return () => io.disconnect();
+  }, [hasMore, loadMore]);
 
   // keep the preview dialog's clip object fresh as renders complete
   const freshPreview = useMemo(
@@ -416,6 +468,23 @@ export default function Dashboard() {
                     />
                   </span>
                 ))}
+                {/* Scroll sentinel. Older batches are fetched only when the
+                    reader actually reaches this point — and the same control
+                    is a real button, so it works without JS observers, with a
+                    keyboard, and on a screen reader. */}
+                {hasMore && (
+                  <div ref={moreRef} className="flex basis-full justify-center pt-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 cursor-pointer text-xs text-muted-foreground"
+                      onClick={loadMore}
+                    >
+                      Load older batches
+                    </Button>
+                  </div>
+                )}
               </div>
 
               {/* job summary */}
@@ -461,11 +530,14 @@ export default function Dashboard() {
                   <ShareReadinessSummary clips={clips} />
                 </div>
               )}
-              {clips.length === 0 && (
-                <p className="mt-3 text-sm text-muted-foreground">
-                  Clips are loading...
-                </p>
-              )}
+              {clips.length === 0 &&
+                (clipsLoaded ? (
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    This batch has no clips yet.
+                  </p>
+                ) : (
+                  <ClipGridSkeleton />
+                ))}
 
               {/* verify-clips report (dev endpoint results) */}
               {verifyResult && (

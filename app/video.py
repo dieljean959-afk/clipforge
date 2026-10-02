@@ -660,17 +660,44 @@ def render_clip(
     }
 
 
+#: Width of a clip thumbnail. The grid cell is a 9:16 frame a few hundred CSS
+#: pixels wide at most, and the poster is downloaded for EVERY card on screen.
+#: At full 1080x1920 each poster was 50-70 KB, so a thirteen-clip grid pulled
+#: ~800 KB of images before a single video byte — all of it scaled away by the
+#: browser. 320px wide is indistinguishable at card size and ~7 KB.
+THUMB_WIDTH = int(os.getenv("CLIPFORGE_THUMB_WIDTH", "320"))
+
+
 def render_first_frame_thumb(clip_path: Path, thumb_path: Path) -> Path:
-    """Thumbnail = REAL first frame of the rendered clip (no generated images)."""
+    """Thumbnail = REAL first frame of the rendered clip (no generated images).
+
+    Scaled to `THUMB_WIDTH`. The frame is real either way; only its size is a
+    delivery decision.
+    """
     thumb_path.parent.mkdir(parents=True, exist_ok=True)
     _run([
         ffmpeg_bin(), "-y",
         "-ss", "0", "-i", str(clip_path),
         "-frames:v", "1",
+        # -2 keeps the 9:16 aspect with an even height, which mjpeg requires.
+        "-vf", f"scale={THUMB_WIDTH}:-2:flags=bicubic",
         # Pin encoder + muxer: `thumb_path` is caller-supplied, and inferring
         # either from its extension is the same class of bug as the `.wav.part`
         # extraction failure.
-        "-c:v", "mjpeg", "-q:v", "3",
+        "-c:v", "mjpeg", "-q:v", "4",
         "-f", "image2", str(thumb_path),
     ], timeout=120)
     return thumb_path
+
+
+def thumb_needs_rewrite(p: Path) -> bool:
+    """Is this poster one of the old full-resolution ones?
+
+    Judged by file size, not by probing: a 320px mjpeg q4 poster is ~7 KB and a
+    1080x1920 one is 50-70 KB, so a size check separates them without an
+    ffprobe on a request path. Anything unreadable is left alone.
+    """
+    try:
+        return p.stat().st_size > 24_000
+    except OSError:
+        return False

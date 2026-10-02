@@ -686,12 +686,114 @@ def delete_env_var(name: str) -> int:
     return removed
 
 
+def default_storage_root(root: Path) -> Path:
+    """Where uploads/sources/transcripts/clips live — OUTSIDE the codebase.
+
+    Downloads, outputs and the job store used to sit in `<codebase>/downloads`,
+    `<codebase>/outputs` and `<codebase>/data`. That put ~1.6 GB of media
+    inside the directory tree the Vite dev server watches, and inside the tree
+    the platform syncs back to the editor. Every byte written by a job was a
+    file-system event in the watched root, and a restarted job lost its source
+    because the source lived somewhere the platform is free to prune.
+
+    The sibling directory `<root>/../clipforge-data` is on the same filesystem
+    (so relocation is a rename, not a copy) but is outside the watched project.
+    """
+    override = os.getenv("CLIPFORGE_STORAGE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return root.parent / "clipforge-data"
+
+
+def _relocate_to_storage(root: Path, storage: Path, name: str) -> Path:
+    """Move `<root>/<name>` under `storage`, leaving a symlink behind.
+
+    The symlink is deliberate: hundreds of absolute paths are already baked
+    into `data/work/<id>/*/meta.json` and into clip documents from jobs created
+    before the move. Replacing the directory with a symlink keeps every one of
+    those paths valid while the bytes now live outside the watched codebase.
+
+    Never raises — a failed relocation just keeps using the old location, which
+    is exactly the behaviour we had before.
+
+    NEVER deletes anything, and NEVER moves files one at a time. Two earlier
+    versions did, and both damaged real data:
+
+      * `shutil.rmtree(old)` for the "both exist" case destroyed 1.3 GB of job
+        sources when the host had restored the codebase tree without the
+        external one.
+      * A per-child merge then SPLIT a live tree: it moved what it could out of
+        `codebase/outputs`, could not `rmdir` the rest, and returned without
+        creating the symlink — so half a batch's rendered clips sat at one path
+        and half at another, and the absolute paths already stored in clip
+        documents stopped resolving.
+
+    The relocation is therefore all-or-nothing on a single `rename`: either the
+    whole directory moves and the symlink appears, or nothing moves at all.
+
+    It only runs when `storage` is on the SAME filesystem as the codebase. On
+    the hosted sandbox they are not — the project directory is its own mount —
+    and there a move is a multi-hundred-megabyte copy with no atomicity at all,
+    which is a worse trade than leaving the tree alone. In that case the
+    function says so and returns the original path; keeping the media out of
+    the Vite watch set is handled by `server.watch.ignored` regardless.
+    """
+    old = root / name
+    new = storage / name
+    try:
+        storage.mkdir(parents=True, exist_ok=True)
+        if old.is_symlink():
+            # already relocated (or an operator symlinked it) — just trust it
+            return new if old.resolve() == new.resolve() else old
+        if old.exists() and old.stat().st_dev != storage.stat().st_dev:
+            logger.info(
+                f"[config] {name} stays at {old} — {storage} is on a different "
+                f"filesystem, so moving it would be a non-atomic copy"
+            )
+            return old
+        if not old.exists():
+            new.mkdir(parents=True, exist_ok=True)
+            old.symlink_to(new, target_is_directory=True)
+            return new
+        if old.resolve() == new.resolve():
+            return new
+        if new.exists():
+            # Both trees exist and they are not merged: a running job may be
+            # writing into either one, and a piecemeal move is exactly what
+            # split `outputs` earlier. `old` stays authoritative — it is the
+            # path every stored document already points at — and the operator
+            # is told, rather than discovering it later as "missing clips".
+            logger.warning(
+                f"[config] both {old} and {new} exist — keeping {old} in place. "
+                f"Move the contents of {new} into {old} (or delete {new}) and "
+                f"restart to finish relocating media to {storage}."
+            )
+            return old
+        os.rename(old, new)
+        try:
+            old.symlink_to(new, target_is_directory=True)
+        except OSError:
+            # Undo rather than leave the tree reachable at only one of the two
+            # paths: data moved with no symlink IS the split.
+            os.rename(new, old)
+            logger.warning(f"[config] could not symlink {old} — left in place")
+            return old
+        return new
+    except (OSError, shutil.Error):
+        try:
+            old.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return old
+
+
 @dataclass
 class Paths:
     downloads_dir: Path
     outputs_dir: Path
     data_dir: Path
     static_dir: Path
+    storage_dir: Path | None = None
 
 
 @dataclass
@@ -1278,11 +1380,44 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
 
     # Env overrides for the working folders — used by tests/tools to isolate
     # from the real job store (never by the hosted app itself).
+    #
+    # Anything WITHOUT an explicit override is relocated out of the codebase
+    # first — but only `downloads` and `outputs`, the two trees that hold
+    # gigabytes of media. `data` (the job store, transcripts and clip
+    # documents) deliberately STAYS in the codebase: it is small, it has been
+    # stable there for weeks, and it is the one directory whose contents are
+    # read by absolute path from documents written long ago. Moving it buys
+    # nothing the watcher ignore rules do not already buy.
+    #
+    # The env overrides exist so tests/tools can pin everything inside a temp
+    # dir; when all three are given we honour them verbatim and never touch
+    # the real folders.
+    pinned = all(
+        os.getenv(v)
+        for v in (
+            "CLIPFORGE_DOWNLOADS_DIR",
+            "CLIPFORGE_OUTPUTS_DIR",
+            "CLIPFORGE_DATA_DIR",
+        )
+    )
+    storage = default_storage_root(root)
+    if pinned:
+        media: dict[str, Path] = {}
+        storage_dir: Path | None = None
+    else:
+        media = {
+            name: _relocate_to_storage(root, storage, name)
+            for name in ("downloads", "outputs")
+        }
+        storage_dir = storage
+        logger.info(f"[config] media storage: {storage}")
+
     paths = Paths(
-        downloads_dir=Path(os.getenv("CLIPFORGE_DOWNLOADS_DIR", root / str(app.get("downloads_dir", "downloads")))),
-        outputs_dir=Path(os.getenv("CLIPFORGE_OUTPUTS_DIR", root / str(app.get("outputs_dir", "outputs")))),
+        downloads_dir=Path(os.getenv("CLIPFORGE_DOWNLOADS_DIR", media.get("downloads", storage / "downloads"))),
+        outputs_dir=Path(os.getenv("CLIPFORGE_OUTPUTS_DIR", media.get("outputs", storage / "outputs"))),
         data_dir=Path(os.getenv("CLIPFORGE_DATA_DIR", root / str(app.get("data_dir", "data")))),
         static_dir=root / "webui",
+        storage_dir=storage_dir,
     )
     for name in ("downloads_dir", "outputs_dir", "data_dir"):
         try:

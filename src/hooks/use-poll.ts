@@ -34,8 +34,17 @@ function triage(raw: string): { fatal: boolean; message: string } {
 /** Consecutive failures before an outage is believed. */
 const FAILURES_BEFORE_ALARM = 3;
 
+/** Batches fetched on the first paint. Ten is enough to fill a phone screen. */
+export const BATCH_PAGE_SIZE = 10;
+
 export function useJobs(intervalMs = 2000) {
   const [jobs, setJobs] = useState<JobDto[] | undefined>(undefined);
+  // How many batches the reader has asked to see. Starts at one page and grows
+  // as they scroll; the poll then asks for exactly that many, so "load more"
+  // and "keep it fresh" are the same request and never disagree.
+  const [limit, setLimit] = useState(BATCH_PAGE_SIZE);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A poll failed but we are still showing the last good list. Same split as
   // useHealth: a soft note, never a hard red "API unreachable" over data that
@@ -74,13 +83,21 @@ export function useJobs(intervalMs = 2000) {
 
   const refresh = useCallback(async () => {
     try {
-      const data = await api.listJobs();
-      setJobs(data);
+      const page = await api.listJobs(limit);
+      setJobs(page.jobs);
+      setTotal(page.total);
+      setHasMore(page.nextBefore !== null);
       applySuccess();
     } catch (err) {
       applyFailure(err);
     }
-  }, [applyFailure, applySuccess]);
+  }, [applyFailure, applySuccess, limit]);
+
+  // One more page. Not a conditional hook, so it is an explicit call from the
+  // scroll sentinel AND from the button — either one works.
+  const loadMore = useCallback(() => {
+    setLimit((n) => n + BATCH_PAGE_SIZE);
+  }, []);
 
   useEffect(() => {
     const initial = setTimeout(() => void refresh(), 0);
@@ -111,7 +128,7 @@ export function useJobs(intervalMs = 2000) {
     }
   }, [applyFailure, applySuccess]);
 
-  return { jobs, error, stale, refresh, checkOne };
+  return { jobs, error, stale, refresh, checkOne, loadMore, hasMore, total };
 }
 
 export function useClips(jobId: string | null, intervalMs = 2000) {

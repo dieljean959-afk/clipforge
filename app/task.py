@@ -710,6 +710,11 @@ class Pipeline:
             min_clip_sec=opts.get("minClipSec"),
             max_clip_sec=opts.get("maxClipSec"),
             max_clips=target,
+            # The source length is the last thing detection needs when there is
+            # no transcript to work from: it is what lets the pipeline return
+            # evenly spaced clips instead of failing a job whose source simply
+            # has no speech in it.
+            duration_sec=float(job.get("durationSec") or 0.0),
             on_log=on_log,
             on_progress=on_progress,
             report=report,
@@ -1295,6 +1300,13 @@ class Pipeline:
             "failedStage": failed_stage,
             "error": message,
             "errorDetail": detail[:4000],
+            # This attempt ran and finished on its own terms, so the job is no
+            # longer "waiting to be resumed". Leaving `interrupted` set made
+            # boot recovery re-queue the job on EVERY subsequent restart — a
+            # job that can never succeed (its upload is gone) then burned a
+            # full pipeline launch per restart, indefinitely, which is exactly
+            # the "resuming (attempt 2)..." loop that was reported.
+            "interrupted": False,
         })
         self.store.write_job(job)
         self._log(job_id, f"FAILED: {message}")

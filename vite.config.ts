@@ -97,6 +97,31 @@ export default defineConfig({
     allowedHosts: true,
     // Freebuff manages the web process; keep HMR disabled for this project.
     hmr: false,
+    // The pipeline writes uploads, sources, transcripts, rendered clips and the
+    // job store as it runs. Those writes used to land inside the watched project
+    // root, so every frame ffmpeg produced was a file-system event in the
+    // watcher. Ignore them outright — the dev server has no business reacting
+    // to gigabytes of media, and the media now lives outside this tree anyway
+    // (see CLIPFORGE_STORAGE_DIR in app/config.py); the symlinks are kept out
+    // of the crawl so a stale path can never drag them back in.
+    watch: {
+      ignored: [
+        "**/downloads/**",
+        "**/outputs/**",
+        "**/data/**",
+        "**/.reliability-backup/**",
+        "**/.rel2-backup/**",
+        "**/*.mp4",
+        "**/*.mp3",
+        "**/*.wav",
+        "**/*.jpg",
+        "**/*.jpeg",
+        "**/*.png",
+        "**/*.srt",
+        "**/*.vtt",
+        "**/*.part",
+      ],
+    },
     proxy: {
       // local pipeline API + rendered media
       "/api": "http://127.0.0.1:8000",

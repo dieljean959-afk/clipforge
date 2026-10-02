@@ -189,6 +189,82 @@ class LocalStore:
         jobs.sort(key=lambda j: j.get("createdAt", 0), reverse=True)
         return jobs
 
+    #: Fields the batch LIST renders. Everything else — most importantly
+    #: `logs`, which is up to 300 lines per job — is dead weight on a payload
+    #: the dashboard re-fetches every two seconds. With 17 jobs that was
+    #: 285 KB per poll, which is what made "Clips are loading..." outlast the
+    #: clip request it was waiting behind. The full document is still served,
+    #: unchanged, by GET /api/jobs/{id}.
+    LIST_FIELDS = (
+        "_id", "title", "source", "sourceType", "isUpload", "stage", "progress",
+        "progressDetail", "createdAt", "completedAt", "durationSec",
+        "clipCount", "totalClipsSec", "transcriptWordCount", "detectedSource",
+        "downloadSource", "error", "errorDetail", "failedStage", "interrupted",
+        "interruptReason", "mediaError", "options", "renderState", "unitsTotal",
+        "unitsDone", "unitLabel", "clipTarget", "clipTargetReason",
+    )
+
+    def list_job_summaries(
+        self, *, limit: int = 10, before: int | None = None
+    ) -> tuple[list[dict[str, Any]], int, int | None]:
+        """Newest-first batch summaries, ONE page at a time.
+
+        Returns `(page, total, next_before)`. `next_before` is the
+        `createdAt` of the last item on this page, or None at the end of the
+        list — the cursor the dashboard asks for when the user scrolls.
+
+        The projection is applied while the document is in hand, so the cost of
+        a page of 10 is 10 file reads regardless of how large the full
+        documents are. There is no database here to index, so the sort that
+        stands in for "indexes on batch_id and created_at" is done once over
+        the parsed headers rather than by the caller re-sorting every slice.
+        """
+        jobs = self.list_jobs()
+        total = len(jobs)
+        if before is not None:
+            jobs = [j for j in jobs if int(j.get("createdAt") or 0) < int(before)]
+        page = jobs[: max(1, int(limit))] if limit > 0 else jobs
+        next_before = (
+            int(page[-1].get("createdAt") or 0) if page and len(jobs) > len(page) else None
+        )
+        return [{k: j[k] for k in self.LIST_FIELDS if k in j} for j in page], total, next_before
+
+    def list_clips_for_list(self, job_id: str) -> list[dict[str, Any]]:
+        """Clip documents trimmed to what the grid and the share dialog read.
+
+        The one real cut is the per-word timings inside `captionCues`. Each cue
+        carries a `words` array of every word with its own start/end, which the
+        card, the SRT builder and the lightbox never read — they use only
+        start/end/text — and it made up about 85% of the clip payload: 7 KB per
+        clip, 91 KB for a 13-clip batch. Same captions on screen, one seventh
+        of the bytes.
+
+        The trim is applied to the returned documents only; `list_clips` still
+        hands every caller the full record.
+        """
+        out: list[dict[str, Any]] = []
+        for clip in self.list_clips(job_id):
+            cues = clip.get("captionCues")
+            if isinstance(cues, list):
+                trimmed = []
+                for c in cues:
+                    if not isinstance(c, dict):
+                        trimmed.append(c)
+                        continue
+                    c = {k: v for k, v in c.items() if k not in ("w", "words")}
+                    # Whisper timings arrive as accumulated float error —
+                    # 0.2400000000000091 — and every one of those digits is
+                    # serialised for every cue of every clip on screen. Millis
+                    # is what SRT itself uses, so nothing observable changes.
+                    for field in ("start", "end"):
+                        val = c.get(field)
+                        if isinstance(val, (int, float)):
+                            c[field] = round(float(val), 3)
+                    trimmed.append(c)
+                clip["captionCues"] = trimmed
+            out.append(clip)
+        return out
+
     def delete_job(self, job_id: str) -> bool:
         job = self.get_job(job_id)
         if job is None:

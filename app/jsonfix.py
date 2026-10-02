@@ -123,12 +123,32 @@ def _close_truncated(payload: str) -> str:
     # half-written final object is dropped rather than poisoning the whole list.
     last_obj = out.rfind("}")
     if last_obj == -1:
-        return out
+        # Nothing finished yet — the reply was cut inside the FIRST clip, very
+        # often in the middle of a string. Giving up here threw the whole chunk
+        # away even though closing the open string and the open brackets below
+        # recovers it: the fields written before the cut are all still there,
+        # and every one the schema needs is written before the model reaches
+        # the caption fields. This is the single most common truncation shape
+        # at a tight max_tokens, so it is worth the branch.
+        return _balance(out)
     # Everything after the last '}' is either a partial element or the tail of
     # the array; keep up to and including it.
     out = out[: last_obj + 1]
-    depth_obj = 0
-    depth_arr = 0
+    return _balance(out)
+
+
+def _balance(out: str) -> str:
+    """Close whatever the model left open: the string, then the brackets.
+
+    A stack, not two counters. Two counters force a close order (arrays before
+    objects) that is only accidentally right for a flat payload; the moment the
+    payload nests — which is every `{"clips": [ ... ]}` envelope — it produces
+    `[{"clips": [...]` closed as `]}` and the JSON is still unparseable.
+
+    A reply cut mid-VALUE (`"score": 0.`) cannot be closed, only trimmed, so
+    the incomplete trailing `, "key": value` is dropped until it parses.
+    """
+    stack: list[str] = []
     in_str = False
     escape = False
     quote = ""
@@ -144,19 +164,44 @@ def _close_truncated(payload: str) -> str:
         if ch in "\"'":
             in_str = True
             quote = ch
-        elif ch == "{":
-            depth_obj += 1
-        elif ch == "}":
-            depth_obj -= 1
-        elif ch == "[":
-            depth_arr += 1
-        elif ch == "]":
-            depth_arr -= 1
-    if depth_arr > 0:
-        out += "]" * depth_arr
-    if depth_obj > 0:
-        out += "}" * depth_obj
-    return out
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+    if in_str:
+        # A cut inside a string literal: close it. A dangling escape would
+        # escape the quote we are about to add, so it is dropped.
+        out = out[:-1] if out.endswith("\\") else out
+        out += quote
+    tail = "".join(reversed(stack))
+    for candidate in (out + tail, _drop_partial_tail(out) + tail):
+        try:
+            json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        return candidate
+    return out + tail
+
+
+def _drop_partial_tail(payload: str) -> str:
+    """Cut a reply back to its last complete `, "key": value`.
+
+    Only reached when the reply was cut inside a value, where closing brackets
+    are not enough: `"score": 0.` has to lose its key as well. Repeated until
+    the tail ends on a complete member, which json.loads then confirms.
+    """
+    out = payload.rstrip()
+    for _ in range(64):
+        cut = out.rfind(",")
+        if cut == -1:
+            break
+        out = out[:cut].rstrip()
+        try:
+            json.loads(_balance(out))
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            continue
+        return out
+    return payload.rstrip()
 
 
 def _drop_trailing_commas(s: str) -> str:

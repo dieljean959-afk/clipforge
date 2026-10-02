@@ -337,14 +337,16 @@ class RetentionCleaner:
                 logger.error(f"[hosting] retention sweep failed: {exc}")
 
     def sweep(self) -> int:
+        removed = self.sweep_orphans()
         if self.settings.hosted.retention_hours <= 0:
             # retention_hours = 0 means "never expire anything". A library
             # that silently empties itself while nobody is looking is far
             # worse than a disk that fills up, so the off switch has to be
-            # reachable from config alone.
-            return 0
+            # reachable from config alone. The orphan sweep above still runs:
+            # it only removes artefacts whose job record is GONE, which is not
+            # "deleting the user's history".
+            return removed
         cutoff = time.time() * 1000 - self.settings.hosted.retention_hours * 3600 * 1000
-        removed = 0
         for job in self.store.list_jobs():
             done_at = job.get("completedAt")
             stage = job.get("stage")
@@ -367,4 +369,92 @@ class RetentionCleaner:
                 remove_workspace(self.settings.app.paths.data_dir, job_id)
                 removed += 1
                 logger.info(f"[hosting] retention: removed job {job_id} artifacts")
+        return removed
+
+    # ------------------------------------------------------------------ #
+    # orphans: disk nobody owns
+    # ------------------------------------------------------------------ #
+
+    #: How long an orphan must sit untouched before it is removed. Long enough
+    #: that a job mid-restart — where the record and the folder are briefly out
+    #: of step — is never mistaken for one, and short enough that the disk does
+    #: not carry yesterday's debris forever.
+    ORPHAN_MAX_AGE_SEC = float(os.getenv("CLIPFORGE_ORPHAN_MAX_AGE_SEC", "86400"))
+
+    def sweep_orphans(self) -> int:
+        """Delete artefacts whose job record no longer exists, plus stale temps.
+
+        Every job writes a lot of bytes nobody tracks: a source download, a
+        per-stage workspace of extracted WAVs and transcript chunks, rendered
+        clips and their posters. When a job is deleted, tombstoned, or its
+        record is lost to a host restart, all of that stays behind forever. On
+        a 4 GB volume a handful of abandoned 700 MB sources is the difference
+        between finishing a job and failing with "disk almost full".
+
+        Only things with NO owning job record are touched. A live job's
+        workspace is never a candidate, whatever its age.
+        """
+        known = {j["_id"] for j in self.store.list_jobs()}
+        cutoff = time.time() - self.ORPHAN_MAX_AGE_SEC
+        removed = 0
+        paths = self.settings.app.paths
+
+        for root in (paths.downloads_dir, paths.outputs_dir, paths.data_dir / "work"):
+            if not root.exists():
+                continue
+            for child in root.iterdir():
+                if not child.is_dir() or child.name in known:
+                    continue
+                try:
+                    if child.stat().st_mtime > cutoff:
+                        continue
+                except OSError:
+                    continue
+                import shutil as _shutil
+
+                _shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+                logger.info(f"[hosting] orphan sweep: removed {child}")
+
+        # Clip documents for jobs that are gone, and half-written temp files
+        # left by a process that was killed mid-write.
+        clips_dir = paths.data_dir / "clips"
+        if clips_dir.exists():
+            for f in clips_dir.glob("*.json"):
+                try:
+                    if f.stat().st_mtime <= cutoff:
+                        continue
+                    clip = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if clip.get("jobId") not in known:
+                    f.unlink(missing_ok=True)
+                    removed += 1
+
+        for root in (paths.downloads_dir, paths.outputs_dir):
+            if not root.exists():
+                continue
+            for f in root.rglob("*"):
+                if not f.is_file() or f.suffix.lower() not in {".part", ".tmp", ".bin"}:
+                    continue
+                try:
+                    if f.stat().st_mtime <= cutoff:
+                        f.unlink(missing_ok=True)
+                        removed += 1
+                except OSError:
+                    continue
+
+        # Deleted jobs are recoverable from the trash for a day, then they are
+        # just disk. Same rule, same clock as everything else here.
+        trash = getattr(paths, "trash", None) or (paths.data_dir / "trash")
+        if trash.exists():
+            for child in trash.iterdir():
+                try:
+                    if child.stat().st_mtime <= cutoff:
+                        import shutil as _shutil
+
+                        _shutil.rmtree(child, ignore_errors=True)
+                        removed += 1
+                except OSError:
+                    continue
         return removed

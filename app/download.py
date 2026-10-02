@@ -206,10 +206,26 @@ def download_url(
         ) from exc
 
 
-def save_upload(src: Path, dest_dir: Path) -> Path:
-    """Move an uploaded file into the job's downloads dir."""
+#: Extensions we accept for an uploaded source. Anything else is stored as
+#: .mp4 so the fetch stage never has to guess from a temp filename.
+_UPLOAD_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".mp3", ".m4a", ".wav"}
+
+
+def save_upload(src: Path, dest_dir: Path, original_name: str | None = None) -> Path:
+    """Move an uploaded file into the job's downloads dir as `source.<ext>`.
+
+    The extension MUST come from the uploaded file's own name, not from the
+    temporary staging file. Callers stage the bytes as `upload.bin`, so the
+    old `src.suffix` produced `source.bin` and the fetch stage — which looks
+    for `source.<ext of job.source>` — only matched by accident, and a job whose
+    source was ever recorded with a real extension died with "uploaded file
+    missing at .../source.mp4" while a perfectly good file sat next to it.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"source{src.suffix.lower() or '.mp4'}"
+    suffix = Path(original_name or src.name).suffix.lower()
+    if suffix not in _UPLOAD_SUFFIXES:
+        suffix = ".mp4"
+    dest = dest_dir / f"source{suffix}"
     shutil.move(str(src), str(dest))
     logger.info(f"[download] upload ingested: {dest.name} ({dest.stat().st_size} bytes)")
     return dest

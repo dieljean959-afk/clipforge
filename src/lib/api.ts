@@ -112,7 +112,8 @@ export interface JobDto {
   lastProgressAt?: number;
   slow?: boolean;
   stageStartedAt?: number;
-  logs: string[];
+  /** Present on GET /api/jobs/{id}; omitted from the list projection. */
+  logs?: string[];
   error?: string | null;
   errorDetail?: string | null;
   /** The stage that failed — `stage` is overwritten with "failed", so this
@@ -445,7 +446,16 @@ export const api = {
   /** Today's token budget for the ACTIVE detection provider. Never throws. */
   usage: () => request<UsageDto>("/api/usage"),
   captionPresets: () => request<CaptionPresetDto[]>("/api/caption-presets"),
-  listJobs: () => request<JobDto[]>("/api/jobs"),
+  /**
+   * One page of batches, newest first. The list projection deliberately omits
+   * `logs`: the dashboard re-polls this every two seconds and shipping 300 log
+   * lines per job on every poll was 285 KB a time for seventeen batches.
+   * `nextBefore` is the cursor to pass as `before` for the following page.
+   */
+  listJobs: (limit = 10) =>
+    request<{ jobs: JobDto[]; total: number; nextBefore: number | null }>(
+      `/api/jobs?limit=${limit}`,
+    ),
   getJob: (jobId: string) => request<JobDto>(`/api/jobs/${jobId}`),
   createJob: (
     source: string,

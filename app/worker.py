@@ -58,7 +58,7 @@ STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "180"))
 # Bounded on purpose: a job that cannot survive a restart loop must stop
 # looping eventually, but losing hours of transcription to a 30-second host
 # bounce is the failure this prevents.
-INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "5"))
+INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "2"))
 
 # The ceiling used when RECONCILING an orphaned job (see
 # InProcessWorker.reconcile_stale_running). Deliberately far above
@@ -75,7 +75,13 @@ RESUME_BUDGET = int(os.getenv("CLIPFORGE_RESUME_BUDGET", "40"))
 # only helps while each attempt gets further than the last; once it does not,
 # the loop is not converging and the job must stop and say so instead of
 # burning the host forever.
-STALLED_RESUME_LIMIT = int(os.getenv("CLIPFORGE_STALLED_RESUME_LIMIT", "3"))
+#
+# Two, not three: the reported symptom was a job cycling through
+# "resuming (attempt 2)" over and over. Two stalled attempts in a row is
+# enough evidence that the retry is not converging, and it is the number the
+# product decision asked for. Resumes that DO advance the job are counted
+# separately by INTERRUPT_MAX_RESUMES and are not affected by this limit.
+STALLED_RESUME_LIMIT = int(os.getenv("CLIPFORGE_STALLED_RESUME_LIMIT", "2"))
 
 # Stage ids -> what the user calls them. Used when a message has to name the
 # stage a job died in.
@@ -96,6 +102,32 @@ STAGE_LABELS = {
 _SIGNAL_BANNER = re.compile(r"\(code -\d+\)")
 
 # Stage ids in pipeline order, used by _progress_signature.
+SOURCE_LOST_MESSAGE = (
+    "Source file was lost, please re-upload. "
+    "The uploaded video is no longer on the server, so this job cannot be "
+    "resumed — attach the file again to start a new one."
+)
+
+
+def unrecoverable_reason(store: Any, job: dict[str, Any]) -> str | None:
+    """Can this job EVER be resumed? Return the reason when it cannot.
+
+    Resuming a job whose upload is gone cannot work at any stage: `fetch` is
+    the first thing every later stage reads its input from, and the fetch stage
+    only knows how to recreate a URL source, never an uploaded one. Re-queueing
+    such a job just burns a full pipeline launch per server restart and then
+    fails again — the "uploaded file missing ... resuming (attempt 2)" loop.
+
+    URL jobs are always recoverable: the source is re-downloaded from its URL.
+    Upload jobs are recoverable only while their file is still on disk.
+    """
+    if job.get("sourceType") != "upload":
+        return None
+    if store.find_source_file(job["_id"]) is not None:
+        return None
+    return SOURCE_LOST_MESSAGE
+
+
 STAGES = ("fetch", "transcribe", "detect", "reframe", "captions", "export")
 
 
@@ -134,6 +166,9 @@ class InProcessWorker:
         self._active: dict[str, subprocess.Popen] = {}
         # FIFO mirror of the queue so the UI can show a real queue position
         self._pending: list[str] = []
+        # Monotonic stamp of the last reconciliation pass, for the floor that
+        # keeps a two-second poll from re-walking every job document.
+        self._last_reconcile_at: float | None = None
         # legacy single-job view: the most recently started job. Kept because
         # status()/the focused supervision test address the worker this way.
         self._current_job: str | None = None
@@ -844,7 +879,9 @@ class InProcessWorker:
         except Exception:
             return ""
 
-    def reconcile_stale_running(self) -> list[str]:
+    def reconcile_stale_running(
+        self, min_interval_sec: float = 0.0, force: bool = False
+    ) -> list[str]:
         """Clear jobs that claim to be running with no worker behind them.
 
         A job's `stage` is written by a CHILD process. If that process is
@@ -875,6 +912,19 @@ class InProcessWorker:
         """
         with self._lock:
             live = set(self._active) | set(self._pending)
+        # Optional floor between passes. Reconciliation reads every job
+        # document and is called from the single read path the dashboard polls
+        # every two seconds; proving "still stale" sixty times a minute is work
+        # with no answer in it. `force=True` bypasses the floor.
+        now = time.monotonic()
+        if (
+            min_interval_sec > 0
+            and not force
+            and self._last_reconcile_at is not None
+            and now - self._last_reconcile_at < min_interval_sec
+        ):
+            return []
+        self._last_reconcile_at = now
         fixed: list[str] = []
         for job in self.store.list_jobs():
             if job.get("_id") in live:
@@ -890,6 +940,36 @@ class InProcessWorker:
             silent = int((job.get("lastProgressAt") or job.get("stageStartedAt")
                           or job.get("createdAt") or 0))
             cause = self._describe_orphan(job, stage)
+            # Nothing to resume TO: an upload whose file is gone can never
+            # succeed, and re-queueing it is the loop, not a recovery.
+            dead_end = unrecoverable_reason(self.store, job)
+            if dead_end is not None:
+                job.update({
+                    "stage": "failed",
+                    "failedStage": stage,
+                    "error": dead_end,
+                    "errorDetail": None,
+                    "interrupted": False,
+                    "interruptReason": cause,
+                    "completedAt": job.get("completedAt") or silent or None,
+                })
+                jobstatus.describe(job)
+                for field in ("stagePlan", "stageEtaSec", "totalEtaSec",
+                              "queueEtaSec", "queuePosition", "progressDetail"):
+                    job.pop(field, None)
+                job["progress"] = 0
+                self.store.write_job(job)
+                self.store.append_job_log(
+                    job_id,
+                    "NOT RESUMABLE: the uploaded source file is no longer on the "
+                    "server — failing instead of re-queueing",
+                )
+                logger.warning(
+                    f"[worker] job {job_id} cannot be resumed (source file gone) "
+                    "— cleared to failed"
+                )
+                fixed.append(job_id)
+                continue
             if self._resume_is_worthwhile(job):
                 job.update({
                     "stage": "queued",
