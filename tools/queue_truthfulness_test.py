@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import subtitle  # noqa: E402
+from app import llm, subtitle  # noqa: E402
 from app.config import Paths, load_config  # noqa: E402
 from app.stages import StageWorkspace  # noqa: E402
 from app.store import LocalStore  # noqa: E402
@@ -356,6 +356,59 @@ def section_no_stale_writes(store, pipeline) -> None:
     check("self.store.write_job(job)" not in stage_src,
           "the detect stage no longer writes the dict it was handed")
     check("_patch_job(" in stage_src, "it annotates through _patch_job instead")
+
+    # The detect stage must not name a provider it is not calling. It used to
+    # hardcode "Gemini is scoring viral moments..." while [llm] provider was
+    # `deepseek`, so a real job announced Gemini and then logged
+    # "Detecting highlights ... via deepseek" one line later. That contradiction
+    # is what made a DeepSeek billing failure look like a Gemini outage.
+    # Only CODE lines are asserted, not the explanatory comment above it — the
+    # comment has to name the old string to explain what it replaced.
+    code_lines = [ln for ln in stage_src.splitlines()
+                  if not ln.lstrip().startswith("#")]
+    code_only = "\n".join(code_lines)
+    check("Gemini is scoring" not in code_only,
+          "the detect stage does not hardcode a provider in its progress text")
+    check("Gemini clip detection" not in code_only,
+          "the detect stage log line does not hardcode Gemini")
+    check("llm.provider_label(" in code_only,
+          "the detect stage derives its backend name from the live provider")
+
+    # Source greps alone are NOT enough. Binding the wrong literal to a local
+    # (`pretty = "Gemini"`) leaves no "Gemini" inside the f-string, so a grep
+    # passes while the UI names a provider that is never called — which is
+    # exactly the bug this guards. So RUN the label derivation the stage uses
+    # and assert on the text it actually produces.
+    import re as _re
+    _m = _re.search(r"pretty\s*=\s*(.+)", code_only)
+    check(_m is not None, "the detect stage still derives a provider name")
+    if _m is not None:
+        _expr = _m.group(1).strip()
+        _derived = eval(_expr, {"backend": llm.provider_label(pipeline.settings)})  # noqa: S307
+        _progress = f"{_derived} is scoring viral moments..."
+        check(llm.provider(pipeline.settings) in _progress,
+              f"the progress text names the ACTIVE backend, not a hardcoded one"
+              f" ({_progress!r})")
+        check("Gemini" not in _progress,
+              "the progress text does not claim Gemini")
+
+    # Same rule on the frontend: the fallback copy is provider-neutral.
+    ts = (Path(__file__).resolve().parents[1] / "src" / "lib"
+          / "clipforge.ts").read_text(encoding="utf-8")
+    loading = ts.split("STAGE_LOADING")[1].split("};")[0]
+    loading_code = "\n".join(ln for ln in loading.splitlines()
+                             if not ln.lstrip().startswith("//") and
+                             not ln.lstrip().startswith("*"))
+    check("Gemini" not in loading_code,
+          "the client-side STAGE_LOADING fallback names no provider")
+
+    # And the derived label really is the configured provider, not Gemini.
+    label = llm.provider_label(pipeline.settings)
+    active = llm.provider(pipeline.settings)
+    check(label.startswith(active),
+          f"the detect label names the active backend ({active})")
+    check("gemini" not in label.lower() or active == "gemini",
+          f"it does not claim Gemini while {active} is active")
     store.delete_job(jid)
 
 

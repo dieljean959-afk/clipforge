@@ -771,8 +771,22 @@ class Pipeline:
                 return cached
 
         opts = job.get("options", {}) or {}
-        self._progress(job_id, "finding", 0, "Gemini is scoring viral moments...")
-        self._log(job_id, "Stage: detect — Gemini clip detection (word indices)")
+        # Name the backend that is ACTUALLY running. These two strings used to
+        # be hardcoded to "Gemini", but [llm] provider is `deepseek` here, so a
+        # real job announced "Gemini is scoring viral moments..." and then
+        # logged "Detecting highlights ... via deepseek (deepseek-flash)" one
+        # line later. That contradiction is what made a funded-key/billing
+        # problem look like "the Gemini server worker is down" — the UI named a
+        # provider that was never called.
+        #
+        # `llm.provider_label` is already used a few lines below for the chunk
+        # cache, so the real name is available; deriving it here keeps the two
+        # in step by construction.
+        backend = llm.provider_label(self.settings)
+        pretty = backend.split(" (")[0] or backend
+        self._progress(job_id, "finding", 0,
+                       f"{pretty} is scoring viral moments...")
+        self._log(job_id, f"Stage: detect — {backend} clip detection (word indices)")
         words = [w.as_dict() for w in transcript.words]
 
         # How many clips this source is worth, decided ONCE and written to the

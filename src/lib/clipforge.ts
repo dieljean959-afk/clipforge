@@ -39,10 +39,15 @@ export const STAGE_LABELS: Record<ClipStage, string> = {
   paused: "Paused",
 };
 
+// Generic, provider-neutral fallbacks. These used to name "Gemini" while the
+// configured backend was deepseek, which is how a billing problem on one
+// provider came to look like an outage on another. The card normally renders
+// the backend's own `progressDetail`, which names the real provider; this map
+// is only a fallback, so it must not assert a provider it cannot know.
 export const STAGE_LOADING: Record<string, string> = {
   grabbing: "Clippy is grabbing the video...",
   transcribing: "Whisper is transcribing word timings...",
-  finding: "Gemini is scoring viral moments...",
+  finding: "AI is scoring viral moments...",
   rendering: "Rendering 9:16 crops with captions...",
 };
 
