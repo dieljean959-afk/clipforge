@@ -706,6 +706,9 @@ def health() -> dict:
             )
             if eff and not (isinstance(eff, dict) and "error" in eff):
                 rtf_value, rtf_source = eff
+    # Local import, matching every other objectstore use in this module.
+    from app import objectstore as objectstore_mod
+
     return {
         # The process answered, so it IS up. `ok` is false only when a part of
         # the picture is missing, and `degraded` says which part.
@@ -780,6 +783,10 @@ def health() -> dict:
             },
         ),
         "system": _block("system", hosting.system_stats),
+        # Whether clips are pushed to durable storage. `enabled` needs all four
+        # CLIPFORGE_S3_* values, and config_from_env() re-reads per call, so this
+        # turns ON by itself once the keys land — no restart, nothing to guess at.
+        "storage": _block("storage", objectstore_mod.status),
         "encode": _block("encode", lambda: encode_mod.as_dict(encode_mod.choose(settings))),
         "disk": _block("disk", disk_stats),
         "tailnetIp": hosting.tailnet_ip(),
