@@ -119,8 +119,18 @@ def main() -> int:
 
     # --- 1. selection / default -------------------------------------------
     print("== 1. backend selection")
+    # Captured BEFORE the mutation below. What this is really asserting is
+    # isolation — a fresh load must not see a provider poked into an
+    # already-loaded object — so comparing against the captured value keeps
+    # that invariant without re-stating whichever default config.toml carries
+    # today and failing on every legitimate provider switch.
+    fresh_default = load_config(quiet=True).llm.provider
     settings.llm.provider = "gemini"
-    check("config default is deepseek (fresh load)", load_config(quiet=True).llm.provider == "deepseek")
+    check("a fresh load ignores a mutated provider",
+          load_config(quiet=True).llm.provider == fresh_default,
+          f"{load_config(quiet=True).llm.provider} vs {fresh_default}")
+    check("that fresh default is a provider this app supports",
+          fresh_default in llm.PROVIDERS, fresh_default)
     check("hosted label names the configured model",
           settings.gemini.model in llm.provider_label(settings))
     settings.llm.provider = "groq"

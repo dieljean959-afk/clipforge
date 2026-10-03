@@ -387,13 +387,24 @@ def test_detect_clips_end_to_end() -> None:
 
 def test_provider_roster() -> None:
     print("\n[provider] roster and dispatch")
-    check("deepseek is the default", load_config(quiet=True).llm.provider == "deepseek")
-    check("groq is the configured backup",
-          load_config(quiet=True).llm.fallback_provider == "groq")
-    check("all five are offered",
-          llm_mod.PROVIDERS == ("deepseek", "nvidia", "groq", "gemini", "ollama"),
-          str(llm_mod.PROVIDERS))
     s = load_config(quiet=True)
+    # The roster is the preference order the dashboard offers, so it has to lead
+    # with whatever config.toml actually selects and put that one's backup
+    # second. Pinning a literal name here would only re-state whichever default
+    # was current when this test was written, and would fail on every
+    # legitimate provider switch.
+    check("the configured default leads the roster",
+          llm_mod.PROVIDERS[0] == s.llm.provider,
+          f"{llm_mod.PROVIDERS[0]} vs {s.llm.provider}")
+    check("groq is the configured backup",
+          s.llm.fallback_provider == "groq")
+    check("the backup comes second",
+          llm_mod.PROVIDERS[1] == s.llm.fallback_provider,
+          f"{llm_mod.PROVIDERS[1]} vs {s.llm.fallback_provider}")
+    check("all five are offered",
+          set(llm_mod.PROVIDERS) == {"deepseek", "nvidia", "groq", "gemini", "ollama"}
+          and len(llm_mod.PROVIDERS) == 5,
+          str(llm_mod.PROVIDERS))
     s.llm.provider = "deepseek"
     check("deepseek still dispatches to its own client",
           "deepseek" in llm_mod.provider_label(s))

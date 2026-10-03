@@ -540,15 +540,18 @@ def verify_clips(jobId: str | None = None) -> dict:
 # --------------------------------------------------------------------------- #
 
 # Shown verbatim in the UI so the tradeoff is visible BEFORE the user picks.
+# Deliberately no copy here calls any backend "the DEFAULT": the provider is
+# switchable from the dashboard without a redeploy, so a label baked at import
+# time goes stale the moment anyone picks a different backend.
 DETECTION_TRADEOFFS = {
-    "deepseek": "Hosted, OpenAI-compatible chat completions, and the DEFAULT. The DeepSeek "
-                "platform bills a balance rather than a fixed tokens-per-DAY ceiling like "
+    "deepseek": "Hosted, OpenAI-compatible chat completions. The DeepSeek platform "
+                "bills a balance rather than a fixed tokens-per-DAY ceiling like "
                 "Groq's free tier, so a long source cannot run out of quota half way through "
                 "detection — and its rates are the cheapest of the hosted options. Needs a "
-                "DeepSeek API key.",
-    "nvidia": "Hosted alternative, selectable without a redeploy. NVIDIA NIM is the same "
-              "wire format and the same code path, and hosts its own `deepseek-*` models — "
-              "but on an NVIDIA quota, not a DeepSeek balance. Needs an NVIDIA API key.",
+                "DeepSeek API key, and a topped-up balance.",
+    "nvidia": "Hosted, selectable without a redeploy. NVIDIA NIM is the same wire "
+              "format and the same code path, and hosts its own `deepseek-*` models — "
+              "metered on NVIDIA credits, not a DeepSeek balance. Needs an NVIDIA API key.",
     "groq": "Hosted BACKUP. Same wire format and the same code path as DeepSeek, but its "
             "free tier is ~30 requests per minute with a 200k tokens-per-DAY ceiling "
             "per model — the app paces calls below the request limit and retries 429s, "

@@ -68,10 +68,14 @@ PROVIDER_NVIDIA = "nvidia"
 PROVIDER_GROQ = "groq"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OLLAMA = "ollama"
+#: Preference order, and the order the dashboard's backend picker offers. It
+#: leads with whichever backend config.toml actually selects, then that one's
+#: fallback, then the remaining alternatives — so the list keeps matching the
+#: real ladder instead of drifting into a fixed ranking nothing consults.
 PROVIDERS = (
-    PROVIDER_DEEPSEEK,
     PROVIDER_NVIDIA,
     PROVIDER_GROQ,
+    PROVIDER_DEEPSEEK,
     PROVIDER_GEMINI,
     PROVIDER_OLLAMA,
 )

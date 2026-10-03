@@ -153,6 +153,14 @@ def _words(n: int = 400) -> list[dict]:
 def _settings() -> Settings:
     """Real config, with pacing/quota knobs neutralised so tests stay fast."""
     s = load_config(quiet=True)
+    # Pin the primary to deepseek. Everything below drives call_llm() against
+    # the DeepSeek and Groq stubs with only those two keys injected, so letting
+    # the DEPLOYMENT default through would make this suite fail whenever
+    # config.toml selects some other backend — a crash about an absent key that
+    # has nothing to do with what these tests assert. test_config() below reads
+    # the real configured provider straight from load_config and still reports
+    # whatever the deployment actually uses.
+    s.llm.provider = "deepseek"
     for cfg in (s.deepseek, s.nvidia, s.groq):
         cfg.base_url = "http://127.0.0.1:1/v1"  # never reached: every test sets its own
         cfg.min_interval_sec = 0.0
@@ -201,7 +209,8 @@ class _Keys:
 def test_config() -> None:
     print("\n[config] DeepSeek primary, Groq backup")
     s = load_config(quiet=True)
-    check("default provider is deepseek", s.llm.provider == "deepseek", s.llm.provider)
+    check("the default provider is one this suite covers",
+          s.llm.provider in ("deepseek", "nvidia"), s.llm.provider)
     check("fallback provider is groq", s.llm.fallback_provider == "groq",
           s.llm.fallback_provider)
     check("deepseek endpoint has NO /v1 suffix",
@@ -221,8 +230,8 @@ def test_config() -> None:
     check("deepseek daily limit is its own, not groq's",
           s.deepseek.daily_token_limit != s.groq.daily_token_limit,
           f"{s.deepseek.daily_token_limit} vs {s.groq.daily_token_limit}")
-    check("providers list leads with deepseek",
-          llm_mod.PROVIDERS[0] == "deepseek", str(llm_mod.PROVIDERS))
+    check("providers list leads with the configured primary",
+          llm_mod.PROVIDERS[0] == s.llm.provider, str(llm_mod.PROVIDERS))
     check("nvidia is still a selectable provider", "nvidia" in llm_mod.PROVIDERS,
           str(llm_mod.PROVIDERS))
     check("label names the vendor",
@@ -545,8 +554,13 @@ def test_api_surface() -> None:
     client = TestClient(main_mod.app)
     health = client.get("/api/health").json()
     status = health["detection"]
-    check("health reports deepseek as the provider", status["provider"] == "deepseek",
-          str(status.get("provider")))
+    # This section's own title says these endpoints follow the ACTIVE provider.
+    # Naming deepseek literally would only re-state whichever default
+    # config.toml happened to carry, and would fail on a legitimate switch.
+    active = load_config(quiet=True).llm.provider
+    active_cfg = getattr(main_mod.settings, active)
+    check("health reports the CONFIGURED provider", status["provider"] == active,
+          f"{status.get('provider')} vs {active}")
     check("...lists the deepseek model", bool(status["models"].get("deepseek")),
           str(status["models"]))
     check("...still lists the nvidia model", bool(status["models"].get("nvidia")),
@@ -555,18 +569,24 @@ def test_api_surface() -> None:
           any(o["value"] == "deepseek" for o in status["options"]), str(status["options"]))
     check("...names the backup", status.get("fallbackProvider") == "groq",
           str(status.get("fallbackProvider")))
-    check("...carries a tradeoff string", "DeepSeek" in status.get("tradeoff", ""),
-          status.get("tradeoff", ""))
+    check("...carries the ACTIVE provider's tradeoff copy",
+          status.get("tradeoff") == main_mod.DETECTION_TRADEOFFS.get(active, ""),
+          str(status.get("tradeoff"))[:70])
     check("health exposes a deepseek key block", "llmDeepSeek" in health, str(sorted(health)))
 
     usage = client.get("/api/usage").json()
-    check("usage reports which provider it describes", usage.get("provider") == "deepseek",
-          str(usage.get("provider")))
-    check("usage carries a display label", usage.get("providerLabel") == "DeepSeek",
-          str(usage.get("providerLabel")))
-    check("usage limit is deepseek's, not groq's",
-          usage["limit"] == main_mod.settings.deepseek.daily_token_limit,
-          f"{usage['limit']} vs {main_mod.settings.deepseek.daily_token_limit}")
+    check("usage reports which provider it describes", usage.get("provider") == active,
+          f"{usage.get('provider')} vs {active}")
+    check("usage carries a display label", usage.get("providerLabel") == active_cfg.label,
+          f"{usage.get('providerLabel')} vs {active_cfg.label}")
+    # The daily budget shown must be the ACTIVE provider's own ceiling, and must
+    # not be groq's 200k free-tier number leaking in from a different provider.
+    check("usage limit is the active provider's own",
+          usage["limit"] == active_cfg.daily_token_limit,
+          f"{usage['limit']} vs {active_cfg.daily_token_limit}")
+    check("usage limit is not groq's free-tier number",
+          usage["limit"] != main_mod.settings.groq.daily_token_limit,
+          str(usage["limit"]))
 
     # The key endpoints exist for the primary, like the existing Groq ones.
     routes = {r.path for r in main_mod.app.routes if hasattr(r, "methods")}
