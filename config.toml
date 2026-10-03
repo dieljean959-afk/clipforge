@@ -309,14 +309,18 @@ daily_token_limit = 2000000
 #                DEEPSEEK_MODEL, DEEPSEEK_BASE_URL.
 # The dashboard shows the active backend and its tradeoff, and can switch it.
 #
-# PRIMARY is nvidia, not deepseek, as of 2026-10-03: the DeepSeek balance on
-# this account returned "Insufficient Balance" (HTTP 402) on every chunk, so
-# every job silently fell through to the Groq backup and crawled at the
-# conservative 6000 tokens/min free-tier pacer. NIM speaks the same wire
-# format on the same code path and carries a far higher budget, and it is
-# metered on credits rather than a per-model daily token wall. Switch back to
-# "deepseek" once that balance is topped up.
-provider = "nvidia"
+# Left on deepseek deliberately. NVIDIA NIM was tried here on2026-10-03 as a
+# faster, credit-metered alternative (same wire format, same code path) because
+# the DeepSeek balance on this account returns "Insufficient Balance" (HTTP
+# 402) on every chunk, sending every job to the Groq backup at its conservative
+# 6000 tokens/min free-tier pacer. It was reverted: the platform's Keys tab does
+# not actually deliver values to the backend, so switching provider only moved
+# the "no key" banner rather than fixing anything, and cost the operator
+# another account to sign up for. Detection keeps working through the Groq
+# fallback on the key already held. Set provider = "nvidia" here AND save
+# NVIDIA_API_KEY through the dashboard's "Set key" button if the faster pacer is
+# ever wanted again.
+provider = "deepseek"
 
 # Automatic failover: when a chunk FAILS on the primary (quota spent, endpoint
 # down, key rejected), retry that chunk on the backup before skipping it. Blank
