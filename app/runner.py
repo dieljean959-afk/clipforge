@@ -92,13 +92,59 @@ def _install_process_handlers(job_id: str, store, settings) -> None:
             detail,
         )
 
+    def leave_resumable(how: str) -> bool:
+        """A SIGTERM is an EXTERNAL stop, never a pipeline fault — so it must not
+        end the job.
+
+        This used to write a terminal `failed`, which silently cancelled the
+        resume the same message promised: the record said "it resumes
+        automatically" while `reconcile_stale_running` skipped it forever,
+        because it skips terminal jobs. The tell was a card reading "Failed
+        during Transcribing — the worker was stopped by the server (SIGTERM) …
+        It resumes automatically", on a job with five finished transcript
+        chunks sitting on disk.
+
+        So the job is left exactly where it is, on its live stage, flagged as
+        interrupted. Whoever is still alive picks it up: on the next boot the
+        reconciler re-queues it, and if the web process survived, the dashboard
+        poll reconciles it within seconds (`LIST_RECONCILE_FLOOR_SEC`). The
+        stall watchdog is unaffected — it kills the child and then writes its
+        OWN terminal state with the real reason, which lands after this.
+        """
+        try:
+            job = store.get_job(job_id)
+            if job is None or job.get("stage") in {"complete", "failed", "paused"}:
+                return False
+            stage = job.get("stage")
+            # Never clobber the shutdown hook's copy — it is the better one,
+            # written microseconds earlier from the parent's point of view.
+            if not job.get("interruptReason"):
+                job["interruptReason"] = (
+                    f"Stopped from outside the pipeline ({how}) at stage "
+                    f"'{stage}' — it will resume."
+                )
+            job["interrupted"] = True
+            if not job.get("progressDetail"):
+                job["progressDetail"] = "Stopped — this job will resume automatically."
+            store.write_job(job)
+            store.append_job_log(
+                job_id,
+                f"{how} received during the job — left at stage '{stage}' so it "
+                f"resumes (finished work is cached)",
+            )
+            return True
+        except Exception:
+            return False
+
     def term_handler(signum, _frame):
         # A graceful SIGTERM: record WHY we are going so the next boot knows
         # this was an external stop and not a pipeline fault.
         how = signal.Signals(signum).name
+        if leave_resumable(how):
+            raise SystemExit(143)
         fail(
             f"The worker was stopped by the server ({how}) during "
-            f"{settings and 'the job'}. It resumes automatically.",
+            f"{settings and 'the job'}.",
             f"received {how}",
         )
         raise SystemExit(143)
