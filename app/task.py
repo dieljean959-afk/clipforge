@@ -1070,6 +1070,11 @@ class Pipeline:
                     "captionStyle": style_id,
                 })
                 self.store.write_clip(clip_doc)
+                # Durability last, once the clip is verified and recorded. The
+                # push happens before the local bytes are released, and the
+                # resume check above still works either way: a clip pulled back
+                # from the bucket is byte-identical and hits the same skip.
+                self._offload_clip(job_id, idx + 1, out_path, thumb)
 
                 # ---- sidecar multi-language tracks (SRT/VTT) ---------------
                 # AFTER the encode, never before it. These are LLM calls (one
@@ -1167,6 +1172,38 @@ class Pipeline:
             name=f"share-prewarm-{job_id[:8]}",
             daemon=True,
         ).start()
+
+    def _offload_clip(
+        self, job_id: str, number: int, video: Path, thumb: Path | None
+    ) -> bool:
+        """Copy a finished clip (and its poster) to durable storage.
+
+        Called only after the encode verified and the clip document was
+        written, so the bytes pushed here are bytes that already earned the
+        right to exist. The local copies are released only after the bucket
+        confirms them, and a failure leaves everything exactly as it was — a
+        finished clip that exists on disk and nowhere else is still playable.
+        """
+        from app import objectstore
+
+        cfg = objectstore.config_from_env()
+        if not cfg.enabled:
+            return False
+        pushed = objectstore.upload_file(
+            video, objectstore.output_key(job_id, video.name), cfg,
+            content_type="video/mp4",
+        )
+        if pushed and thumb is not None and Path(thumb).exists():
+            objectstore.upload_file(
+                thumb, objectstore.output_key(job_id, Path(thumb).name), cfg,
+                content_type="image/jpeg",
+            )
+        if pushed:
+            objectstore.drop_local_after_push(True, video, cfg)
+            if thumb is not None:
+                objectstore.drop_local_after_push(True, thumb, cfg)
+            self._log(job_id, f"clip {number} copied to durable storage")
+        return pushed
 
     def _render_one_clip(
         self,

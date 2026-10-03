@@ -80,6 +80,7 @@ AREAS: dict[str, list[tuple[str, list[str], int]]] = {
     "storage": [
         ("backend_supervisor_test", [], 90),
         ("storage_test", [], 90),
+        ("object_store_test", [], 120),
         ("stability_test", [], 170),
     ],
     "ui": [

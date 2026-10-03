@@ -1,0 +1,96 @@
+{
+  "_id": "77784eb74e54",
+  "sourceType": "upload",
+  "source": "source.mp4",
+  "title": null,
+  "isUpload": true,
+  "stage": "failed",
+  "progress": 0.0,
+  "progressDetail": "Gemini is scoring viral moments...",
+  "unitLabel": null,
+  "unitsDone": null,
+  "unitsTotal": null,
+  "stageEtaSec": null,
+  "totalEtaSec": 78.8,
+  "lastProgressAt": 1790906275050,
+  "slow": false,
+  "stageStartedAt": 1790906275050,
+  "stageTimings": [
+    {
+      "stage": "fetch",
+      "sec": 1.0,
+      "at": 1790906268828
+    },
+    {
+      "stage": "transcribe",
+      "sec": 5.2,
+      "at": 1790906269851
+    }
+  ],
+  "logs": [
+    "01:57:48 disk check: 3884 MB free, ~500 MB needed for this render",
+    "01:57:48 Stage: fetch — source.mp4",
+    "01:57:48 upload present: source.mp4",
+    "01:57:49 Stage: transcribe — engine faster-whisper (cpu/int8, batch 4), model 'small' | ETA basis: RTF 0.216 (measured on this host (10 run(s))) → ~0.1 min for 0.7 min of audio",
+    "01:57:55 transcribed 0 words in 40.0s of audio via faster-whisper (RTF 0.004)",
+    "01:57:55 Stage: detect — Gemini clip detection (word indices)",
+    "01:57:55 Clip target: 2 — you asked for 2",
+    "01:57:55 Detecting highlights on 0 chunk(s) via deepseek (deepseek-flash)...",
+    "01:57:55 FAILED: AI detection failed: deepseek (deepseek-flash) returned no valid clip candidates",
+    "01:57:55   Traceback (most recent call last):",
+    "01:57:55     File \"/home/daytona/codebase/app/task.py\", line 409, in run",
+    "01:57:55       self._stages(job_id, job, t_start)",
+    "01:57:55     File \"/home/daytona/codebase/app/task.py\", line 487, in _stages",
+    "01:57:55       candidates = self._stage_detect(job, transcript, ws)",
+    "01:57:55                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+    "01:57:55     File \"/home/daytona/codebase/app/task.py\", line 707, in _stage_detect",
+    "01:57:55       candidates = llm.detect_clips(",
+    "01:57:55                    ^^^^^^^^^^^^^^^^^",
+    "01:57:55     File \"/home/daytona/codebase/app/llm.py\", line 1639, in detect_clips",
+    "01:57:55       raise LlmError(f\"{label} returned no valid clip candidates\")",
+    "01:57:55   app.llm.LlmError: deepseek (deepseek-flash) returned no valid clip candidates"
+  ],
+  "error": "AI detection failed: deepseek (deepseek-flash) returned no valid clip candidates",
+  "errorDetail": "Traceback (most recent call last):\n  File \"/home/daytona/codebase/app/task.py\", line 409, in run\n    self._stages(job_id, job, t_start)\n  File \"/home/daytona/codebase/app/task.py\", line 487, in _stages\n    candidates = self._stage_detect(job, transcript, ws)\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/daytona/codebase/app/task.py\", line 707, in _stage_detect\n    candidates = llm.detect_clips(\n                 ^^^^^^^^^^^^^^^^^\n  File \"/home/daytona/codebase/app/llm.py\", line 1639, in detect_clips\n    raise LlmError(f\"{label} returned no valid clip candidates\")\napp.llm.LlmError: deepseek (deepseek-flash) returned no valid clip candidates\n",
+  "durationSec": 40.0,
+  "clipCount": null,
+  "totalClipsSec": null,
+  "detectedSource": null,
+  "downloadSource": "upload",
+  "captionsTxt": null,
+  "options": {
+    "maxClips": 2,
+    "minClipSec": 15,
+    "maxClipSec": 30
+  },
+  "createdAt": 1790906268700,
+  "completedAt": null,
+  "etaSource": "unknown",
+  "stagePlan": [
+    {
+      "stage": "detect",
+      "label": "Finding highlights",
+      "sec": 8.0,
+      "source": "estimate",
+      "current": true
+    },
+    {
+      "stage": "reframe",
+      "label": "Framing 9:16",
+      "sec": 2.8,
+      "source": "estimate",
+      "current": false
+    },
+    {
+      "stage": "render",
+      "label": "Rendering clips",
+      "sec": 68.0,
+      "source": "estimate",
+      "current": false
+    }
+  ],
+  "transcriptWordCount": 0,
+  "clipTarget": 2,
+  "clipTargetReason": "you asked for 2",
+  "failedStage": "finding"
+}

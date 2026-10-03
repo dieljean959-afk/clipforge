@@ -1,0 +1,43 @@
+{
+  "_id": "dfb603ff23f6",
+  "sourceType": "upload",
+  "source": "x.mp4",
+  "title": null,
+  "isUpload": true,
+  "stage": "failed",
+  "progress": 0,
+  "unitLabel": null,
+  "unitsDone": null,
+  "unitsTotal": null,
+  "lastProgressAt": 1790980340447,
+  "slow": false,
+  "stageStartedAt": 1790980340445,
+  "stageTimings": [],
+  "logs": [
+    "22:32:20 RECONCILED: 'rendering' had no worker behind it (the server restarted during 'Rendering 9:16' — 2 restart(s) so far) — re-queued from the last checkpoint instead of failing",
+    "22:32:35 NOT RESUMABLE: Source file was lost, please re-upload. The uploaded video is no longer on the server, so this job cannot be resumed — attach the file again to start a new one."
+  ],
+  "error": "Source file was lost, please re-upload. The uploaded video is no longer on the server, so this job cannot be resumed — attach the file again to start a new one.",
+  "errorDetail": null,
+  "durationSec": null,
+  "clipCount": null,
+  "totalClipsSec": null,
+  "detectedSource": null,
+  "downloadSource": null,
+  "captionsTxt": null,
+  "options": {
+    "minClipSec": null,
+    "maxClipSec": null,
+    "maxClips": null,
+    "captionPreset": null
+  },
+  "createdAt": 1790980340445,
+  "completedAt": 1790980355626,
+  "interruptCount": 2,
+  "failedStage": null,
+  "interrupted": false,
+  "interruptReason": "the server restarted during 'Rendering 9:16' — 2 restart(s) so far",
+  "queuePosition": 0,
+  "queueEtaSec": null,
+  "progressDetail": "Queued — starting now on the server worker."
+}

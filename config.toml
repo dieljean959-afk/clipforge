@@ -467,6 +467,26 @@ auto_update = true
 # Hosted-deployment guardrails. Env overrides: CLIPFORGE_MAX_SOURCE_MIN,
 # CLIPFORGE_RETENTION_HOURS, WORKER_URL, WORKER_TOKEN, TAILSCALE_ONLY.
 
+# ---- durable media (optional, off until configured) ----------------------
+# The sandbox's disk is part of the sandbox: a rebuild brings the codebase back
+# and leaves outputs/ and data/ empty. Setting these four values makes uploads
+# and finished clips survive that, by pushing them to any S3-compatible bucket
+# and pulling them back on demand. Until they are set, nothing about the app
+# changes — media simply stays on local disk.
+#
+#   CLIPFORGE_S3_ENDPOINT     https://<account>.r2.cloudflarestorage.com
+#   CLIPFORGE_S3_BUCKET       clipforge-media
+#   CLIPFORGE_S3_ACCESS_KEY   …
+#   CLIPFORGE_S3_SECRET_KEY   …
+#   CLIPFORGE_S3_PREFIX       clipforge      (optional key prefix)
+#   CLIPFORGE_S3_REGION       auto           (R2/B2 convention; "auto" works for
+#                                             AWS too, so it rarely needs setting)
+#   CLIPFORGE_OFFLOAD_DELETE_LOCAL  1        (0 = keep the local copy too)
+#
+# Cloudflare R2 is the obvious fit: S3-compatible and no egress fees, which
+# matters because the same clips are re-served on every playback and download.
+# Put the values in the environment (Keys tab), not in this file.
+
 # Sources longer than this are REJECTED at submit time (413). Long sources are
 # supported — a 2-hour video transcribes and renders proportionally longer.
 max_source_min = 120

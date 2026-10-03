@@ -1853,7 +1853,17 @@ def boot_banner(settings: Settings) -> None:
         if settings.hosted.retention_hours <= 0
         else f"{settings.hosted.retention_hours}h"
     )
-    print(        f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min / {settings.hosted.max_source_mb} MB | retention: {retention}")
+    print(f"[boot] Mode: {'tailscale-only' if settings.hosted.tailscale_only else 'public'} | max source: {settings.hosted.max_source_min} min / {settings.hosted.max_source_mb} MB | retention: {retention}")
+    # Media durability. Off unless a bucket and keys are configured, so this
+    # line is the honest answer to "will my clips outlive this sandbox?".
+    from app import objectstore
+
+    off = objectstore.status()
+    if off["enabled"]:
+        local = "kept locally too" if off["deleteLocal"] is False else "local copy dropped after push"
+        print(f"[boot] Durable media: ON — {off['bucket']} @ {off['endpoint']} ({local})")
+    else:
+        print("[boot] Durable media: OFF — no bucket configured, media dies with the sandbox")
     print(f"[boot] Worker pool: {settings.hosted.worker_concurrency} parallel job(s) (one child process each)")
     if settings.hosted.worker_url:
         print(f"[boot] Worker dispatch: {settings.hosted.worker_url} (rendering happens on the remote worker)")

@@ -1292,10 +1292,49 @@ async def upload_job(
         )
     job = store.get_job(job_id) or job
     job["source"] = final.name
+    # Push to durable storage BEFORE the job is queued, and before the local
+    # copy is (optionally) dropped. If the push fails the local file stays and
+    # the job runs exactly as it did before — an upload is the one artefact
+    # there is no way to recreate, so this is never allowed to be lossy.
+    offloaded = _offload_source(job_id, final)
+    job["sourceRemote"] = bool(offloaded)
     store.write_job(job)
-    store.append_job_log(job_id, f"upload ingested: {final.name} ({final.stat().st_size} bytes)")
+    store.append_job_log(
+        job_id,
+        f"upload ingested: {final.name} ({final.stat().st_size if final.exists() else offloaded} bytes)"
+        + (" | copied to durable storage" if offloaded else ""),
+    )
     worker.enqueue(job_id)
-    return {"jobId": job_id, "file": final.name, "bytes": final.stat().st_size}
+    return {
+        "jobId": job_id,
+        "file": final.name,
+        "bytes": final.stat().st_size if final.exists() else 0,
+        "durable": bool(offloaded),
+    }
+
+
+def _offload_source(job_id: str, path: Path) -> bool:
+    """Copy an uploaded source to durable storage, then free the local bytes.
+
+    Returns whether the durable copy exists. Never raises: durability is a
+    best-effort property, and a storage outage must not reject an upload the
+    user already completed.
+    """
+    from app import objectstore
+
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled or not path.exists():
+        return False
+    key = objectstore.upload_key(job_id, path.name)
+    ok = objectstore.upload_file(path, key, cfg)
+    if not ok:
+        return False
+    if objectstore.drop_local_after_push(True, path, cfg):
+        # The pipeline reads the source straight back through
+        # `find_source_file`, which materialises it from the bucket on demand,
+        # so deleting it here changes nothing for the job that is about to run.
+        logger.info(f"[api] job {job_id}: source offloaded, local copy dropped")
+    return True
 
 
 @app.get("/api/jobs")
@@ -1439,6 +1478,7 @@ def delete_job(job_id: str) -> dict:
         settings.app.paths.outputs_dir / job_id,
     ):
         shutil.rmtree(d, ignore_errors=True)
+    _purge_remote_job(job_id)
     return {"deleted": True, "cancelled": cancelled}
 
 
@@ -1489,6 +1529,7 @@ def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
             settings.app.paths.outputs_dir / job_id,
         ):
             shutil.rmtree(d, ignore_errors=True)
+        _purge_remote_job(job_id)
         deleted.append(job_id)
     logger.info(
         f"[api] bulk delete: {len(deleted)} removed, {len(missing)} not found"
@@ -1853,7 +1894,7 @@ def clip_video(clip_id: str) -> FileResponse:
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
     p = Path(clip["videoPath"])
-    if not p.exists():
+    if not _restore_media(p):
         raise HTTPException(404, f"clip file missing on disk: {p.name}")
     return FileResponse(
         p,
@@ -1866,6 +1907,38 @@ def clip_video(clip_id: str) -> FileResponse:
     )
 
 
+def _purge_remote_job(job_id: str) -> None:
+    """Remove a deleted job's objects from durable storage too.
+
+    Deleting a batch that was offloaded has to mean deleted. Without this the
+    bucket would keep the source video and every clip forever, which is both a
+    privacy problem and a bill that grows with every test batch.
+    """
+    from app import objectstore
+
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled:
+        return
+    s3 = objectstore.client(cfg)
+    if s3 is None:
+        return
+    prefix = f"{cfg.prefix}"
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=cfg.bucket, Prefix=f"{prefix}/"):
+            keys = [
+                {"Key": o["Key"]}
+                for o in page.get("Contents", [])
+                if f"/{job_id}/" in o["Key"]
+            ]
+            for i in range(0, len(keys), 1000):
+                s3.delete_objects(
+                    Bucket=cfg.bucket, Delete={"Objects": keys[i:i + 1000]}
+                )
+    except Exception as exc:  # noqa: BLE001 - a stale object is not worth a 500
+        logger.warning(f"[objectstore] could not purge remote objects for {job_id}: {exc}")
+
+
 def _media_etag(p: Path) -> str:
     """Weak-ish ETag from size+mtime: changes exactly when the bytes change."""
     try:
@@ -1873,6 +1946,30 @@ def _media_etag(p: Path) -> str:
     except OSError:
         return '"0"'
     return f'"{int(st.st_mtime)}-{st.st_size}"'
+
+
+def _restore_media(p: Path) -> bool:
+    """Pull an offloaded media file back onto disk before serving it.
+
+    Rendered clips are offloaded once they are finished, so a sandbox rebuild
+    leaves the job documents pointing at paths that no longer exist. Every
+    serving route calls this first, which means the routes themselves — and
+    therefore Range support, ETags, caching and the frontend — are unchanged:
+    by the time a FileResponse is built the file is local again. Returns False
+    when there is nothing local and nothing in durable storage, which leaves
+    each route's existing 404 exactly as it was.
+    """
+    if p.exists() and p.stat().st_size > 0:
+        return True
+    from app import objectstore
+
+    key = objectstore.key_for_path(p, settings.app.paths.outputs_dir)
+    if not key:
+        return False
+    if objectstore.materialize(key, p):
+        logger.info(f"[api] restored {p.name} from durable storage")
+        return True
+    return False
 
 
 @app.api_route("/api/clips/{clip_id}/share", methods=["GET", "HEAD"])
@@ -1905,7 +2002,7 @@ def clip_share(clip_id: str) -> FileResponse:
         # the honest answer is "not rendered yet".
         raise HTTPException(409, "this clip has no rendered MP4 to share yet")
     master = Path(clip["videoPath"])
-    if not master.exists():
+    if not _restore_media(master):
         raise HTTPException(404, f"clip file missing on disk: {master.name}")
     try:
         share = share_video.build_share_version(master)
@@ -2142,7 +2239,7 @@ def clip_thumb(clip_id: str) -> FileResponse:
     if clip is None or not clip.get("thumbPath"):
         raise HTTPException(404, "thumbnail not available")
     p = Path(clip["thumbPath"])
-    if not p.exists():
+    if not _restore_media(p):
         raise HTTPException(404, "thumbnail file missing")
     if clip.get("videoPath") and video_svc.thumb_needs_rewrite(p):
         try:
@@ -2165,7 +2262,7 @@ def clip_download(clip_id: str) -> FileResponse:
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
     p = Path(clip["videoPath"])
-    if not p.exists():
+    if not _restore_media(p):
         raise HTTPException(404, f"clip file missing on disk: {p.name}")
     safe = "".join(ch for ch in clip.get("title", "clip") if ch.isalnum() or ch in " -_")[:40] or "clip"
     return FileResponse(
@@ -2372,7 +2469,7 @@ def clip_track(clip_id: str, filename: str) -> FileResponse:
             if Path(recorded).name != wanted:
                 continue
             p = Path(recorded)
-            if not p.exists():
+            if not _restore_media(p):
                 raise HTTPException(404, f"track file missing on disk: {p.name}")
             media = "text/vtt" if ext == "vtt" else "application/x-subrip"
             return FileResponse(
@@ -2429,7 +2526,7 @@ def export_zip(body: ZipRequest):
             skipped.append(cid)
             continue
         p = Path(clip["videoPath"])
-        if not p.exists():
+        if not _restore_media(p):
             skipped.append(cid)
             continue
         size = p.stat().st_size

@@ -1,0 +1,103 @@
+{
+  "_id": "f7537ebc9d28",
+  "sourceType": "url",
+  "source": "https://www.youtube.com/live/tXH5EjM_96c?si=Q1cBC0f0xuSqBhNI",
+  "title": "Lets Talk",
+  "isUpload": false,
+  "stage": "failed",
+  "progress": 0.0,
+  "progressDetail": "faster-whisper is transcribing word timings...",
+  "unitLabel": null,
+  "unitsDone": null,
+  "unitsTotal": null,
+  "stageEtaSec": 688.5,
+  "totalEtaSec": 2279.7,
+  "lastProgressAt": 1790973048265,
+  "slow": false,
+  "stageStartedAt": 1790973041607,
+  "stageTimings": [
+    {
+      "stage": "fetch",
+      "sec": 8.3,
+      "at": 1790973033258
+    }
+  ],
+  "logs": [
+    "20:30:33 job created (url: https://www.youtube.com/live/tXH5EjM_96c?si=Q1cBC0f0xuSqBhNI)",
+    "20:30:33 2026-10-02 20:30:33.193 | INFO     | app.config:load_config:1413 - [config] media storage: /home/daytona/clipforge-data",
+    "20:30:33 2026-10-02 20:30:33.254 | INFO     | app.config:refresh:501 - [config] DeepSeek key detected (DEEPSEEK_API_KEY)",
+    "20:30:33 disk check: 4032 MB free, ~500 MB needed for this render",
+    "20:30:33 Stage: fetch — https://www.youtube.com/live/tXH5EjM_96c?si=Q1cBC0f0xuSqBhNI",
+    "20:30:33 2026-10-02 20:30:33.280 | INFO     | app.task:_log:298 - [job f7537ebc9d28] Stage: fetch — https://www.youtube.com/live/tXH5EjM_96c?si=Q1cBC0f0xuSqBhNI",
+    "20:30:33 2026-10-02 20:30:33.411 | INFO     | app.download:download_url:158 - [download] yt-dlp fetching: https://www.youtube.com/live/tXH5EjM_96c?si=Q1cBC0f0xuSqBhNI",
+    "20:30:36 [download]  52.3% of  295.79MiB at  178.79KiB/s ETA 13:28",
+    "20:30:36 [download]  52.3% of  295.79MiB at  519.57KiB/s ETA 04:38",
+    "20:30:36 [download]  52.3% of  295.79MiB at 1013.09KiB/s ETA 02:22",
+    "20:30:36 [download]  52.3% of  295.79MiB at    1.90MiB/s ETA 01:14",
+    "20:30:36 [download]  52.3% of  295.79MiB at    2.72MiB/s ETA 00:51",
+    "20:30:36 [download]  52.4% of  295.79MiB at    5.20MiB/s ETA 00:27",
+    "20:30:36 [download]  52.5% of  295.79MiB at    9.90MiB/s ETA 00:14",
+    "20:30:36 [download]  52.6% of  295.79MiB at   18.66MiB/s ETA 00:07",
+    "20:30:36 [download]  53.0% of  295.79MiB at   34.33MiB/s ETA 00:04",
+    "20:30:37 [download] 100% of  295.79MiB in 00:00:02 at 138.41MiB/s",
+    "20:30:37 [download] 100% of   41.20MiB in 00:00:00 at 212.34MiB/s",
+    "20:30:41 yt-dlp finished: Lets Talk",
+    "20:30:41 2026-10-02 20:30:41.233 | INFO     | app.task:_log:298 - [job f7537ebc9d28] yt-dlp finished: Lets Talk",
+    "20:30:41 2026-10-02 20:30:41.236 | INFO     | app.download:download_url:167 - [download] saved source.mp4 (353705444 bytes)",
+    "20:30:41 2026-10-02 20:30:41.438 | INFO     | app.video:verify_source:70 - [video] source verified: 1280x720, 3260.1s",
+    "20:30:41 Stage: transcribe — engine faster-whisper (cpu/int8, batch 4), model 'small' | ETA basis: RTF 0.211 (measured on this host (26 run(s))) → ~11.5 min for 54.3 min of audio",
+    "20:30:43 2026-10-02 20:30:43.309 | INFO     | app.subtitle:transcribe:475 - [subtitle] transcribing 3260.1s with faster-whisper in 11 ~5 min chunks (overlap 2.0s, batch 4) — resumable per chunk",
+    "20:30:49 FAILED: The worker was stopped by the server (SIGTERM) during the job. It resumes automatically."
+  ],
+  "error": "The worker was stopped by the server (SIGTERM) during the job. It resumes automatically.",
+  "errorDetail": "received SIGTERM",
+  "durationSec": 3260.061,
+  "clipCount": null,
+  "totalClipsSec": null,
+  "detectedSource": null,
+  "downloadSource": "yt-dlp",
+  "captionsTxt": null,
+  "options": {
+    "minClipSec": null,
+    "maxClipSec": null,
+    "maxClips": null,
+    "captionPreset": "karaoke"
+  },
+  "createdAt": 1790973033028,
+  "completedAt": 1790973049255,
+  "queuePosition": 0,
+  "queueEtaSec": null,
+  "etaSource": "rtf-prior",
+  "stagePlan": [
+    {
+      "stage": "transcribe",
+      "label": "Transcribing",
+      "sec": 688.5,
+      "source": "live",
+      "current": true
+    },
+    {
+      "stage": "detect",
+      "label": "Finding highlights",
+      "sec": 164.0,
+      "source": "estimate",
+      "current": false
+    },
+    {
+      "stage": "reframe",
+      "label": "Framing 9:16",
+      "sec": 67.2,
+      "source": "estimate",
+      "current": false
+    },
+    {
+      "stage": "render",
+      "label": "Rendering clips",
+      "sec": 1360.0,
+      "source": "estimate",
+      "current": false
+    }
+  ],
+  "failedStage": "transcribing",
+  "interrupted": false
+}

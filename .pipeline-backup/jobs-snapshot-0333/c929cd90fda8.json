@@ -1,0 +1,38 @@
+{
+  "_id": "c929cd90fda8",
+  "sourceType": "upload",
+  "source": "gone.mp4",
+  "title": null,
+  "isUpload": true,
+  "stage": "failed",
+  "progress": 0,
+  "unitLabel": null,
+  "unitsDone": null,
+  "unitsTotal": null,
+  "lastProgressAt": 1790979861063,
+  "slow": false,
+  "stageStartedAt": 1790979861061,
+  "stageTimings": [],
+  "logs": [
+    "22:24:21 NOT RESUMABLE: the uploaded source file is no longer on the server — failing instead of re-queueing"
+  ],
+  "error": "Source file was lost, please re-upload. The uploaded video is no longer on the server, so this job cannot be resumed — attach the file again to start a new one.",
+  "errorDetail": null,
+  "durationSec": null,
+  "clipCount": null,
+  "totalClipsSec": null,
+  "detectedSource": null,
+  "downloadSource": null,
+  "captionsTxt": null,
+  "options": {
+    "minClipSec": null,
+    "maxClipSec": null,
+    "maxClips": null,
+    "captionPreset": null
+  },
+  "createdAt": 1790979861061,
+  "completedAt": 1790979861063,
+  "failedStage": "rendering",
+  "interrupted": false,
+  "interruptReason": "the worker process vanished during 'Rendering 9:16' (server restart)"
+}

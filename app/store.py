@@ -642,12 +642,16 @@ class LocalStore:
     # ------------------------------------------------------------------
 
     def find_source_file(self, job_id: str) -> Path | None:
-        """Locate a job's source video across BOTH storage locations.
+        """Locate a job's source video: on disk, or in durable storage.
 
-        `job_source_dirs()` returns the new in-codebase location first and the
-        old `downloads/` symlink second, so a job whose source is in either
-        place is found. Never raises: a job with no readable source returns
-        None and the caller reports it.
+        Three places, in order. Both on-disk roots first — the in-codebase
+        `uploads/` location and the legacy `downloads/` one — and only if the
+        bytes are in neither is the object store consulted. That last step is
+        what turns "the sandbox was rebuilt" from a lost batch into a slow
+        one: the caller still gets a real local path to hand to ffmpeg.
+
+        Never raises: a job with no readable source anywhere returns None and
+        the caller reports it.
         """
         for d in _job_source_dirs(self._paths, job_id):
             if not d.exists():
@@ -657,6 +661,29 @@ class LocalStore:
                     ".mp4", ".mov", ".webm", ".mkv", ".m4a",
                 }:
                     return p
+        return self._restore_source_from_object_store(job_id)
+
+    def _restore_source_from_object_store(self, job_id: str) -> Path | None:
+        """Pull an offloaded source back onto disk, if there is one.
+
+        The name recorded on the job is the one that was uploaded; the suffix
+        matters because the pipeline infers the format from it. Restoring into
+        `uploads/` keeps a single on-disk convention for both origins.
+        """
+        from app import objectstore
+
+        job = self.get_job(job_id) or {}
+        name = Path(str(job.get("source") or "source.mp4")).name
+        dest_dir = _uploads_root(self._paths) / job_id
+        dest = dest_dir / name
+        if dest.exists() and dest.stat().st_size > 0:
+            return dest
+        key = objectstore.upload_key(job_id, name)
+        if objectstore.materialize(key, dest):
+            logger.info(
+                f"[store] job {job_id}: source restored from durable storage as {name}"
+            )
+            return dest
         return None
 
     def job_source_dir_for_write(self, job_id: str) -> Path:
