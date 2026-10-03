@@ -261,14 +261,36 @@ def test_real_runner_child_survives_sigterm() -> None:
         )
         rc = None
         try:
-            # Freeze the child during bootstrap — it is importing modules then,
-            # which is Python bytecode, so the handler is guaranteed to run on
-            # SIGCONT instead of waiting on some C call or a `pip` subprocess
-            # deep inside yt-dlp's self-update. Freezing is what stops it from
-            # finishing before the signal is queued; bootstrapping is what
-            # stops the signal from being deferred.
-            time.sleep(0.4)
+            # Wait for the child to install its handlers, instead of sleeping a
+            # fixed time and hoping.
+            #
+            # `_install_process_handlers` runs AFTER `from app.task import
+            # Pipeline`, and that import costs 0.28-0.46s on this1-CPU host
+            # (measured). This test used to `sleep(0.4)` and signal at ~0.5s,
+            # which is the SAME order of magnitude as the import — so whenever
+            # the host was busy the SIGTERM landed while the handler was not
+            # yet installed, the kernel applied SIGTERM's DEFAULT action, and
+            # the child died with rc=-15 having written nothing. That is a
+            # genuine "handler not wired" outcome, not the behaviour this
+            # section is meant to assert, and it failed at random depending on
+            # host load.
+            #
+            # The stage leaving "queued" is the observable proof that main()
+            # got past `_install_process_handlers` and into Pipeline.run, so
+            # polling for it makes the precondition deterministic. The freeze
+            # still matters for the other half of the race: it stops the child
+            # finishing the job before the signal is delivered.
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if child.poll() is not None:
+                    break
+                if (store.get_job(jid) or {}).get("stage") not in (None, "queued"):
+                    break
+                time.sleep(0.02)
             check("the real child is running", child.poll() is None, str(child.poll()))
+            check("the child installed its handlers before the signal",
+                  (store.get_job(jid) or {}).get("stage") not in (None, "queued"),
+                  str((store.get_job(jid) or {}).get("stage")))
             child.send_signal(signal.SIGSTOP)
             time.sleep(0.1)
             frozen_stage = (store.get_job(jid) or {}).get("stage")

@@ -88,9 +88,27 @@ export default defineConfig({
   },
   // Performance hints
   server: {
-    // Bind to all interfaces so the preview proxy (and WebContainer's
-    // server-ready event) can reach the dev server from outside the sandbox.
-    host: "0.0.0.0",
+    // Bind DUAL-STACK, not IPv4-only.
+    //
+    // This used to be "0.0.0.0", which listens on IPv4 only. The platform's
+    // preview proxy does not dial 127.0.0.1 — it dials the IPv6 loopback,
+    // `[::1]:5173`, and on an IPv4-only socket that dial is REFUSED. The
+    // sandbox daemon log recorded 4,719 `502 bad gateway` responses, virtually
+    // all of them the same error:
+    //
+    //   toolbox proxy upstream error path=/ error="dial tcp [::1]:5173:
+    //   connect: connection refused"
+    //
+    // So every preview boot raced the proxy against a dial it could never
+    // satisfy, and the preview sat at "Project connected, booting up preview"
+    // (97%) retrying a connection that was guaranteed to fail until it fell
+    // back to IPv4. That is the wait the user was seeing.
+    //
+    // "::" with net.ipv6.bindv6only=0 (confirmed 0 on this host) is a
+    // dual-stack socket: it accepts IPv6 loopback AND the IPv4 connections
+    // that already worked, so the proxy's preferred dial succeeds on the first
+    // try instead of after a failed attempt. IPv4 reachability is preserved.
+    host: "::",
     port: 5173,
     // The preview is served from a generated *.freebuff.dev domain, so the
     // Host header never matches localhost. Accept it instead of 403-ing.
