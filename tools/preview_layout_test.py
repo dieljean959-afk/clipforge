@@ -321,6 +321,70 @@ def test_controls_fit_a_phone() -> None:
     check("the row is not cramped by its own gaps", 'gap-1.5' in body)
 
 
+def _strip_comments(html: str) -> str:
+    """Drop CSS/JS comments so prose about a removed expression is not code."""
+    out: list[str] = []
+    i, n = 0, len(html)
+    while i < n:
+        if html.startswith("/*", i):
+            end = html.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if html.startswith("//", i):
+            end = html.find("\n", i)
+            i = n if end == -1 else end
+            continue
+        out.append(html[i])
+        i += 1
+    return "".join(out)
+
+
+def test_boot_card_never_parks() -> None:
+    """The boot card must not be able to LOOK stuck.
+
+    It used to compute
+
+        pct = Math.min(97, Math.round((loaded / EXPECTED_MODULES) * 100))
+
+    with EXPECTED_MODULES = 26, while `loaded` counted every finished
+    subresource — modules, CSS, favicon and /api polls alike. One cold load is
+    ~41 resources, so the count passed 26 early and the bar pinned at exactly
+    97% for the rest of the boot: measured across 308 real boots, that frozen
+    97% was on screen for a median of 7s, p90 40s, max 276s, on EVERY load. It
+    read as a hang. The bar is now indeterminate and the status line reports
+    facts that keep changing.
+    """
+    print("\n[11] the boot card cannot report a frozen percentage")
+    html = src("index.html")
+    # Only EXECUTABLE code is under test. index.html documents why the old
+    # percentage was removed, and that prose quotes the old expression — a
+    # naive substring check would flag its own explanation.
+    code = _strip_comments(html)
+
+    check("no guessed module total is left behind",
+          "EXPECTED_MODULES" not in code)
+    check("no percentage is clamped to a ceiling",
+          "Math.min(97" not in code and "Math.min(9" not in code)
+    # The precise invariant: the bar's width is NEVER set from script, so there
+    # is no number on it that can stop moving. (Percentages in the CSS — the
+    # bar's own width, keyframe offsets — are layout, not reported progress.)
+    check("script never writes a width onto the bar",
+          "style.width" not in code and "firstElementChild" not in code)
+    check("the bar animates instead of parking",
+          "@keyframes bootbar" in code and "animation: bootbar" in code)
+    check("a failed boot stops the bar moving",
+          "#boot.failed .meter" in code)
+    check("the status line reports real, changing facts",
+          "paintStatus" in code and "files" in code and "MB" in code)
+    # The failure paths still matter: no auto-reload storm on a slow load.
+    check("a slow load is still never treated as a failure",
+          "idleFor < 4000" in code)
+    check("the hard ceiling still exists and still refuses to reload",
+          "HARD_CEILING_MS" in code and "No auto-reload" in code)
+    check("module-load failures still auto-retry, and are capped",
+          "MAX_RELOADS" in code and "failAndRetry" in code)
+
+
 def main() -> int:
     test_render_geometry()
     test_existing_clips()
@@ -332,6 +396,7 @@ def main() -> int:
     test_caption_preview()
     test_resilient_loading()
     test_controls_fit_a_phone()
+    test_boot_card_never_parks()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

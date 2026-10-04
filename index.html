@@ -54,16 +54,31 @@
     @keyframes bootspin { to { transform: rotate(360deg); } }
     /* Once a failure is known, stop implying that progress is happening. */
     #boot.failed .spin { display: none; }
-    /* A live progress bar: on a slow phone this is the difference between
-       "it is working, just slow" and "it is broken". */
+    /* An INDETERMINATE bar, on purpose.
+       This used to be a determinate one driven by
+         Math.min(97, Math.round((loaded / EXPECTED_MODULES) * 100))
+       which is worse than no bar at all: the total was a guess, and once the
+       count passed it the bar pinned at exactly 97% — a ceiling, not a
+       reading — for the rest of the boot. On this host that is a median of 7
+       seconds and a p90 of 40, so the preview showed a frozen 97% on every
+       single load and read as a hang. A sweeping bar cannot be mistaken for a
+       stall, and the status line underneath reports facts that keep changing
+       (files, megabytes, seconds) instead of a number that cannot move. */
     #boot .meter {
       margin-top: 14px; height: 4px; border-radius: 999px;
       background: #27272a; overflow: hidden;
     }
     #boot .meter > i {
-      display: block; height: 100%; width: 0%;
-      background: #22c55e; transition: width .4s ease;
+      display: block; height: 100%; width: 34%;
+      background: linear-gradient(90deg, #15803d, #4ade80, #15803d);
+      animation: bootbar 1.1s ease-in-out infinite;
     }
+    @keyframes bootbar {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(295%); }
+    }
+    /* A dead bar should not keep pretending to work. */
+    #boot.failed .meter { display: none; }
   </style>
 </head>
 
@@ -88,7 +103,7 @@
     5s intervals. Every reload threw away the modules already downloaded and
     started the same 3 MB again, so on a slow connection it could NEVER finish —
     a self-inflicted reload storm that made the preview unreachable. It now:
-      - counts modules as they arrive and shows real progress,
+      - counts resources as they arrive and reports real numbers,
       - never reloads while progress is still happening,
       - never auto-reloads on a mount timeout at all (a reload cannot make a
         slow connection faster — it only restarts the download),
@@ -115,16 +130,18 @@
       // fallback and tells these handlers there is nothing left to report.
       window.__clipforgeBooted = false;
 
-      // How many modules we EXPECT, roughly. Only used to draw a bar — an
-      // honest "we do not know the total" bar is better than a fake one.
-      var EXPECTED_MODULES = 26;
+      // There is deliberately no EXPECTED_MODULES here any more. The total size
+      // of a dev module graph is not knowable from the page, so any denominator
+      // we invented would be a guess — and a guess that runs out turns into a
+      // frozen percentage, which is what made the preview look hung at 97%.
       var MAX_RELOADS = 8;          // only for real load failures
       var RETRY_MS = 5000;
       var SLOW_AFTER_MS = 6000;     // say "slow connection" after this
       var HARD_CEILING_MS = 180000; // 3 min: genuinely give up
 
       var startedAt = Date.now();
-      var loaded = 0;
+      var files = 0;
+      var bytes = 0;
       var lastProgressAt = Date.now();
       var reloads = 0;
       var failed = false;
@@ -137,25 +154,32 @@
         if (node) node.textContent = text;
       }
 
-      function drawMeter() {
-        var meter = el("boot-meter");
-        if (!meter) return;
-        meter.hidden = false;
-        var pct = Math.min(97, Math.round((loaded / EXPECTED_MODULES) * 100));
-        meter.firstElementChild.style.width = pct + "%";
+      // Real, monotonic facts. No total is invented, so nothing here can stall.
+      function paintStatus(slow) {
+        var mbText = bytes > 0 ? " · " + (bytes / 1048576).toFixed(1) + " MB" : "";
+        var secs = Math.round((Date.now() - startedAt) / 1000);
+        status(
+          "Loading… " + files + " files" + mbText + " · " + secs + "s" +
+            (slow ? " · slow connection" : ""),
+        );
       }
 
       // Every finished subresource is proof the app is still coming.
-      function noteProgress() {
-        loaded += 1;
-        lastProgressAt = Date.now();
-        drawMeter();
+      function noteProgress(entries) {
+        if (entries && entries.length) {
+          for (var i = 0; i < entries.length; i++) {
+            files += 1;
+            bytes += entries[i].transferSize || entries[i].encodedBodySize || 0;
+          }
+          lastProgressAt = Date.now();
+        }
+        paintStatus(false);
       }
 
       if (window.PerformanceObserver) {
         try {
           new PerformanceObserver(function (list) {
-            list.getEntries().forEach(noteProgress);
+            noteProgress(list.getEntries());
           }).observe({ type: "resource", buffered: true });
         } catch (e) { /* older browsers: the timer below still copes */ }
       }
@@ -174,6 +198,8 @@
         var boot = el("boot");
         if (!boot) return;
         boot.classList.add("failed");
+        var deadMeter = el("boot-meter");
+        if (deadMeter) deadMeter.hidden = true;
         el("boot-title").textContent = "ClipForge didn't start";
         el("boot-sub").textContent =
           "A module of the app failed to load — usually a dev server that is " +
@@ -215,10 +241,8 @@
           var idleFor = now - lastProgressAt;
           var elapsed = now - startedAt;
 
-          if (idleFor < 4000 && elapsed > SLOW_AFTER_MS) {
-            status("Still loading — slow connection · " + loaded + " modules");
-            return;
-          }
+          paintStatus(elapsed > SLOW_AFTER_MS && idleFor < 4000);
+
           if (elapsed > HARD_CEILING_MS && idleFor > 15000) {
             var root = el("root");
             if (root && root.childElementCount > 0) return;
@@ -227,8 +251,8 @@
             if (boot) boot.classList.add("failed");
             el("boot-title").textContent = "ClipForge still hasn't loaded";
             el("boot-sub").textContent =
-              "This is a slow connection, not a broken app: " + loaded +
-              " modules downloaded but the app never finished starting. A reload " +
+              "This is a slow connection, not a broken app: " + files +
+              " files downloaded but the app never finished starting. A reload " +
               "will not help — try a stronger connection, or close other tabs to free up bandwidth.";
             el("boot-err").hidden = true;
             el("boot-actions").hidden = false;
@@ -263,8 +287,9 @@
         failAndRetry(String((r && r.message) || r || "Unhandled error"));
       });
 
-      drawMeter();
-      status("Loading…");
+      var meter = el("boot-meter");
+      if (meter) meter.hidden = false;
+      paintStatus(false);
       watchProgress();
     })();
   </script>
