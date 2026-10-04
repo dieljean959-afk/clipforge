@@ -31,6 +31,8 @@ import {
   STAGES,
   STAGE_LABELS,
   QUIET_THRESHOLD_MS,
+  FALLBACK_STALL_TIMEOUT_SEC,
+  STALL_WARN_FRACTION,
   fmtAgo,
   fmtClock,
   fmtDate,
@@ -55,16 +57,30 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
 };
 
 /**
- * Global stall watchdog: mirror the server's silence watchdog so the UI does
- * not claim a long transcription is dead while it is progressing — and, just
- * as importantly, does NOT stay silent for twice as long as the server will
- * actually wait. The server's budget is 3 minutes
- * (app/worker.py STALL_TIMEOUT_SEC = 180); this used to hold off for 10, so a
- * job the server had already killed and auto-retried still showed a spinner
- * with no explanation for seven more minutes.
- * 2s poll mirrors the progress cadence.
+ * The stall budget is the SERVER's (app/worker.py STALL_TIMEOUT_SEC), read
+ * from health and threaded in as `stallTimeoutSec`. These shared constants
+ * from @/lib/clipforge only cover the cold first paint, before /api/health has
+ * answered.
+ *
+ * This card used to hold its own hardcoded 90s threshold and then describe it
+ * to the user as "the server restarts and resumes after 1.5 minutes" — while
+ * the server's real budget was 180s. So the UI promised a recovery half a
+ * minute before the server would act, and the number on screen was not the
+ * number the server was running. One source, not two.
  */
-const STALL_THRESHOLD_MS = 90_000;
+
+/**
+ * Render a duration the way a person would say it. The old copy interpolated
+ * seconds/60000 raw, so a 90s budget printed "1.5 minutes" and a 180s budget
+ * printed "3 minutes" — the first reading as a fraction of a minute is what
+ * made the number look like a bug rather than a budget.
+ */
+function fmtMinutes(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} second${s === 1 ? "" : "s"}`;
+  const m = Math.round(s / 60);
+  return `${m} minute${m === 1 ? "" : "s"}`;
+}
 
 /** Re-render once a second so "12s ago" actually counts up on its own. */
 function useNow(active: boolean): number {
@@ -77,7 +93,7 @@ function useNow(active: boolean): number {
   return now;
 }
 
-function useStalled(job: JobDoc): boolean {
+function useStalled(job: JobDoc, thresholdMs: number): boolean {
   const [stalled, setStalled] = useState(false);
   const active =
     job.stage !== "complete" && job.stage !== "failed" && job.stage !== "queued";
@@ -90,7 +106,7 @@ function useStalled(job: JobDoc): boolean {
     const check = () => {
       const j = jobRef.current;
       const last = j.lastProgressAt ?? j.stageStartedAt ?? j.createdAt;
-      setStalled(Date.now() - last > STALL_THRESHOLD_MS);
+      setStalled(Date.now() - last > thresholdMs);
     };
     // first evaluation deferred a tick — no synchronous setState on mount
     const initial = setTimeout(check, 0);
@@ -99,7 +115,10 @@ function useStalled(job: JobDoc): boolean {
       clearTimeout(initial);
       clearInterval(timer);
     };
-  }, [active]);
+    // thresholdMs is a dependency: when health arrives carrying a different
+    // real budget, the verdict is re-evaluated against it instead of keeping
+    // the fallback's answer until some unrelated re-render happens.
+  }, [active, thresholdMs]);
   return active && stalled;
 }
 
@@ -107,11 +126,19 @@ export function JobCard({
   job,
   onDeleted,
   onCheckNow,
+  stallTimeoutSec,
 }: {
   job: JobDoc;
   onDeleted?: () => void;
   onCheckNow?: (jobId: string) => Promise<void> | void;
+  /** The server's real silence budget, from health. Falls back to the
+   *  worker's own default until health answers. */
+  stallTimeoutSec?: number | null;
 }) {
+  const serverStallSec =
+    typeof stallTimeoutSec === "number" && stallTimeoutSec > 0
+      ? stallTimeoutSec
+      : FALLBACK_STALL_TIMEOUT_SEC;
   const failed = job.status === "failed" || job.stage === "failed";
   const complete = job.status === "complete" || job.stage === "complete";
   const paused = job.status === "paused" || job.stage === "paused";
@@ -123,7 +150,7 @@ export function JobCard({
     | undefined;
   const activeIdx = stepStage ? STAGES.indexOf(stepStage) : -1;
   const overall = overallStatus(job);
-  const stalled = useStalled(job);
+  const stalled = useStalled(job, serverStallSec * 1000 * STALL_WARN_FRACTION);
   const [busy, setBusy] = useState<null | "pause" | "resume" | "check">(null);
   // Live ONLY while the backend says the job is live. isTerminal is the
   // backend's single verdict, so this can never show a spinner for a job that
@@ -461,14 +488,14 @@ export function JobCard({
                 {job.progressDetail ?? STAGE_LABELS[job.stage as ClipStage]}
               </span>
               . The server restarts and resumes this job after{" "}
-              {STALL_THRESHOLD_MS / 60000} minutes of silence, picking up from the
+              {fmtMinutes(serverStallSec)} of silence, picking up from the
               last finished unit.
             </div>
           )}
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               <span className="font-semibold">Pipeline stalled</span> — no progress
-              from the worker for {STALL_THRESHOLD_MS / 60000} minutes at stage{" "}
+              from the worker for {fmtMinutes(serverStallSec * STALL_WARN_FRACTION)} at stage{" "}
               <span className="font-mono">{job.stage}</span>
               {typeof job.unitsDone === "number" && job.unitsDone > 0
                 ? `, stuck after ${job.unitsDone} of ${job.unitsTotal ?? "?"} ${job.unitLabel ?? "units"}`

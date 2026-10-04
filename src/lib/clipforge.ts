@@ -211,16 +211,34 @@ export function fmtEta(sec: number): string {
 /**
  * Silence thresholds, in ms.
  *
- * DISTINCT on purpose, and deliberately far apart:
+ * DISTINCT on purpose, and deliberately ordered:
  *
  * - QUIET is the early "is anything happening?" signal. It is only a hint, not
  *   a verdict: a single long ffmpeg encode legitimately produces no progress
  *   line for a while, so this must not look like an error.
- * - STALL is where the server-side watchdog has given up and killed the worker.
- *   It mirrors CLIPFORGE_STALL_TIMEOUT_SEC.
+ * - The STALL budget is owned by the SERVER (app/worker.py
+ *   STALL_TIMEOUT_SEC, overridable per-deploy with CLIPFORGE_STALL_TIMEOUT_SEC)
+ *   and reaches the UI as health.worker.stallTimeoutSec. A frontend copy of
+ *   that number is what let the card promise recovery "1.5 minutes" after the
+ *   server was really waiting 3, so there is deliberately no hardcoded stall
+ *   threshold here any more -- only the cold-load fallback matching the
+ *   worker's own default.
+ *
+ * The warning fires at a FRACTION of the server's budget so the user hears
+ * about a quiet job while there is still time to act on it. That ordering
+ * (QUIET < warn < budget) is the invariant worth enforcing.
  */
 export const QUIET_THRESHOLD_MS = 75_000;
-export const STALL_THRESHOLD_MS = 90_000;
+
+/** app/worker.py STALL_TIMEOUT_SEC's default; used only before health answers. */
+export const FALLBACK_STALL_TIMEOUT_SEC = 180;
+
+/** Warn at this fraction of the server's budget. Must stay below 1. */
+export const STALL_WARN_FRACTION = 0.5;
+
+/** Cold-load warn threshold: ms of silence before the stall banner appears. */
+export const STALL_WARN_MS =
+  FALLBACK_STALL_TIMEOUT_SEC * 1000 * STALL_WARN_FRACTION;
 
 /** True while a job is doing work we can meaningfully watch. */
 export function isActiveJob(job: JobDoc): boolean {

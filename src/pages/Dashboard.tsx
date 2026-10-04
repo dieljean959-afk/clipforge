@@ -23,7 +23,7 @@ import { CleanupJunkDialog } from "@/components/clipforge/CleanupJunkDialog";
 import { CaptionStyleDialog } from "@/components/clipforge/CaptionStyleDialog";
 import { GroqUsageBadge } from "@/components/clipforge/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
-import { useJobs, useClips } from "@/hooks/use-poll";
+import { useJobs, useClips, useHealth } from "@/hooks/use-poll";
 import { api, type UsageDto, type VerifyClipsDto } from "@/lib/api";
 import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
@@ -100,6 +100,10 @@ export default function Dashboard() {
       : (doneJobs[0]?._id ?? null);
   const selectedJob = doneJobs.find((j) => j._id === effectiveJobId) ?? null;
   const { clips, loaded: clipsLoaded } = useClips(effectiveJobId, 2000);
+  // The worker's real silence budget. A stall banner that quotes a number
+  // invented in the frontend will drift from the server the moment
+  // CLIPFORGE_STALL_TIMEOUT_SEC is set, so the card reads it from health.
+  const { health } = useHealth(10_000);
 
   // "Load older batches" as the reader reaches the end of the pill list. The
   // server already returns only the newest page; without this the older ones
@@ -297,6 +301,7 @@ export default function Dashboard() {
                 <JobCard
                   key={job._id}
                   job={job}
+                  stallTimeoutSec={health?.stallTimeoutSec}
                   onDeleted={refreshJobs}
                   onCheckNow={async (jobId) => {
                     // "Check now" forces an immediate poll of THIS job instead

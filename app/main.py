@@ -1216,11 +1216,23 @@ def create_job(body: CreateJobIn) -> dict:
     # otherwise fail mid-pipeline with a confusing ffmpeg/whisper error.
     free = disk_stats(settings.app.paths.data_dir).get("freeBytes")
     if free is not None and free < MIN_FREE_BYTES:
+        # The old message promised "files are deleted automatically 24h after a
+        # job completes" as the way out. That is only true when retention is
+        # switched ON, and retention_hours defaults to 0 (keep everything), so
+        # on a default install the message told the user the disk would drain
+        # itself while it never would. Say what is actually configured.
+        retention_h = getattr(settings.hosted, "retention_hours", 0) or 0
+        cleanup = (
+            f"completed jobs are deleted automatically {retention_h}h after they "
+            "finish"
+            if retention_h > 0
+            else "nothing is deleted automatically — delete old batches on the "
+            "dashboard to reclaim space"
+        )
         raise HTTPException(
             507,
             f"Server disk is almost full ({free // (1024 * 1024)} MB free) — "
-            "files are deleted automatically 24h after a job completes, or delete "
-            "old jobs on the dashboard and try again.",
+            f"{cleanup}, then try again.",
         )
     job = store.create_job(
         source_type=body.sourceType,

@@ -10,7 +10,9 @@
 import {
   PIPELINE_STAGES,
   QUIET_THRESHOLD_MS,
-  STALL_THRESHOLD_MS,
+  FALLBACK_STALL_TIMEOUT_SEC,
+  STALL_WARN_FRACTION,
+  STALL_WARN_MS,
   fmtAgo,
   isActiveJob,
   overallStatus,
@@ -200,9 +202,24 @@ console.log("\n== 8. liveness helpers");
     silenceMs(asJob({ lastProgressAt: now - 90_000, stageStartedAt: now }), now) === 90_000,
   );
   check(
-    "the quiet threshold is well below the stall threshold",
-    QUIET_THRESHOLD_MS < STALL_THRESHOLD_MS / 3,
-    `${QUIET_THRESHOLD_MS / 1000}s vs ${STALL_THRESHOLD_MS / 1000}s`,
+    "the quiet hint fires before the stall warning does",
+    QUIET_THRESHOLD_MS < STALL_WARN_MS,
+    `${QUIET_THRESHOLD_MS / 1000}s quiet vs ${STALL_WARN_MS / 1000}s warn`,
+  );
+  // The stall budget belongs to the server; this is only the cold-load
+  // fallback, so it must still order correctly against it. The old check
+  // compared QUIET to a hardcoded 90s and asserted 75s < 30s, which has been
+  // false since the two constants were introduced -- and nothing ran this
+  // file, so it rotted unnoticed.
+  check(
+    "the stall warning fires before the server's budget runs out",
+    STALL_WARN_MS < FALLBACK_STALL_TIMEOUT_SEC * 1000,
+    `${STALL_WARN_MS / 1000}s warn vs ${FALLBACK_STALL_TIMEOUT_SEC}s budget`,
+  );
+  check(
+    "the warning fraction stays below 1 so the warning precedes the kill",
+    STALL_WARN_FRACTION > 0 && STALL_WARN_FRACTION < 1,
+    `${STALL_WARN_FRACTION}`,
   );
   check(
     "the quiet threshold sits in the 60-90s band",
