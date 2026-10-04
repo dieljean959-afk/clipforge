@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from loguru import logger
 
@@ -118,7 +118,86 @@ def system_stats() -> dict[str, Any]:
         return dict(stats)
 
 
-def disk_stats(path: Path | None = None) -> dict[str, Any]:
+#: How long a measured tree size stays fresh. Walking every job artefact costs
+#: ~230 ms for ~2,000 files, and /api/health is polled every 10 s by the
+#: dashboard, so measuring on every call would spend a quarter of a core
+#: continuously to print a number that barely moves.
+_TREE_CACHE_TTL_SEC = 60.0
+#: node_modules + .venv are ~1 GB and take ~1.8 s to walk, but they are
+#: installed before the app boots and never change while it runs. Re-walking
+#: them every minute would burn ~3% of a core on a 1-vCPU sandbox to produce a
+#: number that cannot have moved. Six hours outlives the sandbox itself.
+_STATIC_CACHE_TTL_SEC = 6 * 3600.0
+_tree_cache: dict[str, tuple[float, int]] = {}
+_static_cache: tuple[float, int] | None = None
+_tree_cache_lock = threading.Lock()
+
+
+def _cached_measure(key: str, roots: tuple[Path, ...], ttl: float) -> int:
+    """Measure `roots`, reusing the last answer while it is still fresh."""
+    now = time.monotonic()
+    with _tree_cache_lock:
+        hit = _tree_cache.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+    # Measured OUTSIDE the lock: this is filesystem I/O and holding a lock
+    # across it would block /api/health for everyone while one caller walks
+    # 45,000 files. A concurrent caller just does the same work twice.
+    value = _measure_tree_bytes(roots)
+    with _tree_cache_lock:
+        _tree_cache[key] = (now, value)
+    return value
+
+
+def _static_tree_bytes(root: Path) -> int:
+    """Bytes held by the app's own dependencies, cached for hours."""
+    global _static_cache
+    now = time.monotonic()
+    with _tree_cache_lock:
+        if _static_cache is not None and now - _static_cache[0] < _STATIC_CACHE_TTL_SEC:
+            return _static_cache[1]
+    value = _measure_tree_bytes(
+        (root / "node_modules", root / ".venv", root / "dist", root / ".git")
+    )
+    with _tree_cache_lock:
+        _static_cache = (now, value)
+    return value
+
+
+def _measure_tree_bytes(paths: Iterable[Path]) -> int:
+    """Sum the real size of the directories ClipForge writes media into.
+
+    Deliberately counts the FILES rather than trusting the filesystem's own
+    block accounting. On this sandbox the root is virtiofs and `statvfs`
+    reports 72 MB used while `du` finds 1.2 GB — the kernel's numbers simply
+    do not describe what is on disk, so anything derived from them is a
+    fiction. Walking the tree is the only measurement here that can be
+    believed.
+    """
+    total = 0
+    for root in paths:
+        if not root or not root.exists():
+            continue
+        try:
+            for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+                for name in filenames:
+                    p = Path(dirpath) / name
+                    try:
+                        # st_size, not st_blocks: this is what the app will
+                        # read and write, and it is the number the user can
+                        # reason about. Symlinks are skipped so a link into the
+                        # tree is not counted twice.
+                        if p.is_symlink():
+                            continue
+                        total += p.stat().st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def disk_stats(path: Path | None = None, settings: Settings | None = None) -> dict[str, Any]:
     """Disk free/total for the volume jobs ACTUALLY write to.
 
     Measured on the DATA dir, not the repo root. CLIPFORGE_DATA_DIR and
@@ -127,8 +206,20 @@ def disk_stats(path: Path | None = None) -> dict[str, Any]:
     describes a filesystem nothing is written to, so the Doctor card would
     show a full disk that is in fact empty. Unknown stays None rather than a
     confident wrong number.
+
+    `freeBytes` is the CONSERVATIVE figure, not the filesystem's own: it is
+    the smaller of what statvfs claims and what the filesystem size minus the
+    bytes ClipForge can actually see on disk. On a host whose block accounting
+    is broken the second term is far smaller and correct, and a preflight
+    built on the first term would wave through a job that dies at clip 9 of 10.
+    Under-estimating free space is the safe direction for a gate; it never
+    admits a job that could not have fit.
     """
-    stats: dict[str, Any] = {"freeBytes": None, "totalBytes": None, "path": None}
+    stats: dict[str, Any] = {
+        "freeBytes": None, "totalBytes": None, "path": None,
+        "treeBytes": None, "statvfsFreeBytes": None,
+        "mediaBytes": None, "depsBytes": None,
+    }
     target = Path(path) if path is not None else ROOT
     try:
         import shutil as _shutil
@@ -140,9 +231,36 @@ def disk_stats(path: Path | None = None) -> dict[str, Any]:
         while not probe.exists() and probe != probe.parent:
             probe = probe.parent
         usage = _shutil.disk_usage(probe)
-        stats["freeBytes"] = usage.free
         stats["totalBytes"] = usage.total
+        stats["statvfsFreeBytes"] = usage.free
         stats["path"] = str(probe)
+
+        # Only worth measuring when something can actually be measured.
+        if settings is None:
+            try:
+                from app.config import load_config
+
+                settings = load_config(quiet=True)
+            except Exception:
+                settings = None
+        if settings is not None:
+            p = settings.app.paths
+            media = _cached_measure(
+                "media:" + str(probe),
+                (p.data_dir, p.outputs_dir, p.downloads_dir, p.uploads_dir),
+                _TREE_CACHE_TTL_SEC,
+            )
+            deps = _static_tree_bytes(ROOT)
+            tree = media + deps
+            stats["treeBytes"] = tree
+            stats["mediaBytes"] = media
+            stats["depsBytes"] = deps
+            # Everything we can SEE on this volume is now counted, so
+            # total-minus-tree really is the space a new job has to fit in.
+            # The min with statvfs keeps the conservative property even on a
+            # host whose accounting is sane but reports a smaller number.
+            visible_free = usage.total - tree
+            stats["freeBytes"] = min(usage.free, max(0, visible_free))
     except Exception:
         pass  # unknown stays None
     return stats

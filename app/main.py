@@ -428,6 +428,22 @@ def _mark_interrupted() -> None:
 def _start_worker() -> None:
     worker.start()
     retention.start()
+    # Sweep ONCE at boot, not just on the daemon's first 30-minute tick.
+    #
+    # The daemon loop is `while not self._stop.wait(interval_min * 60)`, so
+    # the first pass was 30 minutes after startup — meaning every sandbox
+    # restart inherited the previous run's debris and then sat on it for half
+    # an hour. With retention at 0 that accumulated indefinitely: 353 MB of
+    # trashed batches on a 4 GB disk at the time of writing. A boot sweep is
+    # the one moment guaranteed to see the whole picture, so it runs here. It
+    # is the same `sweep()` the daemon calls, so there is no second code path
+    # to keep honest.
+    try:
+        swept = retention.sweep()
+        if swept:
+            logger.info(f"[boot] startup sweep removed {swept} expired/orphaned item(s)")
+    except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
+        logger.warning(f"[boot] startup sweep failed: {exc}")
     tailnet = hosting.tailnet_ip()
     logger.info(
         f"[boot] API up on http://{settings.app.host}:{settings.app.port} "

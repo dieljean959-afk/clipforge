@@ -1248,7 +1248,14 @@ class HostedConfig:
     max_source_mb: int = 4096
     # Delete finished artifacts (outputs/ + downloads/) this long after a job
     # completes — hosted storage is finite and users expect cleanup.
-    retention_hours: int = 24
+    #
+    # FOUR DAYS, not "never". The sandbox disk is 4 GB and a single 15-clip
+    # batch is ~300 MB of renders plus a ~100 MB scratch workspace, so an
+    # unlimited library fills the disk in about a dozen jobs and every job after
+    # that is refused at submit. Four days is long enough to download and share
+    # what you made, short enough that the disk stays usable. Override with
+    # CLIPFORGE_RETENTION_HOURS; 0 disables the sweeper entirely.
+    retention_hours: int = 96
     # Remote worker dispatch: when set (e.g. http://100.x.y.z:8765), the API
     # sends jobs to the user's home machine over Tailscale instead of running
     # the pipeline locally in the sandbox.
@@ -1438,6 +1445,27 @@ def _load_openai_provider(
             1000, int(section.get("daily_token_limit", defaults.daily_token_limit))
         ),
     )
+
+
+def _env_int(name: str, default: int) -> int:
+    """An integer from the environment that cannot crash the boot.
+
+    A typo in one env var (`CLIPFORGE_RETENTION_HOURS=six`) used to raise
+    ValueError straight out of load_config, which takes the whole API down and
+    serves 500 on every request — a far worse outcome than ignoring the value.
+    Unparseable input falls back to the default and says so out loud; the
+    value is never secret, so naming it in a log is safe.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            f"[config] {name}={raw!r} is not a whole number — using {default}"
+        )
+        return default
 
 
 def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
@@ -1746,7 +1774,18 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
             os.getenv("CLIPFORGE_MAX_SOURCE_MB")
             or h.get("max_source_mb", 4096)
         )),
-        retention_hours=max(0, int(h.get("retention_hours", os.getenv("CLIPFORGE_RETENTION_HOURS", 24)))),
+        # ENV FIRST, then config.toml, then the 4-day default.
+        #
+        # This was `h.get("retention_hours", os.getenv(...))`, which evaluates
+        # the env fallback ONLY when the key is absent from config.toml. The
+        # key is present (shipped as `retention_hours = 0`), so
+        # CLIPFORGE_RETENTION_HOURS was silently dead: setting it changed
+        # nothing, and the sweeper stayed off because the file said 0. Every
+        # other tunable in this block already reads `os.getenv(...) or
+        # h.get(...)` — this one line was the odd one out.
+        retention_hours=max(0, _env_int(
+            "CLIPFORGE_RETENTION_HOURS", h.get("retention_hours", 96)
+        )),
         worker_url=(os.getenv("WORKER_URL") or h.get("worker_url", "") or "").strip().rstrip("/"),
         worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),
         tailscale_only=str(os.getenv("TAILSCALE_ONLY", str(h.get("tailscale_only", False)))).strip().lower()

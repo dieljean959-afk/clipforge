@@ -17,6 +17,7 @@ the job's errorDetail — never swallowed.
 
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 import time
@@ -61,6 +62,38 @@ def _chunk_cached(cache_dir: Path | None, index: int) -> bool:
     if cache_dir is None:
         return False
     return (cache_dir / f"chunk_{index:05d}.json").exists()
+
+
+def _tree_size(root: Path) -> int:
+    """Bytes actually stored under `root`, walking it.
+
+    `Path.stat().st_size` on a DIRECTORY is the size of the inode entry, not
+    the bytes underneath, so summing it reports a few KB for a 300 MB clip
+    folder. Every "freed N MB" message that meant anything had to walk.
+    Symlinks are skipped so a link back into the tree is not double-counted,
+    and an unreadable entry is skipped rather than aborting the whole total.
+    """
+    if not root.exists():
+        return 0
+    if root.is_file() and not root.is_symlink():
+        try:
+            return root.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    try:
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+            for name in filenames:
+                p = Path(dirpath) / name
+                try:
+                    if p.is_symlink():
+                        continue
+                    total += p.stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total
 
 
 class JobPaused(Exception):
@@ -1299,28 +1332,62 @@ class Pipeline:
         raise video.RenderError(str(last) if last else "render failed")
 
     def _cleanup_job_temps(self, job_id: str, ws: StageWorkspace) -> None:
-        """Delete the scratch files a job leaves behind once it is finished.
+        """Delete what a finished job leaves behind on disk.
 
-        The 16 kHz WAV used for transcription is ~19 MB per 5-minute chunk of
-        extraction and is by far the largest temporary artefact; the reframe
-        analysis WAV is another full copy of the source audio. Neither is
-        needed after the job completes, and on a 4 GB sandbox disk a handful of
-        finished batches silently fills it.
+        This used to remove two files — `transcribe/source.wav` and
+        `reframe/audio.wav`. That was a rounding error: the scratch WAVs are
+        ~19 MB per 5-minute chunk, but a whole finished job leaves behind an
+        entire `data/work/<job_id>/` (measured at 101 MB per real job on this
+        sandbox, and that is WITH the two WAVs already deleted), plus the
+        downloaded source in `downloads/<job_id>/`. Deleting two named files
+        out of that reclaimed almost nothing, which is why the trash pile and
+        the scratch dirs kept growing while the code claimed to be cleaning up.
+
+        So: remove the whole workspace, and remove the re-downloadable source.
+        The clips in `outputs/` are deliberately LEFT — those are the product,
+        and the retention sweeper owns their lifetime (4 days by default).
+
+        UPLOADED sources are NOT touched here. An upload is the one artefact
+        there is no way to recreate — a URL job can always be re-downloaded, an
+        uploaded file cannot — so deleting it the moment a render finishes
+        would destroy the user's own file to save bytes. Uploads leave with the
+        batch when retention expires, which is a deliberate, four-day-delayed
+        decision rather than a surprise at job completion.
         """
-        removed = 0
+        paths = self.settings.app.paths
         freed = 0
-        for stage, name in (("transcribe", "source.wav"), ("reframe", "audio.wav")):
-            path = ws.stage_dir(stage) / name
-            try:
-                if path.exists():
-                    freed += path.stat().st_size
-                    path.unlink()
-                    removed += 1
-            except OSError:
-                continue
+        removed = 0
+
+        def _drop(path: Path) -> None:
+            nonlocal freed, removed
+            if not path.exists():
+                return
+            # Measure BEFORE deleting: st_size of a directory is the inode,
+            # not the bytes underneath it.
+            freed += _tree_size(path)
+            # `ignore_errors=True` swallows every OSError, and `rmtree`
+            # returns None ALWAYS — so the only honest evidence that the bytes
+            # are gone is the path no longer existing. Counting on the return
+            # value here reported "removed 2 scratch dirs, freed 101 MB" while
+            # a permission error left every byte exactly where it was.
+            shutil.rmtree(path, ignore_errors=True)
+            if not path.exists():
+                removed += 1
+            else:
+                logger.warning(
+                    f"[job {job_id}] cleanup: could not remove {path} — "
+                    f"{freed / 1024 / 1024:.0f} MB still on disk"
+                )
+
+        # 1. the whole scratch workspace, not two files inside it
+        _drop(ws.root)
+        # 2. the downloaded source, which yt-dlp can fetch again on demand
+        _drop(paths.downloads_dir / job_id)
+        # uploads_dir is intentionally NOT in this list — see the docstring.
+
         if removed:
             logger.info(
-                f"[job {job_id}] cleanup: removed {removed} temp file(s), "
+                f"[job {job_id}] cleanup: removed {removed} scratch dir(s), "
                 f"freed {freed / 1024 / 1024:.0f} MB"
             )
 

@@ -504,19 +504,21 @@ auto_update = true
 max_source_min = 120
 
 # Finished downloads/outputs are deleted this long after a job completes.
-# 0 = never auto-delete. Keep it 0 unless you actively want batches to expire:
-# the sweep is destructive and, before trash existed, unrecoverable.
+# 0 = never auto-delete. This is DESTRUCTIVE: it deletes the finished BATCH
+# itself (record + clips + source), not just scratch files.
 #
-# DELIBERATELY LEFT AT 0. Turning this on deletes the finished BATCH ITSELF
-# (record + clips + source), not just scratch files, so a 48h setting would
-# silently destroy every clip this account has already made. The 48h figure
-# from the rebuild brief is implemented and enforced by the retention sweeper —
-# set this to 48 when you actually want batches to expire.
+# WAS 0, and that was wrong for a 4 GB sandbox disk. With the sweeper off,
+# `data/trash/` alone grew past 350 MB — deleted batches were "recoverable"
+# with nothing ever reclaiming them — and every finished job left ~100 MB of
+# scratch workspace and a ~300 MB clip set behind forever. Four days is long
+# enough to download and share what you made and short enough that the disk
+# keeps working.
 #
-# Scratch files (extracted WAVs, per-chunk transcript caches) ARE cleaned up
-# automatically and unconditionally the moment a job finishes; that path does
-# not depend on this setting.
-retention_hours = 0
+# CLIPFORGE_RETENTION_HOURS overrides this file. Sources you UPLOADED are
+# deleted with the batch at this point too; re-upload if you need them again.
+# Scratch files (extracted WAVs, per-chunk transcript caches) are cleaned the
+# moment a job finishes and do not depend on this setting.
+retention_hours = 96
 
 # Largest upload accepted, in megabytes. Rejected at submit time with a 413
 # rather than after the bytes are already on disk. 0 = no size limit.
