@@ -28,7 +28,12 @@ import {
 } from "lucide-react";
 import { useHealth } from "@/hooks/use-poll";
 import { SocialAccounts } from "./SocialAccounts";
-import { api, type DetectionProvider, type KeyStatusDto } from "@/lib/api";
+import {
+  api,
+  type DetectionProvider,
+  type KeyStatusDto,
+  type StorageKeysInput,
+} from "@/lib/api";
 import { fmtBytes } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -40,6 +45,47 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+
+/**
+ * One labelled text field for the storage dialog.
+ *
+ * Deliberately NOT a password field by default: the endpoint, bucket and
+ * access key id are all things the operator needs to READ BACK to check they
+ * pasted the right thing, and hiding them just makes a typo harder to spot.
+ * Only the secret access key is masked — it is the one value that is genuinely
+ * unrecoverable after the provider shows it once.
+ */
+function StorageField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  hint,
+  secret,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  hint?: string;
+  secret?: boolean;
+}) {
+  return (
+    <label className="grid gap-1">
+      <span className="text-[11px] font-semibold text-muted-foreground">{label}</span>
+      <input
+        type={secret ? "password" : "text"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="off"
+        spellCheck={false}
+        className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-sm"
+      />
+      {hint && <span className="text-[10px] text-muted-foreground">{hint}</span>}
+    </label>
+  );
+}
 
 function StatLine({
   icon: Icon,
@@ -72,6 +118,23 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const [savingKey, setSavingKey] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [runningDoctor, setRunningDoctor] = useState(false);
+  const [storageDialogOpen, setStorageDialogOpen] = useState(false);
+  const [storageForm, setStorageForm] = useState<StorageKeysInput>({});
+  const [savingStorage, setSavingStorage] = useState(false);
+  const [confirmStorageDelete, setConfirmStorageDelete] = useState(false);
+
+  const storage = health?.storage;
+  // "Not known yet" is not "off". This row renders outside the health-gated
+  // region, so before /api/health answers — or while the API is down —
+  // `storage` is undefined and the naive read claims "Media offload off",
+  // which is a statement about the server's configuration that the server has
+  // not actually made. Say unknown instead.
+  const storageKnown = storage !== undefined;
+  const storageOn = storageKnown && storage.enabled === true;
+  // Empty fields mean "leave the saved value alone" (that is how a secret gets
+  // rotated without retyping the endpoint), so Save must stay disabled until
+  // something has actually been typed — otherwise the button looks broken.
+  const storageDirty = Object.values(storageForm).some((v) => (v ?? "").trim() !== "");
 
   // doctor: replaces vague "API unreachable" with specific, fixable checks
   const runDoctor = async () => {
@@ -257,6 +320,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
 
   const openKeyDialog = () => {
     setKeyInput("");
+    setKeyInput("");
     setShowKey(false);
     setConfirmDelete(false);
     setKeyDialogOpen(true);
@@ -289,6 +353,66 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       toast.error(err instanceof Error ? err.message : "Could not save the key.");
     } finally {
       setSavingKey(false);
+    }
+  };
+
+  const openStorageDialog = () => {
+    // Prefill the NON-SECRET fields from the live status so the operator only
+    // has to paste the secret. The secret is never prefilled because the
+    // server does not send it back — deliberately.
+    setStorageForm({
+      endpoint: storage?.endpoint ?? "",
+      bucket: storage?.bucket ?? "",
+      region: "",
+      prefix: storage?.prefix ?? "",
+    });
+    setConfirmStorageDelete(false);
+    setStorageDialogOpen(true);
+  };
+
+  const saveStorage = async () => {
+    // Send only what has been typed; the server merges with what is saved.
+    const payload: StorageKeysInput = {};
+    for (const [k, v] of Object.entries(storageForm)) {
+      const trimmed = (v ?? "").trim();
+      if (trimmed) payload[k as keyof StorageKeysInput] = trimmed;
+    }
+    if (Object.keys(payload).length === 0) return;
+    setSavingStorage(true);
+    try {
+      const res = await api.setStorageKeys(payload);
+      if (res.enabled && res.clientReady) {
+        toast.success(`Media offload is live — s3://${res.bucket}/${res.prefix}/`);
+      } else if (res.enabled) {
+        toast.error(
+          "Saved, but offload is not active: boto3 is not installed on the server.",
+        );
+      } else {
+        toast.error("Saved, but offload is still off — check the fields below.");
+      }
+      setStorageForm({});
+      setStorageDialogOpen(false);
+      void refreshHealth();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save the bucket.");
+    } finally {
+      setSavingStorage(false);
+    }
+  };
+
+  const removeStorage = async () => {
+    setSavingStorage(true);
+    try {
+      const res = await api.deleteStorageKeys();
+      toast.info(
+        `Bucket credentials removed (${res.linesRemoved} line(s) cleaned). Media now lives only in this sandbox.`,
+      );
+      setStorageDialogOpen(false);
+      void refreshHealth();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not delete the bucket.");
+    } finally {
+      setSavingStorage(false);
     }
   };
 
@@ -617,6 +741,160 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       <div className="mt-3 border-t border-border pt-3">
         <SocialAccounts />
       </div>
+
+      {/* Durable media (S3/R2). Separate from the LLM key manager because it is
+          a different question — "where does finished media survive a sandbox
+          rebuild" — and it needs four fields, not one. */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3 text-[11px]">
+        <span
+          className={cn(
+            "flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-bold",
+            storageOn && storage.clientReady
+              ? "border-border text-muted-foreground"
+              : storageKnown && !storageOn
+                ? "border-border text-muted-foreground"
+                : storageKnown
+                  ? "border-amber-400/50 text-amber-300"
+                  : "border-border text-muted-foreground",
+          )}
+          title={
+            !storageKnown
+              ? "The server has not reported its storage state yet"
+              : storageOn
+                ? `Media is offloaded to s3://${storage.bucket}/${storage.prefix}/ — finished clips survive a sandbox rebuild`
+                : "Media offload is off: rendered clips only exist inside this sandbox and are lost if it is rebuilt"
+          }
+        >
+          {storageOn ? (
+            <ShieldCheck className="size-3" />
+          ) : (
+            <HardDrive className="size-3" />
+          )}
+          {!storageKnown
+            ? "Media offload — checking…"
+            : storageOn
+              ? storage.clientReady
+                ? `Media offload on — ${storage.bucket}`
+                : "Offload configured, but boto3 is missing"
+              : "Media offload off"}
+        </span>
+        <button
+          type="button"
+          onClick={openStorageDialog}
+          className="flex cursor-pointer items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[10px] font-bold text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
+          title="Save an S3/R2 bucket so finished clips survive a sandbox rebuild — saved directly into the server's env"
+        >
+          <Pencil className="size-3" />
+          {storageOn ? "Edit bucket" : "Set bucket"}
+        </button>
+      </div>
+
+      {/* Storage credential dialog */}
+      <Dialog open={storageDialogOpen} onOpenChange={setStorageDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <HardDrive className="size-4 text-primary" />
+              Media bucket (S3 / R2)
+            </DialogTitle>
+            <DialogDescription>
+              {storage?.enabled
+                ? `Offloading to ${storage.bucket}. Saving replaces the fields you fill in; empty ones are left alone.`
+                : "No bucket configured. Finished clips live only inside this sandbox and are lost when it is rebuilt."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-2">
+            <StorageField
+              label="Endpoint"
+              placeholder="https://<account-id>.r2.cloudflarestorage.com"
+              value={storageForm.endpoint ?? ""}
+              onChange={(v) => setStorageForm((f) => ({ ...f, endpoint: v }))}
+              hint="Cloudflare R2 or any S3-compatible host. Must include https://"
+            />
+            <StorageField
+              label="Bucket"
+              placeholder="clipforge-media"
+              value={storageForm.bucket ?? ""}
+              onChange={(v) => setStorageForm((f) => ({ ...f, bucket: v }))}
+            />
+            <StorageField
+              label="Access key ID"
+              placeholder="AKIA… or an R2 access key id"
+              value={storageForm.accessKey ?? ""}
+              onChange={(v) => setStorageForm((f) => ({ ...f, accessKey: v }))}
+            />
+            <StorageField
+              label="Secret access key"
+              placeholder={storage?.enabled ? "•••••• saved — type to replace" : "the secret R2 shows once"}
+              value={storageForm.secretKey ?? ""}
+              onChange={(v) => setStorageForm((f) => ({ ...f, secretKey: v }))}
+              secret
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <StorageField
+                label="Region (optional)"
+                placeholder="auto"
+                value={storageForm.region ?? ""}
+                onChange={(v) => setStorageForm((f) => ({ ...f, region: v }))}
+              />
+              <StorageField
+                label="Prefix (optional)"
+                placeholder="clipforge"
+                value={storageForm.prefix ?? ""}
+                onChange={(v) => setStorageForm((f) => ({ ...f, prefix: v }))}
+              />
+            </div>
+          </div>
+
+          <p className="text-[11px] text-muted-foreground">
+            Saved directly into the server&apos;s env — no restart, no Keys tab.
+            Free tier with no egress fees:{" "}
+            <a
+              href="https://dash.cloudflare.com/?to=/r2/overview"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline"
+            >
+              dash.cloudflare.com
+            </a>
+          </p>
+
+          <DialogFooter className="flex-row flex-wrap items-center gap-2">
+            <Button
+              className="cursor-pointer gap-1.5"
+              disabled={savingStorage || !storageDirty}
+              onClick={() => void saveStorage()}
+            >
+              {savingStorage ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Pencil className="size-4" />
+              )}
+              Save bucket
+            </Button>
+            <Button
+              variant="destructive"
+              className="cursor-pointer gap-1.5"
+              disabled={savingStorage || !confirmStorageDelete || !storage?.enabled}
+              onClick={() => void removeStorage()}
+            >
+              <Trash2 className="size-4" />
+              {confirmStorageDelete ? "Confirm delete" : "Delete"}
+            </Button>
+            {!confirmStorageDelete && storage?.enabled && (
+              <Button
+                variant="ghost"
+                className="cursor-pointer text-xs text-muted-foreground"
+                disabled={savingStorage}
+                onClick={() => setConfirmStorageDelete(true)}
+              >
+                I want to delete the bucket
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* LLM key manager dialog (follows the active detection backend) */}
       <Dialog open={keyDialogOpen} onOpenChange={setKeyDialogOpen}>

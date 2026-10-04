@@ -224,6 +224,33 @@ export interface DiskStatsDto {
   path?: string | null;
 }
 
+/**
+ * Durable-media offload (S3/R2). Mirrors objectstore.status().
+ *
+ * `enabled` means all four credential fields are set; `clientReady` means boto3
+ * is installed AND a client could actually be built. Those differ on a host
+ * without boto3, and telling the operator "offload is on" when nothing can be
+ * pushed is the misleading state this split exists to prevent.
+ */
+export interface StorageDto {
+  enabled: boolean;
+  clientReady: boolean;
+  bucket: string | null;
+  endpoint: string | null;
+  prefix: string;
+  deleteLocal: boolean;
+}
+
+/** The save form. Every field optional; blank/absent means "keep saved value". */
+export interface StorageKeysInput {
+  endpoint?: string;
+  bucket?: string;
+  accessKey?: string;
+  secretKey?: string;
+  region?: string;
+  prefix?: string;
+}
+
 export interface KeyStatusDto {
   keyLoaded: boolean;
   source: string;
@@ -281,6 +308,8 @@ export interface HealthDto {
   asr?: AsrDto;
   system: SystemStatsDto;
   disk: DiskStatsDto;
+  /** Durable-media offload state. Absent only if the server could not read it. */
+  storage?: StorageDto;
   tailnetIp: string | null;
   stallTimeoutSec?: number | null;
   limits: { maxSourceMin: number; retentionHours: number };
@@ -648,6 +677,26 @@ export const api = {
   /** Delete DEEPSEEK_API_KEY from the backend's env file. */
   deleteDeepseekKey: () =>
     request<KeyStatusDto & { linesRemoved: number }>("/api/settings/deepseek-key?confirm=true", {
+      method: "DELETE",
+    }),
+  /** Save/replace the S3/R2 offload credentials in the backend's env file.
+   *
+   *  Every field is optional and blank means "keep what is already saved", so
+   *  a rotated secret can be pasted on its own. The server persists what it is
+   *  given, re-reads the environment per operation and keys its S3 client on
+   *  the resolved config, so this takes effect with no restart. */
+  setStorageKeys: (keys: StorageKeysInput) =>
+    request<StorageDto & { savedFields: string[]; storedShape: { secretLength: number; accessKeyFirst4: string } }>(
+      "/api/settings/s3-key",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(keys),
+      },
+    ),
+  /** Delete the S3/R2 credentials. Region and prefix (non-secret) survive. */
+  deleteStorageKeys: () =>
+    request<StorageDto & { linesRemoved: number }>("/api/settings/s3-key?confirm=true", {
       method: "DELETE",
     }),
   /** Save/replace NVIDIA_API_KEY in the backend's env file. */

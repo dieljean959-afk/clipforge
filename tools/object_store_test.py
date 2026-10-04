@@ -335,12 +335,214 @@ def test_delete_purges_remote() -> None:
             objectstore._CLIENT_OVERRIDE = fake
 
 
+def test_storage_settings_endpoints() -> None:
+    """The in-app save/delete path for the credentials.
+
+    These are the endpoint that makes offload reachable at all. The platform
+    Keys tab was measured NOT delivering values to this process, so without
+    them a bucket could only be configured from a terminal. What matters:
+
+      - a full save turns offload ON with no restart
+      - a PARTIAL save keeps the fields it was not given (this is how a
+        secret gets rotated without retyping the endpoint)
+      - an incomplete set is refused by NAME, not silently accepted with
+        offload quietly off
+      - the secret is never echoed back in the response
+      - delete needs ?confirm=true and really turns offload off
+
+    ENV_LOCAL is redirected to a temp file so the operator's real .env.local
+    is never read or rewritten by a test run.
+    """
+    section("storage credential endpoints")
+    from fastapi.testclient import TestClient
+
+    from app import config as config_mod
+    from app import main as main_mod
+
+    real_env_local = config_mod.ENV_LOCAL
+    tmp = Path(tempfile.mkdtemp(prefix="clipforge-envlocal-")) / ".env.local"
+    config_mod.ENV_LOCAL = tmp
+    fake = FakeS3()
+    objectstore._CLIENT_OVERRIDE = fake
+    try:
+        client = TestClient(main_mod.app)
+        full = {
+            "endpoint": "https://example.r2.cloudflarestorage.com",
+            "bucket": "clipforge-media",
+            "accessKey": "AKIAEXAMPLEACCESSKEYID01",
+            "secretKey": "s" * 40,
+        }
+        r = client.post("/api/settings/s3-key", json=full)
+        check(
+            "a full save is accepted",
+            r.status_code == 200,
+            f"{r.status_code} {r.text[:160]}",
+        )
+        body = r.json() if r.status_code == 200 else {}
+        check(
+            "offload reports enabled straight after saving (no restart)",
+            body.get("enabled") is True and body.get("bucket") == "clipforge-media",
+            str(body)[:200],
+        )
+        check(
+            "the secret key is never echoed back",
+            full["secretKey"] not in r.text,
+            "response contained the secret",
+        )
+        check(
+            "only a shape is returned for the secret",
+            body.get("storedShape", {}).get("secretLength") == 40,
+            str(body.get("storedShape")),
+        )
+        check(
+            "all four values landed in the env file",
+            all(
+                v in tmp.read_text(encoding="utf-8")
+                for v in (
+                    full["endpoint"],
+                    full["bucket"],
+                    full["accessKey"],
+                )
+            ),
+            tmp.read_text(encoding="utf-8")[:200] if tmp.exists() else "no file",
+        )
+        check(
+            "the process env was synced (a restart must not be needed)",
+            os.environ.get("CLIPFORGE_S3_BUCKET") == "clipforge-media",
+            str(os.environ.get("CLIPFORGE_S3_BUCKET")),
+        )
+
+        # Partial save: only the secret changes. Everything else must survive,
+        # because R2 shows the secret access key exactly once.
+        rotated = "r" * 44
+        r2 = client.post("/api/settings/s3-key", json={"secretKey": rotated})
+        check(
+            "a partial save is accepted",
+            r2.status_code == 200,
+            f"{r2.status_code} {r2.text[:160]}",
+        )
+        cfg = objectstore.config_from_env()
+        check(
+            "a partial save leaves the other fields alone",
+            cfg.bucket == "clipforge-media" and cfg.secret_key == rotated,
+            f"bucket={cfg.bucket!r} secret_len={len(cfg.secret_key)}",
+        )
+        check(
+            "a partial save rotated only the secret",
+            len(cfg.secret_key) == 44 and cfg.access_key == full["accessKey"],
+            f"len={len(cfg.secret_key)}",
+        )
+
+        # Incomplete set must be refused BY NAME. Tested from a genuinely empty
+        # state, because a blank field means "keep what is saved" — sending an
+        # empty bucket while a bucket is already configured is a no-op, not a
+        # clear, and that merge rule is covered above.
+        client.delete("/api/settings/s3-key?confirm=true")
+        r3 = client.post(
+            "/api/settings/s3-key",
+            json={"endpoint": "https://other.r2.cloudflarestorage.com"},
+        )
+        check(
+            "a lone endpoint with no other field is refused",
+            r3.status_code == 400,
+            f"{r3.status_code} {r3.text[:160]}",
+        )
+        check(
+            "the refusal NAMES what is missing",
+            all(w in r3.text for w in ("bucket", "access key", "secret key")),
+            r3.text[:240],
+        )
+
+        r4 = client.post("/api/settings/s3-key", json={"endpoint": "not-a-url"})
+        check(
+            "a bare hostname is refused as an endpoint",
+            r4.status_code == 400 and "https://" in r4.text,
+            f"{r4.status_code} {r4.text[:160]}",
+        )
+
+        r5 = client.post("/api/settings/s3-key", json={"bucket": "   "})
+        check(
+            "an all-blank save is refused rather than silently ignored",
+            r5.status_code == 400,
+            f"{r5.status_code} {r5.text[:160]}",
+        )
+
+        r6 = client.post(
+            "/api/settings/s3-key",
+            json={"secretKey": "encrypted:abc123"},
+        )
+        check(
+            "an encrypted blob is caught with a useful message",
+            r6.status_code == 400 and "encrypted" in r6.text.lower(),
+            f"{r6.status_code} {r6.text[:160]}",
+        )
+
+        # Delete needs the deliberate flag, then really turns offload off.
+        client.post("/api/settings/s3-key", json=full)
+        r7 = client.delete("/api/settings/s3-key")
+        check(
+            "delete without confirm is refused",
+            r7.status_code == 428,
+            f"{r7.status_code} {r7.text[:120]}",
+        )
+        check(
+            "the refused delete changed nothing",
+            objectstore.config_from_env().enabled is True,
+            "credentials vanished despite the refusal",
+        )
+
+        r8 = client.delete("/api/settings/s3-key?confirm=true")
+        check(
+            "delete with confirm succeeds",
+            r8.status_code == 200,
+            f"{r8.status_code} {r8.text[:160]}",
+        )
+        check(
+            "offload is off again after deleting",
+            r8.json().get("enabled") is False,
+            str(r8.json())[:200],
+        )
+        check(
+            "the credentials are gone from the process env too",
+            os.environ.get("CLIPFORGE_S3_SECRET_KEY") is None,
+            str(os.environ.get("CLIPFORGE_S3_SECRET_KEY")),
+        )
+        if tmp.exists():
+            leftover = tmp.read_text(encoding="utf-8")
+            check(
+                "the credentials are gone from the env file too",
+                "CLIPFORGE_S3_SECRET_KEY" not in leftover,
+                leftover[:200],
+            )
+
+        # A non-secret setting must survive a credential delete, so re-adding a
+        # key does not mean retyping the prefix.
+        r9 = client.post("/api/settings/s3-key", json={**full, "prefix": "myprefix"})
+        check(
+            "a prefix can be saved alongside the credentials",
+            r9.status_code == 200 and objectstore.config_from_env().prefix == "myprefix",
+            f"{r9.status_code} prefix={objectstore.config_from_env().prefix!r}",
+        )
+        client.delete("/api/settings/s3-key?confirm=true")
+        check(
+            "the prefix survives a credential delete",
+            objectstore.config_from_env().prefix == "myprefix",
+            f"prefix={objectstore.config_from_env().prefix!r}",
+        )
+        # leave no trace
+        config_mod.delete_env_var("CLIPFORGE_S3_PREFIX")
+    finally:
+        objectstore._CLIENT_OVERRIDE = None
+        config_mod.ENV_LOCAL = real_env_local
+
+
 def main() -> int:
     print("ClipForge durable-media (object store) suite")
     test_unconfigured_is_a_no_op()
     test_upload_offload_and_restore()
     test_clip_offload_and_restore()
     test_delete_purges_remote()
+    test_storage_settings_endpoints()
     total = PASS + FAIL
     print(f"\nobjectstore: {PASS}/{total} passed")
     return 0 if FAIL == 0 else 1

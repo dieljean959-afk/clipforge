@@ -656,6 +656,48 @@ def sync_deepseek_env_for_delete() -> list[str]:
     return _sync_env_for_delete(DEEPSEEK_KEY_ALIASES, "DEEPSEEK_API_KEY")
 
 
+#: The four values objectstore.ObjectStoreConfig.enabled requires before it will
+#: offload anything. Named here (rather than inlined in the endpoint) because the
+#: endpoint, the delete path and the tests all have to agree on the exact set —
+#: a name that is off by one produces a config that reports enabled=False with
+#: no clue which field is missing.
+S3_CREDENTIAL_VARS: tuple[str, ...] = (
+    "CLIPFORGE_S3_ENDPOINT",
+    "CLIPFORGE_S3_BUCKET",
+    "CLIPFORGE_S3_ACCESS_KEY",
+    "CLIPFORGE_S3_SECRET_KEY",
+)
+
+#: Non-secret store settings. Saved alongside the credentials so a bucket is
+#: described in one place, but kept out of S3_CREDENTIAL_VARS because deleting
+#: the credentials should not silently reset the operator's chosen prefix.
+S3_OPTIONAL_VARS: tuple[str, ...] = ("CLIPFORGE_S3_REGION", "CLIPFORGE_S3_PREFIX")
+
+
+def sync_s3_env_after_save(values: dict[str, str]) -> list[str]:
+    """Mirror freshly written CLIPFORGE_S3_* values into the process env.
+
+    Same reason as every other sync_* helper: objectstore.config_from_env()
+    reads os.getenv, and a value written to .env.local alone would not be seen
+    by the already-running process until a restart — which is exactly the
+    "I saved it and the card still says offload is off" failure. Only the
+    names actually written are touched, so a platform-injected value for a
+    field the operator left blank is left alone.
+    """
+    for name, value in values.items():
+        os.environ[name] = value
+    return sorted(values)
+
+
+def sync_s3_env_for_delete(names: tuple[str, ...]) -> list[str]:
+    """Drop the named CLIPFORGE_S3_* values from the process env."""
+    dropped: list[str] = []
+    for name in names:
+        if os.environ.pop(name, None) is not None:
+            dropped.append(name)
+    return dropped
+
+
 def _sync_env_for_delete(aliases: tuple[str, ...], primary: str) -> list[str]:
     _fingerprint, file_values = _fresh_env_snapshot(ROOT)
     dropped: list[str] = []

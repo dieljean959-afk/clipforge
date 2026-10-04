@@ -40,10 +40,12 @@ from app import (
 )
 from app import encode as encode_mod
 from app import llm as llm_mod
+from app import objectstore as objectstore_mod
 from app import subtitle as subtitle_svc
 from app import video as video_svc
 from app import worker as worker_mod
 from app.config import (
+    S3_CREDENTIAL_VARS,
     ConfigError,
     Settings,
     boot_banner,
@@ -63,6 +65,8 @@ from app.config import (
     sync_groq_env_for_delete,
     sync_nvidia_env_after_save,
     sync_nvidia_env_for_delete,
+    sync_s3_env_after_save,
+    sync_s3_env_for_delete,
     write_env_var,
 )
 from app.download import probe_url
@@ -709,9 +713,6 @@ def health() -> dict:
             )
             if eff and not (isinstance(eff, dict) and "error" in eff):
                 rtf_value, rtf_source = eff
-    # Local import, matching every other objectstore use in this module.
-    from app import objectstore as objectstore_mod
-
     return {
         # The process answered, so it IS up. `ok` is false only when a part of
         # the picture is missing, and `degraded` says which part.
@@ -1130,6 +1131,166 @@ def remove_deepseek_key(confirm: bool = False) -> dict:
         f"({removed} line(s) removed, process env dropped: {dropped or 'none'})"
     )
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
+
+
+class SetStorageIn(BaseModel):
+    """Media-offload (S3/R2) credentials.
+
+    EVERY field is optional and blank means "keep whatever is already saved",
+    not "clear it". That is what makes rotating a secret possible: R2 shows
+    the access key id in plain text but the secret access key only once, so
+    re-pasting all four values every time is how people end up with a typo in
+    a field they were not changing. Clearing is an explicit delete.
+    """
+
+    endpoint: str | None = None
+    bucket: str | None = None
+    accessKey: str | None = None
+    secretKey: str | None = None
+    region: str | None = None
+    prefix: str | None = None
+
+    #: Request field -> env var. Only the two non-secret settings plus the four
+    #: required ones; CLIPFORGE_OFFLOAD_DELETE_LOCAL is a behaviour switch, not
+    #: part of a credential set, so it is not editable here.
+
+
+#: Request field -> env var for the storage dialog. Module level, not a class
+#: attribute: Pydantic v2 turns a leading-underscore class attribute into a
+#: private attr, which is not readable off the class the way this needs.
+STORAGE_FIELD_TO_VAR: dict[str, str] = {
+    "endpoint": "CLIPFORGE_S3_ENDPOINT",
+    "bucket": "CLIPFORGE_S3_BUCKET",
+    "accessKey": "CLIPFORGE_S3_ACCESS_KEY",
+    "secretKey": "CLIPFORGE_S3_SECRET_KEY",
+    "region": "CLIPFORGE_S3_REGION",
+    "prefix": "CLIPFORGE_S3_PREFIX",
+}
+
+#: The four fields objectstore.ObjectStoreConfig.enabled requires, as
+#: (env var, ObjectStoreConfig attribute, label for the operator). Kept in one
+#: place so the completeness check and config.py's S3_CREDENTIAL_VARS cannot
+#: drift apart — a name off by one reports "offload is off" with no clue which
+#: field is missing.
+STORAGE_REQUIRED: tuple[tuple[str, str, str], ...] = (
+    ("CLIPFORGE_S3_ENDPOINT", "endpoint", "endpoint"),
+    ("CLIPFORGE_S3_BUCKET", "bucket", "bucket"),
+    ("CLIPFORGE_S3_ACCESS_KEY", "access_key", "access key"),
+    ("CLIPFORGE_S3_SECRET_KEY", "secret_key", "secret key"),
+)
+
+
+def _storage_field(body: SetStorageIn) -> dict[str, str]:
+    """The non-blank fields of a save request, stripped and ready to write."""
+    out: dict[str, str] = {}
+    for name in ("endpoint", "bucket", "accessKey", "secretKey", "region", "prefix"):
+        raw = getattr(body, name, None)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            out[name] = value
+    return out
+
+
+@app.post("/api/settings/s3-key")
+def set_s3_key(body: SetStorageIn) -> dict:
+    """Save/replace the S3/R2 offload credentials in .env.local.
+
+    The LLM backends each got an in-app key manager; object storage did not,
+    so the only way to enable offload was the platform Keys tab — which, as
+    established for the AI keys, does not deliver values to this process. That
+    left media offload unreachable without a terminal, which is the same trap
+    this endpoint exists to remove for R2/S3.
+
+    No restart: objectstore.config_from_env() is read per operation and the
+    client cache is keyed on the resolved config, so saving here rebuilds the
+    client on the next call.
+    """
+    given = _storage_field(body)
+    if not given:
+        raise HTTPException(
+            400,
+            "Nothing to save — every field was blank. Fill in at least the "
+            "endpoint, bucket, access key and secret key.",
+        )
+    # The endpoint is typed far more often than the rest (R2 vs S3 vs a
+    # path-style endpoint), so a wrong paste fails here with a clear message
+    # instead of much later as an opaque botocore EndpointConnectionError.
+    endpoint = given.get("endpoint") or os.getenv("CLIPFORGE_S3_ENDPOINT", "").strip()
+    if endpoint and not endpoint.lower().startswith(("http://", "https://")):
+        raise HTTPException(
+            400,
+            "The endpoint must be a full URL including https:// — for example "
+            "https://<account-id>.r2.cloudflarestorage.com",
+        )
+    for name, value in given.items():
+        if name in {"endpoint", "bucket"}:
+            continue
+        # Same guard as the AI keys: an encrypted blob pasted from the Keys tab
+        # is unreadable by boto3 and would fail as an opaque 403.
+        if value.lower().startswith("encrypted:"):
+            raise HTTPException(
+                400,
+                f"{name} looks like an encrypted blob — paste the raw value from "
+                "your S3/R2 provider, not the Keys tab.",
+            )
+    written: dict[str, str] = {}
+    for name, value in given.items():
+        env_name = STORAGE_FIELD_TO_VAR[name]
+        write_env_var(env_name, value)
+        written[env_name] = value
+    sync_s3_env_after_save(written)
+
+    cfg = objectstore_mod.config_from_env()
+    missing = [label for _var, attr, label in STORAGE_REQUIRED if not getattr(cfg, attr)]
+    if missing:
+        # Everything given was persisted — this is not a failure to save, it is
+        # a still-incomplete set. Say which fields are still missing instead of
+        # reporting success with offload quietly off.
+        raise HTTPException(
+            400,
+            f"Saved, but media offload stays off until every field is set — still "
+            f"missing: {', '.join(missing)}. Fill those in and save again.",
+        )
+    logger.info(
+        "[config] S3/R2 credentials updated via dashboard "
+        f"(bucket={cfg.bucket!r} endpoint={cfg.endpoint!r} "
+        f"secret={len(cfg.secret_key)} chars, not logged)"
+    )
+    status = objectstore_mod.status()
+    return {
+        **status,
+        "savedFields": sorted(given),
+        # Shape only. The secret never leaves the server, exactly as the AI
+        # key endpoints do — but its length is genuinely useful for spotting a
+        # truncated paste, which is the failure this endpoint exists to prevent.
+        "storedShape": {
+            "secretLength": len(cfg.secret_key),
+            "accessKeyFirst4": cfg.access_key[:4],
+        },
+    }
+
+
+@app.delete("/api/settings/s3-key")
+def remove_s3_key(confirm: bool = False) -> dict:
+    """Delete the S3/R2 credentials from .env.local.
+
+    Same deliberate `?confirm=true` gate as the AI keys: this cannot be undone
+    from inside the app, and the secret is unrecoverable once it is gone.
+    Only the four required credentials are removed — region and prefix are not
+    secret and survive, so re-adding a key does not mean retyping the prefix.
+    """
+    _require_delete_confirmation(confirm, "S3/R2 credentials")
+    dropped = sync_s3_env_for_delete(S3_CREDENTIAL_VARS)
+    removed = sum(delete_env_var(name) for name in S3_CREDENTIAL_VARS)
+    logger.info(
+        f"[config] S3/R2 credentials deleted via dashboard ({removed} line(s) "
+        f"removed, process env dropped: {dropped or 'none'})"
+    )
+    status = objectstore_mod.status()
+    return {**status, "linesRemoved": removed, "envDropped": dropped}
+
 
 class CaptionStyleIn(BaseModel):
     # All optional: the dialog sends the whole set it knows about, and a
