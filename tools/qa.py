@@ -70,6 +70,10 @@ AREAS: dict[str, list[tuple[str, list[str], int]]] = {
         ("preview_layout_test", [], 90),
         ("mobile_overflow_test", [], 90),
         ("export_memory_test", [], 120),
+        # Pins the preview boot config behind the "booting up preview… 97%"
+        # stall: dep cache outside node_modules, no lazy dep discovery, and
+        # the platform invariants (hmr disabled, dual-stack bind).
+        ("preview_boot_config_test", [], 30),
     ],
     "share": [
         ("share_public_test", [], 150),

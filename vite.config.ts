@@ -48,6 +48,7 @@ export default defineConfig({
             '@radix-ui/react-select',
             '@radix-ui/react-separator',
             '@radix-ui/react-slider',
+            '@radix-ui/react-slot',
             '@radix-ui/react-switch',
             '@radix-ui/react-tabs',
             '@radix-ui/react-toggle',
@@ -72,11 +73,35 @@ export default defineConfig({
     // Minify options - using esbuild (faster than terser)
     minify: 'esbuild',
   },
+  // Keep the dep-optimizer cache OUT of node_modules.
+  //
+  // The default cacheDir is `node_modules/.vite`, and the platform recreated
+  // that tree on each sandbox restart (24 restarts on 2026-10-04 alone). A cold
+  // cacheDir means a full esbuild re-optimization on the FIRST page load, and
+  // that work is synchronous with the module-graph request. Measured from the
+  // toolbox proxy log across a real boot: `GET /src/main.tsx` blocked for
+  // 16.262s before returning 200, and `/src/index.css` took 3.58s. That is
+  // the preview panel sitting at "Project connected, booting up preview… 97%"
+  // — the origin is answering, it simply cannot serve the entry module until
+  // esbuild finishes, so the bar has nothing to advance against.
+  //
+  // A cacheDir at the project root is part of the synced workspace, so the
+  // optimizer output survives a sandbox restart and later boots start warm.
+  cacheDir: '.vite-cache',
+
   // Optimize dependencies
   optimizeDeps: {
     // Only scan the app entry HTML; avoids crawling unrelated *.html files
     // if a legacy snapshot accidentally contains leaked package folders.
     entries: ['index.html'],
+    // Every bare specifier the app actually imports.
+    //
+    // This list used to hold only 6 entries while `src/` imports roughly 40.
+    // Vite therefore discovered the remainder LAZILY, mid-request, which forces
+    // an extra optimization round while the page is already loading — and with
+    // `hmr: false` the browser never receives the reload notice, so the boot
+    // stalls rather than recovering. Declaring the full set up front keeps the
+    // optimizer's work deterministic and confined to server startup.
     include: [
       'react',
       'react/jsx-runtime',
@@ -84,7 +109,56 @@ export default defineConfig({
       'react-dom/client',
       'react-router',
       'framer-motion',
+      'lucide-react',
+      'sonner',
+      'next-themes',
+      'cmdk',
+      'class-variance-authority',
+      'clsx',
+      'tailwind-merge',
+      'vaul',
+      'embla-carousel-react',
+      'input-otp',
+      'react-day-picker',
+      'react-hook-form',
+      'react-resizable-panels',
+      'recharts',
+      '@vly-ai/integrations',
+      '@radix-ui/react-accordion',
+      '@radix-ui/react-alert-dialog',
+      '@radix-ui/react-aspect-ratio',
+      '@radix-ui/react-avatar',
+      '@radix-ui/react-checkbox',
+      '@radix-ui/react-collapsible',
+      '@radix-ui/react-context-menu',
+      '@radix-ui/react-dialog',
+      '@radix-ui/react-dropdown-menu',
+      '@radix-ui/react-hover-card',
+      '@radix-ui/react-label',
+      '@radix-ui/react-menubar',
+      '@radix-ui/react-navigation-menu',
+      '@radix-ui/react-popover',
+      '@radix-ui/react-progress',
+      '@radix-ui/react-radio-group',
+      '@radix-ui/react-scroll-area',
+      '@radix-ui/react-select',
+      '@radix-ui/react-separator',
+      '@radix-ui/react-slider',
+      '@radix-ui/react-slot',
+      '@radix-ui/react-switch',
+      '@radix-ui/react-tabs',
+      '@radix-ui/react-toggle',
+      '@radix-ui/react-toggle-group',
+      '@radix-ui/react-tooltip',
     ],
+    // Do not hold the optimizer back until the entry crawl finishes. With the
+    // crawl held, any module requested during startup queues behind it, which
+    // is what pushed the entry-module response into double-digit seconds.
+    holdUntilCrawlEnd: false,
+    // Discovery stays ON. With `include` complete above it should find nothing
+    // new, but if it ever does, a re-optimize is recoverable here (the server
+    // restarts) rather than leaving a half-applied dep graph in the browser.
+    noDiscovery: false,
   },
   // Performance hints
   server: {
@@ -138,6 +212,10 @@ export default defineConfig({
         "**/*.srt",
         "**/*.vtt",
         "**/*.part",
+        // The dep-optimizer cache now lives in the project root. It churns
+        // hundreds of files while pre-bundling; without this, each one is a
+        // watcher event in the middle of a page load.
+        ".vite-cache/**",
       ],
     },
     proxy: {
