@@ -791,7 +791,7 @@ def health() -> dict:
         # turns ON by itself once the keys land — no restart, nothing to guess at.
         "storage": _block("storage", objectstore_mod.status),
         "encode": _block("encode", lambda: encode_mod.as_dict(encode_mod.choose(settings))),
-        "disk": _block("disk", disk_stats),
+        "disk": _block("disk", lambda: disk_stats(settings.app.paths.data_dir)),
         "tailnetIp": hosting.tailnet_ip(),
         "limits": {
             "maxSourceMin": settings.hosted.max_source_min,
@@ -1214,7 +1214,7 @@ def create_job(body: CreateJobIn) -> dict:
         )
     # Disk preflight: long videos download multi-GB sources; a full disk would
     # otherwise fail mid-pipeline with a confusing ffmpeg/whisper error.
-    free = disk_stats().get("freeBytes")
+    free = disk_stats(settings.app.paths.data_dir).get("freeBytes")
     if free is not None and free < MIN_FREE_BYTES:
         raise HTTPException(
             507,

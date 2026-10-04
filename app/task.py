@@ -1337,11 +1337,16 @@ class Pipeline:
 
         Discovering this at the 9th of 10 clips is the worst place to find out:
         the earlier clips were rendered, the download is still on disk, and the
-        user is told only that something went wrong. Estimated need is the
-        rendered MP4 size we have actually been producing plus the downloaded
-        source, with a safety floor.
+        user is told only that something went wrong.
+
+        Need = minutes x source bitrate x 2, because the job holds the source
+        AND every rendered clip at once. A 720p source at ~2.5 Mbps is ~19
+        MB/min, so 20 MB/min per source minute is the base; the x2 covers the
+        rendered clips and the WAV intermediates. The 500 MB floor covers short
+        jobs plus poster/subtitle sidecars.
         """
-        needed = int(max(500.0, duration_sec * 3.0))
+        source_mb_per_min = 20.0
+        needed = int(max(500.0, (duration_sec / 60.0) * source_mb_per_min * 2))
         free = self._free_disk_mb()
         if free < needed:
             raise download.DownloadError(

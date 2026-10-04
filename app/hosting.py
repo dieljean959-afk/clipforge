@@ -118,19 +118,31 @@ def system_stats() -> dict[str, Any]:
         return dict(stats)
 
 
-def disk_stats() -> dict[str, Any]:
-    """Disk free/total for the deployment sandbox (the volumes jobs write to).
+def disk_stats(path: Path | None = None) -> dict[str, Any]:
+    """Disk free/total for the volume jobs ACTUALLY write to.
 
-    Real values via shutil.disk_usage on the repo root — never fabricated.
-    Unknown values stay None and the UI renders them honestly.
+    Measured on the DATA dir, not the repo root. CLIPFORGE_DATA_DIR and
+    CLIPFORGE_STORAGE_DIR exist precisely so every job artefact can be moved
+    onto a larger mounted volume — and reporting the sandbox root in that case
+    describes a filesystem nothing is written to, so the Doctor card would
+    show a full disk that is in fact empty. Unknown stays None rather than a
+    confident wrong number.
     """
-    stats: dict[str, Any] = {"freeBytes": None, "totalBytes": None}
+    stats: dict[str, Any] = {"freeBytes": None, "totalBytes": None, "path": None}
+    target = Path(path) if path is not None else ROOT
     try:
         import shutil as _shutil
 
-        usage = _shutil.disk_usage(ROOT)
+        # A data dir pointing at a volume that is not mounted must not read as
+        # "0 bytes free" (which refuses every job at submit time) — walk up to
+        # the nearest parent that does exist and report the real filesystem.
+        probe = target
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        usage = _shutil.disk_usage(probe)
         stats["freeBytes"] = usage.free
         stats["totalBytes"] = usage.total
+        stats["path"] = str(probe)
     except Exception:
         pass  # unknown stays None
     return stats

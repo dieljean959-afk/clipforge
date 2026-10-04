@@ -45,13 +45,18 @@ function StatLine({
   icon: Icon,
   children,
   className,
+  title,
 }: {
   icon: typeof Cpu;
   children: React.ReactNode;
   className?: string;
+  title?: string;
 }) {
   return (
-    <span className={cn("flex items-center gap-1 text-muted-foreground", className)}>
+    <span
+      className={cn("flex items-center gap-1 text-muted-foreground", className)}
+      title={title}
+    >
       <Icon className="size-3.5 shrink-0" />
       {children}
     </span>
@@ -116,6 +121,10 @@ export function LocalWorkerCard({ className }: { className?: string }) {
     typeof health?.disk?.freeBytes === "number" ? health.disk.freeBytes : null;
   const diskTotal =
     typeof health?.disk?.totalBytes === "number" ? health.disk.totalBytes : null;
+  // WHICH volume these numbers describe. Once CLIPFORGE_DATA_DIR moves job
+  // artefacts to a bigger mount, the sandbox root is irrelevant — saying so
+  // keeps the reading honest instead of implying the 4 GB sandbox is full.
+  const diskPath = health?.disk?.path ?? null;
   const diskLow = diskFree !== null && diskFree < 1.5 * 1024 ** 3;
 
   const dispatch = health?.dispatch;
@@ -370,6 +379,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               <StatLine
                 icon={HardDrive}
                 className={diskLow ? "text-amber-300" : undefined}
+                title={
+                  diskPath
+                    ? `Measured on ${diskPath} — the volume jobs write to`
+                    : "Measured volume unknown"
+                }
               >
                 {diskLow && <TriangleAlert className="size-3" />}
                 Disk {fmtBytes(diskFree)} free

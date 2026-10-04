@@ -216,6 +216,12 @@ export interface SystemStatsDto {
 export interface DiskStatsDto {
   freeBytes: number | null;
   totalBytes: number | null;
+  /**
+   * The filesystem actually measured — the data dir jobs write to, which is
+   * NOT the repo root once CLIPFORGE_DATA_DIR / CLIPFORGE_STORAGE_DIR point
+   * job artefacts at a larger volume. Null when the server could not resolve it.
+   */
+  path?: string | null;
 }
 
 export interface KeyStatusDto {
