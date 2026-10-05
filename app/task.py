@@ -17,6 +17,7 @@ the job's errorDetail — never swallowed.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import threading
@@ -1028,10 +1029,36 @@ class Pipeline:
                 )
                 # mark DONE for this clip in the checkpoint so we can skip
                 # it even if the main loop reset for some reason
+                (rd / f"clip_{idx}.done").write_text("done")
                 (rd / f"clip_{idx}.json").write_text(
-                    {"renderState": "done", "clipId": str(idx + 1)}
+                    json.dumps({"renderState": "done", "clipId": str(idx + 1)})
                 )
+                with open(rd / "clips_done.txt", "a") as fh:
+                    fh.write(f"{idx + 1}\n")
                 continue
+
+            # ---- resume from on-disk checkpoint (survives store loss) ---
+            # A restart during render can leave the store intact but the
+            # pipeline re-enters _stage_render from clip 0. The per-clip
+            # checkpoint on disk (clip_{idx}.done) is independent of the
+            # store and the final MP4, so a clip that was rendered and
+            # checkpointed in a previous attempt is skipped here.
+            if (rd / f"clip_{idx}.done").exists():
+                if out_path.exists():
+                    self._log(job_id, f"resume: clip {idx + 1} checkpointed on disk — skipping")
+                    self._progress(
+                        job_id, "rendering", (idx + 1) / max(1, total),
+                        f"Clip {idx + 1} resumed from checkpoint",
+                        unit_label="clips", units_done=idx + 1, units_total=total,
+                    )
+                    (rd / f"clip_{idx}.json").write_text(
+                        json.dumps({"renderState": "done", "clipId": str(idx + 1)})
+                    )
+                    with open(rd / "clips_done.txt", "a") as fh:
+                        fh.write(f"{idx + 1}\n")
+                    continue
+                else:
+                    self._log(job_id, f"render: clip {idx + 1} checkpointed but MP4 missing — re-rendering")
 
             clip_doc["renderState"] = "running"
             self.store.write_clip(clip_doc)
@@ -1162,6 +1189,12 @@ class Pipeline:
                         f"{i}\n{self._srt_time(cue['start'])} --> "
                         f"{self._srt_time(cue['end'])}\n{cue['text']}\n"
                     )
+                # durable per-clip checkpoint: survives host kills independent
+                # of the store and the final MP4. A restart after this write
+                # resumes from the next clip instead of rebuilding from clip 1.
+                (rd / f"clip_{idx}.done").write_text("done")
+                with open(rd / "clips_done.txt", "a") as fh:
+                    fh.write(f"{idx + 1}\n")
             except video.RenderError as exc:
                 # SKIP, do not fail the batch. The remaining clips are still
                 # worth rendering and the finished ones are already durable.
@@ -1186,16 +1219,11 @@ class Pipeline:
                 unit_label="clips", units_done=idx + 1, units_total=total,
             )
 
-        # ---- render checkpoint (zombie-resume-safe) -----------------------
-        # Writes a per-clip checkpoint AFTER a clip renders successfully, so a
-        # restart during render resumes from the first unrendered clip instead of
-        # rebuilding the whole batch from clip 1. Before this, a restart during
-        # render rebuilt all 18 clips from clip 1 every time — the render loop.
-        rd = self.settings.app.paths.data_dir / job_id / "render"
-        rd.mkdir(parents=True, exist_ok=True)
-        (rd / f"clip_{idx + 1:02d}.done").write_text("done")
-        with open(rd / "clips_done.txt", "a") as fh:
-            fh.write(f"{idx + 1}\n")
+        # ---- render checkpoint ---------------------------------------------------------------
+        # Per-clip checkpoints are written inside the loop above (clip_{idx}.done +
+        # clips_done.txt after each successful encode, current_clip.txt before each
+        # encode). A restart during render resumes from the first unrendered clip
+        # instead of rebuilding the whole batch from clip 1.
 
         # Skipped clips are reported, not fatal: the batch is still a batch.
         # Retry re-attempts ONLY the clips marked failed, so a retry that
