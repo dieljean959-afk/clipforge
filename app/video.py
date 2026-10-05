@@ -209,7 +209,7 @@ def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
     `mode` labels the deadline in the error so a CPU-only host that ran out of
     time is never confused with a broken encode on a GPU host.
     """
-    logger.debug("[video] " + " ".join(cmd))
+    logger.info("[video] ffmpeg command: " + " ".join(cmd))
     with _FfmpegSlot("ffmpeg"):
         _run_locked(cmd, timeout=timeout, mode=mode)
 
@@ -254,6 +254,10 @@ def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> No
             )
         else:
             how, where = "", ""
+        # Log the full stderr so failures show up in View logs
+        stderr_text = (proc.stderr or "").strip()
+        if stderr_text:
+            logger.error(f"[video] ffmpeg stderr ({len(stderr_text)} bytes): {stderr_text[:2000]}")
         raise RenderError(
             f"ffmpeg exited {proc.returncode}{how}{where} | "
             + _ffmpeg_error_tail(proc.stderr or "")
@@ -413,18 +417,6 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
     return f"crop={out_w}:{out_h}:{expr}:0"
 
 
-#: Container flags every rendered clip MUST carry.
-#:
-#: `-movflags +faststart` is the single most important line in the whole
-#: render. Without it ffmpeg writes the `moov` atom (the index that says where
-#: every frame lives) at the END of the file, so a browser cannot start
-#: playback until it has downloaded the clip in full. On a phone over a
-#: proxied connection that either times out — surfacing as "This browser could
-#: not play the rendered file" even though the downloaded MP4 is perfectly
-#: fine — or it succeeds so late that `preload="metadata"` never yields a
-#: duration and the player sits at "0:00 / --:--". Moving `moov` to the front
-#: costs one extra pass over the file and fixes both symptoms.
-MP4_MOVFLAGS = ["-movflags", "+faststart"]
 #: Audio bitrate for the deliverable. 128k AAC is transparent for speech and
 #: is what every platform's own re-encode targets, so 160k was paying ~25% more
 #: for nothing on every clip.
@@ -440,14 +432,14 @@ VIDEO_PROFILE_ARGS = ["-profile:v", "high", "-level:v", "4.0"]
 def browser_safe_args(encoder: str = "") -> list[str]:
     """Container + profile args that make an MP4 playable everywhere.
 
-    `+faststart` applies to every encoder. The pinned profile/level is skipped
-    for VAAPI, whose muxer path rejects `-profile:v`/`-level:v` outright on
-    most builds — passing them there fails the whole render, which is a far
-    worse outcome than the encoding mismatch they would have prevented.
+    `+faststart` is now included in ffmpeg_codec_args() for libx264 (and
+    equivalent muxer flags for hardware encoders). The pinned profile/level
+    is skipped for VAAPI, whose muxer path rejects `-profile:v`/`-level:v`
+    outright on most builds — passing them there fails the whole render.
     """
     if encoder == "h264_vaapi":
-        return list(MP4_MOVFLAGS)
-    return [*MP4_MOVFLAGS, *VIDEO_PROFILE_ARGS]
+        return []
+    return list(VIDEO_PROFILE_ARGS)
 
 
 def build_output_chain(

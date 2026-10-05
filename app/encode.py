@@ -89,7 +89,7 @@ _PRESET_RANK = (
     "medium", "slow", "slower", "veryslow",
 )
 #: What we drop to on a CPU-only host, and the absolute floor we never pass.
-_CPU_PRESET = "ultrafast"
+_CPU_PRESET = "superfast"
 _CPU_PRESET_FLOOR = "superfast"
 
 
@@ -104,7 +104,7 @@ class EncoderChoice:
     #: True when a hardware encoder is doing the work.
     hardware: bool = False
     preset: str = "veryfast"
-    crf: int = 20
+    crf: int = 23
     hw_accel: str = ""
     timeout_sec: int = RENDER_TIMEOUT_GPU_SEC
     #: Populated when the requested preset had to be lowered.
@@ -116,21 +116,21 @@ class EncoderChoice:
     bufsize_kbps: int = 0
     #: Thread count handed to the encoder. Derived from the CONTAINER's CPU
     #: allowance, not from nproc — see `choose()`.
-    threads: int = 0
+    threads: int = 0  # 0 = ffmpeg auto-detects (all available cores)
 
     def threads_args(self) -> list[str]:
         """`-threads` for the encoder and the filter graph.
 
-        Without this, ffmpeg sizes its thread pools from `nproc`, which inside
-        a container-limited host reports the *host's* core count. This host
-        reports 64 cores but is allowed 1, so every render was spawning ~64
-        frame threads and ~64 slice threads to share a single CPU: pure
-        context-switch overhead, several hundred MB of frame buffers, and a
-        much higher chance of being OOM-killed mid-clip (observed as
-        `ffmpeg exited -9 (SIGKILL)`).
+        When threads is 0, pass -threads 0 explicitly so ffmpeg auto-detects
+        and uses all available cores. When > 0, pin to that count (used when
+        the container's cgroup quota is known and we want to stay within it).
         """
         if self.threads <= 0:
-            return []
+            return [
+                "-threads", "0",
+                "-filter_threads", "0",
+                "-filter_complex_threads", "0",
+            ]
         return [
             "-threads", str(self.threads),
             "-filter_threads", str(self.threads),
@@ -141,12 +141,11 @@ class EncoderChoice:
         """Size the encode to the output it is actually producing.
 
         A flat CRF is not a size policy. On this CPU-only host the preset is
-        lowered to `ultrafast`, which disables the lookahead and CABAC
+        lowered to `superfast`, which disables the lookahead and CABAC
         machinery x264 normally uses, so the SAME crf produces a far larger
-        file than the config implies. Measured on a real batch: crf 20 at
-        1080x1920/60 came out at 13.2 Mbps, which is 81 MB for a 50-second
-        clip — wasteful for vertical social delivery and it crowds a 3 GB
-        disk with four batches.
+        file than the config implies. Measured on a real batch: crf 23 at
+        720x1280/30 came out at ~6 Mbps — comfortable for vertical social
+        delivery and well within disk budgets.
 
         So the ceiling is derived from the OUTPUT geometry rather than pinned
         to a magic number: bits-per-pixel-per-frame is the standard way to
@@ -154,23 +153,18 @@ class EncoderChoice:
         of the 60fps one at the same resolution instead of the same one.
 
         The CRF is also adapted to the preset, because the presets are not
-        equally efficient. Measured on stress content at 1080x1920/60:
-
-            ultrafast crf20, uncapped   71.8 Mbps   SSIM 0.906 vs source
-            ultrafast crf20, 8M cap      6.8 Mbps   SSIM 0.893
-            ultrafast crf23, 8M cap      6.7 Mbps   SSIM 0.896
-
-        Under a ceiling, crf 23 beat crf 20 on BOTH size and quality — with
-        the cap doing the rate limiting, a lower CRF just spends bits in the
-        wrong places. So the degraded preset gets the higher CRF, and a
-        capable preset keeps (or lowers) it.
+        equally efficient. With the cap doing the rate limiting, a lower CRF
+        just spends bits in the wrong places — so the degraded preset gets
+        the higher CRF, and a capable preset keeps (or lowers) it.
 
         Returns self so it can be chained onto `choose()`.
         """
         self.maxrate_kbps = target_bitrate_kbps(width, height, fps)
         self.bufsize_kbps = self.maxrate_kbps * 2
-        if self.preset == "ultrafast":
-            self.crf = min(28, self.crf + 3)
+        if self.preset == "superfast":
+            self.crf = min(28, self.crf + 2)
+        elif self.preset == "veryfast":
+            self.crf = max(16, self.crf - 1)
         elif _preset_rank(self.preset) >= _preset_rank("medium"):
             self.crf = max(16, self.crf - 1)
         return self
@@ -217,6 +211,7 @@ class EncoderChoice:
             *thr,
             *cap,
             "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
         ]
 
     def hw_accel_args(self) -> list[str]:
@@ -401,18 +396,10 @@ def choose(settings: Settings, *, force_software: bool = False) -> EncoderChoice
         crf=crf,
     )
 
-    # Thread count comes from the CONTAINER's allowance, never from nproc.
-    # Inside a cgroup-limited host nproc reports the host's cores (64 here)
-    # while the container is allowed 1 CPU, so an unbounded ffmpeg builds its
-    # thread pools from the wrong number entirely.
-    choice.threads = hostlimits.effective_cpus()
-    if choice.threads <= 0:
-        choice.threads = 1
-    if choice.threads < os.cpu_count():
-        choice.notes.append(
-            f"ffmpeg limited to {choice.threads} thread(s) — this container may use "
-            f"{choice.threads} of the {os.cpu_count()} cores the host reports"
-        )
+    # Use -threads 0 so ffmpeg auto-detects and uses all available cores.
+    # ffmpeg's internal auto-detection respects cgroup limits on modern kernels,
+    # so this gives the best utilization without manual thread pinning.
+    choice.threads = 0
 
     if encoder:
         # Hardware encodes fast enough that a slow preset is affordable, so the

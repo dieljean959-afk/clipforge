@@ -1746,10 +1746,10 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
 
     v = raw.get("video", {})
     video = VideoConfig(
-        width=int(v.get("width", 1080)),
-        height=int(v.get("height", 1920)),
+        width=int(v.get("width", 720)),
+        height=int(v.get("height", 1280)),
         fps=int(v.get("fps", 30)),
-        crf=int(v.get("crf", 20)),
+        crf=int(v.get("crf", 23)),
         preset=str(v.get("preset", "veryfast")),
         reframe=bool(v.get("reframe", True)),
         silence_trim=bool(v.get("silence_trim", True)),
