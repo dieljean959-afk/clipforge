@@ -799,7 +799,19 @@ class InProcessWorker:
         # 5-attempt budget on jobs that were making progress every time).
         signature = self._progress_signature(job_id)
         previous = job.get("resumeSignature")
-        stalled = 0 if signature != previous else int(job.get("stalledResumes") or 0) + 1
+        # A host restart is NOT the job failing to advance.
+        #
+        # This counter used to advance on every interrupt, so a job that was
+        # genuinely progressing (6 of 8 chunks cached, then 8 of 8) still hit
+        # STALLED_RESUME_LIMIT and was failed with "the server restarted 3
+        # times ... it cannot be resumed automatically". That is the exact
+        # message in the screenshot. The fix is in _progress_signature: it now
+        # counts cached transcription chunks, so a job that did MORE work
+        # between kills reports a different signature and the counter resets. An
+        # interrupted-but-advancing job is therefore re-queued indefinitely,
+        # while a genuinely wedged one still stops after two no-op attempts.
+        advanced = previous is None or signature != previous
+        stalled = 0 if advanced else int(job.get("stalledResumes") or 0) + 1
         if stalled >= STALLED_RESUME_LIMIT:
             job.update({
                 "interruptCount": count,
@@ -863,9 +875,17 @@ class InProcessWorker:
     def _progress_signature(self, job_id: str) -> str:
         """How far this job has actually got, as a comparable string.
 
-        Counts finished stage markers plus rendered clips. Two attempts with the
-        SAME signature did identical amounts of work, which is what makes a
-        restart loop visible instead of invisible.
+        Counts finished stage markers, rendered clips, AND cached transcription
+        chunks. Two attempts with the SAME signature did identical amounts of
+        work, which is what makes a restart loop visible instead of invisible.
+
+        The chunk count is load-bearing. It used to be absent, so a job that
+        transcribed 3 chunks, was killed, transcribed 5 more, was killed again,
+        still reported the identical signature -- the three extra chunks of real
+        work were invisible -- and the no-progress counter advanced on a job that
+        was in fact converging. Every unit of work that survives a restart is
+        written to disk first (see _cleanup_job_temps and the per-chunk cache),
+        so counting them is counting work that will not be redone.
         """
         try:
             stages = sum(
@@ -875,7 +895,16 @@ class InProcessWorker:
             clips = sum(
                 1 for c in self.store.list_clips(job_id) if c.get("renderState") == "done"
             )
-            return f"{stages}/{len(STAGES)} stages, {clips} clip(s) rendered"
+            chunks = 0
+            chunk_dir = (
+                self.settings.app.paths.data_dir / "work" / job_id / "transcribe" / "chunks"
+            )
+            if chunk_dir.is_dir():
+                chunks = sum(1 for _ in chunk_dir.glob("*.json"))
+            return (
+                f"{stages}/{len(STAGES)} stages, {clips} clip(s) rendered, "
+                f"{chunks} chunk(s) transcribed"
+            )
         except Exception:
             return ""
 
@@ -1228,6 +1257,43 @@ class InProcessWorker:
     def _watchdog(self) -> None:
         while not self._stop.wait(5.0):
             self._check_watchdog_once()
+            # Reconcile orphaned jobs ON A TIMER, not only from request handlers.
+            #
+            # This is the difference between jobs that run unattended and jobs
+            # that need the owner to stare at the dashboard. `reconcile_stale_
+            # running` re-queues a job whose worker was killed by a host restart,
+            # but until this change it was called from exactly two places --
+            # GET /api/jobs and GET /api/jobs/{id} -- both of which only fire
+            # when a browser is polling. A job orphaned at 03:00 with no tab
+            # open therefore sat on a live stage ("Transcribing, updated 5h ago")
+            # until somebody happened to load the page, which is precisely the
+            # reported bug.
+            #
+            # The watchdog thread is the right home: it already runs for the
+            # life of the process, it already owns "is this job actually making
+            # progress", and it exists whether or not anyone is watching. The
+            # floor keeps this off the per-second path -- reconciliation reads
+            # every job document, and five times a second would spend the single
+            # vCPU proving that nothing had changed.
+            if self._reconcile_due():
+                try:
+                    self.reconcile_stale_running()
+                except Exception:  # pragma: no cover - defensive
+                    # A failed reconcile pass must never take the watchdog (and
+                    # with it every other liveness guarantee) down with it. The
+                    # next pass retries.
+                    logger.exception("[worker] reconcile pass failed")
+
+    #: Seconds between unattended reconcile passes. Well inside the window in
+    #: which a stalled job is still cheap to restart, and cheap on a 1-vCPU host.
+    RECONCILE_INTERVAL_SEC = 30.0
+
+    def _reconcile_due(self) -> bool:
+        now = time.monotonic()
+        last = self._last_reconcile_at
+        if last is None or (now - last) >= self.RECONCILE_INTERVAL_SEC:
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # status for the dashboard card

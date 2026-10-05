@@ -55,6 +55,9 @@ AREAS: dict[str, list[tuple[str, list[str], int]]] = {
         ("delete_cancels_test", [], 90),
         ("queue_truthfulness_test", [], 90),
         ("health_resilience_test", [], 90),
+        # Jobs must recover with no browser open: server-side reconcile timer
+        # plus a progress signature that sees cached chunks.
+        ("unattended_recovery_test", [], 60),
         ("export_memory_test", [], 120),
         ("pipeline_resilience_test", [], 120),
     ],
