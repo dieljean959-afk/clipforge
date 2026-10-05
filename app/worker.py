@@ -83,6 +83,16 @@ RESUME_BUDGET = int(os.getenv("CLIPFORGE_RESUME_BUDGET", "40"))
 # separately by INTERRUPT_MAX_RESUMES and are not affected by this limit.
 STALLED_RESUME_LIMIT = int(os.getenv("CLIPFORGE_STALLED_RESUME_LIMIT", "2"))
 
+# An attempt that lived at least this long was working, not wedged — see the
+# `worked` branch in _note_interrupted. Sized against this host: the sandbox
+# recycles the web process every 15-60 minutes, so anything past ~10 minutes is
+# far more likely to be a kill mid-render than a job failing to start. A job
+# that dies in under this window, repeatedly and at the same checkpoint, is a
+# genuine wedge and is still stopped after STALLED_RESUME_LIMIT attempts.
+MIN_USEFUL_ATTEMPT_SEC = float(
+    os.getenv("CLIPFORGE_MIN_USEFUL_ATTEMPT_SEC", "600")
+)
+
 # Stage ids -> what the user calls them. Used when a message has to name the
 # stage a job died in.
 STAGE_LABELS = {
@@ -811,7 +821,25 @@ class InProcessWorker:
         # interrupted-but-advancing job is therefore re-queued indefinitely,
         # while a genuinely wedged one still stops after two no-op attempts.
         advanced = previous is None or signature != previous
-        stalled = 0 if advanced else int(job.get("stalledResumes") or 0) + 1
+        # A long attempt that died on the same signature is WORK, not a wedge.
+        #
+        # This host restarts its web process every 15-60 minutes, and measured
+        # stage times on this project run to `fetch` 6167s and `detect` 1243s.
+        # So a job is routinely SIGKILLed partway through a single render unit,
+        # twice in a row, while doing exactly what it was asked to do — and the
+        # signature cannot change because no unit finished. Counting that as
+        # "not progressing" failed healthy multi-hour jobs with the message
+        # "the server restarted 3 times ... it cannot be resumed automatically",
+        # which is the opposite of the truth.
+        #
+        # So an attempt that lived at least MIN_USEFUL_ATTEMPT_SEC is counted as
+        # forward progress regardless of signature: it consumed real time doing
+        # real work, and killing it was the host's choice, not the job's fault.
+        # An attempt that dies almost immediately, repeatedly, at the same point
+        # IS wedged and still stops.
+        lived_sec = (time.time() * 1000 - float(job.get("stageStartedAt") or 0)) / 1000.0
+        worked = lived_sec >= MIN_USEFUL_ATTEMPT_SEC
+        stalled = 0 if (advanced or worked) else int(job.get("stalledResumes") or 0) + 1
         if stalled >= STALLED_RESUME_LIMIT:
             job.update({
                 "interruptCount": count,

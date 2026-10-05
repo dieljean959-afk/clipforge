@@ -58,6 +58,9 @@ AREAS: dict[str, list[tuple[str, list[str], int]]] = {
         # Jobs must recover with no browser open: server-side reconcile timer
         # plus a progress signature that sees cached chunks.
         ("unattended_recovery_test", [], 60),
+        # A long attempt killed repeatedly at one checkpoint still resumes;
+        # an instantly-repeating failure is still stopped.
+        ("long_attempt_resume_test", [], 60),
         ("export_memory_test", [], 120),
         ("pipeline_resilience_test", [], 120),
     ],
