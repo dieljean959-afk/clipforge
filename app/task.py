@@ -996,6 +996,19 @@ class Pipeline:
             # straight past it to this clip.
             self._checkpoint(job_id, f"rendering (after clip {idx} of {total})")
 
+            # ---- resume checkpoint: write where we are BEFORE encoding ----
+            # A restart between checkpoint and the mp4 file lands us here with
+            # no rendered file and the same idx, so we resume by rendering this
+            # clip again — correct. A restart AFTER the mp4 lands here with the
+            # file present and we skip. The checkpoint is on disk, so it survives
+            # the host killing the web process mid-render (the exact failure path
+            # that produced the render loop).
+            rd = self.settings.app.paths.data_dir / job_id / "render"
+            rd.mkdir(parents=True, exist_ok=True)
+            cur = rd / "current_clip.txt"
+            cur.write_text(str(idx))
+            self._log(job_id, f"render checkpoint: clip {idx + 1} of {total} (will render)")
+
             # ---- resume: a clip already rendered and present is skipped ---
             # Only when the burned-in result still matches this job's request:
             # same cut (enforced upstream in create_clips) and same caption
@@ -1012,6 +1025,11 @@ class Pipeline:
                     job_id, "rendering", (idx + 1) / max(1, total),
                     f"Clip {idx + 1} already rendered",
                     unit_label="clips", units_done=idx + 1, units_total=total,
+                )
+                # mark DONE for this clip in the checkpoint so we can skip
+                # it even if the main loop reset for some reason
+                (rd / f"clip_{idx}.json").write_text(
+                    {"renderState": "done", "clipId": str(idx + 1)}
                 )
                 continue
 
@@ -1168,6 +1186,17 @@ class Pipeline:
                 unit_label="clips", units_done=idx + 1, units_total=total,
             )
 
+        # ---- render checkpoint (zombie-resume-safe) -----------------------
+        # Writes a per-clip checkpoint AFTER a clip renders successfully, so a
+        # restart during render resumes from the first unrendered clip instead of
+        # rebuilding the whole batch from clip 1. Before this, a restart during
+        # render rebuilt all 18 clips from clip 1 every time — the render loop.
+        rd = self.settings.app.paths.data_dir / job_id / "render"
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / f"clip_{idx + 1:02d}.done").write_text("done")
+        with open(rd / "clips_done.txt", "a") as fh:
+            fh.write(f"{idx + 1}\n")
+
         # Skipped clips are reported, not fatal: the batch is still a batch.
         # Retry re-attempts ONLY the clips marked failed, so a retry that
         # happens to get a healthier host finishes the stragglers.
@@ -1191,7 +1220,16 @@ class Pipeline:
             )
 
         # ---- stage: export (final state on disk) --------------------------
+        # The render stage is now recorded per-clip, so a restart during render
+        # resumes from the last rendered clip instead of rebuilding from clip 1.
+        # Write the render DONE marker here too, so the checkpoint machinery
+        # (the 'resume from first INCOMPLETE stage' path in run()) can skip the
+        # rendered clips on a clean restart after a full finish.
+        rd = self.settings.app.paths.data_dir / job_id / "render"
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "DONE").write_text("done")
         ws.mark_done("captions", artifacts=[])
+        ws.mark_done("render", artifacts=[f"{rd}/clips_done.txt"])
         ws.mark_done("export", artifacts=[], clips=total)
 
         # captions.txt content stored on the job
