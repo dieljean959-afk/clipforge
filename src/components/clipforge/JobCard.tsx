@@ -56,8 +56,7 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
   failed: AlertTriangle,
 };
 
-/**
- * The stall budget is the SERVER's (app/worker.py STALL_TIMEOUT_SEC), read
+/** The stall budget is the SERVER's (app/worker.py STALL_TIMEOUT_SEC), read
  * from health and threaded in as `stallTimeoutSec`. These shared constants
  * from @/lib/clipforge only cover the cold first paint, before /api/health has
  * answered.
@@ -69,8 +68,7 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
  * number the server was running. One source, not two.
  */
 
-/**
- * Render a duration the way a person would say it. The old copy interpolated
+/** Render a duration the way a person would say it. The old copy interpolated
  * seconds/60000 raw, so a 90s budget printed "1.5 minutes" and a 180s budget
  * printed "3 minutes" — the first reading as a fraction of a minute is what
  * made the number look like a bug rather than a budget.
@@ -305,19 +303,9 @@ export function JobCard({
       ) : overall.state === "failed" ? (
         <div
           data-testid="job-failed"
-          className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2.5 text-sm"
+          className="mt-3"
         >
-          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
-          <div className="min-w-0">
-            <div className="font-semibold text-destructive">{overall.label}</div>
-            {job.error && (
-              <div
-                className="mt-0.5 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]"
-              >
-                {job.error}
-              </div>
-            )}
-          </div>
+          <FailureNotice job={job} />
         </div>
       ) : (
         <div className="mt-3" data-testid="job-overall">
@@ -592,7 +580,11 @@ export function JobCard({
         </div>
       )}
 
-      {failed && <FailureNotice job={job} />}
+      {failed && (
+        <div className="mt-3">
+          <FailureNotice job={job} />
+        </div>
+      )}
 
       {/* per-job worker log ("View logs") */}
       <Dialog open={logsOpen} onOpenChange={setLogsOpen}>
@@ -621,8 +613,7 @@ export function JobCard({
   );
 }
 
-/**
- * A failure, in words a person can act on.
+/** A failure, in words a person can act on.
  *
  * The raw Python traceback used to be rendered inline. On a phone it is a wall
  * of "/home/daytona/.local/share/uv/python/…" that pushed the card past the
@@ -669,8 +660,7 @@ function FailureNotice({ job }: { job: JobDoc }) {
   );
 }
 
-/**
- * One short sentence for a failure, derived from the message rather than
+/** One short sentence for a failure, derived from the message rather than
  * shown raw. Detection is the case that mattered: the backend said
  * "AI detection failed on chunk 3/7" and the raw body underneath was a
  * `json_validate_failed` envelope, which reads as gibberish to anyone who

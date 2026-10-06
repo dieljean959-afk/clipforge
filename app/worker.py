@@ -849,9 +849,24 @@ class InProcessWorker:
                     f"the server restarted {count} times during "
                     f"'{STAGE_LABELS.get(stage, stage or 'the job')}' without the "
                     f"job advancing past {signature or 'its last checkpoint'} — "
-                    f"resuming again would repeat the same failure"
+                    f"each restart is resuming from the last checkpoint, "
+                    f"but the same checkpoint keeps being reached"
                 ),
-                "error": None,
+                # Do NOT say "cannot be resumed" here. A render-stage job that
+                # dies and resumes is resumable by construction: render is per-clip
+                # (see app/task.py), and the restart re-renders from the last
+                # completed clip without re-running download/transcribe/detect.
+                # Reserve the hard "cannot be resumed" wording for the one case
+                # that is actually unrecoverable (upload source file gone).
+                "error": (
+                    f"The server restarted {count} times during "
+                    f"'{STAGE_LABELS.get(stage, stage or 'the job')}'. "
+                    f"The job was making progress each time but the host kept "
+                    f"killing the worker before the current unit finished, so it "
+                    f"could not finish '{STAGE_LABELS.get(stage, stage or 'the job')}' "
+                    f"after {count} attempts. The expensive stages are cached — "
+                    f"Retry re-renders from the last completed clip."
+                ),
             })
             self.store.write_job(job)
             self.store.append_job_log(
