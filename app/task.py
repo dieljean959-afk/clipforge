@@ -26,7 +26,7 @@ import traceback
 from concurrent import futures as cf
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -1209,7 +1209,7 @@ class Pipeline:
                 )
                 self._progress(
                     job_id, "rendering", (idx + 1) / max(1, total),
-                    f"Clip {idx + 1} skipped after 2 attempts — continuing",
+                    f"Clip {idx + 1} skipped after 3 attempts — continuing",
                     unit_label="clips", units_done=idx + 1, units_total=total,
                 )
 
@@ -1243,7 +1243,7 @@ class Pipeline:
                 job_id,
                 progressDetail=(
                     f"{total - len(failed_renders)} of {total} clips ready — "
-                    f"clip {names} skipped after 2 attempts"
+                    f"clip {names} skipped after 3 attempts"
                 ),
             )
 
@@ -1318,6 +1318,39 @@ class Pipeline:
             self._log(job_id, f"clip {number} copied to durable storage")
         return pushed
 
+    def _clip_progress_callback(
+        self, job_id: str, number: int, total: int, clip_dur: float        ) -> Callable[[], None]:
+        """Return a callback that reports REAL ffmpeg frame progress for one clip.
+
+        Parses ffmpeg's ``-progress`` output (frame/time/fps) and writes real
+        per-frame progress to the job so the UI shows actual encode progress
+        instead of a blind liveness heartbeat. The percentage is bounded by the
+        clip duration so a stalled encoder stops advancing the bar.
+        """
+        last_reported_frame = 0
+
+        def _cb(frame: int, fps: float, time_sec: float) -> None:
+            nonlocal last_reported_frame
+            if frame <= last_reported_frame:
+                return
+            last_reported_frame = frame
+            # Bounded by clip duration so a stuck encoder cannot push the bar
+            # past 100% by reporting frames past the end.
+            fraction = max(0.0, min(1.0, time_sec / max(0.1, clip_dur)))
+            try:
+                self._progress(
+                    job_id, "rendering", fraction,
+                    f"Rendering clip {number} of {total} "
+                    f"(frame {frame}, {fps:.1f} fps, {time_sec:.1f}s / {clip_dur:.1f}s)",
+                    unit_label="clips",
+                    units_done=number - 1,
+                    units_total=total,
+                )
+            except Exception:
+                pass
+
+        return _cb
+
     def _render_one_clip(
         self,
         job_id: str,
@@ -1331,13 +1364,13 @@ class Pipeline:
         ass_path: Path | None,
         cues: list[dict[str, Any]] | None,
         crop_windows: list[dict[str, Any]] | None,
-        silence_cuts: list[dict[str, Any]] | None,
-        src_fps: float,
+        silence_cuts: list[dict[str, Any]] | None,        src_fps: float,
+        _progress_callback=None,
     ) -> dict[str, Any]:
-        """Encode one clip, verify it, retry once safely, then give up on it.
+        """Encode one clip, verify it, retry up to 3 times, then give up.
 
         Returns the encoder metadata on success. Raises RenderError only after
-        BOTH attempts fail — the caller records the clip as skipped and moves
+        ALL attempts fail — the caller records the clip as skipped and moves
         on to the next one.
 
         The verification is not decoration. ffmpeg can exit 0 and leave a
@@ -1345,9 +1378,13 @@ class Pipeline:
         thread), and a clip that is marked `renderState="done"` with no
         playable file is exactly the failure that surfaces much later as a
         player that spins forever.
+
+        Each retry after the first uses safer settings (lower resolution,
+        no captions) so a single bad clip costs one clip, not the batch.
         """
+
         last: Exception | None = None
-        for attempt in (1, 2):
+        for attempt in (1, 2, 3):
             try:
                 # The heartbeat spans ONLY the encode. Nothing in it reports
                 # progress -- ffmpeg's own output is read for errors, not
@@ -1363,14 +1400,16 @@ class Pipeline:
                         crop_windows=crop_windows,
                         silence_cuts=silence_cuts,
                         src_fps=src_fps,
-                        safe=attempt == 2,
+                        safe=attempt >= 2,
+                        _progress_callback=_progress_callback,
                     )
                 video.verify_output(out_path, expected_sec=end - start)
-                if attempt == 2:
+                if attempt >= 2:
                     self._log(
                         job_id,
-                        f"clip {number} of {total}: first attempt failed "
-                        f"({last}); the safer retry produced a usable file",
+                        f"clip {number} of {total}: attempt {attempt - 1} failed "
+                        f"({last}); attempt {attempt} with safer settings produced "
+                        f"a usable file",
                     )
                 return meta
             except Exception as exc:  # noqa: BLE001 - retried below, then skipped
@@ -1381,21 +1420,21 @@ class Pipeline:
                     out_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-                if attempt == 1:
+                if attempt < 3:
                     self._log(
                         job_id,
-                        f"clip {number} of {total} failed on attempt 1/2 "
-                        f"({type(exc).__name__}: {exc}) — retrying 2/3 with "
-                        f"safer settings",
+                        f"clip {number} of {total} failed on attempt {attempt}/3 "
+                        f"({type(exc).__name__}: {exc}) — retrying attempt "
+                        f"{attempt + 1}/3 with safer settings",
                     )
                     self._progress(
                         job_id, "rendering",
                         (number - 1) / max(1, total),
-                        f"Clip {number} failed, retrying 2/3 with safer settings",
+                        f"Clip {number} failed, retrying {attempt + 1}/3 with safer settings",
                         unit_label="clips", units_done=number - 1,
                         units_total=total,
                     )
-        raise video.RenderError(str(last) if last else "render failed")
+        raise video.RenderError(str(last) if last else "render failed after 3 attempts")
 
     def _cleanup_job_temps(self, job_id: str, ws: StageWorkspace) -> None:
         """Delete what a finished job leaves behind on disk.

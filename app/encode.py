@@ -114,48 +114,36 @@ class EncoderChoice:
     #: alone, the old behaviour). Set by `for_output()`.
     maxrate_kbps: int = 0
     bufsize_kbps: int = 0
-    #: Thread count handed to the encoder. Derived from the CONTAINER's CPU
-    #: allowance, not from nproc — see `choose()`.
-    threads: int = 0  # 0 = ffmpeg auto-detects (all available cores)
+    #: Thread count handed to the encoder.
+    #: 0 = ffmpeg auto-detects all available cores (uses -threads 0).
+    #: >0 = pinned to that count (used when cgroup quota is known).
+    threads: int = 0
 
     def threads_args(self) -> list[str]:
         """`-threads` for the encoder and the filter graph.
 
-        When threads is 0, pass -threads 0 explicitly so ffmpeg auto-detects
-        and uses all available cores. When > 0, pin to that count (used when
-        the container's cgroup quota is known and we want to stay within it).
+        -threads 0 tells ffmpeg to auto-detect and use all available cores.
+        On modern kernels this respects cgroup limits. We always pass it
+        explicitly so the behavior is deterministic across ffmpeg versions.
         """
-        if self.threads <= 0:
-            return [
-                "-threads", "0",
-                "-filter_threads", "0",
-                "-filter_complex_threads", "0",
-            ]
         return [
-            "-threads", str(self.threads),
-            "-filter_threads", str(self.threads),
-            "-filter_complex_threads", str(self.threads),
+            "-threads", "0",
+            "-filter_threads", "0",
+            "-filter_complex_threads", "0",
         ]
 
     def for_output(self, width: int, height: int, fps: float) -> "EncoderChoice":
         """Size the encode to the output it is actually producing.
 
-        A flat CRF is not a size policy. On this CPU-only host the preset is
-        lowered to `superfast`, which disables the lookahead and CABAC
-        machinery x264 normally uses, so the SAME crf produces a far larger
-        file than the config implies. Measured on a real batch: crf 23 at
-        720x1280/30 came out at ~6 Mbps — comfortable for vertical social
-        delivery and well within disk budgets.
+        A flat CRF is not a size policy. On a CPU-only host the preset may be
+        lowered (superfast), which disables lookahead/CABAC, so the same crf
+        produces a larger file. The VBR ceiling is derived from output geometry
+        (bits per pixel per frame) so a 30fps clip gets half the ceiling of a
+        60fps one at the same resolution.
 
-        So the ceiling is derived from the OUTPUT geometry rather than pinned
-        to a magic number: bits-per-pixel-per-frame is the standard way to
-        size a video target, and it means a 30fps clip gets half the ceiling
-        of the 60fps one at the same resolution instead of the same one.
-
-        The CRF is also adapted to the preset, because the presets are not
-        equally efficient. With the cap doing the rate limiting, a lower CRF
-        just spends bits in the wrong places — so the degraded preset gets
-        the higher CRF, and a capable preset keeps (or lowers) it.
+        The CRF is adapted to the preset: a degraded preset gets a higher CRF
+        since the cap does the rate limiting, and a capable preset keeps or
+        lowers it.
 
         Returns self so it can be chained onto `choose()`.
         """
@@ -176,6 +164,9 @@ class EncoderChoice:
         VBR: CRF still decides quality per frame, and the ceiling stops a hard
         scene from producing an enormous file. Easy content stays well under
         the cap, so this costs nothing on simple footage.
+
+        libx264 and QSV get -movflags +faststart for web playback; NVENC and
+        VAAPI get their equivalent muxer flags.
         """
         cap: list[str] = []
         if self.maxrate_kbps > 0:
@@ -190,12 +181,18 @@ class EncoderChoice:
                 *thr,
                 *cap,
                 "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
             ]
         if self.encoder == "h264_vaapi":
             # VAAPI takes a bitrate, not a CRF; prefer the adaptive ceiling,
             # and fall back to scaling the CRF when there is no output geometry.
             kbps = self.maxrate_kbps or max(1200, int(self.crf * 180))
-            return ["-c:v", "h264_vaapi", "-b:v", f"{kbps}k", "-pix_fmt", "yuv420p"]
+            return [
+                "-c:v", "h264_vaapi",
+                "-b:v", f"{kbps}k",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+            ]
         if self.encoder == "h264_qsv":
             return [
                 "-c:v", "h264_qsv",
@@ -205,6 +202,7 @@ class EncoderChoice:
                 *thr,
                 *cap,
                 "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
             ]
         return [
             "-c:v", "libx264", "-preset", self.preset, "-crf", str(self.crf),

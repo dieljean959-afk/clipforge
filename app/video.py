@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -203,18 +203,38 @@ class _FfmpegSlot:
             _FFMPEG_SEM.release()
 
 
-def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
+def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> None:
     """Run ffmpeg, failing with a message that says WHICH deadline was hit.
 
     `mode` labels the deadline in the error so a CPU-only host that ran out of
     time is never confused with a broken encode on a GPU host.
+
+    When `_progress_callback` is given, ffmpeg's ``-progress`` output is parsed
+    and the callback is called with (frame: int, fps: float, time_sec: float)
+    whenever ffmpeg reports a new frame — so the caller can report REAL
+    per-frame progress instead of a blind liveness heartbeat.
     """
     logger.info("[video] ffmpeg command: " + " ".join(cmd))
     with _FfmpegSlot("ffmpeg"):
-        _run_locked(cmd, timeout=timeout, mode=mode)
+        _run_locked(cmd, timeout=timeout, mode=mode, _progress_callback=_progress_callback)
 
 
-def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> None:
+def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> None:
+    """Run ffmpeg with optional real-time progress parsing.
+
+    When ``_progress_callback`` is set, ``-progress pipe:1`` is appended to the
+    command and stdout is read line-by-line in a thread while stderr is captured
+    separately. The callback receives ``(frame, fps, time_sec)`` on each new
+    frame report. When it is None, the old ``subprocess.run`` path is used
+    unchanged.
+    """
+    if _progress_callback is not None and "-progress" not in cmd:
+        cmd = list(cmd) + ["-progress", "pipe:1"]
+
+    if _progress_callback is not None:
+        _run_with_progress(cmd, timeout=timeout, mode=mode, callback=_progress_callback)
+        return
+
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -261,6 +281,130 @@ def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu") -> No
         raise RenderError(
             f"ffmpeg exited {proc.returncode}{how}{where} | "
             + _ffmpeg_error_tail(proc.stderr or "")
+        )
+
+
+def _run_with_progress(
+    cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", callback: Callable[[], None]
+) -> None:
+    """Run ffmpeg with real-time progress parsing via ``-progress pipe:1``.
+
+    Spawns ffmpeg with stdout directed to a pipe (progress output) and stderr
+    captured separately. A thread reads stdout line-by-line, parsing ``frame``
+    and ``time`` keys from ffmpeg's ``-progress`` output and calling
+    ``callback(frame, fps, time_sec)`` on each new frame report.
+
+    The process is killed if it exceeds ``timeout``. On failure the full stderr
+    is logged and raised as ``RenderError``, same as ``_run_locked``.
+    """
+    import select
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    _progress_block = re.compile(
+        r"^frame=(\d+)\r?$\n"
+        r".*?time=([0-9.]+)\r?$\n"
+        r".*?fps=([0-9.]+)",
+        re.MULTILINE,
+    )
+    stderr_chunks: list[str] = []
+
+    def _read_stderr() -> None:
+        try:
+            for line in proc.stderr:  # type: ignore[union-attr]
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stderr_thread.start()
+
+    last_frame = -1
+    deadline = time.monotonic() + timeout
+
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.wait(timeout=5)
+                tail = "\n".join(stderr_chunks[-6:])
+                raise RenderError(
+                    f"ffmpeg exceeded its {mode.upper()}-render deadline of "
+                    f"{timeout // 60} min and was killed. "
+                    + (
+                        "This host has no hardware encoder, so 9:16 software encoding is "
+                        "the bottleneck — lower [video] width/height or clip length, or "
+                        "move the render to a GPU worker (WORKER_URL)."
+                        if mode == "cpu"
+                        else "The encode should not be this slow on a hardware encoder — "
+                             "check GPU health."
+                    )
+                    + (f" Last output: {tail}" if tail else "")
+                )
+
+            # Read available stdout data without blocking.
+            ready, _, _ = select.select([proc.stdout], [], [], min(0.5, remaining))
+            if ready:
+                chunk = proc.stdout.read(4096)  # type: ignore[union-attr]
+                if not chunk:
+                    break
+                for line in chunk.splitlines():
+                    m = _progress_block.match(line)
+                    if m:
+                        frame = int(m.group(1))
+                        if frame != last_frame:
+                            last_frame = frame
+                            try:
+                                callback(frame, float(m.group(3)), float(m.group(2)))
+                            except Exception:
+                                pass
+    except Exception:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        raise
+    finally:
+        stderr_thread.join(timeout=5)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait(timeout=5)
+
+    if proc.returncode != 0:
+        if proc.returncode < 0:
+            try:
+                how = f" ({signal.Signals(-proc.returncode).name})"
+            except ValueError:
+                how = ""
+            where = (
+                " — this was an EXTERNAL kill, not an ffmpeg error: the process was "
+                "terminated by a signal while it was still working. Common causes are "
+                "the host restarting or redeploying mid-render, or a container stop. "
+                "Retry the job; if it recurs, correlate the time with restarts."
+            )
+        else:
+            how, where = "", ""
+        stderr_text = "".join(stderr_chunks).strip()
+        if stderr_text:
+            logger.error(f"[video] ffmpeg stderr ({len(stderr_text)} bytes): {stderr_text[:2000]}")
+        raise RenderError(
+            f"ffmpeg exited {proc.returncode}{how}{where} | "
+            + _ffmpeg_error_tail(stderr_text or "")
         )
 
 
@@ -489,6 +633,7 @@ def render_clip(
     silence_cuts: list[dict] | None = None,
     src_fps: float | None = None,
     safe: bool = False,
+    _progress_callback: Callable | None = None,
 ) -> dict[str, Any]:
     """Cut + reframe + burn captions into one 9:16 clip. Returns metadata.
 
@@ -630,7 +775,8 @@ def render_clip(
         f"{'GPU' if enc.hardware else 'CPU-only'} host — "
         f"encode deadline {deadline // 60} min"
     )
-    _run(cmd, timeout=deadline, mode="gpu" if enc.hardware else "cpu")
+    _run(cmd, timeout=deadline, mode="gpu" if enc.hardware else "cpu",
+         _progress_callback=_progress_callback)
 
     meta = probe(dest)
     took = time.time() - t0
