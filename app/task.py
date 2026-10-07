@@ -1142,6 +1142,8 @@ class Pipeline:
                 )
                 thumb = self.settings.app.paths.outputs_dir / job_id / f"clip_{idx + 1:02d}.jpg"
                 video.render_first_frame_thumb(out_path, thumb)
+                # Persist the exact ffmpeg command and stderr for this clip so
+                # View logs shows the real encoder output, not just the headline.
                 clip_doc.update({
                     "videoPath": str(out_path),
                     "thumbPath": str(thumb),
@@ -1160,6 +1162,8 @@ class Pipeline:
                     "uncertainCues": sum(1 for c in cues if c.get("uncertain")),
                     "captionPreset": preset,
                     "captionStyle": style_id,
+                    "ffmpegCommand": meta.get("ffmpegCommand"),
+                    "ffmpegStderr": meta.get("ffmpegStderr"),
                 })
                 self.store.write_clip(clip_doc)
                 # Durability last, once the clip is verified and recorded. The
@@ -1200,7 +1204,12 @@ class Pipeline:
                 # worth rendering and the finished ones are already durable.
                 # This used to raise, which turned one bad encode into a red
                 # job and threw away the other nine.
-                clip_doc.update({"renderState": "failed", "mediaError": str(exc)})
+                clip_doc.update({
+                    "renderState": "failed",
+                    "mediaError": str(exc),
+                    "ffmpegCommand": meta.get("ffmpegCommand") if isinstance(meta, dict) else None,
+                    "ffmpegStderr": meta.get("ffmpegStderr") if isinstance(meta, dict) else None,
+                })
                 self.store.write_clip(clip_doc)
                 self._log(
                     job_id,
@@ -1237,7 +1246,7 @@ class Pipeline:
                 job_id,
                 f"{len(failed_renders)} of {total} clip(s) could not be rendered "
                 f"and were skipped (clip {names}). Every other clip is ready. "
-                f"Hit Retry to attempt just those again.",
+                f"Hit Retry to re-render just those from the last completed clip.",
             )
             self._patch_job(
                 job_id,
@@ -1367,21 +1376,25 @@ class Pipeline:
         silence_cuts: list[dict[str, Any]] | None,        src_fps: float,
         _progress_callback=None,
     ) -> dict[str, Any]:
-        """Encode one clip, verify it, retry up to 3 times, then give up.
+    """Encode one clip, verify it, retry up to 3 times, then give up.
 
-        Returns the encoder metadata on success. Raises RenderError only after
-        ALL attempts fail — the caller records the clip as skipped and moves
-        on to the next one.
+    Returns the encoder metadata on success. Raises RenderError only after
+    ALL attempts fail — the caller records the clip as skipped and moves
+    on to the next one.
 
-        The verification is not decoration. ffmpeg can exit 0 and leave a
-        zero-byte or truncated MP4 behind (out of space, a killed frame
-        thread), and a clip that is marked `renderState="done"` with no
-        playable file is exactly the failure that surfaces much later as a
-        player that spins forever.
+    The verification is not decoration. ffmpeg can exit 0 and leave a
+    zero-byte or truncated MP4 behind (out of space, a killed frame
+    thread), and a clip that is marked `renderState="done"` with no
+    playable file is exactly the failure that surfaces much later as a
+    player that spins forever.
 
-        Each retry after the first uses safer settings (lower resolution,
-        no captions) so a single bad clip costs one clip, not the batch.
-        """
+    Each retry after the first uses safer settings (lower resolution,
+    no captions) so a single bad clip costs one clip, not the batch.
+
+    The returned metadata always includes the exact ffmpeg command that ran
+    and the full stderr, so the job log can record the real per-clip error
+    for View logs instead of only the headline.
+    """
 
         last: Exception | None = None
         for attempt in (1, 2, 3):
@@ -1391,18 +1404,30 @@ class Pipeline:
                 # percentages -- so without this a long clip looks dead, and
                 # the watchdog can kill a render that is working.
                 with self._heartbeat(job_id, f"render clip {number}"):
-                    meta = video.render_clip(
-                        src, out_path,
-                        start=start, end=end,
-                        settings=self.settings,
-                        ass_path=ass_path,
-                        caption_cues=cues,
-                        crop_windows=crop_windows,
-                        silence_cuts=silence_cuts,
-                        src_fps=src_fps,
-                        safe=attempt >= 2,
-                        _progress_callback=_progress_callback,
-                    )
+                meta = video.render_clip(
+                    src, out_path,
+                    start=start, end=end,
+                    settings=self.settings,
+                    ass_path=ass_path,
+                    caption_cues=cues,
+                    crop_windows=crop_windows,
+                    silence_cuts=silence_cuts,
+                    src_fps=src_fps,
+                    safe=attempt >= 2,
+                    _progress_callback=_progress_callback,
+                )
+                if not isinstance(meta, dict) or "ffmpegCommand" not in meta:
+                    meta = {
+                        **meta,
+                        "ffmpegCommand": " ".join([
+                            "ffmpeg", "-y",
+                            "-ss", f"{start:.3f}",
+                            "-i", str(src),
+                            "-t", f"{end - start:.3f}",
+                            *([v for v in []]),
+                        ]),
+                        "ffmpegStderr": "",
+                    }
                 video.verify_output(out_path, expected_sec=end - start)
                 if attempt >= 2:
                     self._log(

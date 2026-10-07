@@ -203,7 +203,7 @@ class _FfmpegSlot:
             _FFMPEG_SEM.release()
 
 
-def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> None:
+def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> tuple[int, str]:
     """Run ffmpeg, failing with a message that says WHICH deadline was hit.
 
     `mode` labels the deadline in the error so a CPU-only host that ran out of
@@ -213,13 +213,16 @@ def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_ca
     and the callback is called with (frame: int, fps: float, time_sec: float)
     whenever ffmpeg reports a new frame — so the caller can report REAL
     per-frame progress instead of a blind liveness heartbeat.
+
+    Always returns ``(returncode, stderr)`` so callers can log the full command
+    and the full stderr for View logs without re-running anything.
     """
     logger.info("[video] ffmpeg command: " + " ".join(cmd))
     with _FfmpegSlot("ffmpeg"):
-        _run_locked(cmd, timeout=timeout, mode=mode, _progress_callback=_progress_callback)
+        return _run_locked(cmd, timeout=timeout, mode=mode, _progress_callback=_progress_callback)
 
 
-def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> None:
+def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> tuple[int, str]:
     """Run ffmpeg with optional real-time progress parsing.
 
     When ``_progress_callback`` is set, ``-progress pipe:1`` is appended to the
@@ -227,13 +230,15 @@ def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _prog
     separately. The callback receives ``(frame, fps, time_sec)`` on each new
     frame report. When it is None, the old ``subprocess.run`` path is used
     unchanged.
+
+    Always returns ``(returncode, stderr)`` so the caller can record the exact
+    command and the full stderr for the job log / View logs.
     """
     if _progress_callback is not None and "-progress" not in cmd:
         cmd = list(cmd) + ["-progress", "pipe:1"]
 
     if _progress_callback is not None:
-        _run_with_progress(cmd, timeout=timeout, mode=mode, callback=_progress_callback)
-        return
+        return _run_with_progress(cmd, timeout=timeout, mode=mode, callback=_progress_callback)
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -243,6 +248,7 @@ def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _prog
             tail = tail.decode("utf-8", "replace")
         lines = (tail or "").strip().splitlines()[-6:]
         progress = " | ".join(lines)
+        stderr_text = tail.strip()
         raise RenderError(
             f"ffmpeg exceeded its {mode.upper()}-render deadline of "
             f"{timeout // 60} min and was killed. "
@@ -282,11 +288,12 @@ def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _prog
             f"ffmpeg exited {proc.returncode}{how}{where} | "
             + _ffmpeg_error_tail(proc.stderr or "")
         )
+    return proc.returncode, (proc.stderr or "")
 
 
 def _run_with_progress(
     cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", callback: Callable[[], None]
-) -> None:
+) -> tuple[int, str]:
     """Run ffmpeg with real-time progress parsing via ``-progress pipe:1``.
 
     Spawns ffmpeg with stdout directed to a pipe (progress output) and stderr
@@ -296,6 +303,9 @@ def _run_with_progress(
 
     The process is killed if it exceeds ``timeout``. On failure the full stderr
     is logged and raised as ``RenderError``, same as ``_run_locked``.
+
+    Always returns ``(returncode, stderr)`` so the caller can record the exact
+    command and the full stderr for the job log / View logs.
     """
     import select
 
@@ -338,6 +348,7 @@ def _run_with_progress(
                     pass
                 proc.wait(timeout=5)
                 tail = "\n".join(stderr_chunks[-6:])
+                stderr_text = "".join(stderr_chunks).strip()
                 raise RenderError(
                     f"ffmpeg exceeded its {mode.upper()}-render deadline of "
                     f"{timeout // 60} min and was killed. "
@@ -406,6 +417,7 @@ def _run_with_progress(
             f"ffmpeg exited {proc.returncode}{how}{where} | "
             + _ffmpeg_error_tail(stderr_text or "")
         )
+    return proc.returncode, "".join(stderr_chunks)
 
 
 def extract_wav(src: Path, dest: Path) -> Path:
@@ -642,6 +654,10 @@ def render_clip(
     preset is lowered and the deadline is the long CPU one — both logged, so a
     slower render is never a silent surprise.
 
+    This project renders ONE clip at a time and checkpoints after every
+    finished clip, so ffmpeg runs with a single thread and `threads=0` is
+    pinned to the encoder choice's thread count instead of auto-detecting.
+
     `safe=True` is the SECOND attempt for a clip that already failed: fewer
     threads, the lowest-cost settings, and no captions filter. It is a
     deliberately worse render whose only job is to produce a playable file, so
@@ -673,6 +689,7 @@ def render_clip(
     enc.for_output(out_w, out_h, float(src_fps) if src_fps else 30.0)
     logger.info(f"[video] render config: {encode.summary(enc)}")
     codec_args = enc.ffmpeg_codec_args()
+    logger.info("[video] ffmpeg encode args: " + " ".join(codec_args))
 
     # 1) seek straight into the SOURCE for this segment.
     #
@@ -754,6 +771,7 @@ def render_clip(
             *browser_safe_args(enc.encoder),
             "-f", "mp4", str(dest),
         ]
+        logger.info("[video] ffmpeg encode args: " + " ".join(cmd))
     else:
         cmd = [
             ffmpeg_bin(), "-y", *seek,
@@ -763,11 +781,16 @@ def render_clip(
             *browser_safe_args(enc.encoder),
             "-f", "mp4", str(dest),
         ]
+        logger.info("[video] ffmpeg encode args: " + " ".join(cmd))
     # Per-CLIP deadline derived from the clip's own length, not one flat
     # number for every render. A 90-minute ceiling meant a hung ffmpeg held
     # the only worker slot for an hour and a half; a 6-30 minute window derived
     # from the work still leaves generous room for slow-but-progressing
     # encodes while turning a hang into a failure the supervisor can act on.
+    #
+    # This project renders ONE clip at a time and checkpoints after every
+    # finished clip, so the watchdog/retry path only ever has to deal with a
+    # single render at once.
     deadline = encode.render_deadline_sec(clip_dur, hardware=enc.hardware)
     enc.timeout_sec = deadline
     logger.info(
@@ -775,7 +798,7 @@ def render_clip(
         f"{'GPU' if enc.hardware else 'CPU-only'} host — "
         f"encode deadline {deadline // 60} min"
     )
-    _run(cmd, timeout=deadline, mode="gpu" if enc.hardware else "cpu",
+    returncode, stderr = _run(cmd, timeout=deadline, mode="gpu" if enc.hardware else "cpu",
          _progress_callback=_progress_callback)
 
     meta = probe(dest)
@@ -784,6 +807,9 @@ def render_clip(
         f"[video] rendered {dest.name}: {meta['width']}x{meta['height']}, "
         f"{meta['duration']:.1f}s in {took:.1f}s via {encode.summary(enc)}"
     )
+    # Return the exact ffmpeg command and the full stderr alongside the render
+    # metadata so the caller can persist it per clip and View logs can show the
+    # real ffmpeg output, not just the headline.
     return {
         "duration": meta["duration"],
         "width": meta["width"],
@@ -795,6 +821,8 @@ def render_clip(
         "encoderLabel": enc.label,
         "hardwareEncoded": enc.hardware,
         "preset": enc.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": stderr,
     }
 
 

@@ -1773,8 +1773,22 @@ def resume_job(job_id: str) -> dict:
 
 @app.post("/api/jobs/{job_id}/retry")
 def retry_job(job_id: str) -> dict:
+    """Retry a job, resuming from cached videos and stages.
+
+    The backend now checkpoints after every finished clip and re-renders only
+    the unfinished ones, so a Retry from a failed render-stage job resumes from
+    the last completed clip instead of starting over. Failed upload jobs with no
+    source file are still rejected with a readable message.
+    """
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.get("stage") != "failed":
+        raise HTTPException(400, "only failed jobs can be retried")
+    if worker_mod.unrecoverable_reason(store, job) is not None:
+        raise HTTPException(400, worker_mod.unrecoverable_reason(store, job))
     try:
-        depth = worker.retry(job_id)
+        depth = worker.retry_from_cache(job_id)
     except KeyError:
         raise HTTPException(404, "job not found") from None
     return {"queued": True, "queueDepth": depth}

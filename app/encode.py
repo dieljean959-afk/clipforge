@@ -117,7 +117,12 @@ class EncoderChoice:
     #: Thread count handed to the encoder.
     #: 0 = ffmpeg auto-detects all available cores (uses -threads 0).
     #: >0 = pinned to that count (used when cgroup quota is known).
-    threads: int = 0
+    #:
+    #: This project renders ONE clip at a time and checkpoints after every
+    #: finished clip, so ffmpeg should not compete with itself across multiple
+    #: encode threads. Pin to 1 for deterministic CPU behavior on the target
+    #: host; 0 (autodetect) is still the default elsewhere.
+    threads: int = 1
 
     def threads_args(self) -> list[str]:
         """`-threads` for the encoder and the filter graph.
@@ -127,9 +132,9 @@ class EncoderChoice:
         explicitly so the behavior is deterministic across ffmpeg versions.
         """
         return [
-            "-threads", "0",
-            "-filter_threads", "0",
-            "-filter_complex_threads", "0",
+            "-threads", str(self.threads),
+            "-filter_threads", str(self.threads),
+            "-filter_complex_threads", str(self.threads),
         ]
 
     def for_output(self, width: int, height: int, fps: float) -> "EncoderChoice":

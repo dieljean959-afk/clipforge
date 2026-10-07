@@ -1266,7 +1266,12 @@ class HostedConfig:
     tailscale_only: bool = False
     # How many jobs the in-process queue drains in parallel. Each job runs in
     # its own child process, so a hung job can never block the whole queue.
-    worker_concurrency: int = 2
+    #
+    # This project renders ONE clip at a time per job and checkpoints after every
+    # finished clip, so there is no parallelism gain worth the resume/state
+    # complexity here. Keep it at 1 unless the host is explicitly sized for
+    # parallel renders.
+    worker_concurrency: int = 1
 
 
 @dataclass
@@ -1794,7 +1799,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
             1,
             min(
                 8,
-                int(os.getenv("CLIPFORGE_WORKER_CONCURRENCY") or h.get("worker_concurrency", 2)),
+                int(os.getenv("CLIPFORGE_WORKER_CONCURRENCY") or h.get("worker_concurrency", 1)),
             ),
         ),
     )
