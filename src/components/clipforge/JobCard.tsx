@@ -580,12 +580,6 @@ export function JobCard({
         </div>
       )}
 
-      {failed && (
-        <div className="mt-3">
-          <FailureNotice job={job} />
-        </div>
-      )}
-
       {/* per-job worker log ("View logs") */}
       <Dialog open={logsOpen} onOpenChange={setLogsOpen}>
         <DialogContent className="max-w-lg">
@@ -628,6 +622,16 @@ function FailureNotice({ job }: { job: JobDoc }) {
   const isPersistentServerRestartFailure = Boolean(
     job.error?.match(/the server restarted \d+ times/i),
   );
+  const retryNote = (() => {
+    if (!isPersistentServerRestartFailure || !job.error) return null;
+    if (job.error.includes(headline)) return null;
+    return (
+      <p className="mt-1 break-words text-xs text-destructive/90 [overflow-wrap:anywhere]">
+        Finished stages are cached. Retry starts a new run from the last
+        checkpoint; the same render stage will be retried.
+      </p>
+    );
+  })();
   return (
     <div
       data-testid="job-failed-detail"
@@ -636,12 +640,7 @@ function FailureNotice({ job }: { job: JobDoc }) {
       <p className="break-words text-sm font-medium text-destructive [overflow-wrap:anywhere]">
         {headline}
       </p>
-      {isPersistentServerRestartFailure && job.error && !job.error.includes(headline) && (
-        <p className="mt-1 break-words text-xs text-destructive/90 [overflow-wrap:anywhere]">
-          Finished stages are cached. Retry starts a new run from the last
-          checkpoint; the same render stage will be retried.
-        </p>
-      )}
+      {retryNote}
       {job.error && job.error !== headline && (
         <p className="mt-1 break-words text-xs text-destructive/80 [overflow-wrap:anywhere]">
           {job.error}
