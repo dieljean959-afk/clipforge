@@ -623,9 +623,11 @@ export function JobCard({
  * wrapping everywhere so nothing can widen the page.
  */
 function FailureNotice({ job }: { job: JobDoc }) {
-  const [open, setOpen] = useState(false);
   const where = job.stageLabel?.toLowerCase();
   const headline = friendlyError(job.error, where);
+  const isPersistentServerRestartFailure = Boolean(
+    job.error?.match(/the server restarted \d+ times/i),
+  );
   return (
     <div
       data-testid="job-failed-detail"
@@ -634,27 +636,26 @@ function FailureNotice({ job }: { job: JobDoc }) {
       <p className="break-words text-sm font-medium text-destructive [overflow-wrap:anywhere]">
         {headline}
       </p>
+      {isPersistentServerRestartFailure && job.error && !job.error.includes(headline) && (
+        <p className="mt-1 break-words text-xs text-destructive/90 [overflow-wrap:anywhere]">
+          Finished stages are cached. Retry starts a new run from the last
+          checkpoint; the same render stage will be retried.
+        </p>
+      )}
       {job.error && job.error !== headline && (
         <p className="mt-1 break-words text-xs text-destructive/80 [overflow-wrap:anywhere]">
           {job.error}
         </p>
       )}
       {job.errorDetail && (
-        <>
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="mt-1.5 cursor-pointer text-xs font-medium text-destructive underline underline-offset-2"
-            aria-expanded={open}
-          >
-            {open ? "Hide details" : "Show details"}
-          </button>
-          {open && (
-            <pre className="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-destructive/70 [overflow-wrap:anywhere]">
-              {job.errorDetail}
-            </pre>
-          )}
-        </>
+        <details className="mt-1.5 cursor-pointer">
+          <summary className="cursor-pointer text-xs font-medium text-destructive underline underline-offset-2 list-none">
+            Show details
+          </summary>
+          <pre className="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-destructive/70 [overflow-wrap:anywhere]">
+            {job.errorDetail}
+          </pre>
+        </details>
       )}
     </div>
   );
@@ -669,6 +670,17 @@ function FailureNotice({ job }: { job: JobDoc }) {
 function friendlyError(error: string | null | undefined, where?: string | null): string {
   const raw = String(error ?? "").trim();
   if (!raw) return "This job failed.";
+
+  // The exact failure you keep seeing: the server restarted several times
+  // during one stage and the job stopped making progress between those
+  // restarts, so the backend marked it unrecoverable rather than pretending
+  // a retry would resurrect it. We render that message as the headline
+  // already, but the surrounding card still read like a live stall warning.
+  // Normalize the card text to the same sentence so the job does not look
+  // like two different problems at once.
+  if (/the server restarted \d+ times/i.test(raw)) {
+    return raw;
+  }
 
   // Chunk-level detection failures already name the chunk; lead with that.
   // Two orders reach us: the per-chunk skip logged during the run
@@ -716,9 +728,6 @@ function friendlyError(error: string | null | undefined, where?: string | null):
     return `Clip ${clipSkip[1]}${clipSkip[2] ? ` of ${clipSkip[2]}` : ""} could not be rendered and was skipped. Every other clip is ready.`;
   }
   if (/not enough free disk/i.test(raw)) {
-    return raw;
-  }
-  if (/the server restarted \d+ times/i.test(raw)) {
     return raw;
   }
   if (where && raw.toLowerCase().includes(where)) {
