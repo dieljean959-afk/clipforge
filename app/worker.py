@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import enum
 from typing import Any
 
 from loguru import logger
@@ -103,6 +104,21 @@ STAGE_LABELS = {
     "captions": "Rendering 9:16",
     "export": "Export",
 }
+
+
+class _Worth(int, enum.Enum):
+    """Three outcomes of "should this orphaned/stalled job be re-queued?".
+
+    Kept as an enum, not a bare bool, so both ``_note_interrupted`` and
+    ``reconcile_stale_running`` can distinguish "resume budget spent"
+    (hard-fail) from "stalled ceiling reached but budget remains" (warning +
+    re-queue) without re-deriving the decision in two places.
+    """
+
+    WORTH_YES = 1
+    WORTH_BLOCKED_BY_STALLED_LIMIT = 2
+    WORTH_BUDGET_SPENT = 3
+
 
 # Matches the signalled-death banners this module writes, e.g.
 # "exited unexpectedly (code -15)". Kept deliberately narrow so it cannot match
@@ -847,74 +863,114 @@ class InProcessWorker:
         lived_sec = (time.time() * 1000 - float(job.get("stageStartedAt") or 0)) / 1000.0
         worked = lived_sec >= MIN_USEFUL_ATTEMPT_SEC
         stalled = 0 if (advanced or worked) else int(job.get("stalledResumes") or 0) + 1
-        if stalled >= STALLED_RESUME_LIMIT:
+        if stalled >= STALLED_RESUME_LIMIT and STALLED_RESUME_LIMIT > 0:
+            if count > RESUME_BUDGET:
+                # Budget spent AND no progress: only now is a terminal state
+                # honest. Same shape as reconcile_stale_running's spent path.
+                job.update({
+                    "interruptCount": count,
+                    "stalledResumes": stalled,
+                    "interrupted": False,
+                    "interruptReason": (
+                        f"the server restarted {count} times during "
+                        f"'{STAGE_LABELS.get(stage, stage or 'the job')}' without the "
+                        f"job advancing past {signature or 'its last checkpoint'} — "
+                        f"each restart is resuming from the last checkpoint, "
+                        f"but the same checkpoint keeps being reached"
+                    ),
+                    "error": (
+                        f"The server restarted {count} times during "
+                        f"'{STAGE_LABELS.get(stage, stage or 'the job')}'. "
+                        f"The job was making progress each time but the host kept "
+                        f"killing the worker before the current unit finished, so it "
+                        f"could not finish '{STAGE_LABELS.get(stage, stage or 'the job')}' "
+                        f"after {count} attempts. The expensive stages are cached — "
+                        f"Retry re-renders from the last completed clip."
+                    ),
+                })
+                self.store.write_job(job)
+                self.store.append_job_log(
+                    job_id,
+                    f"INTERRUPTED: killed by {signal.Signals(-rc).name if _safe_signal(rc) else rc} "
+                    f"during '{stage}', and the previous {stalled} restart(s) made no "
+                    f"progress — not resuming again",
+                )
+                return False
+            # Stalled limit reached, but resume budget still available:
+            # keep it interrupted and re-queue. This is the wall-clock-budget
+            # case where the host keeps restarting a genuinely-working render
+            # before the current unit finishes; we do not hard-fail it here —
+            # only the overall RESUME_BUDGET does that.
             job.update({
                 "interruptCount": count,
                 "stalledResumes": stalled,
-                "interrupted": False,
+                "interrupted": True,
+                "resumeSignature": signature,
                 "interruptReason": (
-                    f"the server restarted {count} times during "
-                    f"'{STAGE_LABELS.get(stage, stage or 'the job')}' without the "
-                    f"job advancing past {signature or 'its last checkpoint'} — "
-                    f"each restart is resuming from the last checkpoint, "
-                    f"but the same checkpoint keeps being reached"
+                    f"Host keeps restarting during "
+                    f"'{STAGE_LABELS.get(stage, stage or 'the job')}' past the "
+                    f"no-progress ceiling ({stalled} stalled resume(s)) — still "
+                    f"re-queuing because the overall resume budget has not run out"
                 ),
-                "error": (
-                    f"The server restarted {count} times during "
-                    f"'{STAGE_LABELS.get(stage, stage or 'the job')}'. "
-                    f"The job was making progress each time but the host kept "
-                    f"killing the worker before the current unit finished, so it "
-                    f"could not finish '{STAGE_LABELS.get(stage, stage or 'the job')}' "
-                    f"after {count} attempts. The expensive stages are cached — "
-                    f"Retry re-renders from the last completed clip."
+                "error": None,
+                "progressDetail": (
+                    f"Interrupted by a host restart — resuming "
+                    f"(attempt {count}, {stalled} without progress; stalled ceiling "
+                    f"reached but resume budget remains)"
                 ),
             })
             self.store.write_job(job)
             self.store.append_job_log(
                 job_id,
-                f"INTERRUPTED: killed by {signal.Signals(-rc).name if _safe_signal(rc) else rc} "
-                f"during '{stage}', and the previous {stalled} restart(s) made no "
-                f"progress — not resuming again",
+                f"INTERRUPTED: worker killed during '{stage}' — stalled ceiling "
+                f"({stalled}) reached but resume budget remains, re-queuing "
+                f"(attempt {count}; checkpoint: {signature or 'start'})",
             )
-            return False
+            logger.warning(
+                f"[worker] job {job_id} hit STALLED_RESUME_LIMIT ({stalled}) during "
+                f"'{stage}' but resume budget remains ({count}/{RESUME_BUDGET}) — "
+                f"continuing to re-queue instead of failing"
+            )
+            self.enqueue(job_id)
+            return True
         try:
             how = signal.Signals(-rc).name
         except ValueError:
             how = f"signal {-rc}"
-    # `interruptReason` is the operator-facing sentence and is rebuilt from
-    # these primitive fields every time — see _describe_orphan.
-    reason = (
-        f"Host terminated the worker with {how} during "
-        f"'{STAGE_LABELS.get(stage, stage or 'the job')}' — this is an "
-        f"external kill (restart/redeploy), not a pipeline error."
-    )
-    job.update({
-        "interruptCount": count,
-        "stalledResumes": stalled,
-        "resumeSignature": signature,
-        "interrupted": True,
-        "interruptReason": reason,
-        "lastInterruptSignal": how,
-        "error": None,
-        "progressDetail": (
-            f"Interrupted by a host restart — resuming "
-            f"(attempt {count}, {stalled} without progress)"
-        ),
-    })
-    self.store.write_job(job)
-    self.store.append_job_log(
-        job_id,
-        f"INTERRUPTED: worker killed by {how} during '{stage}' — auto-resuming "
-        f"(attempt {count}; checkpoint: {signature or 'start'})",
-    )
-    if tail:
-        logger.debug(f"[worker] {job_id} last runner output before interrupt: {tail[-400:]}")
-    logger.warning(
-        f"[worker] job {job_id} interrupted by {how} during '{stage}' — "
-        f"re-queuing (attempt {count}, checkpoint {signature or 'start'})"
-    )
-    self.enqueue(job_id)
-    return True
+        # `interruptReason` is the operator-facing sentence and is rebuilt from
+        # these primitive fields every time — see _describe_orphan.
+        reason = (
+            f"Host terminated the worker with {how} during "
+            f"'{STAGE_LABELS.get(stage, stage or 'the job')}' — this is an "
+            f"external kill (restart/redeploy), not a pipeline error."
+        )
+        job.update({
+            "interruptCount": count,
+            "stalledResumes": stalled,
+            "resumeSignature": signature,
+            "interrupted": True,
+            "interruptReason": reason,
+            "lastInterruptSignal": how,
+            "error": None,
+            "progressDetail": (
+                f"Interrupted by a host restart — resuming "
+                f"(attempt {count}, {stalled} without progress)"
+            ),
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(
+            job_id,
+            f"INTERRUPTED: worker killed by {how} during '{stage}' — auto-resuming "
+            f"(attempt {count}; checkpoint: {signature or 'start'})",
+        )
+        if tail:
+            logger.debug(f"[worker] {job_id} last runner output before interrupt: {tail[-400:]}")
+        logger.warning(
+            f"[worker] job {job_id} interrupted by {how} during '{stage}' — "
+            f"re-queuing (attempt {count}, checkpoint {signature or 'start'})"
+        )
+        self.enqueue(job_id)
+        return True
 
     def _progress_signature(self, job_id: str) -> str:
         """How far this job has actually got, as a comparable string.
@@ -1173,11 +1229,11 @@ class InProcessWorker:
         """
         count = int(job.get("interruptCount") or 0)
         if count >= RESUME_BUDGET:
-            return False
+            return _Worth.WORTH_BUDGET_SPENT
         stalled = int(job.get("stalledResumes") or 0)
-    if stalled >= STALLED_RESUME_LIMIT and STALLED_RESUME_LIMIT > 0:
-        return False
-    return True
+        if STALLED_RESUME_LIMIT > 0 and stalled >= STALLED_RESUME_LIMIT:
+            return _Worth.WORTH_BLOCKED_BY_STALLED_LIMIT
+        return _Worth.WORTH_YES
 
     def mark_in_flight_interrupted(self) -> list[str]:
         """Flag every job with a live child as interrupted, for the next boot.
