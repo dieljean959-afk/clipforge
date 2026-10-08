@@ -1520,35 +1520,32 @@ class Pipeline:
         ass_path: Path | None,
         cues: list[dict[str, Any]] | None,
         crop_windows: list[dict[str, Any]] | None,
-        silence_cuts: list[dict[str, Any]] | None,        src_fps: float,
+        silence_cuts: list[dict[str, Any]] | None,
+        src_fps: float,
         _progress_callback=None,
     ) -> dict[str, Any]:
-    """Encode one clip, verify it, retry up to 3 times, then give up.
+        """Encode one clip, verify it, retry up to 3 times, then give up.
 
-    Returns the encoder metadata on success. Raises RenderError only after
-    ALL attempts fail — the caller records the clip as skipped and moves
-    on to the next one.
+        Returns the encoder metadata on success. Raises RenderError only after
+        ALL attempts fail — the caller records the clip as skipped and moves
+        on to the next one.
 
-    The verification is not decoration. ffmpeg can exit 0 and leave a
-    zero-byte or truncated MP4 behind (out of space, a killed frame
-    thread), and a clip that is marked `renderState="done"` with no
-    playable file is exactly the failure that surfaces much later as a
-    player that spins forever.
+        The verification is not decoration. ffmpeg can exit 0 and leave a
+        zero-byte or truncated MP4 behind (out of space, a killed frame
+        thread), and a clip that is marked `renderState="done"` with no
+        playable file is exactly the failure that surfaces much later as a
+        player that spins forever.
 
-    Each retry after the first uses safer settings (lower resolution,
-    no captions) so a single bad clip costs one clip, not the batch.
+        Each retry after the first uses safer settings (lower resolution,
+        no captions) so a single bad clip costs one clip, not the batch.
 
-    The returned metadata always includes the exact ffmpeg command that ran
-    and the full stderr, so the job log can record the real per-clip error
-    for View logs instead of only the headline.
-    """
+        The returned metadata always includes the exact ffmpeg command that ran
+        and the full stderr, so the job log can record the real per-clip error
+        for View logs instead of only the headline.
+        """
         last: Exception | None = None
         for attempt in (1, 2, 3):
             try:
-                # The heartbeat spans ONLY the encode. Nothing in it reports
-                # progress -- ffmpeg's own output is read for errors, not
-                # percentages -- so without this a long clip looks dead, and
-                # the watchdog can kill a render that is working.
                 with self._heartbeat(job_id, f"render clip {number}"):
                     meta = video.render_clip(
                         src, out_path,
@@ -1562,8 +1559,8 @@ class Pipeline:
                         safe=attempt >= 2,
                         _progress_callback=_progress_callback,
                     )
-                if not isinstance(meta, dict) or "ffmpegCommand" not in meta:
-                    meta = {**meta, "ffmpegCommand": "", "ffmpegStderr": ""}
+                if not isinstance(meta, dict):
+                    meta = {}
                 video.verify_output(out_path, expected_sec=end - start)
                 if attempt >= 2:
                     self._log(
@@ -1573,7 +1570,7 @@ class Pipeline:
                         f"a usable file",
                     )
                 return meta
-            except Exception as exc:  # noqa: BLE001 - retried below, then skipped
+            except Exception as exc:  # noqa: BLE001
                 last = exc
                 try:
                     out_path.unlink(missing_ok=True)
@@ -1594,229 +1591,3 @@ class Pipeline:
                         units_total=total,
                     )
         raise video.RenderError(str(last) if last else "render failed after 3 attempts")
-
-
-    def _cleanup_job_temps(self, job_id: str, ws: StageWorkspace) -> None:
-        """Delete what a finished job leaves behind on disk.
-
-        This used to remove two files — `transcribe/source.wav` and
-        `reframe/audio.wav`. That was a rounding error: the scratch WAVs are
-        ~19 MB per 5-minute chunk, but a whole finished job leaves behind an
-        entire `data/work/<job_id>/` (measured at 101 MB per real job on this
-        sandbox, and that is WITH the two WAVs already deleted), plus the
-        downloaded source in `downloads/<job_id>/`. Deleting two named files
-        out of that reclaimed almost nothing, which is why the trash pile and
-        the scratch dirs kept growing while the code claimed to be cleaning up.
-
-        So: remove the whole workspace, and remove the re-downloadable source.
-        The clips in `outputs/` are deliberately LEFT — those are the product,
-        and the retention sweeper owns their lifetime (4 days by default).
-
-        UPLOADED sources are NOT touched here. An upload is the one artefact
-        there is no way to recreate — a URL job can always be re-downloaded, an
-        uploaded file cannot — so deleting it the moment a render finishes
-        would destroy the user's own file to save bytes. Uploads leave with the
-        batch when retention expires, which is a deliberate, four-day-delayed
-        decision rather than a surprise at job completion.
-        """
-        paths = self.settings.app.paths
-        freed = 0
-        removed = 0
-
-        def _drop(path: Path) -> None:
-            nonlocal freed, removed
-            if not path.exists():
-                return
-            # Measure BEFORE deleting: st_size of a directory is the inode,
-            # not the bytes underneath it.
-            freed += _tree_size(path)
-            # `ignore_errors=True` swallows every OSError, and `rmtree`
-            # returns None ALWAYS — so the only honest evidence that the bytes
-            # are gone is the path no longer existing. Counting on the return
-            # value here reported "removed 2 scratch dirs, freed 101 MB" while
-            # a permission error left every byte exactly where it was.
-            shutil.rmtree(path, ignore_errors=True)
-            if not path.exists():
-                removed += 1
-            else:
-                logger.warning(
-                    f"[job {job_id}] cleanup: could not remove {path} — "
-                    f"{freed / 1024 / 1024:.0f} MB still on disk"
-                )
-
-        # 1. the whole scratch workspace, not two files inside it
-        _drop(ws.root)
-        # 2. the downloaded source, which yt-dlp can fetch again on demand
-        _drop(paths.downloads_dir / job_id)
-        # uploads_dir is intentionally NOT in this list — see the docstring.
-
-        if removed:
-            logger.info(
-                f"[job {job_id}] cleanup: removed {removed} scratch dir(s), "
-                f"freed {freed / 1024 / 1024:.0f} MB"
-            )
-
-    def _free_disk_mb(self) -> int:
-        """Free space on the volume holding outputs/, in MB."""
-        try:
-            usage = shutil.disk_usage(self.settings.app.paths.outputs_dir)
-            return usage.free // (1024 * 1024)
-        except Exception:
-            return 1 << 30
-
-    def _check_disk_space(self, job_id: str, duration_sec: float) -> None:
-        """Fail early and clearly when the disk cannot hold the render.
-
-        Discovering this at the 9th of 10 clips is the worst place to find out:
-        the earlier clips were rendered, the download is still on disk, and the
-        user is told only that something went wrong.
-
-        Need = minutes x source bitrate x 2, because the job holds the source
-        AND every rendered clip at once. A 720p source at ~2.5 Mbps is ~19
-        MB/min, so 20 MB/min per source minute is the base; the x2 covers the
-        rendered clips and the WAV intermediates. The 500 MB floor covers short
-        jobs plus poster/subtitle sidecars.
-        """
-        source_mb_per_min = 20.0
-        needed = int(max(500.0, (duration_sec / 60.0) * source_mb_per_min * 2))
-        free = self._free_disk_mb()
-        if free < needed:
-            raise download.DownloadError(
-                f"Not enough free disk space to finish this job: about "
-                f"{needed} MB is needed but only {free} MB is left. Delete an "
-                f"older batch (or its clips) and Retry — everything already "
-                f"rendered is cached and will not be redone."
-            )
-        self._log(
-            job_id,
-            f"disk check: {free} MB free, ~{needed} MB needed for this render",
-        )
-
-    def _prewarm_share_copies(self, job_id: str) -> None:
-        """Build every clip's share copy ahead of the first tap.
-
-        Strictly best-effort: a share copy is an optimisation for the file
-        share path, so a failure here is logged and dropped rather than
-        failing a batch whose MP4s are all already rendered and served.
-        """
-        masters: list[Path] = []
-        for clip in self.store.list_clips(job_id):
-            if clip.get("renderState") != "done":
-                continue
-            raw = str(clip.get("videoPath") or "")
-            if not raw:
-                continue
-            path = Path(raw)
-            if path.is_file():
-                masters.append(path)
-
-        if not masters:
-            return
-
-        def warm(master: Path) -> str:
-            try:
-                share = share_video.build_share_version(master)
-                # The share link is minted HERE, at the end of rendering, so
-                # every finished clip already has a public URL and the badge
-                # can go green without the user tapping anything.
-                self._mark_share_ready(master, share)
-                return ""
-            except Exception as exc:  # noqa: BLE001 - never fail the batch
-                return f"{master.name}: {exc}"
-
-        # Two at a time: enough to overlap the transcode's I/O with its encode,
-        # not so many that they fight the worker pool for a single core.
-        workers = min(2, max(1, len(masters)))
-        problems: list[str] = []
-        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            problems = [p for p in pool.map(warm, masters) if p]
-
-        if problems:
-            logger.warning(
-                f"[share] prewarm incomplete for {job_id}: {len(problems)} of "
-                f"{len(masters)} clip(s) failed ({problems[0]})"
-            )
-        else:
-            logger.info(f"[share] prewarmed {len(masters)} share copies for {job_id}")
-
-    # ------------------------------------------------------------------
-
-    def _mark_share_ready(self, master: Path, share: Path) -> None:
-        """Record the clip's real share state after a successful prewarm.
-
-        Written to the clip document rather than computed per request, so the
-        batch list can answer "Ready" from the payload it already sends. The
-        probe is still the source of truth — this only records what the probe
-        just concluded.
-        """
-        state, detail = sharelink.probe(share)
-        job_dir = master.parent
-        for clip in self.store.list_all_clips(limit=1000):
-            if str(clip.get("videoPath") or "") != str(master):
-                continue
-            clip["shareId"] = sharelink.ensure_id(clip)
-            clip["shareState"] = state
-            clip["shareDetail"] = detail
-            try:
-                self.store.write_clip(clip)
-            except Exception as exc:  # noqa: BLE001 - telemetry, never fatal
-                logger.warning(f"[share] could not record state for {job_dir.name}: {exc}")
-
-    def _finish(self, job_id: str, elapsed: float) -> None:
-        job = self.store.get_job(job_id)
-        if job is None:
-            return
-        ready = self.store.clips_ready_count(job_id)
-        resumes = int(job.get("interruptCount") or 0)
-        job.update({
-            "stage": "complete",
-            "progress": 100,
-            "progressDetail": f"{ready} clips ready.",
-            "completedAt": int(time.time() * 1000),
-            # A completed job is no longer interrupted, whatever it survived.
-            "interrupted": False,
-            "interruptReason": None,
-            # ...and it is certainly no longer carrying the error that killed
-            # an earlier attempt. stage="complete" with an error string is a
-            # contradiction, and it outlives the job in every API response.
-            "error": None,
-            "errorDetail": None,
-        })
-        if resumes:
-            # Worth stating plainly: the result is real, but it took extra
-            # attempts, which changes what a render-time estimate means.
-            self._log(
-                job_id,
-                f"completed after {resumes} host-restart interruption(s) — "
-                "resumed from cached stages each time",
-            )
-        self.store.write_job(job)
-        self._log(job_id, f"pipeline complete in {elapsed:.0f}s — {ready} clips rendered")
-
-    def _fail(self, job_id: str, message: str, detail: str) -> None:
-        job = self.store.get_job(job_id)
-        if job is None:
-            return
-        # Keep the stage that actually failed — `stage` is about to be
-        # overwritten with "failed", and without this the dashboard can only
-        # say "Failed" with no idea which step broke.
-        failed_stage = job.get("stage")
-        job.update({
-            "stage": "failed",
-            "failedStage": failed_stage,
-            "error": message,
-            "errorDetail": detail[:4000],
-            # This attempt ran and finished on its own terms, so the job is no
-            # longer "waiting to be resumed". Leaving `interrupted` set made
-            # boot recovery re-queue the job on EVERY subsequent restart — a
-            # job that can never succeed (its upload is gone) then burned a
-            # full pipeline launch per restart, indefinitely, which is exactly
-            # the "resuming (attempt 2)..." loop that was reported.
-            "interrupted": False,
-        })
-        self.store.write_job(job)
-        self._log(job_id, f"FAILED: {message}")
-        # the traceback goes into the job log so 'View logs' shows the real
-        # failure chain, not just the headline
-        for line in detail.strip().splitlines()[-12:]:
-            self._log(job_id, f"  {line}")

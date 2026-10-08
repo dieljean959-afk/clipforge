@@ -318,9 +318,9 @@ def _run_with_progress(
         start_new_session=True,
     )
     _progress_block = re.compile(
-        r"^frame=(\d+)\r?$\n"
-        r".*?time=([0-9.]+)\r?$\n"
-        r".*?fps=([0-9.]+)",
+        r"frame=(\d+)\r?$\n"
+        r"(?:.*?time=([0-9.]+)\r?$\n)?"
+        r"(?:.*?fps=([0-9.]+))?",
         re.MULTILINE,
     )
     stderr_chunks: list[str] = []

@@ -76,25 +76,11 @@ RESUME_BUDGET = int(os.getenv("CLIPFORGE_RESUME_BUDGET", "40"))
 # the loop is not converging and the job must stop and say so instead of
 # burning the host forever.
 #
-# Two, not three: the reported symptom was a job cycling through    # "resuming (attempt 2)" over and over. This project checkpoints after every
-    # finished clip and re-renders only the unfinished ones, so a render-stage job
-    # that dies and resumes is resumable by construction.
-    #
-    # Remove the fixed give-up count here. Let a render-stage job keep resuming
-    # until it either finishes or the host keeps killing the worker before any
-    # unit finishes, which is the real failure mode reported in the screenshot.
-    # Give up after a fixed number of restarts that produced NO additional finished
-    # units. A render-stage job that checkpoints after every finished clip and
-    # re-renders only the unfinished ones is resumable by construction, so the
-    # real failure mode is a host repeatedly killing the worker before any unit
-    # finishes. That is now detected by per-clip checkpoint progress (see
-    # _progress_signature), not by a blanket "3 restarts and give up" rule.
-    #
-    # Set to 0 (default) to never hard-fail a job purely because the host kept
-    # restarting — every interrupted render-stage job is re-queued and resumes
-    # from the next unfinished clip. Increase only if you want a safety cap for
-    # pathological restart loops on a specific deployment.
-    STALLED_RESUME_LIMIT = int(os.getenv("CLIPFORGE_STALLED_RESUME_LIMIT", "0"))
+# Set to 0 (default) to never hard-fail a job purely because the host kept
+# restarting — every interrupted render-stage job is re-queued and resumes
+# from the next unfinished clip. Increase only if you want a safety cap for
+# pathological restart loops on a specific deployment.
+STALLED_RESUME_LIMIT = int(os.getenv("CLIPFORGE_STALLED_RESUME_LIMIT", "0"))
 
 # An attempt that lived at least this long was working, not wedged — see the
 # `worked` branch in _note_interrupted. Sized against this host: the sandbox
@@ -808,93 +794,93 @@ class InProcessWorker:
 
     def _note_interrupted(self, job: dict[str, Any] | None, job_id: str, rc: int,
                           stage: str | None, tail: str) -> bool:
-    """Flag a signalled job as interrupted and re-queue it.
+        """Flag a signalled job as interrupted and re-queue it.
 
-    Returns False once the resume budget is spent, so the caller falls
-    through to the ordinary hard-failure path (we must not loop forever).
+        Returns False once the resume budget is spent, so the caller falls
+        through to the ordinary hard-failure path (we must not loop forever).
 
-    ``stage`` is deliberately left UNCHANGED: it stays where the child died,
-    so the stage-workspace resume picks up from the last completed stage
-    instead of starting over. That is the whole point — transcription on a
-    15-minute source is the expensive part and it is already on disk.
-    """
-    if job is None:
-        return False
-    count = int(job.get("interruptCount") or 0) + 1
-    if count > RESUME_BUDGET:
-        return False
-    # Did this attempt get further than the last one? Restarting only
-    # helps while it does; if several restarts in a row leave the job
-    # exactly where it was, the loop is not converging and continuing it
-    # just burns the host (and, before this, silently exhausted the old
-    # 5-attempt budget on jobs that were making progress every time).
-    signature = self._progress_signature(job_id)
-    previous = job.get("resumeSignature")
-    # A host restart is NOT the job failing to advance.
-    #
-    # This counter used to advance on every interrupt, so a job that was
-    # genuinely progressing (6 of 8 chunks cached, then 8 of 8) still hit
-    # STALLED_RESUME_LIMIT and was failed with "the server restarted 3
-    # times ... it cannot be resumed automatically". That is the exact
-    # message in the screenshot. The fix is in _progress_signature: it now
-    # counts cached transcription chunks, so a job that did MORE work
-    # between kills reports a different signature and the counter resets. An
-    # interrupted-but-advancing job is therefore re-queued indefinitely,
-    # while a genuinely wedged one still stops after two no-op attempts.
-    advanced = previous is None or signature != previous
-    # A long attempt that died on the same signature is WORK, not a wedge.
-    #
-    # This host restarts its web process every 15-60 minutes, and measured
-    # stage times on this project run to `fetch` 6167s and `detect` 1243s.
-    # So a job is routinely SIGKILLed partway through a single render unit,
-    # twice in a row, while doing exactly what it was asked to do — and the
-    # signature cannot change because no unit finished. Counting that as
-    # "not progressing" failed healthy multi-hour jobs with the message
-    # "the server restarted 3 times ... it cannot be resumed automatically",
-    # which is the opposite of the truth.
-    #
-    # So an attempt that lived at least MIN_USEFUL_ATTEMPT_SEC is counted as
-    # forward progress regardless of signature: it consumed real time doing
-    # real work, and killing it was the host's choice, not the job's fault.
-    # An attempt that dies almost immediately, repeatedly, at the same point
-    # IS wedged and still stops.
-    lived_sec = (time.time() * 1000 - float(job.get("stageStartedAt") or 0)) / 1000.0
-    worked = lived_sec >= MIN_USEFUL_ATTEMPT_SEC
-    stalled = 0 if (advanced or worked) else int(job.get("stalledResumes") or 0) + 1
-    if stalled >= STALLED_RESUME_LIMIT:
-        job.update({
-            "interruptCount": count,
-            "stalledResumes": stalled,
-            "interrupted": False,
-            "interruptReason": (
-                f"the server restarted {count} times during "
-                f"'{STAGE_LABELS.get(stage, stage or 'the job')}' without the "
-                f"job advancing past {signature or 'its last checkpoint'} — "
-                f"each restart is resuming from the last checkpoint, "
-                f"but the same checkpoint keeps being reached"
-            ),
-            "error": (
-                f"The server restarted {count} times during "
-                f"'{STAGE_LABELS.get(stage, stage or 'the job')}'. "
-                f"The job was making progress each time but the host kept "
-                f"killing the worker before the current unit finished, so it "
-                f"could not finish '{STAGE_LABELS.get(stage, stage or 'the job')}' "
-                f"after {count} attempts. The expensive stages are cached — "
-                f"Retry re-renders from the last completed clip."
-            ),
-        })
-        self.store.write_job(job)
-        self.store.append_job_log(
-            job_id,
-            f"INTERRUPTED: killed by {signal.Signals(-rc).name if _safe_signal(rc) else rc} "
-            f"during '{stage}', and the previous {stalled} restart(s) made no "
-            f"progress — not resuming again",
-        )
-        return False
-    try:
-        how = signal.Signals(-rc).name
-    except ValueError:
-        how = f"signal {-rc}"
+        ``stage`` is deliberately left UNCHANGED: it stays where the child died,
+        so the stage-workspace resume picks up from the last completed stage
+        instead of starting over. That is the whole point — transcription on a
+        15-minute source is the expensive part and it is already on disk.
+        """
+        if job is None:
+            return False
+        count = int(job.get("interruptCount") or 0) + 1
+        if count > RESUME_BUDGET:
+            return False
+        # Did this attempt get further than the last one? Restarting only
+        # helps while it does; if several restarts in a row leave the job
+        # exactly where it was, the loop is not converging and continuing it
+        # just burns the host (and, before this, silently exhausted the old
+        # 5-attempt budget on jobs that were making progress every time).
+        signature = self._progress_signature(job_id)
+        previous = job.get("resumeSignature")
+        # A host restart is NOT the job failing to advance.
+        #
+        # This counter used to advance on every interrupt, so a job that was
+        # genuinely progressing (6 of 8 chunks cached, then 8 of 8) still hit
+        # STALLED_RESUME_LIMIT and was failed with "the server restarted 3
+        # times ... it cannot be resumed automatically". That is the exact
+        # message in the screenshot. The fix is in _progress_signature: it now
+        # counts cached transcription chunks, so a job that did MORE work
+        # between kills reports a different signature and the counter resets. An
+        # interrupted-but-advancing job is therefore re-queued indefinitely,
+        # while a genuinely wedged one still stops after two no-op attempts.
+        advanced = previous is None or signature != previous
+        # A long attempt that died on the same signature is WORK, not a wedge.
+        #
+        # This host restarts its web process every 15-60 minutes, and measured
+        # stage times on this project run to `fetch` 6167s and `detect` 1243s.
+        # So a job is routinely SIGKILLed partway through a single render unit,
+        # twice in a row, while doing exactly what it was asked to do — and the
+        # signature cannot change because no unit finished. Counting that as
+        # "not progressing" failed healthy multi-hour jobs with the message
+        # "the server restarted 3 times ... it cannot be resumed automatically",
+        # which is the opposite of the truth.
+        #
+        # So an attempt that lived at least MIN_USEFUL_ATTEMPT_SEC is counted as
+        # forward progress regardless of signature: it consumed real time doing
+        # real work, and killing it was the host's choice, not the job's fault.
+        # An attempt that dies almost immediately, repeatedly, at the same point
+        # IS wedged and still stops.
+        lived_sec = (time.time() * 1000 - float(job.get("stageStartedAt") or 0)) / 1000.0
+        worked = lived_sec >= MIN_USEFUL_ATTEMPT_SEC
+        stalled = 0 if (advanced or worked) else int(job.get("stalledResumes") or 0) + 1
+        if stalled >= STALLED_RESUME_LIMIT:
+            job.update({
+                "interruptCount": count,
+                "stalledResumes": stalled,
+                "interrupted": False,
+                "interruptReason": (
+                    f"the server restarted {count} times during "
+                    f"'{STAGE_LABELS.get(stage, stage or 'the job')}' without the "
+                    f"job advancing past {signature or 'its last checkpoint'} — "
+                    f"each restart is resuming from the last checkpoint, "
+                    f"but the same checkpoint keeps being reached"
+                ),
+                "error": (
+                    f"The server restarted {count} times during "
+                    f"'{STAGE_LABELS.get(stage, stage or 'the job')}'. "
+                    f"The job was making progress each time but the host kept "
+                    f"killing the worker before the current unit finished, so it "
+                    f"could not finish '{STAGE_LABELS.get(stage, stage or 'the job')}' "
+                    f"after {count} attempts. The expensive stages are cached — "
+                    f"Retry re-renders from the last completed clip."
+                ),
+            })
+            self.store.write_job(job)
+            self.store.append_job_log(
+                job_id,
+                f"INTERRUPTED: killed by {signal.Signals(-rc).name if _safe_signal(rc) else rc} "
+                f"during '{stage}', and the previous {stalled} restart(s) made no "
+                f"progress — not resuming again",
+            )
+            return False
+        try:
+            how = signal.Signals(-rc).name
+        except ValueError:
+            how = f"signal {-rc}"
     # `interruptReason` is the operator-facing sentence and is rebuilt from
     # these primitive fields every time — see _describe_orphan.
     reason = (
@@ -936,6 +922,8 @@ class InProcessWorker:
         Counts finished stage markers, rendered clips, AND cached transcription
         chunks. Two attempts with the SAME signature did identical amounts of
         work, which is what makes a restart loop visible instead of invisible.
+
+
 
         The chunk count is load-bearing. It used to be absent, so a job that
         transcribed 3 chunks, was killed, transcribed 5 more, was killed again,
@@ -1162,31 +1150,31 @@ class InProcessWorker:
         return text[:200]
 
     def _resume_is_worthwhile(self, job: dict[str, Any]) -> bool:
-    """Is re-queueing this orphan useful, or is it a restart loop?
+        """Is re-queueing this orphan useful, or is it a restart loop?
 
-    Two rules, and both exist because the naive "count the restarts"
-    version lost real jobs:
+        Two rules, and both exist because the naive "count the restarts"
+        version lost real jobs:
 
-    1. A generous ceiling. `INTERRUPT_MAX_RESUMES` was 5 and the sandbox
-       restarts the web process often enough that a multi-hour job burned
-       the whole budget without ever hitting a real error — after which
-       every further restart produced a permanent failure. The budget
-       exists to stop an infinite loop, not to cap a slow machine.
-    2. No-progress runs out. Restarting forever only helps if each attempt
-       gets further than the last. Once several consecutive attempts die
-       without advancing the finished-unit count, retrying is not fixing
-       anything and the job should stop and say so.
+        1. A generous ceiling. `INTERRUPT_MAX_RESUMES` was 5 and the sandbox
+           restarts the web process often enough that a multi-hour job burned
+           the whole budget without ever hitting a real error — after which
+           every further restart produced a permanent failure. The budget
+           exists to stop an infinite loop, not to cap a slow machine.
+        2. No-progress runs out. Restarting forever only helps if each attempt
+           gets further than the last. Once several consecutive attempts die
+           without advancing the finished-unit count, retrying is not fixing
+           anything and the job should stop and say so.
 
-    This project checkpoints after every finished clip and re-renders only the
-    unfinished ones, so a render-stage job is resumable by construction. Do not
-    fail it on a fixed stalled count here unless the env explicitly re-enables
-    that limit; the only real stop is the overall resume budget or a genuinely
-    wedged attempt that never advances.
-    """
-    count = int(job.get("interruptCount") or 0)
-    if count >= RESUME_BUDGET:
-        return False
-    stalled = int(job.get("stalledResumes") or 0)
+        This project checkpoints after every finished clip and re-renders only the
+        unfinished ones, so a render-stage job is resumable by construction. Do not
+        fail it on a fixed stalled count here unless the env explicitly re-enables
+        that limit; the only real stop is the overall resume budget or a genuinely
+        wedged attempt that never advances.
+        """
+        count = int(job.get("interruptCount") or 0)
+        if count >= RESUME_BUDGET:
+            return False
+        stalled = int(job.get("stalledResumes") or 0)
     if stalled >= STALLED_RESUME_LIMIT and STALLED_RESUME_LIMIT > 0:
         return False
     return True
