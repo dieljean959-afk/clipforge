@@ -987,6 +987,11 @@ class Pipeline:
 
         for idx, clip_doc in enumerate(clips):
             c0, c1 = clip_doc["start"], clip_doc["end"]
+            # Per-clip retry state: attempt 1..CLIP_RETRY_LIMIT, then skip and
+            # continue with the remaining clips. One bad clip never fails the
+            # whole batch.
+            clip_attempts = int(clip_doc.get("_retryAttempt") or 0)
+            clip_skipped = bool(clip_doc.get("_skipped"))
             self._progress(
                 job_id, "rendering", idx / max(1, total),
                 f"Rendering clip {idx + 1} of {total}",
@@ -1035,6 +1040,148 @@ class Pipeline:
                 )
                 with open(rd / "clips_done.txt", "a") as fh:
                     fh.write(f"{idx + 1}\n")
+                clip_doc["_retryAttempt"] = 0
+                clip_doc["_skipped"] = False
+                self.store.write_clip(clip_doc)
+                continue
+
+            # A clip that already exhausted its retry budget is skipped, not
+            # failed. Retry is per-clip and bounded; the batch keeps going.
+            if clip_skipped and clip_attempts >= CLIP_RETRY_LIMIT:
+                self._log(
+                    job_id,
+                    f"clip {idx + 1} skipped after {clip_attempts} render attempt(s) — continuing",
+                )
+                self._progress(
+                    job_id, "rendering", (idx + 1) / max(1, total),
+                    f"Clip {idx + 1} skipped after {clip_attempts} attempt(s)",
+                    unit_label="clips", units_done=idx + 1, units_total=total,
+                )
+                (rd / f"clip_{idx}.skipped").write_text("skipped")
+                continue
+
+            # A clip that already exhausted its retry budget is skipped, not
+            # failed. Retry is per-clip and bounded; the batch keeps going.
+            if clip_skipped and clip_attempts >= CLIP_RETRY_LIMIT:
+                self._log(
+                    job_id,
+                    f"clip {idx + 1} skipped after {clip_attempts} render attempt(s) — continuing",
+                )
+                self._progress(
+                    job_id, "rendering", (idx + 1) / max(1, total),
+                    f"Clip {idx + 1} skipped after {clip_attempts} attempt(s)",
+                    unit_label="clips", units_done=idx + 1, units_total=total,
+                )
+                (rd / f"clip_{idx}.skipped").write_text("skipped")
+                continue
+
+            # ---- resume from on-disk checkpoint (survives store loss) ---
+            # A restart during render can leave the store intact but the
+            # pipeline re-enters _stage_render from clip 0. The per-clip checkpoint
+            # file records the last clip index that we intended to render. If that
+            # still matches the current idx and there is still no output file, we
+            # keep going — do not reset to clip 0.
+            ckpt_idx = None
+            ckpt_path = rd / "current_clip.txt"
+            if ckpt_path.exists():
+                try:
+                    ckpt_idx = int(ckpt_path.read_text(encoding="utf-8").strip() or "-1")
+                except Exception:
+                    ckpt_idx = None
+            if ckpt_idx is not None and ckpt_idx != idx:
+                self._log(
+                    job_id,
+                    f"render checkpoint mismatch: on-disk {ckpt_idx}, resuming at {idx} — re-rending this clip",
+                )
+
+            # Per-clip timeout + retry. If ffmpeg times out or errors, retry up
+            # to CLIP_RETRY_LIMIT times, then skip the clip and continue with the
+            # rest of the batch. Each attempt increments the per-clip attempt
+            # counter on the clip document so a resume does not lose the count.
+            attempt_log_lines: list[str] = []
+            last_err: Exception | None = None
+            for attempt in range(1, CLIP_RETRY_LIMIT + 1):
+                clip_doc["_retryAttempt"] = attempt
+                self.store.write_clip(clip_doc)
+                self._log(
+                    job_id,
+                    f"render clip {idx + 1} attempt {attempt} of {CLIP_RETRY_LIMIT}",
+                )
+                try:
+                    meta = video.render_clip(
+                        src,
+                        out_path,
+                        start=c0,
+                        end=c1,
+                        settings=settings,
+                        ass_path=(ws.stage_dir("captions") / f"clip_{idx + 1:02d}.ass") if ws.stage_dir("captions").exists() else None,
+                        caption_cues=None,
+                        crop_windows=({
+                            "windows": ws.read_json("reframe", f"clip_{idx + 1:02d}.json") or [],
+                            "usedMediapipe": False,
+                        } if not ws.is_done("reframe") else ws.read_json("reframe", f"clip_{idx + 1:02d}.json") or []),
+                        silence_cuts=(speech or None),
+                        src_fps=src_meta.get("fps"),
+                        _progress_callback=lambda frame, fps, t: self._log(
+                            job_id,
+                            f"[ffmpeg progress] clip {idx + 1}: frame {frame}, {fps:.1f} fps, {t:.1f}s",
+                        ),
+                    )
+                    # On success: persist full ffmpeg command + stderr into the
+                    # clip doc so View logs can show the real error output later.
+                    clip_doc["ffmpegCommand"] = meta.get("ffmpegCommand")
+                    clip_doc["ffmpegStderr"] = meta.get("ffmpegStderr")
+                    clip_doc["encoder"] = meta.get("encoder")
+                    clip_doc["encoderLabel"] = meta.get("encoderLabel")
+                    clip_doc["hardwareEncoded"] = meta.get("hardwareEncoded")
+                    clip_doc["preset"] = meta.get("preset")
+                    clip_doc["renderState"] = "done"
+                    clip_doc["renderAt"] = int(time.time() * 1000)
+                    clip_doc["_retryAttempt"] = attempt
+                    clip_doc["_skipped"] = False
+                    self.store.write_clip(clip_doc)
+                    self._log(
+                        job_id,
+                        f"rendered clip {idx + 1}: {meta['width']}x{meta['height']}, "
+                        f"{meta['duration']:.1f}s in {meta['renderMs']}ms",
+                    )
+                    last_err = None
+                    break
+                except video.RenderError as exc:
+                    last_err = exc
+                    attempt_log_lines.append(f"clip {idx + 1} attempt {attempt} failed: {exc}")
+                    self._log(job_id, attempt_log_lines[-1])
+                    if attempt >= CLIP_RETRY_LIMIT:
+                        self._log(
+                            job_id,
+                            f"clip {idx + 1} exhausted {CLIP_RETRY_LIMIT} retry attempts — skipping",
+                        )
+                        clip_doc["renderState"] = "skipped"
+                        clip_doc["_skipped"] = True
+                        clip_doc["error"] = str(last_err)
+                        clip_doc["_retryAttempt"] = attempt
+                        self.store.write_clip(clip_doc)
+                        self._progress(
+                            job_id, "rendering", (idx + 1) / max(1, total),
+                            f"Clip {idx + 1} skipped after {attempt} attempt(s)",
+                            unit_label="clips", units_done=idx + 1, units_total=total,
+                        )
+                        with open(rd / f"clip_{idx}.skipped", "w") as fh:
+                            fh.write(str(last_err))
+                        last_err = None
+                        continue
+            if last_err is not None:
+                # Should only reach here if the for-loop exited without break and
+                # without setting skip; treat as skip to keep the batch moving.
+                clip_doc["renderState"] = "skipped"
+                clip_doc["_skipped"] = True
+                clip_doc["error"] = str(last_err)
+                self.store.write_clip(clip_doc)
+                self._progress(
+                    job_id, "rendering", (idx + 1) / max(1, total),
+                    f"Clip {idx + 1} skipped",
+                    unit_label="clips", units_done=idx + 1, units_total=total,
+                )
                 continue
 
             # ---- resume from on-disk checkpoint (survives store loss) ---
@@ -1395,7 +1542,6 @@ class Pipeline:
     and the full stderr, so the job log can record the real per-clip error
     for View logs instead of only the headline.
     """
-
         last: Exception | None = None
         for attempt in (1, 2, 3):
             try:
@@ -1404,30 +1550,20 @@ class Pipeline:
                 # percentages -- so without this a long clip looks dead, and
                 # the watchdog can kill a render that is working.
                 with self._heartbeat(job_id, f"render clip {number}"):
-                meta = video.render_clip(
-                    src, out_path,
-                    start=start, end=end,
-                    settings=self.settings,
-                    ass_path=ass_path,
-                    caption_cues=cues,
-                    crop_windows=crop_windows,
-                    silence_cuts=silence_cuts,
-                    src_fps=src_fps,
-                    safe=attempt >= 2,
-                    _progress_callback=_progress_callback,
-                )
+                    meta = video.render_clip(
+                        src, out_path,
+                        start=start, end=end,
+                        settings=self.settings,
+                        ass_path=ass_path,
+                        caption_cues=cues,
+                        crop_windows=crop_windows,
+                        silence_cuts=silence_cuts,
+                        src_fps=src_fps,
+                        safe=attempt >= 2,
+                        _progress_callback=_progress_callback,
+                    )
                 if not isinstance(meta, dict) or "ffmpegCommand" not in meta:
-                    meta = {
-                        **meta,
-                        "ffmpegCommand": " ".join([
-                            "ffmpeg", "-y",
-                            "-ss", f"{start:.3f}",
-                            "-i", str(src),
-                            "-t", f"{end - start:.3f}",
-                            *([v for v in []]),
-                        ]),
-                        "ffmpegStderr": "",
-                    }
+                    meta = {**meta, "ffmpegCommand": "", "ffmpegStderr": ""}
                 video.verify_output(out_path, expected_sec=end - start)
                 if attempt >= 2:
                     self._log(
@@ -1439,8 +1575,6 @@ class Pipeline:
                 return meta
             except Exception as exc:  # noqa: BLE001 - retried below, then skipped
                 last = exc
-                # Never let a half-written MP4 be mistaken for a finished one
-                # by the resume path or by /share.
                 try:
                     out_path.unlink(missing_ok=True)
                 except OSError:
@@ -1460,6 +1594,7 @@ class Pipeline:
                         units_total=total,
                     )
         raise video.RenderError(str(last) if last else "render failed after 3 attempts")
+
 
     def _cleanup_job_temps(self, job_id: str, ws: StageWorkspace) -> None:
         """Delete what a finished job leaves behind on disk.

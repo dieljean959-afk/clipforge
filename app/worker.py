@@ -83,6 +83,17 @@ RESUME_BUDGET = int(os.getenv("CLIPFORGE_RESUME_BUDGET", "40"))
     # Remove the fixed give-up count here. Let a render-stage job keep resuming
     # until it either finishes or the host keeps killing the worker before any
     # unit finishes, which is the real failure mode reported in the screenshot.
+    # Give up after a fixed number of restarts that produced NO additional finished
+    # units. A render-stage job that checkpoints after every finished clip and
+    # re-renders only the unfinished ones is resumable by construction, so the
+    # real failure mode is a host repeatedly killing the worker before any unit
+    # finishes. That is now detected by per-clip checkpoint progress (see
+    # _progress_signature), not by a blanket "3 restarts and give up" rule.
+    #
+    # Set to 0 (default) to never hard-fail a job purely because the host kept
+    # restarting — every interrupted render-stage job is re-queued and resumes
+    # from the next unfinished clip. Increase only if you want a safety cap for
+    # pathological restart loops on a specific deployment.
     STALLED_RESUME_LIMIT = int(os.getenv("CLIPFORGE_STALLED_RESUME_LIMIT", "0"))
 
 # An attempt that lived at least this long was working, not wedged — see the

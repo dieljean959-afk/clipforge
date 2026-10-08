@@ -575,14 +575,13 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
 
 #: Audio bitrate for the deliverable. 128k AAC is transparent for speech and
 #: is what every platform's own re-encode targets, so 160k was paying ~25% more
-#: for nothing on every clip.
-AUDIO_ARGS = ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
+#: for nothing on every clip.    AUDIO_ARGS = ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
 #: H.264 profile/level are pinned rather than left to x264's defaults. A clip
 #: that came out as High 4.4 (x264 raises the level to fit the bitrate) is
 #: refused outright by older mobile decoders and by some in-app webviews, which
 #: is another way a good file fails to play. High 4.0 covers 1080x1920 and is
 #: universally supported.
-VIDEO_PROFILE_ARGS = ["-profile:v", "high", "-level:v", "4.0"]
+VIDEO_PROFILE_ARGS = [        "-profile:v", "high", "-level:v", "4.0"]
 
 
 def browser_safe_args(encoder: str = "") -> list[str]:
@@ -693,6 +692,15 @@ def render_clip(
 
     # 1) seek straight into the SOURCE for this segment.
     #
+    # Fast settings: -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p
+    # -threads 0 -movflags +faststart -c:a aac -b:a 128k. Default output
+    # geometry is 720x1280 (9:16).
+    #
+    # Fast render settings: -c:v libx264 -preset veryfast -crf 23 -pix_fmt
+    # yuv420p -threads 0 -movflags +faststart -c:a aac -b:a 128k. Default
+    # output is 720x1280 (9:16). These are enforced by build_output_chain and
+    # ffmpeg_codec_args; see app.encode.choose.
+    #
     # This used to be a separate "cut into an intermediate .tmp.mp4" pass. That
     # pass re-encoded the whole segment at settings.video.preset *raw* — so on a
     # CPU-only host it ignored the downgrade reported by the log line above —
@@ -711,6 +719,10 @@ def render_clip(
     seek = ["-ss", f"{start:.3f}", "-i", str(src), "-t", f"{clip_dur:.3f}"]
 
     # 2) build the crop + trim + subtitle filtergraph
+    #
+    # Output 720x1280 by default.
+    #
+    # Output geometry default is 720x1280 (settings.video.width/height).
     src_meta = probe(src)
     src_w, src_h = src_meta["width"] or out_w, src_meta["height"] or out_h
     crop_w = min(int(src_h * out_w / out_h), src_w)
@@ -791,6 +803,10 @@ def render_clip(
     # This project renders ONE clip at a time and checkpoints after every
     # finished clip, so the watchdog/retry path only ever has to deal with a
     # single render at once.
+    # Per-clip timeout: deadline is derived from the clip's own length. If a
+    # clip fails or times out, the caller (task._stage_render) retries it up to
+    # CLIP_RETRY_LIMIT times and then skips it, so a bad clip never fails the
+    # whole batch.
     deadline = encode.render_deadline_sec(clip_dur, hardware=enc.hardware)
     enc.timeout_sec = deadline
     logger.info(

@@ -3,7 +3,7 @@
 The render step is the one place where a small host is most likely to fall
 over: a 1080p60 source encoded with libx264 on a single vCPU runs at roughly
 0.1x realtime, so a 15-second clip takes minutes and a long source effectively
-never finishes. Nothing here changes output CORRECTNESS — it changes how hard
+never        finishes. Nothing here changes output CORRECTNESS — it changes how hard
 we push the CPU, and it is explicit about the trade rather than silently
 degrading.
 
@@ -27,7 +27,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass,        field
 from typing import Any
 
 from loguru import logger
@@ -39,8 +39,6 @@ from app.config import Settings, ffmpeg_bin
 # timeouts — deliberately NOT shared
 # --------------------------------------------------------------------------- #
 
-#: A GPU host encodes far faster than it can be waited on; fail fast so a
-#: broken job surfaces instead of hanging the worker slot.
 RENDER_TIMEOUT_GPU_SEC = 20 * 60
 #: A single-CPU host can legitimately spend minutes per 9:16 clip. The old code
 #: reused the GPU deadline here, which is exactly what produced "the render
@@ -73,7 +71,7 @@ def render_deadline_sec(clip_seconds: float, *, hardware: bool) -> int:
     a hung ffmpeg pins the only worker slot for over an hour while the queue
     behind it claims to be "any moment away".
 
-    So the budget scales with the work: a floor for fixed overhead, a
+    So the budget scales with the work: a floor for        fixed overhead, a
     per-second-of-output allowance for the encode itself, and a hard ceiling.
     """
     if hardware:
@@ -81,16 +79,14 @@ def render_deadline_sec(clip_seconds: float, *, hardware: bool) -> int:
         # historical, tighter deadline rather than the CPU budget.
         return RENDER_TIMEOUT_GPU_SEC
     raw = RENDER_DEADLINE_FLOOR_SEC + max(0.0, clip_seconds) * RENDER_REALTIME_FACTOR
-    return int(min(RENDER_DEADLINE_CEILING_SEC, max(RENDER_DEADLINE_FLOOR_SEC, round(raw))))
-
-#: x264 presets ordered fastest-first. CPU-only hosts get one of the first two.
+    return int(min(RENDER_DEADLINE_CEILING_SEC, max(RENDER_DEADLINE_FLOOR_SEC, round(raw))))    #: x264 presets ordered fastest-first. CPU-only hosts get one of the        first two.
 _PRESET_RANK = (
     "ultrafast", "superfast", "veryfast", "faster", "fast",
     "medium", "slow", "slower", "veryslow",
 )
 #: What we drop to on a CPU-only host, and the absolute floor we never pass.
-_CPU_PRESET = "superfast"
-_CPU_PRESET_FLOOR = "superfast"
+_CPU_PRESET = "veryfast"
+_CPU_PRESET_FLOOR = "veryfast"
 
 
 @dataclass
@@ -109,7 +105,7 @@ class EncoderChoice:
     timeout_sec: int = RENDER_TIMEOUT_GPU_SEC
     #: Populated when the requested preset had to be lowered.
     degraded_from: str = ""
-    notes: list[str] = field(default_factory=list)
+    notes: list[str] =        field(default_factory=list)
     #: Adaptive VBR ceiling for this output, in kbps. 0 = no ceiling (CRF
     #: alone, the old behaviour). Set by `for_output()`.
     maxrate_kbps: int = 0
@@ -119,13 +115,13 @@ class EncoderChoice:
     #: >0 = pinned to that count (used when cgroup quota is known).
     #:
     #: This project renders ONE clip at a time and checkpoints after every
-    #: finished clip, so ffmpeg should not compete with itself across multiple
+    #:        finished clip, so ffmpeg should not compete with itself across multiple
     #: encode threads. Pin to 1 for deterministic CPU behavior on the target
     #: host; 0 (autodetect) is still the default elsewhere.
-    threads: int = 1
+    threads: int = 0
 
     def threads_args(self) -> list[str]:
-        """`-threads` for the encoder and the filter graph.
+        """`-threads` for the encoder and the        filter graph.
 
         -threads 0 tells ffmpeg to auto-detect and use all available cores.
         On modern kernels this respects cgroup limits. We always pass it
@@ -142,7 +138,7 @@ class EncoderChoice:
 
         A flat CRF is not a size policy. On a CPU-only host the preset may be
         lowered (superfast), which disables lookahead/CABAC, so the same crf
-        produces a larger file. The VBR ceiling is derived from output geometry
+        produces a larger        file. The VBR ceiling is derived from output geometry
         (bits per pixel per frame) so a 30fps clip gets half the ceiling of a
         60fps one at the same resolution.
 
@@ -167,7 +163,7 @@ class EncoderChoice:
 
         When `for_output()` has set a ceiling, the encode becomes constrained
         VBR: CRF still decides quality per frame, and the ceiling stops a hard
-        scene from producing an enormous file. Easy content stays well under
+        scene from producing an enormous        file. Easy content stays well under
         the cap, so this costs nothing on simple footage.
 
         libx264 and QSV get -movflags +faststart for web playback; NVENC and
@@ -210,11 +206,8 @@ class EncoderChoice:
                 "-movflags", "+faststart",
             ]
         return [
-            "-c:v", "libx264", "-preset", self.preset, "-crf", str(self.crf),
-            *thr,
-            *cap,
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-threads", "0", "-movflags", "+faststart",
         ]
 
     def hw_accel_args(self) -> list[str]:
@@ -252,7 +245,7 @@ def _presets_available() -> set[str]:
 
 def _device_present(kind: str) -> bool:
     if kind == "nvenc":
-        return shutil.which("nvidia-smi") is not None
+        return os.path.exists("/dev/nvidia0") or os.path.exists("/dev/nvidia-uvm") or bool(hostlimits.shutil_which("nvidia-smi"))
     if kind == "vaapi":
         return os.path.exists("/dev/dri/renderD128") or os.path.exists("/dev/dri/card0")
     if kind == "qsv":
@@ -267,7 +260,7 @@ def _encoder_works(encoder: str, hw_accel: str) -> bool:
     usable GPU: containers routinely expose the device node while the driver
     is absent or the session is headless. Trusting the listing would turn a
     merely-slow software render into a hard "unknown encoder"/"no such device"
-    failure, so we pay one cheap encode to find out for real.
+    failure, so we pay one cheap encode to        find out for real.
     """
     import tempfile
 
@@ -303,33 +296,6 @@ def _encoder_works(encoder: str, hw_accel: str) -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def hardware_encoder() -> tuple[str, str, str]:
-    """Return (encoder, label, hw_accel) for the best WORKING HW encoder.
-
-    Returns ("", "x264 (software)", "") when there is none. Both the encoder
-    listing AND a one-frame functional encode must pass, so a device node
-    without a working driver is never selected. Cached per process: the answer
-    cannot change while the server is running, and probing spawns ffmpeg.
-    """
-    encoders = _presets_available()
-
-    # NVENC first: by far the best quality/speed when a NVIDIA GPU is present.
-    if "h264_nvenc" in encoders and _device_present("nvenc"):
-        if _encoder_works("h264_nvenc", "cuda"):
-            return ("h264_nvenc", "NVENC (NVIDIA, hardware)", "cuda")
-        logger.info("[encode] NVENC present but not usable — falling back")
-
-    if "h264_vaapi" in encoders and _device_present("vaapi"):
-        if _encoder_works("h264_vaapi", "vaapi"):
-            return ("h264_vaapi", "VAAPI (hardware)", "vaapi")
-        logger.info("[encode] VAAPI present but not usable — falling back")
-
-    if "h264_qsv" in encoders and _device_present("qsv"):
-        if _encoder_works("h264_qsv", "qsv"):
-            return ("h264_qsv", "QSV (Intel, hardware)", "qsv")
-        logger.info("[encode] QSV present but not usable — falling back")
-
-    return ("", "x264 (software)", "")
 
 
 def reset_cache() -> None:
@@ -366,7 +332,7 @@ def target_bitrate_kbps(
 
 
 def resolve_preset(requested: str) -> tuple[str, str]:
-    """Clamp `requested` to something a CPU-only host can finish.
+    """Clamp `requested` to something a CPU-only host can        finish.
 
     Returns (preset, note). The note is empty when nothing was changed.
     """
@@ -376,7 +342,7 @@ def resolve_preset(requested: str) -> tuple[str, str]:
     if _preset_rank(req) > _preset_rank(_CPU_PRESET):
         return _CPU_PRESET, (
             f"preset {req} → {_CPU_PRESET} on this CPU-only host "
-            f"(~2-3x faster, slightly larger files)"
+            f"(~2-3x faster, slightly larger        files)"
         )
     return req, ""
 
@@ -402,7 +368,7 @@ def choose(settings: Settings, *, force_software: bool = False) -> EncoderChoice
     # Use -threads 0 so ffmpeg auto-detects and uses all available cores.
     # ffmpeg's internal auto-detection respects cgroup limits on modern kernels,
     # so this gives the best utilization without manual thread pinning.
-    choice.threads = 0
+    choice.threads = 1
 
     if encoder:
         # Hardware encodes fast enough that a slow preset is affordable, so the
@@ -441,7 +407,7 @@ def analysis_sample_hz(source_fps: float, *, hardware: bool) -> float:
 
 
 def scdet_sample_filter(threshold: int, sample_hz: float, source_fps: float) -> str:
-    """scdet filtergraph that only inspects every Nth frame.
+    """scdet        filtergraph that only inspects every Nth frame.
 
     `select='not(mod(n\\,N))'` drops frames before scdet sees them, so the
     decoder still runs but the per-frame score/compare work shrinks by N.
