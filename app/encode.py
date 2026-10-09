@@ -27,14 +27,15 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass,        field
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from app import hosting
 from app import hostlimits
-from app.config import Settings, ffmpeg_bin
+from app.config import ffmpeg_bin
 
 # --------------------------------------------------------------------------- #
 # timeouts — deliberately NOT shared
@@ -246,7 +247,8 @@ def _presets_available() -> set[str]:
 
 def _device_present(kind: str) -> bool:
     if kind == "nvenc":
-        return os.path.exists("/dev/nvidia0") or os.path.exists("/dev/nvidia-uvm") or bool(hosting.shutil_which("nvidia-smi")) or bool(hostlimits.shutil_which("nvidia-smi"))
+        nvidia_smi = hosting.shutil_which('nvidia-smi') or hostlimits.shutil_which('nvidia-smi')
+        return os.path.exists('/dev/nvidia0') or os.path.exists('/dev/nvidia-uvm') or bool(nvidia_smi)
     if kind == "vaapi":
         return os.path.exists("/dev/dri/renderD128") or os.path.exists("/dev/dri/card0")
     if kind == "qsv":
