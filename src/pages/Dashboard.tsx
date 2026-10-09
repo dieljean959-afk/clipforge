@@ -24,7 +24,7 @@ import { CaptionStyleDialog } from "@/components/clipforge/CaptionStyleDialog";
 import { GroqUsageBadge } from "@/components/clipforge/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips, useHealth } from "@/hooks/use-poll";
-import { api, type UsageDto, type VerifyClipsDto } from "@/lib/api";
+import { api, type UsageDto, type VerifyClipsDto, waitForSandbox } from "@/lib/api";
 import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
@@ -79,6 +79,8 @@ export default function Dashboard() {
   const [verifyResult, setVerifyResult] = useState<VerifyClipsDto | null>(null);
   // Fed by the header badge, read by the submit form. One poll, two consumers.
   const [usage, setUsage] = useState<UsageDto | null>(null);
+  const [sandboxState, setSandboxState] = useState<"idle" | "starting" | "failed">("idle");
+  const [sandboxMessage, setSandboxMessage] = useState<string | null>(null);
 
   const allJobs = useMemo(() => jobs ?? [], [jobs]);
   // The backend derives `status` in ONE place (app/jobstatus.py) and clears
@@ -288,7 +290,93 @@ export default function Dashboard() {
               <Sparkles className="size-4 text-primary" />
               New batch
             </h2>
-            <NewJobForm className="mt-4" usage={usage} />
+
+            {sandboxState !== "idle" && (
+              <p
+                className={cn(
+                  "mt-3 text-[11px] font-medium leading-relaxed",
+                  sandboxState === "starting"
+                    ? "text-amber-300"
+                    : "text-destructive",
+                )}
+              >
+                {sandboxState === "starting"
+                  ? sandboxMessage ?? "Sandbox is starting, please wait…"
+                  : sandboxMessage ?? "Sandbox did not start."}
+              </p>
+            )}
+
+            <NewJobForm
+              className="mt-4"
+              usage={usage}
+              onSandboxState={(state, message) => {
+                setSandboxState(state === "ready" ? "idle" : state);
+                setSandboxMessage(message);
+              }}
+            />
+
+            <div className="mt-4 rounded-xl border border-border/60 bg-card p-4">
+              <p className="text-xs font-medium text-muted-foreground">
+                Sandbox status
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <span
+                  className={cn(
+                    "rounded-full px-3 py-1 text-[11px] font-medium",
+                    sandboxState === "idle"
+                      ? "border-border bg-muted text-muted-foreground"
+                      : sandboxState === "starting"
+                        ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                        : "border-destructive/50 bg-destructive/15 text-destructive",
+                  )}
+                >
+                  {sandboxState === "idle"
+                    ? "Checked"
+                    : sandboxState === "starting"
+                      ? "Starting"
+                      : "Not running"}
+                </span>
+              </div>
+              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                {sandboxState === "idle"
+                  ? "The backend was reachable the last time it was checked."
+                  : sandboxState === "starting"
+                    ? sandboxMessage ?? "Sandbox is starting, please wait…"
+                    : sandboxMessage ?? "The backend did not respond."}
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3 cursor-pointer"
+                onClick={async () => {
+                  setSandboxState("starting");
+                  setSandboxMessage("Sandbox is starting, please wait…");
+                  try {
+                    const ready = await waitForSandbox({
+                      waitForWorker: true,
+                      onUpdate: (state, message) => {
+                        setSandboxState(state === "ready" ? "idle" : state);
+                        setSandboxMessage(message);
+                      },
+                    });
+                    if (!ready.ok) {
+                      toast.error("Sandbox still not running.");
+                    } else {
+                      toast.success("Sandbox is running.");
+                    }
+                  } catch (err) {
+                    toast.error(
+                      err instanceof Error ? err.message : "Could not reach the sandbox.",
+                    );
+                  } finally {
+                    setSandboxState("idle");
+                    setSandboxMessage(null);
+                  }
+                }}
+              >
+                Restart sandbox
+              </Button>
+            </div>
           </div>
         </section>
 

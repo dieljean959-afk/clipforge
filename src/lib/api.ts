@@ -370,6 +370,96 @@ export interface CaptionPresetDto {
 }
 
 /**
+ * Sandbox/backend readiness helper for cold starts and restarts.
+ *
+ * The app now treats a missing or not-yet-ready backend as a
+ * "sandbox is starting" state instead of dumping raw fetch errors into the UI.
+ * This is the shared primitive for that: it polls /api/health, waits for the
+ * process to answer, and then optionally waits until the worker is online.
+ *
+ * Backoff is exponential-ish and capped so a cold start does not become an
+ * instant hammering of the proxy/platform before the container has started.
+ */
+export interface WaitForSandboxOptions {
+  /** Milliseconds before the first probe. Defaults to 1500. */
+  initialDelayMs?: number;
+  /** Backoff per attempt, in ms. Defaults to 2000, 5000, 10000, 20000. */
+  backoffMs?: number[];
+  /** Max total time including backoff. Defaults to 60000. */
+  timeoutMs?: number;
+  /** If true, wait until `health.worker.online` is true in addition to 200. */
+  waitForWorker?: boolean;
+  /** Called on each failed probe with the latest error text. Optional. */
+  onUpdate?: (state: "starting" | "ready" | "failed", message: string) => void;
+}
+
+const DEFAULT_BACKOFF_MS = [2000, 5000, 10000, 20000];
+
+export async function waitForSandbox(
+  opts: WaitForSandboxOptions = {},
+): Promise<{ ok: boolean; health: import("./api").HealthDto | null; error: string }> {
+  const initialDelayMs = opts.initialDelayMs ?? 1500;
+  const backoffMs = opts.backoffMs ?? DEFAULT_BACKOFF_MS;
+  const timeoutMs = opts.timeoutMs ?? 60000;
+  const waitForWorker = opts.waitForWorker ?? false;
+
+  await sleep(initialDelayMs);
+
+  const start = Date.now();
+  let lastError = "";
+
+  for (let attempt = 0; ; attempt++) {
+    const remaining = timeoutMs - (Date.now() - start);
+    if (remaining <= 0) {
+      const msg =
+        lastError &&
+        /HTTP 5\d\d/.test(lastError)
+          ? `The backend is up but unhealthy: ${lastError}`
+          : lastError ||
+            `Sandbox did not become ready within ${timeoutMs / 1000}s — it may still be starting.`;
+      opts.onUpdate?.("failed", msg);
+      return { ok: false, health: null, error: msg };
+    }
+
+    try {
+      const health = await api.health();
+      if (waitForWorker && !health.worker?.online) {
+        lastError = "worker not yet online";
+        opts.onUpdate?.("starting", `Sandbox is starting… (worker not online yet)`);
+      } else {
+        opts.onUpdate?.("ready", "Sandbox is ready.");
+        return { ok: true, health, error: "" };
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      opts.onUpdate?.("starting", `Sandbox is starting… (${lastError})`);
+    }
+
+    const delay =
+      attempt < backoffMs.length
+        ? backoffMs[attempt]
+        : backoffMs[backoffMs.length - 1];
+    const waited = Date.now() - start + delay;
+    if (waited > timeoutMs) break;
+    await sleep(delay);
+  }
+
+  const msg =
+    lastError &&
+    /HTTP 5\d\d/.test(lastError)
+      ? `The backend is up but unhealthy: ${lastError}`
+      : lastError ||
+        `Sandbox did not become ready within ${timeoutMs / 1000}s — it may still be starting.`;
+  opts.onUpdate?.("failed", msg);
+  return { ok: false, health: null, error: msg };
+}
+
+/** Minimal internal sleep used by the readiness helper. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
  * API base URL, normalised.
  *
  * A trailing slash on VITE_API_BASE produced "/api//health"-style URLs — the
@@ -541,6 +631,32 @@ export const api = {
   listAllJobs: () =>
     request<{ jobs: JobDto[]; total: number; nextBefore: number | null }>("/api/jobs?all=1"),
   getJob: (jobId: string) => request<JobDto>(`/api/jobs/${jobId}`),
+  /**
+   * Create a job, but only after confirming the backend is reachable.
+   *
+   * The old code called POST /api/jobs directly and then showed the raw
+   * platform error when the container was cold or restarting. That produced the
+   * "SANDBOX_NOT_RUNNING / failed to resolve container IP" JSON the user saw.
+   *
+   * This wrapper first checks /api/health; if it does not answer within the
+   * default 60s window, it returns a human message ("Sandbox is starting…")
+   * instead of the raw failure. If health answers but the worker is not online
+   * yet, it keeps waiting (same backoff) because a live process with no worker
+   * is the same cold-start situation.
+   */
+  createJobWithHealthCheck: (
+    source: string,
+    sourceType: "url" | "upload" = "url",
+    captionPreset?: string,
+    maxClips?: number,
+    opts?: WaitForSandboxOptions,
+  ) =>
+    waitForSandbox(opts).then((ready) => {
+      if (!ready.ok) {
+        throw new Error(ready.error);
+      }
+      return api.createJob(source, sourceType, captionPreset, maxClips);
+    }),
   createJob: (
     source: string,
     sourceType: "url" | "upload" = "url",

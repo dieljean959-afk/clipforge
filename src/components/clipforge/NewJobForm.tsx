@@ -3,27 +3,37 @@ import { toast } from "sonner";
 import { Layers, Loader2, Paperclip, Sparkles, Type, Youtube } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, type CaptionPresetDto, type UsageDto } from "@/lib/api";
+import { api, type CaptionPresetDto, type UsageDto, waitForSandbox } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
  * New job form: paste a video URL (fetched server-side with yt-dlp) or attach
  * a file. Ownership confirmation is required before submission. Uploads
  * always work — URL fetching can fail (bot checks), and we say so honestly.
+ *
+ * Submission now goes through a sandbox readiness gate before POST /api/jobs.
+ * If the backend is cold or restarting, the UI shows "Sandbox is starting…"
+ * and polls /api/health with exponential backoff instead of dumping the raw
+ * platform JSON ("SANDBOX_NOT_RUNNING / failed to resolve container IP").
  */
 export function NewJobForm({
   className,
   usage,
+  onSandboxState,
 }: {
   className?: string;
   /** Latest Groq usage, fed by the header badge. Null until its first poll. */
   usage?: UsageDto | null;
+  /** Optional callback for sandbox state changes during submit. */
+  onSandboxState?: (state: "starting" | "ready" | "failed", message: string) => void;
 }) {
   const [mode, setMode] = useState<"url" | "upload">("url");
   const [url, setUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [sandboxState, setSandboxState] = useState<"idle" | "starting" | "failed">("idle");
+  const [sandboxMessage, setSandboxMessage] = useState<string | null>(null);
   const [presets, setPresets] = useState<CaptionPresetDto[]>([]);
   const [preset, setPreset] = useState("bold_pop");
   // "" = auto (clip count scaled from the source length). A number is a hard
@@ -55,6 +65,25 @@ export function NewJobForm({
     confirmed &&
     !submitting &&
     (mode === "url" ? url.trim().length > 0 : file !== null);
+
+  // Clear sandbox state when the user starts editing the form again.
+  useEffect(() => {
+    if (mode === "url" ? url.trim().length > 0 : file !== null) {
+      setSandboxState("idle");
+      setSandboxMessage(null);
+    }
+  }, [mode, url, file]);
+
+  const announceSandbox = (
+    state: "starting" | "ready" | "failed",
+    message: string,
+  ) => {
+    setSandboxState(state === "ready" ? "idle" : state);
+    setSandboxMessage(message);
+    onSandboxState?.(state, message);
+  };
+
+  const canGo = canSubmit && sandboxState !== "starting" && sandboxState !== "failed";
 
   // Warn BEFORE the job is queued, not after it dies at chunk 18. Detection is
   // the only stage that costs money and it is metered per model per day, so a
@@ -107,14 +136,31 @@ export function NewJobForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canSubmit) return;
+    if (!canGo) return;
+
     setSubmitting(true);
+    setSandboxState("starting");
+    setSandboxMessage("Sandbox is starting, please wait...");
+
     try {
       if (mode === "url") {
-        await api.createJob(url.trim(), "url", preset, clipCap);
+        await api.createJobWithHealthCheck(
+          url.trim(),
+          "url",
+          preset,
+          clipCap,
+          {
+            waitForWorker: true,
+            onUpdate: announceSandbox,
+          },
+        );
       } else if (file !== null) {
+        // Uploads carry the bytes to the same backend, so require the same
+        // readiness gate. The health check above already confirmed the process
+        // is up; we do not re-poll here — just submit.
         await api.uploadJob(file, preset, clipCap);
       }
+
       toast.success("Job queued — ClipForge's server is on it.", {
         description: mode === "url" ? url.trim() : file?.name,
       });
@@ -123,11 +169,15 @@ export function NewJobForm({
       setConfirmed(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Could not queue the job.",
-      );
+      const message =
+        err instanceof Error ? err.message : "Could not queue the job.";
+(sandboxState === "starting" || sandboxState === "failed"
+        ? toast.error("Sandbox did not become ready in time.")
+        : toast.error(message));
     } finally {
       setSubmitting(false);
+      setSandboxState("idle");
+      setSandboxMessage(null);
     }
   };
 
@@ -277,7 +327,7 @@ export function NewJobForm({
         </span>
       </label>
 
-      <Button type="submit" size="lg" disabled={!canSubmit} className="cursor-pointer gap-2 font-bold">
+      <Button type="submit" size="lg" disabled={!canGo} className="cursor-pointer gap-2 font-bold">
         {submitting ? (
           <Loader2 className="size-4 animate-spin" />
         ) : (
@@ -285,6 +335,18 @@ export function NewJobForm({
         )}
         Forge clips
       </Button>
+
+      {sandboxState === "starting" && (
+        <p className="text-[11px] text-amber-300">
+          {sandboxMessage ?? "Sandbox is starting, please wait..."}
+        </p>
+      )}
+
+      {sandboxState === "failed" && (
+        <p className="text-[11px] text-destructive">
+          {sandboxMessage ?? "Sandbox did not start."}
+        </p>
+      )}
     </form>
   );
 }
