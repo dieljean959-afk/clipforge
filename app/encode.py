@@ -32,6 +32,7 @@ from typing import Any
 
 from loguru import logger
 
+from app import hosting
 from app import hostlimits
 from app.config import Settings, ffmpeg_bin
 
@@ -245,7 +246,7 @@ def _presets_available() -> set[str]:
 
 def _device_present(kind: str) -> bool:
     if kind == "nvenc":
-        return os.path.exists("/dev/nvidia0") or os.path.exists("/dev/nvidia-uvm") or bool(hostlimits.shutil_which("nvidia-smi"))
+        return os.path.exists("/dev/nvidia0") or os.path.exists("/dev/nvidia-uvm") or bool(hosting.shutil_which("nvidia-smi")) or bool(hostlimits.shutil_which("nvidia-smi"))
     if kind == "vaapi":
         return os.path.exists("/dev/dri/renderD128") or os.path.exists("/dev/dri/card0")
     if kind == "qsv":
@@ -296,6 +297,21 @@ def _encoder_works(encoder: str, hw_accel: str) -> bool:
 
 
 @functools.lru_cache(maxsize=1)
+
+
+def hardware_encoder() -> tuple[str, str, str]:
+    """Pick the best usable encoder for this host.
+
+    Returns (encoder_name, label, hw_accel). encoder_name may be '' for libx264.
+    """
+    # CPU-only host: never attempt GPU paths.
+    if not hosting.shutil_which('nvidia-smi') and not Path('/dev/nvidia0').exists() and not Path('/dev/nvidia-uvm').exists():
+        return '', 'x264 (software)', ''
+    # If a GPU device is present, still only claim what ffmpeg can actually use.
+    for enc in ('h264_nvenc', 'h264_vaapi', 'h264_qsv'):
+        if _encoder_works(enc, enc.split('_')[1].lower()):
+            return enc, enc, enc.split('_', 1)[1]
+    return '', 'x264 (software)', ''
 
 
 def reset_cache() -> None:
