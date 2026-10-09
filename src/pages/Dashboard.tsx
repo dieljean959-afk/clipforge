@@ -349,8 +349,10 @@ export default function Dashboard() {
                 variant="outline"
                 className="mt-3 cursor-pointer"
                 onClick={async () => {
-                  setSandboxState("starting");
-                  setSandboxMessage("Sandbox is starting, please wait…");
+                  if (sandboxState === "idle" || sandboxState === "failed") {
+                    setSandboxState("starting");
+                    setSandboxMessage("Sandbox is starting, please wait…");
+                  }
                   try {
                     const ready = await waitForSandbox({
                       waitForWorker: true,

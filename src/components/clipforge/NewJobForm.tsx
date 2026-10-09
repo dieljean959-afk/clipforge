@@ -169,11 +169,9 @@ export function NewJobForm({
       setConfirmed(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Could not queue the job.";
-(sandboxState === "starting" || sandboxState === "failed"
-        ? toast.error("Sandbox did not become ready in time.")
-        : toast.error(message));
+      toast.error(
+        err instanceof Error ? err.message : "Could not queue the job.",
+      );
     } finally {
       setSubmitting(false);
       setSandboxState("idle");
