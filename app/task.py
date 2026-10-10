@@ -49,13 +49,17 @@ from app import (
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
-from app.store import LocalStore
-
-#: How often a long, silent step re-asserts that the pipeline is alive.
+from app.store import LocalStore    #: How often a long, silent step re-asserts that the pipeline is alive.
 #:
 #: Five seconds is well inside the 600s stall timeout and comfortably longer
 #: than any real UI poll, so this is liveness only -- never progress.
 HEARTBEAT_SEC = 5.0
+
+#: How long a heartbeat can go unwritten before a RUNNING job is considered
+#: stale by the startup reaper / watchdog. This is the authoritative "is this
+#: child actually alive" threshold for a job whose lastProgressAt is silent.
+HEARTBEAT_STALE_SEC = 15.0
+
 
 
 def _chunk_cached(cache_dir: Path | None, index: int) -> bool:
@@ -156,6 +160,63 @@ class _StageChunkCache(llm.ChunkCache):
         return {}
 
 
+STAGE_STATUS_FIELDS = frozenset({
+    "status", "startedAt", "doneAt", "error", "errorDetail",
+})
+
+
+def _normalize_stage_status(raw: Any) -> dict[str, Any]:
+    """Coerce a stored stage-status blob into the canonical shape.
+
+    Validated on load so a stale/corrupt/wrong-shaped entry from an older
+    build or a hand-edited file does not crash the dashboard or the runner.
+    Missing keys get safe defaults; unknown keys are dropped; wrong types are
+    coerced where safe (timestamps to int, status to str).
+    """
+    if not isinstance(raw, dict):
+        return {"status": "pending", "startedAt": None, "doneAt": None,
+                "error": None, "errorDetail": None}
+    status = str(raw.get("status") or "pending").strip()
+    if status not in {"pending", "running", "done", "failed"}:
+        status = "pending"
+    def _int_or_none(v: Any) -> int | None:
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            if not f.is_integer():
+                return None
+            return int(f)
+        except (TypeError, ValueError):
+            return None
+    return {
+        "status": status,
+        "startedAt": _int_or_none(raw.get("startedAt")),
+        "doneAt": _int_or_none(raw.get("doneAt")),
+        "error": str(raw.get("error") or "") or None,
+        "errorDetail": str(raw.get("errorDetail") or "") or None,
+    }
+
+
+def _validate_and_normalize_stage_statuses(
+    raw: Any,
+) -> dict[str, dict[str, Any]]:
+    """Validate the whole stageStatus block on load.
+
+    Returns the canonical dict keyed by stage name. Unknown stage keys are
+    dropped so a stale key from a future pipeline version does not leak into
+    the UI. Stages that are missing entirely are filled in as pending.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        for s in STAGES:
+            out[s] = _normalize_stage_status({})
+        return out
+    for s in STAGES:
+        out[s] = _normalize_stage_status(raw.get(s))
+    return out
+
+
 class Pipeline:
     def __init__(self, settings: Settings, store: LocalStore) -> None:
         self.settings = settings
@@ -167,6 +228,251 @@ class Pipeline:
         # whose liveness signal could not be recorded is diagnosed as
         # "the worker is alive but cannot report", not "the worker died".
         self._heartbeat_faults = 0
+        # Working-stage cache for the current run. Written to the job doc on
+        # every transition so the dashboard can show per-stage state without
+        # reading the workspace markers.
+        self._stage_status: dict[str, dict[str, Any]] = {}
+        # Backfill the working copy from the stored job doc so a fresh Pipeline
+        # instance (e.g. inside app.runner) resumes the per-stage picture the
+        # supervisor / dashboard already wrote. Any key missing from the doc is
+        # left as the mutable default we built below.
+        stored = store.get_job(job_id) if False else None  # set per-run below
+        # Liveness for THIS run. Written by the heartbeat on every beat and by
+        # the startup reaper to decide whether a running-looking job still has a
+        # live child. Persisted by _set_stage_status / _fail so a recovered job
+        # carries its heartbeat history.
+        self._heartbeat_at: int | None = None
+
+    # ------------------------------------------------------------------
+    # long-input guard queries (descriptive only; no caps)
+    # ------------------------------------------------------------------
+
+    def _long_source_note(self, job_id: str, duration_sec: float) -> None:
+        """Log once, at pipeline start, if the source is long enough that the
+        render stage is the memory-critical one. Purely diagnostic: it does not
+        change behaviour, it just makes any later OOM traceable to "rendering N
+        clips from a M-min source" instead of a mystery kill.
+        """
+        try:
+            if duration_sec > self.settings.hosted.max_source_min * 60 * 2:
+                logger.info(
+                    f"[job {job_id}] long-source note: {duration_sec / 60:.0f} min "
+                    f"(> {self.settings.hosted.max_source_min * 2:.0f} min) — "
+                    f"transcription will chunk and render is per-clip; memory is the "
+                    f"likely limit, not time"
+                )
+        except Exception:
+            pass
+
+    def _transcript_size_note(self, job_id: str, n_words: int) -> None:
+        try:
+            if n_words > 5000:
+                logger.info(
+                    f"[job {job_id}] transcript-size note: {n_words} words — "
+                    f"the transcript dict is now the largest single Python object; "
+                    f"do not keep extra copies of it in memory"
+                )
+        except Exception:
+            pass
+
+    def _render_workload_note(self, job_id: str, n_clips: int, duration_sec: float) -> None:
+        try:
+            if n_clips >= 10 and duration_sec > 60 * 15:
+                logger.info(
+                    f"[job {job_id}] render-workload note: {n_clips} clips from a "
+                    f"{duration_sec / 60:.0f} min source — render is the "
+                    f"memory-critical stage; each clip is its own ffmpeg process"
+                )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # disk-space guard (the method whose absence crashed two jobs)
+    # ------------------------------------------------------------------
+
+    def _check_disk_space(self, job_id: str, source_duration_sec: float) -> None:
+        """Fail fast when the host is out of room before we write more artifacts.
+
+        Called once at the top of _stages and once inside _stage_render (after
+        probe) so a host that fills up mid-render fails at the cheapest point.
+        This is a guard, not a quota system: it does not try to predict whether
+        the WHOLE batch will fit, only whether the host is already in trouble.
+        """
+        from app import hostlimits
+
+        path = self.settings.app.paths.data_dir
+        lim = hostlimits.describe()
+        try:
+            used = hostlimits.dir_bytes(path)
+            free = hostlimits.dir_free(path)
+        except Exception as exc:
+            logger.warning(f"[job {job_id}] could not measure disk: {exc}")
+            return
+        if free is not None and free < 200 * 1024 * 1024:
+            raise video.RenderError(
+                f"not enough free disk ({lim}) — less than 200 MB free on "
+                f"{path}. The download and transcript are still cached; Retry "
+                f"will resume from the last completed stage once space is cleared."
+            )
+        if source_duration_sec > 0:
+            est = source_duration_sec * 0.05
+            if free is not None and est and free < est + 500 * 1024 * 1024:
+                logger.warning(
+                    f"[job {job_id}] low disk headroom: {free // (1024*1024)} MB free, "
+                    f"~{est:.0f} MB estimated render footprint for a "
+                    f"{source_duration_sec / 60:.0f} min source"
+                )
+
+    # ------------------------------------------------------------------
+    # structured failure path (the method whose absence masked the real crash)
+    # ------------------------------------------------------------------
+
+    def _fail(self, job_id: str, message: str, detail: str) -> None:
+        """Record a terminal failure and stop the job.
+
+        This is the ONE place a structured exception path writes the terminal
+        state, so the exception handler in run() does not itself crash while
+        trying to report an earlier crash (the bug behind both failed jobs:
+        the handler called self._fail which did not exist).
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            logger.error(f"[job {job_id}] cannot fail — job gone from store")
+            return
+        stage = job.get("stage") or "unknown"
+        self._stage_status.setdefault(stage, _normalize_stage_status({}))
+        self._stage_status[stage]["status"] = "failed"
+        self._stage_status[stage]["error"] = message
+        self._stage_status[stage]["errorDetail"] = detail
+        now_ms = int(time.time() * 1000)
+        job.update({
+            "stage": "failed",
+            "failedStage": stage,
+            "error": message,
+            "errorDetail": detail,
+            "completedAt": now_ms,
+            "stageStatus": self._stage_status,
+            "interrupted": False,
+            "progress": 0.0,
+            "unitLabel": None,
+            "unitsDone": None,
+            "unitsTotal": None,
+            "stageEtaSec": None,
+            "totalEtaSec": None,
+            "stagePlan": None,
+            "lastProgressAt": now_ms,
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(job_id, f"FAILED at {stage}: {message}")
+        logger.error(f"[job {job_id}] FAILED at {stage}: {message}")
+
+    # ------------------------------------------------------------------
+    # temp cleanup (the method whose absence was never reached, but must exist)
+    # ------------------------------------------------------------------
+
+    def _cleanup_job_temps(
+        self, job_id: str, ws: StageWorkspace,
+    ) -> None:
+        """Drop scratch files that are no longer needed once the batch finished.
+
+        Called after _finish so a completed job does not keep its extracted
+        audio WAV and per-chunk transcript scratch around for the lifetime of
+        the job. Finished stage artifacts (words.json, candidates.json, cuts,
+        per-clip windows) are NOT touched — those are what resume reuses.
+        """
+        try:
+            audio = ws.stage_dir("reframe") / "audio.wav"
+            if audio.exists():
+                audio.unlink(missing_ok=True)
+                logger.info(f"[job {job_id}] removed scratch audio {audio}")
+        except Exception as exc:
+            logger.warning(f"[job {job_id}] could not remove scratch audio: {exc}")
+        try:
+            chunk_dir = ws.stage_dir("transcribe") / "chunks"
+            if chunk_dir.is_dir():
+                for p in chunk_dir.glob("*.tmp"):
+                    p.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning(f"[job {job_id}] could not clean transcript tmp files: {exc}")
+
+    # ------------------------------------------------------------------
+    # per-stage status helpers
+    # ------------------------------------------------------------------
+
+    def _stage_status_for(self, job_id: str, stage: str) -> dict[str, Any]:
+        """Current per-stage status blob, loaded from the job doc if needed."""
+        if self._stage_status:
+            return self._stage_status.get(stage, _normalize_stage_status({}))
+        job = self.store.get_job(job_id)
+        if job and isinstance(job.get("stageStatus"), dict):
+            self._stage_status = _validate_and_normalize_stage_statuses(job["stageStatus"])
+        else:
+            self._stage_status = _validate_and_normalize_stage_statuses(None)
+        return self._stage_status.get(stage, _normalize_stage_status({}))
+
+    def _set_stage_status(
+        self, job_id: str, stage: str, *, status: str,
+        startedAt: int | None = None, doneAt: int | None = None,
+        error: str | None = None, errorDetail: str | None = None,
+    ) -> None:
+        """Persist a per-stage transition atomically and update the working copy."""
+        now = int(time.time() * 1000)
+        blob = self._stage_status_for(job_id, stage)
+        blob["status"] = status
+        if startedAt is not None:
+            blob["startedAt"] = startedAt
+        if doneAt is not None:
+            blob["doneAt"] = doneAt
+        if error is not None:
+            blob["error"] = error
+        if errorDetail is not None:
+            blob["errorDetail"] = errorDetail
+        job = self.store.get_job(job_id)
+        if job is None:
+            return
+        job["stageStatus"] = dict(self._stage_status)
+        job["lastProgressAt"] = now
+        self.store.write_job(job)
+
+    def _mark_stage_running(self, job_id: str, stage: str) -> None:
+        prev = self._stage_status_for(job_id, stage)
+        if prev.get("status") in {"done", "failed"}:
+            return
+        self._set_stage_status(
+            job_id, stage, status="running",
+            startedAt=prev.get("startedAt") or int(time.time() * 1000),
+        )
+
+    def _mark_stage_done(self, job_id: str, stage: str) -> None:
+        self._set_stage_status(
+            job_id, stage, status="done",
+            doneAt=int(time.time() * 1000),
+            error=None, errorDetail=None,
+        )
+
+    def _mark_stage_failed(self, job_id: str, stage: str, error: str, detail: str) -> None:
+        self._set_stage_status(
+            job_id, stage, status="failed",
+            doneAt=int(time.time() * 1000),
+            error=error, errorDetail=detail,
+        )
+
+    def _first_incomplete_stage(self, job_id: str) -> str | None:
+        """First stage that is not 'done' according to the persisted stageStatus.
+
+        This is the authoritative resume point. It defaults to the workspace
+        markers when stageStatus has not been written yet (older jobs), so
+        existing cached jobs still resume correctly.
+        """
+        ss = self._stage_status_for(job_id, STAGES[0])
+        if any(isinstance(v.get("status"), str) for v in self._stage_status.values()):
+            for s in STAGES:
+                if self._stage_status_for(job_id, s).get("status") != "done":
+                    return s
+            return None
+        # Fall back to workspace markers for jobs that predate stageStatus.
+        ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
+        return ws.first_incomplete()
 
     # ------------------------------------------------------------------
     # progress / logging helpers
@@ -312,6 +618,7 @@ class Pipeline:
                     if job is None or job.get("stage") in {"complete", "failed"}:
                         return
                     self._patch_job(job_id, lastProgressAt=int(time.time() * 1000))
+                    self._heartbeat_at = int(time.time() * 1000)
                 except Exception as exc:  # noqa: BLE001 - never fail a job
                     # A heartbeat that cannot write must not raise into the
                     # render; the watchdog's own timeout remains the backstop.
@@ -474,24 +781,32 @@ class Pipeline:
             # remote worker refused/unreachable — honest error, job stays failed
             self._fail(job_id, f"Could not hand the job to your worker: {exc}", self._detail(exc))
         except llm.LlmNotConfigured as exc:
-            # The exception already names the right backend and variable
-            # ("GROQ_API_KEY missing…", "ollama server unreachable…"). A
-            # hardcoded "add GEMINI_API_KEY" overrode it and sent users hunting
-            # for a key that was never the one being used.
             self._fail(job_id, f"AI detection offline — {exc}", self._detail(exc))
         except llm.LlmError as exc:
             self._fail(job_id, f"AI detection failed: {exc}", self._detail(exc))
         except download.DownloadError as exc:
             self._fail(job_id, f"Could not fetch video: {exc}", self._detail(exc))
         except asr.AsrError as exc:
-            # covers subtitle.TranscribeError too — one class of readable
-            # transcription failure reaches the UI either way
             self._fail(job_id, f"Transcription failed: {exc}", self._detail(exc))
         except video.RenderError as exc:
             self._fail(job_id, f"Render failed: {exc}", self._detail(exc))
         except Exception as exc:  # noqa: BLE001 - the UI must see the real error
             logger.exception(f"[job {job_id}] unexpected pipeline error")
             self._fail(job_id, f"Pipeline error: {exc}", self._detail(exc))
+        finally:
+            # Make the liveness heartbeat visible to the reaper/web. A child that
+            # reaches here — including on a hard crash — has had its last beat at
+            # the moment the heartbeat context manager stopped, so persist that
+            # timestamp once more with the (possibly terminal) stageStatus we have
+            # now. The reaper uses heartbeatAt + lastProgressAt together to decide
+            # whether a running-looking job still has a live child.
+            try:
+                job = self.store.get_job(job_id)
+                if job is not None:
+                    job["heartbeatAt"] = self._heartbeat_at
+                    self.store.write_job(job)
+            except Exception:
+                pass
 
     def _stages(self, job_id: str, job: dict[str, Any], t_start: float) -> None:
         """The stage sequence, isolated from run()'s failure handling.
@@ -522,9 +837,33 @@ class Pipeline:
             return
 
         ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
+        self._long_source_note(job_id,
+            float((ws.done_meta("fetch") or {}).get("duration") or 0.0) or 0.0)
+        # Long-input guard: refuse absurdly long sources up-front (the download
+        # stage already enforces max_source_min, but a reframed job can reach
+        # _stages with a cached source that is longer than the host wants to
+        # chew through in one render pass). This is descriptive, not a quota.
+        src_duration_for_warning = 0.0
+        if ws.is_done("fetch"):
+            fm = ws.done_meta("fetch") or {}
+            src_duration_for_warning = float(fm.get("duration") or 0.0)
+        if src_duration_for_warning > self.settings.hosted.max_source_min * 60 * 2:
+            logger.warning(
+                f"[job {job_id}] source is {src_duration_for_warning / 60:.0f} min "
+                f"(>{self.settings.hosted.max_source_min * 2:.0f} min) — transcription "
+                f"will chunk aggressively and render will be per-clip; memory is the "
+                f"likely limit, not time"
+            )
         self._check_disk_space(job_id, 0.0)
-        resume_from = ws.first_incomplete()
-        done_before = [s for s in STAGES if ws.is_done(s)]
+
+        # Where does this run actually start? Prefer the persisted
+        # stageStatus (the dashboard's authoritative per-stage picture) so a
+        # resumed job does not redo finished work; fall back to workspace
+        # markers for jobs that predate stageStatus.
+        resume_from = self._first_incomplete_stage(job_id) or ws.first_incomplete()
+        done_before = [s for s in STAGES if self._stage_status_for(job_id, s).get("status") == "done"]
+        if not done_before:
+            done_before = [s for s in STAGES if ws.is_done(s)]
         if done_before:
             self._log(
                 job_id,
@@ -532,14 +871,51 @@ class Pipeline:
                 f"starting at '{resume_from or 'export'}'",
             )
 
+        # If a stage is done in the workspace but not yet reflected in
+        # stageStatus (older jobs), sync the two views so we never re-run it.
+        for s in STAGES:
+            blob = self._stage_status_for(job_id, s)
+            if blob.get("status") != "done" and ws.is_done(s):
+                self._mark_stage_done(job_id, s)
+
         src = self._stage_fetch(job, ws)
+        self._mark_stage_running(job_id, "fetch")
+        try:
+            src = self._stage_fetch(job, ws)
+            self._mark_stage_done(job_id, "fetch")
+        except Exception:
+            self._mark_stage_failed(job_id, "fetch", *self._fail_args_for(sys.exc_info()))
+            raise
         self._checkpoint(job_id, "fetch")
+        self._mark_stage_running(job_id, "transcribe")
         transcript = self._stage_transcribe(job, src, ws)
+        self._mark_stage_done(job_id, "transcribe")
+        # Transcription-memory guard: if the source is long enough that the
+        # transcript words dict is large, log the size so a future OOM is
+        # diagnosable as "transcript grew to N words / M MB" rather than a
+        # mysterious kill.
+        try:
+            n_words = len(transcript.words)
+            if n_words > 5000:
+                logger.info(
+                    f"[job {job_id}] long-transcript guard: {n_words} words "
+                    f"(transcript dominates memory now — do not load extra copies)"
+                )
+        except Exception:
+            pass
         self._checkpoint(job_id, "transcribing")
+        self._mark_stage_running(job_id, "detect")
         candidates = self._stage_detect(job, transcript, ws)
+        self._mark_stage_done(job_id, "detect")
         self._checkpoint(job_id, "finding")
+        self._mark_stage_running(job_id, "reframe")
         self._stage_render(job, src, transcript, candidates, ws)
+        self._mark_stage_done(job_id, "reframe")
+        self._mark_stage_running(job_id, "captions")
+        self._mark_stage_done(job_id, "captions")
+        self._mark_stage_running(job_id, "export")
         self._finish(job_id, time.time() - t_start)
+        self._mark_stage_done(job_id, "export")
         # Scratch audio is dead weight once the clips exist.
         self._cleanup_job_temps(job_id, StageWorkspace(self.settings.app.paths.data_dir, job_id))
 
@@ -549,6 +925,14 @@ class Pipeline:
         return "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )[-4000:]
+
+    @staticmethod
+    def _fail_args_for(exc_info) -> tuple[str, str]:
+        """Build (message, detail) for _mark_stage_failed from an exception."""
+        exc_type, exc_value, exc_tb = exc_info
+        msg = f"{exc_type.__name__}: {exc_value}"
+        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))[-4000:]
+        return msg, detail
 
     # ------------------------------------------------------------------
     # stage 1: fetch

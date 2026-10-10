@@ -144,12 +144,54 @@ class StageWorkspace:
         tmp.replace(path)
         return path
 
-    def read_json(self, stage: str, name: str) -> Any | None:
+    # ------------------------------------------------------------------ #
+    # typed artifact validation
+    # ------------------------------------------------------------------ #
+
+    def read_json(
+        self, stage: str, name: str, *, expected: type | None = None,
+        min_items: int | None = None, max_items: int | None = None,
+    ) -> Any | None:
+        """Read a stage artifact and validate its shape.
+
+        Replaces the old untyped read so a corrupt/missing/wrong-shape
+        artifact invalidates only that stage instead of crashing the pipeline
+        the moment it is accessed. ``expected`` is the Python type we expect
+        (``list`` or ``dict``); ``min_items``/``max_items`` apply to
+        sequences.
+
+        Returns None when the file is missing, unreadable, or the wrong shape
+        — the caller is then expected to re-run the stage (or, for
+        per-clip artifacts, skip it) rather than crash.
+        """
         path = self.root / stage / name
         if not path.exists():
+            logger.info(f"[stages] {stage}/{name}: missing — stage needs re-run")
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning(f"[stages] unreadable artifact {stage}/{name}: {exc}")
+            logger.warning(f"[stages] {stage}/{name}: unreadable json: {exc}")
             return None
+        if expected is not None and not isinstance(data, expected):
+            logger.warning(
+                f"[stages] {stage}/{name}: wrong shape "
+                f"(expected {expected.__name__}, got {type(data).__name__}) — "
+                f"stage needs re-run"
+            )
+            return None
+        if isinstance(data, list):
+            n = len(data)
+            if min_items is not None and n < min_items:
+                logger.warning(
+                    f"[stages] {stage}/{name}: too few items "
+                    f"({n} < {min_items}) — stage needs re-run"
+                )
+                return None
+            if max_items is not None and n > max_items:
+                logger.warning(
+                    f"[stages] {stage}/{name}: too many items "
+                    f"({n} > {max_items}) — stage needs re-run"
+                )
+                return None
+        return data
