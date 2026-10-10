@@ -1,9 +1,43 @@
 import '@vly-ai/integrations';
 import { Toaster } from "@/components/ui/sonner";
-import React, { StrictMode, useEffect, lazy, Suspense } from "react";
+import React, { StrictMode, useEffect, lazy, Suspense, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
+import { AuthProvider, RequireAuth, useSession } from "@/lib/auth";
+import { AuthPage } from "./pages/Auth";
+
+function AuthPageWrapper() {
+  const location = useLocation();
+  const returnTo = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const rt = params.get("returnTo");
+    return rt && typeof rt === "string" && rt.startsWith("/") ? rt : "/dashboard";
+  }, [location.search]);
+  return <AuthPage returnTo={returnTo} />;
+}
+
+function AlreadySignedIn({ returnTo }: { returnTo: string }) {
+  return (
+    <main className="min-h-screen bg-background">
+      <div className="mx-auto flex max-w-2xl flex-col gap-6 items-center justify-center px-4 py-24 text-center">
+        <div className="space-y-2">
+          <h1 className="text-2xl font-bold tracking-tight">Already signed in</h1>
+          <p className="text-sm text-muted-foreground">
+            Your session is active. If the page did not redirect automatically,
+            open the dashboard.
+          </p>
+        </div>
+        <a
+          href={returnTo}
+          className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium hover:border-primary/50"
+        >
+          Open dashboard
+        </a>
+      </div>
+    </main>
+  );
+}
 
 // Lazy load route components for better code splitting
 const Landing = lazy(() => import("./pages/Landing.tsx"));
@@ -66,8 +100,6 @@ class RootErrorBoundary extends React.Component<
     };
   }
   componentDidCatch(err: Error) {
-    // Also surface it in the document title and body class, so a crash is
-    // visible even in a screenshot of a stripped-down preview shell.
     console.error("[WebContainer preview] Root crash:", err);
     document.title = `ClipForge error: ${err.message || "runtime failure"}`;
   }
@@ -132,24 +164,53 @@ function BootCleanup() {
   return null;
 }
 
+function AuthRouteContent() {
+  const { user, loaded, refresh } = useSession();
+
+  const location = useLocation();
+  const returnTo = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const rt = params.get("returnTo");
+    return rt && typeof rt === "string" && rt.startsWith("/") ? rt : "/dashboard";
+  }, [location.search]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    if (!user) {
+      const params = new URLSearchParams();
+      params.set("returnTo", returnTo ?? "/dashboard");
+      window.location.href = `/auth?${params}`;
+      return;
+    }
+    refresh();
+  }, [user, loaded, returnTo, refresh]);
+
+  if (!loaded) {
+    return null;
+  }
+
+  if (user) {
+    const dest = returnTo ?? "/dashboard";
+    if (location.pathname !== dest) {
+      const params = new URLSearchParams(location.search);
+      params.delete("returnTo");
+      const href = params.size ? `${dest}?${params}` : dest;
+      window.location.href = href;
+      return null;
+    }
+    return <AlreadySignedIn returnTo={dest} />;
+  }
+
+  return <AuthPage returnTo={returnTo} />;
+}
+
 const rootEl = document.getElementById("root");
 if (!rootEl) {
-  // Should be impossible (index.html ships the element), but a missing mount
-  // point is otherwise a silent blank page.
   throw new Error("ClipForge: #root is missing from index.html");
 }
 
-// Tell index.html's guards that React has taken over, so its 15s timeout and
-// its error listeners stop reporting on a page that is working fine.
 window.__clipforgeBooted = true;
 
-// HTTP-layer backstop for share-sized clips.
-//
-// Registered ONLY in a production build. In dev this would sit in front of the
-// Vite module graph, and a cache-first worker that ever touched an app module
-// would serve stale code and break HMR for the whole session. It also matches
-// only /api/clips/<id>/share (see public/share-sw.js) and passes everything
-// else straight through, so even in production it cannot cache app code.
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker
@@ -171,13 +232,23 @@ createRoot(rootEl).render(
       </ToolbarErrorBoundary>
       <BrowserRouter>
         <RouteSyncer />
-        <Suspense fallback={<RouteLoading />}>
-          <Routes>
-            <Route path="/" element={<Landing />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </Suspense>
+        <AuthProvider>
+          <Suspense fallback={<RouteLoading />}>
+            <Routes>
+              <Route path="/" element={<Landing />} />
+              <Route path="/auth" element={<AuthRouteContent />} />
+              <Route
+                path="/dashboard"
+                element={
+                  <RequireAuth returnTo="/auth?returnTo=/dashboard">
+                    <Dashboard />
+                  </RequireAuth>
+                }
+              />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </Suspense>
+        </AuthProvider>
       </BrowserRouter>
       <Toaster />
     </RootErrorBoundary>
