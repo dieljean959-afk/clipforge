@@ -67,6 +67,7 @@ STAGE_STATUS_FIELDS = frozenset({
     "status", "startedAt", "doneAt", "error", "errorDetail",
 })
 
+
 def _normalize_stage_status(raw: Any) -> dict[str, Any]:
     """One canonical blob per stage, used as the per-stage status default."""
     if not isinstance(raw, dict):
@@ -79,6 +80,7 @@ def _normalize_stage_status(raw: Any) -> dict[str, Any]:
         "errorDetail": raw.get("errorDetail"),
     }
 
+
 def _validate_and_normalize_stage_statuses(raw: Any) -> dict[str, dict[str, Any]]:
     """Strip anything beyond canonical fields. Keeps older/unknown keys harmless."""
     if not isinstance(raw, dict):
@@ -88,6 +90,31 @@ def _validate_and_normalize_stage_statuses(raw: Any) -> dict[str, dict[str, Any]
         if isinstance(stage, str) and isinstance(blob, dict):
             out[stage] = _normalize_stage_status(blob)
     return out
+
+
+def _chunk_cached(cache_dir: Path | None, index: int) -> bool:
+    """True when a chunk's transcript has already been cached."""
+    if cache_dir is None or not cache_dir.is_dir():
+        return False
+    return (cache_dir / f"chunk_{index}.json").exists()
+
+#: How often a long, silent step re-asserts that the pipeline is alive.
+#:
+#: Five seconds is well inside the 600s stall timeout and comfortably longer
+#: than any real UI poll, so this is liveness only -- never progress.
+HEARTBEAT_SEC = 5.0
+
+#: How long a heartbeat can go unwritten before a RUNNING job is considered
+#: stale by the startup reaper / watchdog. This is the authoritative "is this
+#: child actually alive" threshold for a job whose lastProgressAt is silent.
+HEARTBEAT_STALE_SEC = 15.0
+
+
+STAGE_STATUS_FIELDS = frozenset({
+    "status", "startedAt", "doneAt", "error", "errorDetail",
+})
+
+
 
 
 class Pipeline:
@@ -1086,57 +1113,12 @@ class Pipeline:
             on_progress=on_progress,
             report=report,
             # Per-chunk persistence: a pause or host restart during chunk 5 of
-            # 7 resumes at chunk 6 instead of re-running — and re-billing —\n            # all seven Groq calls.
+            # 7 resumes at chunk 6 instead of re-running — and re-billing —
+            # all seven calls.
             chunk_cache=_StageChunkCache(ws, model=llm.provider_label(self.settings)),
             should_pause=lambda: self.pause_requested(job_id),
         )
         ws.write_json("detect", "candidates.json", candidates)
-        ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(candidates))
-        # The three numbers that explain the batch size. "Detected 61, kept 18\n        # of a possible 23" is a different story from "asked for 10, got 10",\n        # and only the first one tells the user whether to raise min_score,\n        # lower the cap, or leave it alone.
-        job = self._patch_job(
-            job_id,
-            candidatesDetected=int(report.get("detected", len(candidates))),
-            clipsAboveScore=int(report.get("aboveFloor", len(candidates))),
-            clipsBelowScore=int(report.get("belowFloor", 0)),
-            clipScoreFloor=float(report.get("floor", self.settings.gemini.min_score)),
-        )
-        self._log(
-            job_id,
-            f"Detection: {job.get('candidatesDetected')} candidate(s) found, "
-            f"{job.get('clipsAboveScore')} scored >= {job.get('clipScoreFloor'):.0f}, "
-            f"{len(candidates)} kept (cap was {target})",
-        )
-        if report.get("aboveFloor", 0) > len(candidates):
-            self._log(
-                job_id,
-                f"Note: {report['aboveFloor'] - len(candidates)} good candidate(s) were " 
-            )
-        )
-        ws.write_json("detect", "candidates.json", candidates)
-        ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(candidates))
-        # The three numbers that explain the batch size. "Detected 61, kept 18
-        # of a possible 23" is a different story from "asked for 10, got 10",
-        # and only the first one tells the user whether to raise min_score,
-        # lower the cap, or leave it alone.
-        job = self._patch_job(
-            job_id,
-            candidatesDetected=int(report.get("detected", len(candidates))),
-            clipsAboveScore=int(report.get("aboveFloor", len(candidates))),
-            clipsBelowScore=int(report.get("belowFloor", 0)),
-            clipScoreFloor=float(report.get("floor", self.settings.gemini.min_score)),
-        )
-        self._log(
-            job_id,
-            f"Detection: {job.get('candidatesDetected')} candidate(s) found, "
-            f"{job.get('clipsAboveScore')} scored >= {job.get('clipScoreFloor'):.0f}, "
-            f"{len(candidates)} kept (cap was {target})",
-        )
-        if report.get("aboveFloor", 0) > len(candidates):
-            self._log(
-                job_id,
-                f"Note: {report['aboveFloor'] - len(candidates)} good candidate(s) were "
-                f"above the floor but were not selected because of the cap."
-            )
         return candidates
 
     # ------------------------------------------------------------------
@@ -1295,12 +1277,6 @@ class Pipeline:
 # ------------------------------------------------------------------
 
 
-def _chunk_cached(cache_dir: Path | None, index: int) -> bool:
-    """True when a chunk's transcript has already been cached."""
-    if cache_dir is None or not cache_dir.is_dir():
-        return False
-    return (cache_dir / f"chunk_{index}.json").exists()
-
 
 class _StageChunkCache:
     """Per-chunk persistence for LLM / ASR stages that expose a cache dir."""
@@ -1328,4 +1304,6 @@ class _StageChunkCache:
         if not p.exists():
             raise FileNotFoundError(p)
         return json.loads(p.read_text())
+
+
 
