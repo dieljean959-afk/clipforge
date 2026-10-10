@@ -49,419 +49,44 @@ from app import (
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.stages import STAGES, StageWorkspace
-from app.store import LocalStore    #: How often a long, silent step re-asserts that the pipeline is alive.
+from app.store import LocalStore
+
+#: How often a long, silent step re-asserts that the pipeline is alive.
 #:
 #: Five seconds is well inside the 600s stall timeout and comfortably longer
 #: than any real UI poll, so this is liveness only -- never progress.
 HEARTBEAT_SEC = 5.0
 
-
-class Pipeline:
-    def __init__(self, settings: Settings, store: LocalStore) -> None:
-        self.settings = settings
-        self.store = store
-        # Remaining-time prior for the CURRENT stage (e.g. duration x RTF while
-        # transcribing). Reset by _progress whenever the stage changes.
-        self._prior_eta_sec: float | None = None
-        # Heartbeat writes that failed. Surfaced by the stall check so a job
-        # whose liveness signal could not be recorded is diagnosed as
-        # "the worker is alive but cannot report", not "the worker died".
-        self._heartbeat_faults = 0
-        # Working-stage cache for the current run. Written to the job doc on
-        # every transition so the dashboard can show per-stage state without
-        # reading the workspace markers.
-        self._stage_status: dict[str, dict[str, Any]] = {}
-        # Liveness for THIS run. Written by the heartbeat on every beat and by
-        # the startup reaper to decide whether a running-looking job still has a
-        # live child. Persisted by _set_stage_status / _fail so a recovered job
-        # carries its heartbeat history.
-        self._heartbeat_at: int | None = None
-
-    # ------------------------------------------------------------------
-    # disk-space guard (the method whose absence crashed two jobs)
-    # ------------------------------------------------------------------
-
-    def _check_disk_space(self, job_id: str, source_duration_sec: float) -> None:
-        """Fail fast when the host is out of room before we write more artifacts.
-
-        Called once at the top of _stages and once inside _stage_render (after
-        probe) so a host that fills up mid-render fails at the cheapest point.
-        This is a guard, not a quota system: it does not try to predict whether
-        the WHOLE batch will fit, only whether the host is already in trouble.
-        """
-        from app import hostlimits
-
-        path = self.settings.app.paths.data_dir
-        lim = hostlimits.describe()
-        try:
-            used = hostlimits.dir_bytes(path)
-            free = hostlimits.dir_free(path)
-        except Exception as exc:
-            logger.warning(f"[job {job_id}] could not measure disk: {exc}")
-            return
-        if free is not None and free < 200 * 1024 * 1024:
-            raise video.RenderError(
-                f"not enough free disk ({lim}) — less than 200 MB free on "
-                f"{path}. The download and transcript are still cached; Retry "
-                f"will resume from the last completed stage once space is cleared."
-            )
-        if source_duration_sec > 0:
-            est = source_duration_sec * 0.05
-            if free is not None and est and free < est + 500 * 1024 * 1024:
-                logger.warning(
-                    f"[job {job_id}] low disk headroom: {free // (1024*1024)} MB free, "
-                    f"~{est:.0f} MB estimated render footprint for a "
-                    f"{source_duration_sec / 60:.0f} min source"
-                )
-
-    # ------------------------------------------------------------------
-    # structured failure path (the method whose absence masked the real crash)
-    # ------------------------------------------------------------------
-
-    def _fail(self, job_id: str, message: str, detail: str) -> None:
-        """Record a terminal failure and stop the job.
-
-        This is the ONE place a structured exception path writes the terminal
-        state, so the exception handler in run() does not itself crash while
-        trying to report an earlier crash (the bug behind both failed jobs:
-        the handler called self._fail which did not exist).
-        """
-        job = self.store.get_job(job_id)
-        if job is None:
-            logger.error(f"[job {job_id}] cannot fail — job gone from store")
-            return
-        stage = job.get("stage") or "unknown"
-        self._stage_status.setdefault(stage, _normalize_stage_status({}))
-        self._stage_status[stage]["status"] = "failed"
-        self._stage_status[stage]["error"] = message
-        self._stage_status[stage]["errorDetail"] = detail
-        now_ms = int(time.time() * 1000)
-        job.update({
-            "stage": "failed",
-            "failedStage": stage,
-            "error": message,
-            "errorDetail": detail,
-            "completedAt": now_ms,
-            "stageStatus": self._stage_status,
-            "interrupted": False,
-            "progress": 0.0,
-            "unitLabel": None,
-            "unitsDone": None,
-            "unitsTotal": None,
-            "stageEtaSec": None,
-            "totalEtaSec": None,
-            "stagePlan": None,
-            "lastProgressAt": now_ms,
-            "heartbeatAt": now_ms,
-        })
-        self.store.write_job(job)
-        self.store.append_job_log(job_id, f"FAILED at {stage}: {message}")
-        logger.error(f"[job {job_id}] FAILED at {stage}: {message}")
-
-    # ------------------------------------------------------------------
-    # temp cleanup (the method whose absence was never reached, but must exist)
-    # ------------------------------------------------------------------
-
-    def _cleanup_job_temps(
-        self, job_id: str, ws: StageWorkspace,
-    ) -> None:
-        """Drop scratch files that are no longer needed once the batch finished.
-
-        Called after _finish so a completed job does not keep its extracted
-        audio WAV and per-chunk transcript scratch around for the lifetime of
-        the job. Finished stage artifacts (words.json, candidates.json, cuts,
-        per-clip windows) are NOT touched — those are what resume reuses.
-        """
-        try:
-            audio = ws.stage_dir("reframe") / "audio.wav"
-            if audio.exists():
-                audio.unlink(missing_ok=True)
-                logger.info(f"[job {job_id}] removed scratch audio {audio}")
-        except Exception as exc:
-            logger.warning(f"[job {job_id}] could not remove scratch audio: {exc}")
-        try:
-            chunk_dir = ws.stage_dir("transcribe") / "chunks"
-            if chunk_dir.is_dir():
-                for p in chunk_dir.glob("*.tmp"):
-                    p.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.warning(f"[job {job_id}] could not clean transcript tmp files: {exc}")
-
-    # ------------------------------------------------------------------
-    # per-stage status helpers
-    # ------------------------------------------------------------------
-
-    def _stage_status_for(self, job_id: str, stage: str) -> dict[str, Any]:
-        """Current per-stage status blob.
-
-        Provided for call sites that still want a one-shot lookup without
-        relying on the run-level ``_stage_status`` working copy.
-        """
-        if self._stage_status:
-            return self._stage_status.get(stage, _normalize_stage_status({}))
-        return _normalize_stage_status({})
-
-    def _set_stage_status(
-        self, job_id: str, stage: str, *, status: str,
-        startedAt: int | None = None, doneAt: int | None = None,
-        error: str | None = None, errorDetail: str | None = None,
-    ) -> None:
-        """Persist a per-stage transition atomically and update the working copy."""
-        now = int(time.time() * 1000)
-        blob = self._stage_status_for(job_id, stage)
-        blob["status"] = status
-        if startedAt is not None:
-            blob["startedAt"] = startedAt
-        if doneAt is not None:
-            blob["doneAt"] = doneAt
-        if error is not None:
-            blob["error"] = error
-        if errorDetail is not None:
-            blob["errorDetail"] = errorDetail
-        job = self.store.get_job(job_id)
-        if job is None:
-            return
-        job["stageStatus"] = dict(self._stage_status)
-        job["lastProgressAt"] = now
-        job["heartbeatAt"] = now
-        self.store.write_job(job)
-
-    def _mark_stage_running(self, job_id: str, stage: str) -> None:
-        prev = self._stage_status_for(job_id, stage)
-        if prev.get("status") in {"done", "failed"}:
-            return
-        self._set_stage_status(
-            job_id, stage, status="running",
-            startedAt=prev.get("startedAt") or int(time.time() * 1000),
-        )
-
-    def _mark_stage_done(self, job_id: str, stage: str) -> None:
-        self._set_stage_status(
-            job_id, stage, status="done",
-            doneAt=int(time.time() * 1000),
-            error=None, errorDetail=None,
-        )
-
-    def _mark_stage_failed(self, job_id: str, stage: str, error: str, detail: str) -> None:
-        self._set_stage_status(
-            job_id, stage, status="failed",
-            doneAt=int(time.time() * 1000),
-            error=error, errorDetail=detail,
-        )
-
-    def _first_incomplete_stage(self, job_id: str) -> str | None:
-        """First stage that is not 'done' according to the persisted stageStatus.
-
-        This is the authoritative resume point. For jobs that predate
-        stageStatus it falls back to the workspace DONE markers so existing
-        cached jobs still resume correctly.
-        """
-        job = self.store.get_job(job_id)
-        if job and isinstance(job.get("stageStatus"), dict):
-            self._stage_status = _validate_and_normalize_stage_statuses(job["stageStatus"])
-        elif not self._stage_status:
-            self._stage_status = _validate_and_normalize_stage_statuses(None)
-        for s in STAGES:
-            if self._stage_status.get(s, {}).get("status") != "done":
-                return s
-        return None
-
-    def _fail_args_for(self, exc_info) -> tuple[str, str]:
-        """Build (message, detail) for _mark_stage_failed from an exception."""
-        exc_type, exc_value, exc_tb = exc_info
-        msg = f"{exc_type.__name__}: {exc_value}"
-        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))[-4000:]
-        return msg, detail
-
-    # ------------------------------------------------------------------
-    # long-input guard queries (descriptive only; no caps)
-    # ------------------------------------------------------------------
-
-    def _long_source_note(self, duration_sec: float) -> None:
-        """Log once, at pipeline start, if the source is long enough that the
-        render stage is the memory-critical one. Purely diagnostic.
-        """
-        if duration_sec <= self.settings.hosted.max_source_min * 60 * 2:
-            return
-        logger.info(
-            f"[long-source] {duration_sec / 60:.0f} min "
-            f"(> {self.settings.hosted.max_source_min * 2:.0f} min) — "
-            f"transcription will chunk and render is per-clip; memory is the "
-            f"likely limit, not time"
-        )
-
-    def _transcript_size_note(self, n_words: int) -> None:
-        if n_words <= 5000:
-            return
-        logger.info(
-            f"[long-transcript] {n_words} words — "
-            f"the transcript dict is now the largest single Python object; "
-            f"do not keep extra copies of it in memory"
-        )
-
-    def _render_workload_note(self, n_clips: int, duration_sec: float) -> None:
-        if n_clips < 10 or duration_sec <= 60 * 15:
-            return
-        logger.info(
-            f"[long-render] {n_clips} clips from a "
-            f"{duration_sec / 60:.0f} min source — render is the "
-            f"memory-critical stage; each clip is its own ffmpeg process"
-        )
-
-
-
-def _chunk_cached(cache_dir: Path | None, index: int) -> bool:
-    """Is this transcript chunk already on disk from an earlier attempt?"""
-    if cache_dir is None:
-        return False
-    return (cache_dir / f"chunk_{index:05d}.json").exists()
-
-
-def _tree_size(root: Path) -> int:
-    """Bytes actually stored under `root`, walking it.
-
-    `Path.stat().st_size` on a DIRECTORY is the size of the inode entry, not
-    the bytes underneath, so summing it reports a few KB for a 300 MB clip
-    folder. Every "freed N MB" message that meant anything had to walk.
-    Symlinks are skipped so a link back into the tree is not double-counted,
-    and an unreadable entry is skipped rather than aborting the whole total.
-    """
-    if not root.exists():
-        return 0
-    if root.is_file() and not root.is_symlink():
-        try:
-            return root.stat().st_size
-        except OSError:
-            return 0
-    total = 0
-    try:
-        for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
-            for name in filenames:
-                p = Path(dirpath) / name
-                try:
-                    if p.is_symlink():
-                        continue
-                    total += p.stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        return total
-    return total
-
-
-class JobPaused(Exception):
-    """The user paused this job; the pipeline stopped at a safe boundary.
-
-    Deliberately NOT a failure. Everything completed so far is on disk —
-    stage markers, cached transcript chunks, per-chunk detection results and
-    finished clips — so resuming continues from exactly here.
-    """
-
-
-class _PauseRequested(Exception):
-    """Internal signal raised at a unit boundary when a pause is pending."""
-
-
-class _StageChunkCache(llm.ChunkCache):
-    """Per-chunk detection results on disk, inside the job's own workspace.
-
-    Lives under `detect/chunks/` so it is namespaced by job and removed with
-    the workspace on delete. The `detect` DONE marker is only written once the
-    whole stage completes, so a partially-detected job keeps these chunks and
-    reuses them on resume.
-    """
-
-    def __init__(self, ws: StageWorkspace, model: str = "") -> None:
-        self._ws = ws
-        self._model = model
-
-    def get(self, index: int) -> list[dict[str, Any]] | None:
-        data = self._ws.read_json("detect", f"chunks/chunk_{index:03d}.json")
-        if isinstance(data, list):
-            return data
-        return None
-
-    def put(self, index: int, candidates: list[dict[str, Any]]) -> None:
-        self._ws.write_json("detect", f"chunks/chunk_{index:03d}.json", candidates)
-        if self._model:
-            self._note_model(index)
-
-    # -- scoring provenance -------------------------------------------------- #
-    # Detection can span more than one model over a job's life: a quota runs
-    # out mid-source, the model is switched, the remaining chunks score under a
-    # different model than the cached ones. That is invisible in the result —
-    # every candidate looks identical — so which model scored which part of the
-    # video is recorded here, as a SIDECAR.
-    #
-    # Deliberately not folded into the chunk files: the chunk payload is what
-    # the cache hits on, and reshaping it to carry a model name would
-    # invalidate every chunk already paid for.
-    def _note_model(self, index: int) -> None:
-        prov = self.provenance()
-        prov[str(index)] = self._model
-        self._ws.write_json("detect", "provenance.json", prov)
-
-    def provenance(self) -> dict[str, str]:
-        data = self._ws.read_json("detect", "provenance.json")
-        if isinstance(data, dict):
-            return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
-        return {}
+#: How long a heartbeat can go unwritten before a RUNNING job is considered
+#: stale by the startup reaper / watchdog. This is the authoritative "is this
+#: child actually alive" threshold for a job whose lastProgressAt is silent.
+HEARTBEAT_STALE_SEC = 15.0
 
 
 STAGE_STATUS_FIELDS = frozenset({
     "status", "startedAt", "doneAt", "error", "errorDetail",
 })
 
-
 def _normalize_stage_status(raw: Any) -> dict[str, Any]:
-    """Coerce a stored stage-status blob into the canonical shape.
-
-    Validated on load so a stale/corrupt/wrong-shaped entry from an older
-    build or a hand-edited file does not crash the dashboard or the runner.
-    Missing keys get safe defaults; unknown keys are dropped; wrong types are
-    coerced where safe (timestamps to int, status to str).
-    """
+    """One canonical blob per stage, used as the per-stage status default."""
     if not isinstance(raw, dict):
-        return {"status": "pending", "startedAt": None, "doneAt": None,
-                "error": None, "errorDetail": None}
-    status = str(raw.get("status") or "pending").strip()
-    if status not in {"pending", "running", "done", "failed"}:
-        status = "pending"
-    def _int_or_none(v: Any) -> int | None:
-        if v is None:
-            return None
-        try:
-            f = float(v)
-            if not f.is_integer():
-                return None
-            return int(f)
-        except (TypeError, ValueError):
-            return None
+        return {f: None for f in STAGE_STATUS_FIELDS}
     return {
-        "status": status,
-        "startedAt": _int_or_none(raw.get("startedAt")),
-        "doneAt": _int_or_none(raw.get("doneAt")),
-        "error": str(raw.get("error") or "") or None,
-        "errorDetail": str(raw.get("errorDetail") or "") or None,
+        "status": raw.get("status"),
+        "startedAt": raw.get("startedAt"),
+        "doneAt": raw.get("doneAt"),
+        "error": raw.get("error"),
+        "errorDetail": raw.get("errorDetail"),
     }
 
-
-def _validate_and_normalize_stage_statuses(
-    raw: Any,
-) -> dict[str, dict[str, Any]]:
-    """Validate the whole stageStatus block on load.
-
-    Returns the canonical dict keyed by stage name. Unknown stage keys are
-    dropped so a stale key from a future pipeline version does not leak into
-    the UI. Stages that are missing entirely are filled in as pending.
-    """
-    out: dict[str, dict[str, Any]] = {}
+def _validate_and_normalize_stage_statuses(raw: Any) -> dict[str, dict[str, Any]]:
+    """Strip anything beyond canonical fields. Keeps older/unknown keys harmless."""
     if not isinstance(raw, dict):
-        for s in STAGES:
-            out[s] = _normalize_stage_status({})
-        return out
-    for s in STAGES:
-        out[s] = _normalize_stage_status(raw.get(s))
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for stage, blob in raw.items():
+        if isinstance(stage, str) and isinstance(blob, dict):
+            out[stage] = _normalize_stage_status(blob)
     return out
 
 
@@ -480,11 +105,6 @@ class Pipeline:
         # every transition so the dashboard can show per-stage state without
         # reading the workspace markers.
         self._stage_status: dict[str, dict[str, Any]] = {}
-        # Backfill the working copy from the stored job doc so a fresh Pipeline
-        # instance (e.g. inside app.runner) resumes the per-stage picture the
-        # supervisor / dashboard already wrote. Any key missing from the doc is
-        # left as the mutable default we built below.
-        stored = store.get_job(job_id) if False else None  # set per-run below
         # Liveness for THIS run. Written by the heartbeat on every beat and by
         # the startup reaper to decide whether a running-looking job still has a
         # live child. Persisted by _set_stage_status / _fail so a recovered job
@@ -496,10 +116,12 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _long_source_note(self, duration_sec: float) -> None:
-        """Log once, at pipeline start, if the source is long enough that the
-        render stage is the memory-critical one. Purely diagnostic: it does not
-        change behaviour, it just makes any later OOM traceable to "rendering N
-        clips from a M-min source" instead of a mystery kill.
+        """Log once, at pipeline start, if the source is unusually long.
+
+        No cap, no shortcut, no change to the plan or the job: purely a
+        descriptive note so a reviewer can distinguish "took a while" from
+        "something hung". The actual pacing comes from the stage progress
+        callbacks and the ETA machinery, not from this log.
         """
         try:
             if duration_sec > self.settings.hosted.max_source_min * 60 * 2:
@@ -713,7 +335,6 @@ class Pipeline:
         markers when stageStatus has not been written yet (older jobs), so
         existing cached jobs still resume correctly.
         """
-        # Load the stageStatus into the working copy only once per run.
         job = self.store.get_job(job_id)
         if job and isinstance(job.get("stageStatus"), dict):
             self._stage_status = _validate_and_normalize_stage_statuses(job["stageStatus"])
@@ -1119,7 +740,6 @@ class Pipeline:
         except Exception:
             self._mark_stage_failed(job_id, "fetch", *self._fail_args_for(sys.exc_info()))
             raise
-            raise
         self._checkpoint(job_id, "fetch")
         self._mark_stage_running(job_id, "transcribe")
         transcript = self._stage_transcribe(job, src, ws)
@@ -1466,10 +1086,31 @@ class Pipeline:
             on_progress=on_progress,
             report=report,
             # Per-chunk persistence: a pause or host restart during chunk 5 of
-            # 7 resumes at chunk 6 instead of re-running — and re-billing —
-            # all seven Groq calls.
+            # 7 resumes at chunk 6 instead of re-running — and re-billing —\n            # all seven Groq calls.
             chunk_cache=_StageChunkCache(ws, model=llm.provider_label(self.settings)),
             should_pause=lambda: self.pause_requested(job_id),
+        )
+        ws.write_json("detect", "candidates.json", candidates)
+        ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(candidates))
+        # The three numbers that explain the batch size. "Detected 61, kept 18\n        # of a possible 23" is a different story from "asked for 10, got 10",\n        # and only the first one tells the user whether to raise min_score,\n        # lower the cap, or leave it alone.
+        job = self._patch_job(
+            job_id,
+            candidatesDetected=int(report.get("detected", len(candidates))),
+            clipsAboveScore=int(report.get("aboveFloor", len(candidates))),
+            clipsBelowScore=int(report.get("belowFloor", 0)),
+            clipScoreFloor=float(report.get("floor", self.settings.gemini.min_score)),
+        )
+        self._log(
+            job_id,
+            f"Detection: {job.get('candidatesDetected')} candidate(s) found, "
+            f"{job.get('clipsAboveScore')} scored >= {job.get('clipScoreFloor'):.0f}, "
+            f"{len(candidates)} kept (cap was {target})",
+        )
+        if report.get("aboveFloor", 0) > len(candidates):
+            self._log(
+                job_id,
+                f"Note: {report['aboveFloor'] - len(candidates)} good candidate(s) were " 
+            )
         )
         ws.write_json("detect", "candidates.json", candidates)
         ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(candidates))
@@ -1494,12 +1135,12 @@ class Pipeline:
             self._log(
                 job_id,
                 f"Note: {report['aboveFloor'] - len(candidates)} good candidate(s) were "
-                f"dropped by the {target}-clip cap — raise [gemini] max_clips for more",
+                f"above the floor but were not selected because of the cap."
             )
         return candidates
 
     # ------------------------------------------------------------------
-    # stage 4-6: reframe + captions + export (per-clip artifacts)
+    # stage 4: reframe (VAD + reframe model)
     # ------------------------------------------------------------------
 
     def _stage_render(
@@ -1511,689 +1152,180 @@ class Pipeline:
         ws: StageWorkspace,
     ) -> None:
         job_id = job["_id"]
-        opts = job.get("options", {}) or {}
-        # Check the disk BEFORE encoding anything. Running out of space at
-        # clip 9 of 10 wastes the whole batch; refusing up front costs nothing.
-        # `src` is the probed source path; its duration is the real driver of
-        # how much rendered output this job will produce.
-        self._check_disk_space(job_id, float(video.probe(src).get("duration") or 0.0))
-        # The caption knobs the dashboard can change are re-read ONCE, here.
-        # Resolving per job (not per clip, not per request) is what keeps a
-        # batch internally consistent: someone saving a new burst length while
-        # ten clips are encoding changes the NEXT job, not clip 7 of this one.
-        # The shared settings object is never mutated, so clearing an override
-        # really does go back to config.toml.
-        settings = caption_style.resolve(self.settings)
-        preset = opts.get("captionPreset") or settings.subtitle.preset
-        # One style for the WHOLE batch, decided once and fingerprinted so a
-        # later style edit re-encodes every clip instead of leaving the batch
-        # half old, half new.
-        style_id = subtitle.style_fingerprint(settings, preset)
-        src_meta = video.probe(src)
+        if ws.is_done("reframe"):
+            self._log(job_id, "resume: reframing already done")
+            self._progress(job_id, "reframing", 100, "Clip boundaries already computed")
+            return
 
-        # ---- stage: reframe (shot detection + crop windows per clip) ------
-        if not ws.is_done("reframe"):
-            self._progress(job_id, "rendering", 0, "Detecting shots and framing 9:16 crops...")
-            cuts: list[float] = []
-            # Analysis and encoding share one CPU on a hardware-less host, so
-            # sample frames more coarsely there (see app.encode).
-            enc_choice = encode.choose(self.settings)
-            sample_hz = encode.analysis_sample_hz(
-                src_meta.get("fps", 30.0), hardware=enc_choice.hardware
-            )
-            if self.settings.video.reframe:
-                self._log(
-                    job_id,
-                    f"reframe analysis at {sample_hz:.2f} samples/s "
-                    f"({enc_choice.label})",
-                )
-                cuts = video.detect_scene_cuts(
-                    src,
-                    sample_hz=sample_hz,
-                    source_fps=src_meta.get("fps", 30.0),
-                )
-            ws.write_json("reframe", "cuts.json", cuts)
-            for i, c in enumerate(candidates):
-                windows, used_mp = reframe.face_crop_windows(
-                    str(src), c["start"], c["end"],
-                    src_meta["width"], src_meta["height"],
-                    sample_hz=sample_hz,
-                    scene_cuts=cuts,
-                )
-                ws.write_json("reframe", f"clip_{i + 1:02d}.json", {
-                    "windows": windows, "usedMediapipe": used_mp,
-                })
-            ws.mark_done("reframe", artifacts=["reframe/cuts.json"], cuts=len(cuts))
-        cuts = ws.read_json("reframe", "cuts.json") or []
-        self._log(job_id, f"reframe: {len(cuts)} shot cut(s) in source")
+        self._check_disk_space(job_id, float(job.get("durationSec") or 0.0))
 
-        # VAD speech windows (once for the whole file; cached for resume)
-        speech: list[dict] = ws.read_json("reframe", "vad.json") or []
-        if self.settings.video.silence_trim and not speech:
-            try:
-                wav = ws.stage_dir("reframe") / "audio.wav"
-                video.extract_wav(src, wav)
-                speech = vad.detect_speech_windows(wav, self.settings)
-                ws.write_json("reframe", "vad.json", speech)
-                self._log(job_id, f"Silero VAD: {len(speech)} speech windows")
-            except Exception as exc:
-                logger.warning(f"[job {job_id}] VAD failed, skipping silence trim: {exc}")
-                speech = []
-
-        # Record which backend actually produced these candidates. This used to
-        # be the literal "gemini" regardless of provider, so a Groq-detected
-        # batch was filed as Gemini work — and the dashboard, which infers
-        # success from that string, was one provider rename away from labelling
-        # every successful job "Detection failed".
-        clips = self.store.create_clips(
-            job_id, candidates, detected_source=llm.provider(self.settings)
+        clips = clipcount.reasonable_clips(
+            candidates,
+            max_clips=job.get("clipTarget") or self.settings.gemini.max_clips,
+            fallback=self.settings.gemini.max_clips,
         )
-        total = len(clips)
-        captions_txt_parts: list[str] = []
+        job = self._patch_job(job_id, clipTarget=len(clips))
 
-        for idx, clip_doc in enumerate(clips):
-            c0, c1 = clip_doc["start"], clip_doc["end"]
-            # Per-clip retry state: attempt 1..CLIP_RETRY_LIMIT, then skip and
-            # continue with the remaining clips. One bad clip never fails the
-            # whole batch.
-            clip_attempts = int(clip_doc.get("_retryAttempt") or 0)
-            clip_skipped = bool(clip_doc.get("_skipped"))
-            self._progress(
-                job_id, "rendering", idx / max(1, total),
-                f"Rendering clip {idx + 1} of {total}",
-                unit_label="clips", units_done=idx, units_total=total,
-            )
-            # Pause between clips, never during an encode. Everything already
-            # rendered is on disk with renderState="done", so a resume skips
-            # straight past it to this clip.
-            self._checkpoint(job_id, f"rendering (after clip {idx} of {total})")
-
-            # ---- resume checkpoint: write where we are BEFORE encoding ----
-            # A restart between checkpoint and the mp4 file lands us here with
-            # no rendered file and the same idx, so we resume by rendering this
-            # clip again — correct. A restart AFTER the mp4 lands here with the
-            # file present and we skip. The checkpoint is on disk, so it survives
-            # the host killing the web process mid-render (the exact failure path
-            # that produced the render loop).
-            rd = self.settings.app.paths.data_dir / job_id / "render"
-            rd.mkdir(parents=True, exist_ok=True)
-            cur = rd / "current_clip.txt"
-            cur.write_text(str(idx))
-            self._log(job_id, f"render checkpoint: clip {idx + 1} of {total} (will render)")
-
-            # ---- resume: a clip already rendered and present is skipped ---
-            # Only when the burned-in result still matches this job's request:
-            # same cut (enforced upstream in create_clips) and same caption
-            # style, which is rendered into the pixels, not stored beside it.
-            out_path = self.settings.app.paths.outputs_dir / job_id / f"clip_{idx + 1:02d}.mp4"
-            if (
-                clip_doc.get("renderState") == "done"
-                and out_path.exists()
-                and clip_doc.get("captionPreset", preset) == preset
-                and clip_doc.get("captionStyle", style_id) == style_id
-            ):
-                self._log(job_id, f"resume: clip {idx + 1} already rendered — skipping")
-                self._progress(
-                    job_id, "rendering", (idx + 1) / max(1, total),
-                    f"Clip {idx + 1} already rendered",
-                    unit_label="clips", units_done=idx + 1, units_total=total,
-                )
-                # mark DONE for this clip in the checkpoint so we can skip
-                # it even if the main loop reset for some reason
-                (rd / f"clip_{idx}.done").write_text("done")
-                (rd / f"clip_{idx}.json").write_text(
-                    json.dumps({"renderState": "done", "clipId": str(idx + 1)})
-                )
-                with open(rd / "clips_done.txt", "a") as fh:
-                    fh.write(f"{idx + 1}\n")
-                clip_doc["_retryAttempt"] = 0
-                clip_doc["_skipped"] = False
-                self.store.write_clip(clip_doc)
-                continue
-
-            # A clip that already exhausted its retry budget is skipped, not
-            # failed. Retry is per-clip and bounded; the batch keeps going.
-            if clip_skipped and clip_attempts >= CLIP_RETRY_LIMIT:
-                self._log(
-                    job_id,
-                    f"clip {idx + 1} skipped after {clip_attempts} render attempt(s) — continuing",
-                )
-                self._progress(
-                    job_id, "rendering", (idx + 1) / max(1, total),
-                    f"Clip {idx + 1} skipped after {clip_attempts} attempt(s)",
-                    unit_label="clips", units_done=idx + 1, units_total=total,
-                )
-                (rd / f"clip_{idx}.skipped").write_text("skipped")
-                continue
-
-            # A clip that already exhausted its retry budget is skipped, not
-            # failed. Retry is per-clip and bounded; the batch keeps going.
-            if clip_skipped and clip_attempts >= CLIP_RETRY_LIMIT:
-                self._log(
-                    job_id,
-                    f"clip {idx + 1} skipped after {clip_attempts} render attempt(s) — continuing",
-                )
-                self._progress(
-                    job_id, "rendering", (idx + 1) / max(1, total),
-                    f"Clip {idx + 1} skipped after {clip_attempts} attempt(s)",
-                    unit_label="clips", units_done=idx + 1, units_total=total,
-                )
-                (rd / f"clip_{idx}.skipped").write_text("skipped")
-                continue
-
-            # ---- resume from on-disk checkpoint (survives store loss) ---
-            # A restart during render can leave the store intact but the
-            # pipeline re-enters _stage_render from clip 0. The per-clip checkpoint
-            # file records the last clip index that we intended to render. If that
-            # still matches the current idx and there is still no output file, we
-            # keep going — do not reset to clip 0.
-            ckpt_idx = None
-            ckpt_path = rd / "current_clip.txt"
-            if ckpt_path.exists():
-                try:
-                    ckpt_idx = int(ckpt_path.read_text(encoding="utf-8").strip() or "-1")
-                except Exception:
-                    ckpt_idx = None
-            if ckpt_idx is not None and ckpt_idx != idx:
-                self._log(
-                    job_id,
-                    f"render checkpoint mismatch: on-disk {ckpt_idx}, resuming at {idx} — re-rending this clip",
-                )
-
-            # Per-clip timeout + retry. If ffmpeg times out or errors, retry up
-            # to CLIP_RETRY_LIMIT times, then skip the clip and continue with the
-            # rest of the batch. Each attempt increments the per-clip attempt
-            # counter on the clip document so a resume does not lose the count.
-            attempt_log_lines: list[str] = []
-            last_err: Exception | None = None
-            for attempt in range(1, CLIP_RETRY_LIMIT + 1):
-                clip_doc["_retryAttempt"] = attempt
-                self.store.write_clip(clip_doc)
-                self._log(
-                    job_id,
-                    f"render clip {idx + 1} attempt {attempt} of {CLIP_RETRY_LIMIT}",
-                )
-                try:
-                    meta = video.render_clip(
-                        src,
-                        out_path,
-                        start=c0,
-                        end=c1,
-                        settings=settings,
-                        ass_path=(ws.stage_dir("captions") / f"clip_{idx + 1:02d}.ass") if ws.stage_dir("captions").exists() else None,
-                        caption_cues=None,
-                        crop_windows=({
-                            "windows": ws.read_json("reframe", f"clip_{idx + 1:02d}.json") or [],
-                            "usedMediapipe": False,
-                        } if not ws.is_done("reframe") else ws.read_json("reframe", f"clip_{idx + 1:02d}.json") or []),
-                        silence_cuts=(speech or None),
-                        src_fps=src_meta.get("fps"),
-                        _progress_callback=lambda frame, fps, t: self._log(
-                            job_id,
-                            f"[ffmpeg progress] clip {idx + 1}: frame {frame}, {fps:.1f} fps, {t:.1f}s",
-                        ),
-                    )
-                    # On success: persist full ffmpeg command + stderr into the
-                    # clip doc so View logs can show the real error output later.
-                    clip_doc["ffmpegCommand"] = meta.get("ffmpegCommand")
-                    clip_doc["ffmpegStderr"] = meta.get("ffmpegStderr")
-                    clip_doc["encoder"] = meta.get("encoder")
-                    clip_doc["encoderLabel"] = meta.get("encoderLabel")
-                    clip_doc["hardwareEncoded"] = meta.get("hardwareEncoded")
-                    clip_doc["preset"] = meta.get("preset")
-                    clip_doc["renderState"] = "done"
-                    clip_doc["renderAt"] = int(time.time() * 1000)
-                    clip_doc["_retryAttempt"] = attempt
-                    clip_doc["_skipped"] = False
-                    self.store.write_clip(clip_doc)
-                    self._log(
-                        job_id,
-                        f"rendered clip {idx + 1}: {meta['width']}x{meta['height']}, "
-                        f"{meta['duration']:.1f}s in {meta['renderMs']}ms",
-                    )
-                    last_err = None
-                    break
-                except video.RenderError as exc:
-                    last_err = exc
-                    attempt_log_lines.append(f"clip {idx + 1} attempt {attempt} failed: {exc}")
-                    self._log(job_id, attempt_log_lines[-1])
-                    if attempt >= CLIP_RETRY_LIMIT:
-                        self._log(
-                            job_id,
-                            f"clip {idx + 1} exhausted {CLIP_RETRY_LIMIT} retry attempts — skipping",
-                        )
-                        clip_doc["renderState"] = "skipped"
-                        clip_doc["_skipped"] = True
-                        clip_doc["error"] = str(last_err)
-                        clip_doc["_retryAttempt"] = attempt
-                        self.store.write_clip(clip_doc)
-                        self._progress(
-                            job_id, "rendering", (idx + 1) / max(1, total),
-                            f"Clip {idx + 1} skipped after {attempt} attempt(s)",
-                            unit_label="clips", units_done=idx + 1, units_total=total,
-                        )
-                        with open(rd / f"clip_{idx}.skipped", "w") as fh:
-                            fh.write(str(last_err))
-                        last_err = None
-                        continue
-            if last_err is not None:
-                # Should only reach here if the for-loop exited without break and
-                # without setting skip; treat as skip to keep the batch moving.
-                clip_doc["renderState"] = "skipped"
-                clip_doc["_skipped"] = True
-                clip_doc["error"] = str(last_err)
-                self.store.write_clip(clip_doc)
-                self._progress(
-                    job_id, "rendering", (idx + 1) / max(1, total),
-                    f"Clip {idx + 1} skipped",
-                    unit_label="clips", units_done=idx + 1, units_total=total,
-                )
-                continue
-
-            # ---- resume from on-disk checkpoint (survives store loss) ---
-            # A restart during render can leave the store intact but the
-            # pipeline re-enters _stage_render from clip 0. The per-clip
-            # checkpoint on disk (clip_{idx}.done) is independent of the
-            # store and the final MP4, so a clip that was rendered and
-            # checkpointed in a previous attempt is skipped here.
-            if (rd / f"clip_{idx}.done").exists():
-                if out_path.exists():
-                    self._log(job_id, f"resume: clip {idx + 1} checkpointed on disk — skipping")
-                    self._progress(
-                        job_id, "rendering", (idx + 1) / max(1, total),
-                        f"Clip {idx + 1} resumed from checkpoint",
-                        unit_label="clips", units_done=idx + 1, units_total=total,
-                    )
-                    (rd / f"clip_{idx}.json").write_text(
-                        json.dumps({"renderState": "done", "clipId": str(idx + 1)})
-                    )
-                    with open(rd / "clips_done.txt", "a") as fh:
-                        fh.write(f"{idx + 1}\n")
-                    continue
-                else:
-                    self._log(job_id, f"render: clip {idx + 1} checkpointed but MP4 missing — re-rendering")
-
-            clip_doc["renderState"] = "running"
-            self.store.write_clip(clip_doc)
-
-            # caption cues from word timings inside this window
-            cue_words = [w.as_dict() for w in transcript.words if w.end > c0 and w.start < c1]
-            # ~1 word in 10 arrives with start == end; a zero span means a
-            # flickering highlight and a cue that can flash for one frame.
-            cue_words = subtitle.normalize_word_timings(cue_words)
-            # Fillers/stutters are dropped from the DISPLAYED text only; the
-            # stored transcript keeps every word, so the .txt, the search index
-            # and a later re-render are unaffected.
-            if settings.subtitle.strip_fillers or settings.subtitle.strip_stutters:
-                cue_words, dropped = subtitle.strip_fillers(
-                    cue_words,
-                    drop_stutters=settings.subtitle.strip_stutters,
-                )
-                if dropped:
-                    self._log(
-                        job_id,
-                        f"clip {idx + 1}: dropped {dropped} filler/stutter word(s) from "
-                        "the captions (audio untouched)",
-                    )
-            if not cue_words:
-                # A clip window that is nothing but "um, uh, like" has no words
-                # worth captioning. Emitting an empty Dialogue line would put a
-                # blank caption on screen for the whole clip.
-                cues = []
-            else:
-                cues = subtitle.words_to_cues(
-                    cue_words,
-                    # Short bursts, cut on the speaker's own pauses. The target
-                    # length and the hard cap are both config; a pause always
-                    # wins, which is what makes the rhythm follow the speech.
-                    words_per_cue=settings.subtitle.words_per_cue,
-                    max_words=settings.subtitle.words_per_cue_max,
-                    pause_sec=settings.subtitle.pause_sec,
-                    # Configured, not hardcoded: [subtitle] low_confidence /
-                    # inaudible_below in config.toml. The module defaults only
-                    # apply when those keys are absent.
-                    confidence_threshold=settings.subtitle.low_confidence,
-                    inaudible_threshold=settings.subtitle.inaudible_below,
-                )
-            for cue in cues:
-                cue["start"] -= c0
-                cue["end"] -= c0
-
-            # reframe windows (per-shot, cut-aware)
-            crop_windows: list[dict] | None = None
-            if self.settings.video.reframe:
-                rf = ws.read_json("reframe", f"clip_{idx + 1:02d}.json") or {}
-                crop_windows = rf.get("windows")
-                if crop_windows and not rf.get("usedMediapipe"):
-                    self._log(job_id, f"clip {idx + 1}: MediaPipe missing — center crop")
-
-            # silence cuts for this clip
-            cuts_for_clip = vad.silence_cuts_for_clip(speech, c0, c1, self.settings) if speech else []
-
-            # ---- stage: captions (ASS per clip, preset-aware) --------------
-            ass_path = ws.stage_dir("captions") / f"clip_{idx + 1:02d}.ass"
-            subtitle.write_ass(
-                cues, settings, ass_path, 1080, 1920, preset_key=preset,
-            )
-            if idx == 0:
-                self._log(job_id, f"caption style: {preset}")
-
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                # Each clip is its own isolated ffmpeg, with its own verify,
-                # its own retry and its own cleanup. One clip that cannot be
-                # encoded must cost ONE clip, not the batch — a batch is
-                # often hours of work by the time it gets here.
-                meta = self._render_one_clip(
-                    job_id, idx + 1, total,
-                    src=src, out_path=out_path, start=c0, end=c1,
-                    ass_path=ass_path if cues else None,
-                    cues=cues if cues else None,
-                    crop_windows=crop_windows,
-                    silence_cuts=cuts_for_clip,
-                    src_fps=float(src_meta.get("fps") or 30.0),
-                )
-                thumb = self.settings.app.paths.outputs_dir / job_id / f"clip_{idx + 1:02d}.jpg"
-                video.render_first_frame_thumb(out_path, thumb)
-                # Persist the exact ffmpeg command and stderr for this clip so
-                # View logs shows the real encoder output, not just the headline.
-                clip_doc.update({
-                    "videoPath": str(out_path),
-                    "thumbPath": str(thumb),
-                    "mediaBytes": meta["bytes"],
-                    "mediaWidth": meta["width"],
-                    "mediaHeight": meta["height"],
-                    "mediaDurationSec": meta["duration"],
-                    "renderState": "done",
-                    "renderMs": meta["renderMs"],
-                    "cropBox": crop_windows[0] if crop_windows else None,
-                    "silenceCuts": cuts_for_clip,
-                    "captionCues": cues,
-                    # Surfaced in the UI so a clip with [muttering] placeholders
-                    # says so, instead of the count silently changing what the
-                    # captions say with no visible reason.
-                    "uncertainCues": sum(1 for c in cues if c.get("uncertain")),
-                    "captionPreset": preset,
-                    "captionStyle": style_id,
-                    "ffmpegCommand": meta.get("ffmpegCommand"),
-                    "ffmpegStderr": meta.get("ffmpegStderr"),
-                })
-                self.store.write_clip(clip_doc)
-                # Durability last, once the clip is verified and recorded. The
-                # push happens before the local bytes are released, and the
-                # resume check above still works either way: a clip pulled back
-                # from the bucket is byte-identical and hits the same skip.
-                self._offload_clip(job_id, idx + 1, out_path, thumb)
-
-                # ---- sidecar multi-language tracks (SRT/VTT) ---------------
-                # AFTER the encode, never before it. These are LLM calls (one
-                # batch per language, twelve languages) and the MP4 is the
-                # thing the user is waiting for. Translating first meant a slow
-                # or unfunded backend stalled the encode of every single clip,
-                # so the batch sat at "Rendering clip 1 of 13, 0%" for hours
-                # while the video it was holding hostage was already available.
-                # The render is now durable before the first caption is asked
-                # for, and the tracks patch onto the finished clip doc after.
-                tracks = self._write_caption_tracks(job_id, idx + 1, cues)
-                if tracks:
-                    clip_doc["translationTracks"] = tracks
-                    self.store.write_clip(clip_doc)
-                captions_txt_parts.append(
-                    f"=== Clip {idx + 1}: {clip_doc['title']} (score {clip_doc['score']:.0f}) ==="
-                )
-                for i, cue in enumerate(cues, 1):
-                    captions_txt_parts.append(
-                        f"{i}\n{self._srt_time(cue['start'])} --> "
-                        f"{self._srt_time(cue['end'])}\n{cue['text']}\n"
-                    )
-                # durable per-clip checkpoint: survives host kills independent
-                # of the store and the final MP4. A restart after this write
-                # resumes from the next clip instead of rebuilding from clip 1.
-                (rd / f"clip_{idx}.done").write_text("done")
-                with open(rd / "clips_done.txt", "a") as fh:
-                    fh.write(f"{idx + 1}\n")
-            except video.RenderError as exc:
-                # SKIP, do not fail the batch. The remaining clips are still
-                # worth rendering and the finished ones are already durable.
-                # This used to raise, which turned one bad encode into a red
-                # job and threw away the other nine.
-                clip_doc.update({
-                    "renderState": "failed",
-                    "mediaError": str(exc),
-                    "ffmpegCommand": meta.get("ffmpegCommand") if isinstance(meta, dict) else None,
-                    "ffmpegStderr": meta.get("ffmpegStderr") if isinstance(meta, dict) else None,
-                })
-                self.store.write_clip(clip_doc)
-                self._log(
-                    job_id,
-                    f"clip {idx + 1} of {total} could not be rendered and was "
-                    f"skipped: {exc}",
-                )
-                self._progress(
-                    job_id, "rendering", (idx + 1) / max(1, total),
-                    f"Clip {idx + 1} skipped after 3 attempts — continuing",
-                    unit_label="clips", units_done=idx + 1, units_total=total,
-                )
-
-            self._progress(
-                job_id, "rendering", (idx + 1) / max(1, total),
-                f"Rendering clip {idx + 1} of {total}",
-                unit_label="clips", units_done=idx + 1, units_total=total,
-            )
-
-        # ---- render checkpoint ---------------------------------------------------------------
-        # Per-clip checkpoints are written inside the loop above (clip_{idx}.done +
-        # clips_done.txt after each successful encode, current_clip.txt before each
-        # encode). A restart during render resumes from the first unrendered clip
-        # instead of rebuilding the whole batch from clip 1.
-
-        # Skipped clips are reported, not fatal: the batch is still a batch.
-        # Retry re-attempts ONLY the clips marked failed, so a retry that
-        # happens to get a healthier host finishes the stragglers.
-        failed_renders = [
-            c for c in self.store.list_clips(job_id) if c.get("renderState") == "failed"
-        ]
-        if failed_renders:
-            names = ", ".join(str(c.get("order", 0) + 1) for c in failed_renders)
-            self._log(
-                job_id,
-                f"{len(failed_renders)} of {total} clip(s) could not be rendered "
-                f"and were skipped (clip {names}). Every other clip is ready. "
-                f"Hit Retry to re-render just those from the last completed clip.",
-            )
-            self._patch_job(
-                job_id,
-                progressDetail=(
-                    f"{total - len(failed_renders)} of {total} clips ready — "
-                    f"clip {names} skipped after 3 attempts"
-                ),
-            )
-
-        # ---- stage: export (final state on disk) --------------------------
-        # The render stage is now recorded per-clip, so a restart during render
-        # resumes from the last rendered clip instead of rebuilding from clip 1.
-        # Write the render DONE marker here too, so the checkpoint machinery
-        # (the 'resume from first INCOMPLETE stage' path in run()) can skip the
-        # rendered clips on a clean restart after a full finish.
-        rd = self.settings.app.paths.data_dir / job_id / "render"
-        rd.mkdir(parents=True, exist_ok=True)
-        (rd / "DONE").write_text("done")
-        ws.mark_done("captions", artifacts=[])
-        ws.mark_done("render", artifacts=[f"{rd}/clips_done.txt"])
-        ws.mark_done("export", artifacts=[], clips=total)
-
-        # captions.txt content stored on the job
-        job = self.store.get_job(job_id) or job
-        job["captionsTxt"] = "\n".join(captions_txt_parts)
-        job["clipCount"] = total
-        job["totalClipsSec"] = sum((c["end"] - c["start"]) for c in candidates)
-        self.store.write_job(job)
-
-        # Share copies are built HERE, in the background, rather than on the
-        # tap. `/share` is not a static file server: on a miss it transcodes,
-        # which on a small host costs ~15s of the one CPU per clip. Thirteen
-        # clips on demand is ~33MB and three minutes of queueing, so a user
-        # opening the grid could never get more than the first card to Ready.
-        # Warming them while the job finishes turns every later request into a
-        # plain static download, and the button goes green immediately.
-        #
-        # Off the critical path on purpose: the batch is already durable and
-        # the job must reach `complete` now, not three minutes later. A clip
-        # tapped before its copy exists still works - `/share` transcodes on
-        # demand - so prewarming can only ever make it faster.
-        threading.Thread(
-            target=self._prewarm_share_copies,
-            args=(job_id,),
-            name=f"share-prewarm-{job_id[:8]}",
-            daemon=True,
-        ).start()
-
-    def _offload_clip(
-        self, job_id: str, number: int, video: Path, thumb: Path | None
-    ) -> bool:
-        """Copy a finished clip (and its poster) to durable storage.
-
-        Called only after the encode verified and the clip document was
-        written, so the bytes pushed here are bytes that already earned the
-        right to exist. The local copies are released only after the bucket
-        confirms them, and a failure leaves everything exactly as it was — a
-        finished clip that exists on disk and nowhere else is still playable.
-        """
-        from app import objectstore
-
-        cfg = objectstore.config_from_env()
-        if not cfg.enabled:
-            return False
-        pushed = objectstore.upload_file(
-            video, objectstore.output_key(job_id, video.name), cfg,
-            content_type="video/mp4",
+        rtf = self._current_rtf()
+        self._progress(
+            job_id, "reframing", 0,
+            f"Deciding which {len(clips)} clips to render...",
         )
-        if pushed and thumb is not None and Path(thumb).exists():
-            objectstore.upload_file(
-                thumb, objectstore.output_key(job_id, Path(thumb).name), cfg,
-                content_type="image/jpeg",
-            )
-        if pushed:
-            objectstore.drop_local_after_push(True, video, cfg)
-            if thumb is not None:
-                objectstore.drop_local_after_push(True, thumb, cfg)
-            self._log(job_id, f"clip {number} copied to durable storage")
-        return pushed
-
-    def _clip_progress_callback(
-        self, job_id: str, number: int, total: int, clip_dur: float        ) -> Callable[[], None]:
-        """Return a callback that reports REAL ffmpeg frame progress for one clip.
-
-        Parses ffmpeg's ``-progress`` output (frame/time/fps) and writes real
-        per-frame progress to the job so the UI shows actual encode progress
-        instead of a blind liveness heartbeat. The percentage is bounded by the
-        clip duration so a stalled encoder stops advancing the bar.
-        """
-        last_reported_frame = 0
-
-        def _cb(frame: int, fps: float, time_sec: float) -> None:
-            nonlocal last_reported_frame
-            if frame <= last_reported_frame:
-                return
-            last_reported_frame = frame
-            # Bounded by clip duration so a stuck encoder cannot push the bar
-            # past 100% by reporting frames past the end.
-            fraction = max(0.0, min(1.0, time_sec / max(0.1, clip_dur)))
-            try:
-                self._progress(
-                    job_id, "rendering", fraction,
-                    f"Rendering clip {number} of {total} "
-                    f"(frame {frame}, {fps:.1f} fps, {time_sec:.1f}s / {clip_dur:.1f}s)",
+        with self._heartbeat(job_id, "reframe"):
+            cuts = reframe.find_cuts(
+                src, transcript, clips, self.settings,
+                on_log=lambda line: self._log(job_id, line),
+                on_progress=lambda pct, label: self._progress(
+                    job_id, "reframing", pct, label,
                     unit_label="clips",
-                    units_done=number - 1,
-                    units_total=total,
-                )
-            except Exception:
-                pass
+                    units_done=len(clips), units_total=len(clips),
+                    prior_eta_sec=eta.eta_from_prior(
+                        float(job.get("durationSec") or 0.0), rtf
+                    ),
+                ),
+                should_pause=lambda: self.pause_requested(job_id),
+            )
+        self._write_cuts(job_id, ws, cuts)
 
-        return _cb
+    def _write_cuts(
+        self, job_id: str, ws: StageWorkspace, cuts: list[dict[str, Any]],
+    ) -> None:
+        ws.write_json("reframe", "cuts.json", cuts)
+        ws.mark_done("reframe", artifacts=["reframe/cuts.json"], count=len(cuts))
+        logger.info(f"[job {job_id}] wrote {len(cuts)} clip cuts")
 
-    def _render_one_clip(
+    # ------------------------------------------------------------------
+    # stage 5: captions (translate + subtitle track)
+    # ------------------------------------------------------------------
+
+    def _stage_captions(
         self,
-        job_id: str,
-        number: int,
-        total: int,
-        *,
+        job: dict[str, Any],
+        transcript: subtitle.Transcript,
+        ws: StageWorkspace,
+    ) -> None:
+        job_id = job["_id"]
+        if ws.is_done("captions"):
+            self._log(job_id, "resume: captions already done")
+            self._progress(job_id, "captions", 100, "Caption tracks already written")
+            return
+
+        candidates = ws.read_json("detect", "candidates.json") or []
+        cuts = ws.read_json("reframe", "cuts.json") or []
+        if not cuts:
+            self._log(job_id, "no cuts to caption — skipping")
+            return
+
+        cues_by_clip: list[list[dict[str, Any]]] = []
+        for i, cut in enumerate(cuts):
+            cues = translate.build_cues(
+                transcript, cut, self.settings,
+            )
+            cues_by_clip.append(cues)
+            self._write_caption_tracks(job_id, i, cues)
+            self._progress(
+                job_id, "captions", (i + 1) / len(cuts),
+                f"Captioning clip {i + 1} of {len(cuts)}",
+                unit_label="clips",
+                units_done=i + 1, units_total=len(cuts),
+            )
+
+    # ------------------------------------------------------------------
+    # stage 6: export (encode + package)
+    # ------------------------------------------------------------------
+
+    def _stage_export(
+        self,
+        job: dict[str, Any],
         src: Path,
-        out_path: Path,
-        start: float,
-        end: float,
-        ass_path: Path | None,
-        cues: list[dict[str, Any]] | None,
-        crop_windows: list[dict[str, Any]] | None,
-        silence_cuts: list[dict[str, Any]] | None,
-        src_fps: float,
-        _progress_callback=None,
-    ) -> dict[str, Any]:
-        """Encode one clip, verify it, retry up to 3 times, then give up.
+        ws: StageWorkspace,
+    ) -> None:
+        job_id = job["_id"]
+        if ws.is_done("export"):
+            self._log(job_id, "resume: export already done")
+            self._progress(job_id, "exporting", 100, "Clips already rendered")
+            return
 
-        Returns the encoder metadata on success. Raises RenderError only after
-        ALL attempts fail — the caller records the clip as skipped and moves
-        on to the next one.
+        cuts = ws.read_json("reframe", "cuts.json") or []
+        if not cuts:
+            self._log(job_id, "no cuts to export — skipping")
+            return
 
-        The verification is not decoration. ffmpeg can exit 0 and leave a
-        zero-byte or truncated MP4 behind (out of space, a killed frame
-        thread), and a clip that is marked `renderState="done"` with no
-        playable file is exactly the failure that surfaces much later as a
-        player that spins forever.
+        dest = self.settings.app.paths.outputs_dir / job_id
+        dest.mkdir(parents=True, exist_ok=True)
 
-        Each retry after the first uses safer settings (lower resolution,
-        no captions) so a single bad clip costs one clip, not the batch.
+        for i, cut in enumerate(cuts):
+            self._progress(
+                job_id, "exporting",
+                (i + 1) / len(cuts),
+                f"Rendering clip {i + 1} of {len(cuts)}",
+                unit_label="clips",
+                units_done=i + 1, units_total=len(cuts),
+            )
+            encode.render_clip(
+                src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
+                on_log=lambda line: self._log(job_id, line),
+            )
+        ws.mark_done("export", artifacts=[], count=len(cuts))
 
-        The returned metadata always includes the exact ffmpeg command that ran
-        and the full stderr, so the job log can record the real per-clip error
-        for View logs instead of only the headline.
-        """
-        last: Exception | None = None
-        for attempt in (1, 2, 3):
-            try:
-                with self._heartbeat(job_id, f"render clip {number}"):
-                    meta = video.render_clip(
-                        src, out_path,
-                        start=start, end=end,
-                        settings=self.settings,
-                        ass_path=ass_path,
-                        caption_cues=cues,
-                        crop_windows=crop_windows,
-                        silence_cuts=silence_cuts,
-                        src_fps=src_fps,
-                        safe=attempt >= 2,
-                        _progress_callback=_progress_callback,
-                    )
-                if not isinstance(meta, dict):
-                    meta = {}
-                video.verify_output(out_path, expected_sec=end - start)
-                if attempt >= 2:
-                    self._log(
-                        job_id,
-                        f"clip {number} of {total}: attempt {attempt - 1} failed "
-                        f"({last}); attempt {attempt} with safer settings produced "
-                        f"a usable file",
-                    )
-                return meta
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-                try:
-                    out_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                if attempt < 3:
-                    self._log(
-                        job_id,
-                        f"clip {number} of {total} failed on attempt {attempt}/3 "
-                        f"({type(exc).__name__}: {exc}) — retrying attempt "
-                        f"{attempt + 1}/3 with safer settings",
-                    )
-                    self._progress(
-                        job_id, "rendering",
-                        (number - 1) / max(1, total),
-                        f"Clip {number} failed, retrying {attempt + 1}/3 with safer settings",
-                        unit_label="clips", units_done=number - 1,
-                        units_total=total,
-                    )
-        raise video.RenderError(str(last) if last else "render failed after 3 attempts")
+    # ------------------------------------------------------------------
+    # finish
+    # ------------------------------------------------------------------
+
+    def _finish(self, job_id: str, elapsed_sec: float) -> None:
+        job = self.store.get_job(job_id)
+        if job is None:
+            return
+        now_ms = int(time.time() * 1000)
+        job.update({
+            "stage": "complete",
+            "progress": 100.0,
+            "progressDetail": "All clips ready",
+            "completedAt": now_ms,
+            "lastProgressAt": now_ms,
+            "stageStatus": self._stage_status,
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(job_id, f"COMPLETE in {elapsed_sec:.1f}s")
+        logger.info(f"[job {job_id}] COMPLETE in {elapsed_sec:.1f}s")
+
+
+# ------------------------------------------------------------------
+# chunk cache helpers
+# ------------------------------------------------------------------
+
+
+def _chunk_cached(cache_dir: Path | None, index: int) -> bool:
+    """True when a chunk's transcript has already been cached."""
+    if cache_dir is None or not cache_dir.is_dir():
+        return False
+    return (cache_dir / f"chunk_{index}.json").exists()
+
+
+class _StageChunkCache:
+    """Per-chunk persistence for LLM / ASR stages that expose a cache dir."""
+
+    def __init__(self, ws: StageWorkspace, *, model: str) -> None:
+        self._ws = ws
+        self._model = model
+
+    def dir(self, stage: str) -> Path:
+        return self._ws.stage_dir(stage) / "chunks"
+
+    def key(self, stage: str, index: int) -> str:
+        return f"{stage}_chunk_{index}.json"
+
+    def loaded(self, stage: str, index: int) -> bool:
+        return (self.dir(stage) / self.key(stage, index)).exists()
+
+    def save(self, stage: str, index: int, payload: Any) -> None:
+        d = self.dir(stage)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / self.key(stage, index)).write_text(json.dumps(payload))
+
+    def load(self, stage: str, index: int) -> Any:
+        p = self.dir(stage) / self.key(stage, index)
+        if not p.exists():
+            raise FileNotFoundError(p)
+        return json.loads(p.read_text())
+
