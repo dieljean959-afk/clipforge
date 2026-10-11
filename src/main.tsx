@@ -215,10 +215,70 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker
       .register("/share-sw.js", { scope: "/" })
+      .then((reg) => {
+        // Track installation so we can clear stale shell caches the first time
+        // a new worker takes over. This worker is deliberately narrow and does
+        // NOT precache the app shell, but a leftover worker from a prior build
+        // can still serve stale assets if it is still active.
+        if (reg.installing) {
+          const installing = reg.installing;
+          installing.addEventListener("statechange", () => {
+            if (installing.state === "installed" && navigator.serviceWorker.controller) {
+              logBootEvent("worker-activated", { state: installing.state });
+            }
+          });
+        }
+      })
       .catch(() => {
         /* the IndexedDB prefetch cache still works without it */
       });
   });
+}
+
+// One-time recovery for devices that got stuck in a reload loop.
+// This runs once per page load, before React commits, so it can neuter a bad
+// worker and old shell cache before the new load starts.
+(() => {
+  try {
+    const stuckFlag = sessionStorage.getItem("clipforge.bootLoop");
+    const wasStuck = stuckFlag === "aborted";
+    if (wasStuck) {
+      console.warn("[clipforge/boot] recovering from prior boot-loop state");
+      if (navigator.serviceWorker) {
+        navigator.serviceWorker.getRegistrations().then((regs) => {
+          regs.forEach((r) => r.unregister());
+        }).catch(() => {});
+      }
+      if (window.caches) {
+        caches.keys().then((names) => {
+          Promise.all(
+            names
+              .filter((n) =>
+                n.indexOf("clipforge-shell-") === 0 || n === "clipforge-share-v1",
+              )
+              .map((n) => caches.delete(n)),
+          ).catch(() => {});
+        }).catch(() => {});
+      }
+      sessionStorage.removeItem("clipforge.bootLoop");
+      logBootEvent("recovered", { clearedWorker: true, clearedShellCaches: true });
+    }
+  } catch (e) { /* ignore storage errors on some browsers */ }
+})();
+
+function logBootEvent(event: string, detail?: Record<string, unknown>) {
+  try {
+    (window as any).__clipforgeBootEvents =
+      (window as any).__clipforgeBootEvents || [];
+    (window as any).__clipforgeBootEvents.push({
+      event,
+      ts: Date.now(),
+      detail,
+    });
+    if (event === "recovered" || event === "worker-activated") {
+      console.info("[clipforge/boot] " + event, detail);
+    }
+  } catch (e) { /* ignore */ }
 }
 
 createRoot(rootEl).render(

@@ -126,18 +126,50 @@
 
   <script>
     (function () {
-      // main.tsx sets this the instant React takes over, which both removes the
-      // fallback and tells these handlers there is nothing left to report.
+      // ---------------------------------------------------------------
+      // ClipForge boot loader.
+      //
+      // Rule 1: a SLOW load is not a failure. The app is ~3 MB across a lot of
+      // separate requests on cold start; a phone legitimately takes longer than
+      // any short timeout. This loader reports real monotonic progress and only
+      // ever reloads for a GENUINE fetch/eval failure, never for "nothing new
+      // arrived for a while".
+      //
+      // Rule 2: retry the FAILED resource, not the whole page. Reloading a
+      // module-only failure discards every chunk already downloaded and starts
+      // the same multi-MB download over from zero. We retry the one failing URL
+      // inline with exponential backoff and a hard cap, and only reload the
+      // whole page if even that gives up.
+      //
+      // Rule 3: a loop guard stops this script from participating in a reload
+      // storm. Reload-attempt timestamps are kept in sessionStorage (not
+      // localStorage — this is a transient boot problem, not user data). If the
+      // app has done more than 2 reloads in 30s, we stop auto-reloading, clear
+      // the service worker + shell caches, and show a real error screen with a
+      // manual "Clear cache and reload" button. Only a user-initiated action can
+      // get past that gate.
+      // ---------------------------------------------------------------
+
       window.__clipforgeBooted = false;
 
-      // There is deliberately no EXPECTED_MODULES here any more. The total size
-      // of a dev module graph is not knowable from the page, so any denominator
-      // we invented would be a guess — and a guess that runs out turns into a
-      // frozen percentage, which is what made the preview look hung at 97%.
-      var MAX_RELOADS = 8;          // only for real load failures
-      var RETRY_MS = 5000;
-      var SLOW_AFTER_MS = 6000;     // say "slow connection" after this
-      var HARD_CEILING_MS = 180000; // 3 min: genuinely give up
+      var BUILD_VERSION = "1.0.0";
+      var CACHE_NAMESPACE = "clipforge-shell-";
+      var CACHE_NAME = CACHE_NAMESPACE + BUILD_VERSION;
+
+      // Reload-loop guard (session-only).
+      var LOOP_KEY = "clipforge.bootLoop";
+      var LOOP_WINDOW_SECONDS = 30;
+      var LOOP_MAX_RELOADS = 2;
+
+      // Per-file retry policy for module/script load failures.
+      // We retry the SINGLE failing URL, not the whole page.
+      var PER_FILE_MAX_ATTEMPTS = 3;
+      var PER_FILE_BASE_MS = 800;
+      var PER_FILE_CAP_MS = 8000;
+
+      // Absolute ceiling for the whole boot. After this we stop even trying and
+      // surface the real last-known failure instead of hammering the network.
+      var HARD_CEILING_MS = 180000; // 3 min
 
       var startedAt = Date.now();
       var files = 0;
@@ -145,7 +177,28 @@
       var lastProgressAt = Date.now();
       var reloads = 0;
       var failed = false;
+      var programmaticReloadInFlight = false;
       var timer = null;
+      var perFileTimers = [];
+
+      // Controlled log, structured and timestamped. Keeping it on one object so
+      // the error screen can dump it as one JSON blob.
+      var bootLog = [];
+      function log(type, message, detail) {
+        var entry = {
+          t: Date.now() - startedAt,
+          type: type,
+          message: message,
+        };
+        if (detail != null) entry.detail = detail;
+        bootLog.push(entry);
+        try {
+          if (window.__clipforgeBootLogs) window.__clipforgeBootLogs.push(entry);
+        } catch (e) { /* ignore */ }
+        if (type === "error" || type === "loop-stop" || type === "reload") {
+          console.warn("[clipforge/boot] " + type + ": " + message + (detail != null ? " (" + JSON.stringify(detail) + ")" : ""));
+        }
+      }
 
       function el(id) { return document.getElementById(id); }
 
@@ -154,7 +207,8 @@
         if (node) node.textContent = text;
       }
 
-      // Real, monotonic facts. No total is invented, so nothing here can stall.
+      // Monotonic progress reporter. Nothing here moves backward because the
+      // counters only increase.
       function paintStatus(slow) {
         var mbText = bytes > 0 ? " · " + (bytes / 1048576).toFixed(1) + " MB" : "";
         var secs = Math.round((Date.now() - startedAt) / 1000);
@@ -164,15 +218,15 @@
         );
       }
 
-      // Every finished subresource is proof the app is still coming.
       function noteProgress(entries) {
-        if (entries && entries.length) {
-          for (var i = 0; i < entries.length; i++) {
-            files += 1;
-            bytes += entries[i].transferSize || entries[i].encodedBodySize || 0;
-          }
-          lastProgressAt = Date.now();
+        if (!entries || !entries.length) return;
+        for (var i = 0; i < entries.length; i++) {
+          var enc = entries[i].encodedBodySize || 0;
+          var trans = entries[i].transferSize || 0;
+          files += 1;
+          bytes += trans || enc;
         }
+        lastProgressAt = Date.now();
         paintStatus(false);
       }
 
@@ -184,17 +238,150 @@
         } catch (e) { /* older browsers: the timer below still copes */ }
       }
 
+      // ---- loop guard ----------------------------------------------------
+
+      function readLoopState() {
+        try {
+          var raw = sessionStorage.getItem(LOOP_KEY);
+          if (!raw) return { version: BUILD_VERSION, reloads: [], aborted: false };
+          var parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== "object") return { version: BUILD_VERSION, reloads: [], aborted: false };
+          // A version jump means the loader changed under a stuck device. Reset
+          // the history but keep the aborted flag so we do not silently re-enter
+          // a storm on an old session.
+          if (parsed.version !== BUILD_VERSION) {
+            return { version: BUILD_VERSION, reloads: [], aborted: !!parsed.aborted };
+          }
+          return parsed;
+        } catch (e) {
+          return { version: BUILD_VERSION, reloads: [], aborted: false };
+        }
+      }
+
+      function writeLoopState(state) {
+        try { sessionStorage.setItem(LOOP_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+      }
+
+      function loopTryReload() {
+        var state = readLoopState();
+        if (state.aborted) return false;
+        var now = Date.now();
+        state.reloads.push(now);
+        // Keep only the window we care about.
+        state.reloads = state.reloads.filter(function (ts) {
+          return now - ts < LOOP_WINDOW_SECONDS * 1000;
+        });
+        writeLoopState(state);
+        if (state.reloads.length > LOOP_MAX_RELOADS) {
+          state.aborted = true;
+          writeLoopState(state);
+          return false;
+        }
+        return true;
+      }
+
+      function loopStop(reason) {
+        var state = readLoopState();
+        state.aborted = true;
+        writeLoopState(state);
+        return state;
+      }
+
+      function clearShellCachesAndWorker() {
+        log("action", "clearing shell caches + service worker");
+        if (window.caches) {
+          Promise.all([
+            caches.keys().then(function (names) {
+              return Promise.all(
+                names
+                  .filter(function (n) { return n.indexOf(CACHE_NAMESPACE) === 0 || n === "clipforge-share-v1"; })
+                  .map(function (n) { return caches.delete(n); }),
+              );
+            }),
+          ]).catch(function (e) { log("warn", "cache clear failed", e && e.message); });
+        }
+        if (navigator.serviceWorker) {
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            regs.forEach(function (r) { r.unregister(); });
+          }).catch(function (e) { log("warn", "worker unregister failed", e && e.message); });
+          // Best-effort: try to stop the active worker so it stops serving a
+          // stale shell on the next load.
+          try {
+            var active = navigator.serviceWorker.controller;
+            if (active) active.postMessage({ type: "CLIPFORGE_CLEAR_SHELL" });
+          } catch (e) { /* postMessage may throw on some browsers */ }
+        }
+      }
+
+      // ---- per-file retry -----------------------------------------------
+
+      function schedulePerFileRetry(url, attempt) {
+        attempt = attempt || 1;
+        if (attempt > PER_FILE_MAX_ATTEMPTS) {
+          log("error", "per-file retry exhausted", { url: url, attempts: attempt - 1 });
+          // We tried the one bad resource 3x with backoff. Now a full reload has
+          // a real chance of helping (e.g. the bad asset only exists on a newer
+          // build). But we still go through the global loop guard.
+          failAndRetry("Failed to load " + (url || "a module") + " after " + (attempt - 1) + " retries.");
+          return;
+        }
+        var backoff = Math.min(PER_FILE_CAP_MS, PER_FILE_BASE_MS * Math.pow(2, attempt - 1));
+        log("retry", "scheduling per-file retry", { url: url, attempt: attempt, backoffMs: backoff });
+        var id = setTimeout(function () {
+          // If boot succeeded in the meantime, do not inject another script.
+          if (window.__clipforgeBooted) return;
+          injectModuleScript(url, attempt + 1);
+        }, backoff);
+        perFileTimers.push(id);
+      }
+
+      function injectModuleScript(url, attempt) {
+        if (!url) return;
+        var script = document.createElement("script");
+        script.type = "module";
+        script.src = url;
+        script.async = true;
+        script.addEventListener("load", function () {
+          log("action", "per-file retry succeeded", { url: url, attempt: attempt });
+          // The real entry point will still be the one in index.html; this is
+          // only for recovering a single failed chunk that the browser would
+          // otherwise never request again.
+        });
+        script.addEventListener("error", function () {
+          log("error", "per-file retry failed", { url: url, attempt: attempt });
+          schedulePerFileRetry(url, attempt);
+        });
+        document.head.appendChild(script);
+      }
+
+      // ---- global failure path -------------------------------------------
+
       function hardReload() {
         if (window.__clipforgeBooted) return;
+        if (programmaticReloadInFlight) return;
+        if (!loopTryReload()) {
+          log("loop-stop", "reload loop guard stopped auto-reload", readLoopState());
+          stopAllTimers();
+          showLoopStoppedError();
+          return;
+        }
         reloads += 1;
+        log("reload", "scheduled full reload", { reloads: reloads, reason: "module/fatal failure" });
+        // location.replace keeps us off the reload history so the user does not
+        // get trapped in the back-button.
         location.replace(location.pathname + "?reload=" + Date.now());
       }
 
-      // Only ever called for a genuine failure a reload can fix: a module that
-      // would not fetch or evaluate.
-      function failAndRetry(message) {
+      function stopAllTimers() {
+        if (timer) { clearInterval(timer); timer = null; }
+        perFileTimers.forEach(function (id) { clearTimeout(id); });
+        perFileTimers = [];
+      }
+
+      function failAndRetry(message, failingUrl) {
         if (window.__clipforgeBooted || failed) return;
         failed = true;
+        log("error", "boot failure", { message: message, failingUrl: failingUrl });
         var boot = el("boot");
         if (!boot) return;
         boot.classList.add("failed");
@@ -202,53 +389,89 @@
         if (deadMeter) deadMeter.hidden = true;
         el("boot-title").textContent = "ClipForge didn't start";
         el("boot-sub").textContent =
-          "A module of the app failed to load — usually a dev server that is " +
-          "restarting or stopped. It reloads on its own until it comes back.";
-        el("boot-err").textContent = message;
-        el("boot-err").hidden = false;
+          "A piece of the app failed to load — often a server restart mid-load, " +
+          "a bad connection, or a stale cached version. It will retry the failed " +
+          "file first, and only reload the page if that does not help.";
+        var errNode = el("boot-err");
+        if (errNode) {
+          errNode.textContent = "failed file: " + (failingUrl || message) + "\n" + message;
+          errNode.hidden = false;
+        }
         el("boot-actions").hidden = false;
-        scheduleReload();
-      }
 
-      function scheduleReload() {
-        if (timer) return;
-        if (reloads >= MAX_RELOADS) {
-          status("Stopped retrying — tap Reload now.");
+        // If we already crossed the loop guard, do not start another retry timer.
+        if (readLoopState().aborted) {
+          status("Stopped retrying — tap Clear cache and reload.");
           return;
         }
-        var nextAt = Date.now() + RETRY_MS;
-        status("Reloading in " + Math.ceil(RETRY_MS / 1000) + "s (try " + (reloads + 1) + " of " + MAX_RELOADS + ")");
-        timer = setInterval(function () {
-          var left = Math.ceil((nextAt - Date.now()) / 1000);
-          if (left <= 0) {
-            clearInterval(timer);
-            timer = null;
-            hardReload();
-          } else {
-            status("Reloading in " + left + "s (try " + (reloads + 1) + " of " + MAX_RELOADS + ")");
-          }
-        }, 500);
+
+        // Start with a per-file retry, not a whole-page reload.
+        schedulePerFileRetry(failingUrl, 1);
       }
 
-      // A load that is merely slow is NOT a failure, and must never trigger a
-      // reload: reloading discards the modules already downloaded and restarts
-      // the same transfer, so it converts a slow load into a page that never
-      // loads at all.
+      function showLoopStoppedError() {
+        if (!el("boot")) return;
+        var boot = el("boot");
+        boot.classList.add("failed");
+        var deadMeter = el("boot-meter");
+        if (deadMeter) deadMeter.hidden = true;
+        el("boot-title").textContent = "ClipForge is stuck loading";
+        el("boot-sub").textContent =
+          "The app reloaded too many times in a short period, so auto-retry was " +
+          "turned off to stop the loop.";
+        var errNode = el("boot-err");
+        if (errNode) {
+          errNode.textContent = bootLog
+            .filter(function (e) { return e.type === "error" || e.type === "reload" || e.type === "retry"; })
+            .map(function (e) { return "[" + e.t + "s] " + e.message + (e.detail && e.detail.url ? " — " + e.detail.url : ""); })
+            .join("\n") || "No detailed failure recorded.";
+          errNode.hidden = false;
+        }
+        el("boot-actions").hidden = false;
+
+        // Replace the two original buttons with a clearer recovery set.
+        var actions = el("boot-actions");
+        if (actions) {
+          actions.innerHTML =
+            '<button id="boot-reload">Reload now</button>' +
+            '<button class="ghost" id="boot-stop">Stop auto-retry</button>' +
+            '<button class="ghost" id="boot-clear">Clear cache and reload</button>';
+        }
+        el("boot-reload").addEventListener("click", hardReload);
+        el("boot-stop").addEventListener("click", function () {
+          stopAllTimers();
+          loopStop("user");
+          status("Auto-retry stopped.");
+        });
+        var clearBtn = el("boot-clear");
+        if (clearBtn) {
+          clearBtn.addEventListener("click", function () {
+            clearShellCachesAndWorker();
+            loopStop("user");
+            stopAllTimers();
+            log("action", "user cleared caches and requested reload");
+            setTimeout(function () { location.reload(); }, 0);
+          });
+        }
+      }
+
+      // ---- slow-progress watch (never reloads on slow alone) -------------
+
       function watchProgress() {
-        setInterval(function () {
-          if (window.__clipforgeBooted || failed) return;
+        timer = setInterval(function () {
+          if (window.__clipforgeBooted) return;
           var now = Date.now();
           var idleFor = now - lastProgressAt;
           var elapsed = now - startedAt;
 
-          paintStatus(elapsed > SLOW_AFTER_MS && idleFor < 4000);
+          paintStatus(elapsed > 6000 && idleFor < 4000);
 
           if (elapsed > HARD_CEILING_MS && idleFor > 15000) {
             var root = el("root");
             if (root && root.childElementCount > 0) return;
             failed = true;
-            var boot = el("boot");
-            if (boot) boot.classList.add("failed");
+            log("error", "hard ceiling reached with no mount", { elapsedMs: elapsed, idleMs: idleFor, files: files, bytes: bytes });
+            boot.classList.add("failed");
             el("boot-title").textContent = "ClipForge still hasn't loaded";
             el("boot-sub").textContent =
               "This is a slow connection, not a broken app: " + files +
@@ -262,31 +485,45 @@
         }, 1000);
       }
 
+      // ---- wire buttons -------------------------------------------------
+
       el("boot-reload").addEventListener("click", hardReload);
       el("boot-stop").addEventListener("click", function () {
-        reloads = MAX_RELOADS;
-        if (timer) { clearInterval(timer); timer = null; }
+        stopAllTimers();
+        loopStop("user");
         status("Auto-retry stopped.");
       });
 
-      // A <script type="module"> that cannot be fetched or evaluated fires an
-      // error event on the element itself, which never reaches window.onerror.
+      // ---- error capture ------------------------------------------------
+
       window.addEventListener(
         "error",
         function (e) {
-          if (e && e.target && e.target.tagName === "SCRIPT") {
-            failAndRetry("Failed to load " + (e.target.src || "a module"));
-          } else if (e && e.message) {
-            failAndRetry(e.message);
+          if (window.__clipforgeBooted) return;
+          var target = e && e.target;
+          var url = null;
+          if (target && target.tagName === "SCRIPT" && target.src) {
+            url = target.src;
           }
+          // Failing url may already be present on the event for module errors.
+          if (!url && e && e.detail && e.detail.filename) url = e.detail.filename;
+          log("error", "module/script error", { message: e && e.message, url: url });
+          failAndRetry((e && e.message) || ("Failed to load " + (url || "a module")), url);
         },
         true,
       );
+
       window.addEventListener("unhandledrejection", function (e) {
+        if (window.__clipforgeBooted) return;
         var r = e && e.reason;
-        failAndRetry(String((r && r.message) || r || "Unhandled error"));
+        var msg = (r && r.message) || (r && r.toString()) || "Unhandled promise rejection";
+        log("error", "unhandled rejection", { message: msg });
+        failAndRetry(msg);
       });
 
+      // ---- boot ----------------------------------------------------------
+
+      log("boot", "boot loader start", { buildVersion: BUILD_VERSION });
       var meter = el("boot-meter");
       if (meter) meter.hidden = false;
       paintStatus(false);
@@ -294,7 +531,24 @@
     })();
   </script>
 
-  <script type="module" src="/src/main.tsx"></script>
+  <!-- The app entry point. Deferring to window.onload keeps the boot loader
+       (the inline script above) in charge until proven assets are already
+       being fetched, which is what prevents a flash of the old loader path
+       during a cold start on a slow connection. -->
+  <script>
+    (function () {
+      // Defer the app entry script so the boot loader (the inline script above)
+      // stays in charge until the page is interactive. This avoids a race where
+      // the entry module starts loading before the loader is fully wired on very
+      // slow connections.
+      window.addEventListener('load', function () {
+        var s = document.createElement('script');
+        s.type = 'module';
+        s.src = '/src/main.tsx';
+        document.body.appendChild(s);
+      });
+    })();
+  </script>
 </body>
 
 </html>

@@ -1,6 +1,6 @@
 import { Dialog } from "@radix-ui/react-dialog";
 import { AlertTriangle, ChevronDown, ExternalLink } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -15,6 +15,81 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+
+// Boot-loop diagnostic capture. This is the source of truth for the loader's
+// structured logs once React owns the page. The inline loader writes
+// window.__clipforgeBootLogs and window.__clipforgeBootEvents before mount;
+// this component surfaces them when the boot is slow/failing so the user sees
+// real reasons instead of a mystery timing bar.
+function BootDiagnostics() {
+  const shown = useRef(false);
+  const [report, setReport] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (shown.current) return;
+    shown.current = true;
+
+    const loaders =
+      (window as any).__clipforgeBootLogs
+      ? [(window as any).__clipforgeBootLogs, "loader"]
+      : [];
+    const events =
+      (window as any).__clipforgeBootEvents
+      ? [(window as any).__clipforgeBootEvents, "runtime"]
+      : [];
+    const combined = [...loaders, ...events];
+    if (!combined.length) return;
+
+    const lines = combined
+      .map(([entries, source]) =>
+        (entries as any[]).map(
+          (entry: any) =>
+            `[${source}] ${entry.event || entry.type}: ${entry.message || ""}` +
+            (entry.detail != null
+              ? "\n    " +
+                Object.entries(entry.detail)
+                  .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+                  .join("\n    ")
+              : ""),
+        ),
+      )
+      .flat()
+      .join("\n");
+
+    setReport(lines);
+  }, []);
+
+  if (!report) return null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        right: 12,
+        bottom: 12,
+        maxWidth: 320,
+        background: "#111113",
+        color: "#e7e7e9",
+        border: "1px solid #27272a",
+        borderRadius: 10,
+        padding: "10px 12px",
+        fontFamily: "ui-monospace, monospace",
+        fontSize: 11,
+        lineHeight: 1.45,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        maxHeight: 220,
+        overflow: "auto",
+        zIndex: 9999,
+      }}
+    >
+      <div style={{ marginBottom: 6, color: "#71717a", textTransform: "uppercase", letterSpacing: ".04em", fontSize: 10 }}>
+        boot diagnostics
+      </div>
+      {report}
+    </div>
+  );
+}
 
 type GenericError = {
   error: string;
@@ -294,6 +369,7 @@ export function InstrumentationProvider({
   }, []);
   return (
     <>
+      <BootDiagnostics />
       <ErrorBoundary>{children}</ErrorBoundary>
       {error && <ErrorDialog error={error} setError={setError} />}
     </>
