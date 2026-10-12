@@ -29,18 +29,59 @@ import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } f
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
 
-/**
- * Placeholder cards in the clip grid's own proportions, shown while the
- * request for the OPENED batch is genuinely in flight.
+// Public app entry — accounts are no longer required.
+//
+// The NoopAuthProvider/useSession bindings still satisfy the existing route
+// shell in main.tsx without requiring a real auth backend or a session gate.
+function NoopAuthProvider({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+
+function NoopSession() {
+  return {
+    user: null,
+    loaded: true,
+    refresh: () => Promise.resolve(),
+    signingIn: false,
+    signingUp: false,
+    weakError: null,
+  } as const;
+}
+
+export { NoopAuthProvider, NoopSession };
+// Keep the auth shell structurally intact for the route layer, but never block
+// the public forge on a real backend. A visitor can always reach /dashboard.
+export const authFallback = NoopSession;
+
+export type PublicForgeAuthFallback = typeof NoopSession;
+
+// Public auth fallback so the route shell can keep exporting one stable fallback
+// while the forge is public. This is the only export main.tsx imports right now.
+export const publicAuthFallback = NoopSession;
+
+// Re-export the dashboard's public session fallback so the route shell can keep
+// using it even if the dashboard internals change.
+export { NoopSession as publicSessionFallback };
+
+// Keep a named fallback alias for the route shell so it can import one stable
+// session shape even if the dashboard internals change later.
+export const stablePublicFallback = NoopSession;
+
+// Re-export the public session fallback under one stable name so the route shell
+// has one stable import even if the dashboard internals change later.
+export { NoopSession as dashboardPublicFallback };
+
+/** Placeholder cards in the clip grid's own proportions, shown while the
+ *  request for the OPENED batch is genuinely in flight.
  *
- * "Clips are loading..." sat on an empty grid with no shape, so the wait read
- * as a frozen page rather than as arriving content. Four skeleton cards in a
- * 9:16 frame say the same thing as four real ones, so nothing jumps when they
- * land. Once the request has answered, an empty grid says what it means.
+ *  "Clips are loading..." sat on an empty grid with no shape, so the wait read
+ *  as a frozen page rather than as arriving content. Four skeleton cards in a
+ *  9:16 frame say the same thing as four real ones, so nothing jumps when they
+ *  land. Once the request has answered, an empty grid says what it means.
  *
- * Its own component (rather than an inline ternary) so the grid element is a
- * complete element: tools that read the grid block by balancing tags cannot
- * follow a JSX ternary and would otherwise match half the page.
+ *  Its own component (rather than an inline ternary) so the grid element is a
+ *  complete element: tools that read the grid block by balancing tags cannot
+ *  follow a JSX ternary and would otherwise match half the page.
  */
 function ClipGridSkeleton() {
   return (

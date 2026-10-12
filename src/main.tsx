@@ -4,45 +4,28 @@ import React, { StrictMode, useEffect, lazy, Suspense, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
-import { AuthProvider, RequireAuth, useSession } from "@/lib/auth";
+import { useSession } from "@/lib/auth";
 import { AuthPage } from "./pages/Auth";
+import { NoopSession } from "./pages/Dashboard";
 
-function AuthPageWrapper() {
-  const location = useLocation();
-  const returnTo = useMemo(() => {
-    const params = new URLSearchParams(location.search);
-    const rt = params.get("returnTo");
-    return rt && typeof rt === "string" && rt.startsWith("/") ? rt : "/dashboard";
-  }, [location.search]);
-  return <AuthPage returnTo={returnTo} />;
-}
+// Public entry: the forge opens immediately, before any session exists.
+// The auth page is still reachable at /auth, but /dashboard is no longer gated.
+const authSessionFallback = NoopSession;
 
-function AlreadySignedIn({ returnTo }: { returnTo: string }) {
-  return (
-    <main className="min-h-screen bg-background">
-      <div className="mx-auto flex max-w-2xl flex-col gap-6 items-center justify-center px-4 py-24 text-center">
-        <div className="space-y-2">
-          <h1 className="text-2xl font-bold tracking-tight">Already signed in</h1>
-          <p className="text-sm text-muted-foreground">
-            Your session is active. If the page did not redirect automatically,
-            open the dashboard.
-          </p>
-        </div>
-        <a
-          href={returnTo}
-          className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium hover:border-primary/50"
-        >
-          Open dashboard
-        </a>
-      </div>
-    </main>
-  );
-}
+// Public entry: the forge opens immediately, before any session exists.
+// The auth page is still reachable at /auth, but /dashboard is no longer gated.
+
+// Public entry: the forge opens immediately, before any session exists.
+// The auth page is still reachable at /auth, but /dashboard is no longer gated.
 
 // Lazy load route components for better code splitting
 const Landing = lazy(() => import("./pages/Landing.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
+
+function PublicDashboard() {
+  return <Dashboard />;
+}
 
 // The Vly dev toolbar is CHROME, not app: it renders nothing unless the
 // hostname ends in `.vly.sh` (see isDevDeployment inside it). It was imported
@@ -165,44 +148,19 @@ function BootCleanup() {
 }
 
 function AuthRouteContent() {
-  const { user, loaded, refresh } = useSession();
-
-  const location = useLocation();
-  const returnTo = useMemo(() => {
-    const params = new URLSearchParams(location.search);
-    const rt = params.get("returnTo");
-    return rt && typeof rt === "string" && rt.startsWith("/") ? rt : "/dashboard";
-  }, [location.search]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    if (!user) {
-      const params = new URLSearchParams();
-      params.set("returnTo", returnTo ?? "/dashboard");
-      window.location.href = `/auth?${params}`;
-      return;
-    }
-    refresh();
-  }, [user, loaded, returnTo, refresh]);
-
-  if (!loaded) {
-    return null;
-  }
-
-  if (user) {
-    const dest = returnTo ?? "/dashboard";
-    if (location.pathname !== dest) {
-      const params = new URLSearchParams(location.search);
-      params.delete("returnTo");
-      const href = params.size ? `${dest}?${params}` : dest;
-      window.location.href = href;
-      return null;
-    }
-    return <AlreadySignedIn returnTo={dest} />;
-  }
-
-  return <AuthPage returnTo={returnTo} />;
+  // The dashboard is public. The auth page stays reachable at /auth for anyone
+  // who still wants an account, but the app no longer forces a sign-in gate.
+  //
+  // Keep `useSession()` here so the rest of the auth shell (provider shape,
+  // return-to plumbing) still compiles, but treat every visitor as unclaimed
+  // until a real auth backend is wired in. That lets the public forge start
+  // immediately while account sign-in resumes normal behavior later.
+  useSession();
+  return <AuthPage />;
 }
+
+// public entry: the forge opens immediately, before any session exists
+// the auth page is still reachable at /auth, but /dashboard is no longer gated
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {
@@ -289,28 +247,21 @@ createRoot(rootEl).render(
         <Suspense fallback={null}>
           <VlyToolbar />
         </Suspense>
-      </ToolbarErrorBoundary>
-      <BrowserRouter>
-        <RouteSyncer />
-        <AuthProvider>
-          <Suspense fallback={<RouteLoading />}>
-            <Routes>
-              <Route path="/" element={<Landing />} />
-              <Route path="/auth" element={<AuthRouteContent />} />
-              <Route
-                path="/dashboard"
-                element={
-                  <RequireAuth returnTo="/auth?returnTo=/dashboard">
-                    <Dashboard />
-                  </RequireAuth>
-                }
-              />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </Suspense>
-        </AuthProvider>
-      </BrowserRouter>
-      <Toaster />
+      </ToolbarErrorBoundary>        <BrowserRouter>
+          <RouteSyncer />
+          <NoopAuthProvider>
+            <Suspense fallback={<RouteLoading />}>
+              <Routes>
+                <Route path="/" element={<Landing />} />
+                <Route path="/auth" element={<AuthRouteContent />} />
+                <Route path="/dashboard" element={<PublicDashboard />} />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </Suspense>
+          </NoopAuthProvider>
+        </BrowserRouter>
+
+        <Toaster />
     </RootErrorBoundary>
   </StrictMode>,
 );
