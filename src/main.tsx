@@ -1,22 +1,12 @@
 import '@vly-ai/integrations';
 import { Toaster } from "@/components/ui/sonner";
-import React, { StrictMode, useEffect, lazy, Suspense, useMemo } from "react";
+import React, { StrictMode, useEffect, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
-import { useSession } from "@/lib/auth";
+import { useSession, AuthProvider } from "@/lib/auth";
 import { AuthPage } from "./pages/Auth";
-import { NoopSession } from "./pages/Dashboard";
 
-// Public entry: the forge opens immediately, before any session exists.
-// The auth page is still reachable at /auth, but /dashboard is no longer gated.
-const authSessionFallback = NoopSession;
-
-// Public entry: the forge opens immediately, before any session exists.
-// The auth page is still reachable at /auth, but /dashboard is no longer gated.
-
-// Public entry: the forge opens immediately, before any session exists.
-// The auth page is still reachable at /auth, but /dashboard is no longer gated.
 
 // Lazy load route components for better code splitting
 const Landing = lazy(() => import("./pages/Landing.tsx"));
@@ -151,17 +141,14 @@ function AuthRouteContent() {
   // The dashboard is public. The auth page stays reachable at /auth for anyone
   // who still wants an account, but the app no longer forces a sign-in gate.
   //
-  // Keep `useSession()` here so the rest of the auth shell (provider shape,
-  // return-to plumbing) still compiles, but treat every visitor as unclaimed
-  // until a real auth backend is wired in. That lets the public forge start
-  // immediately while account sign-in resumes normal behavior later.
+  // `?returnTo=` is honoured here, not in the Landing links: the caller already
+  // knows where it wants the visitor to land, so the auth page just relays it
+  // to AuthPage after a successful sign-in/up.
   useSession();
-  return <AuthPage />;
+  const returnTo = useLocation().search;
+  const target = new URLSearchParams(returnTo).get("returnTo");
+  return <AuthPage returnTo={target ?? "/dashboard"} />;
 }
-
-// public entry: the forge opens immediately, before any session exists
-// the auth page is still reachable at /auth, but /dashboard is no longer gated
-
 const rootEl = document.getElementById("root");
 if (!rootEl) {
   throw new Error("ClipForge: #root is missing from index.html");
@@ -249,7 +236,7 @@ createRoot(rootEl).render(
         </Suspense>
       </ToolbarErrorBoundary>        <BrowserRouter>
           <RouteSyncer />
-          <NoopAuthProvider>
+          <AuthProvider>
             <Suspense fallback={<RouteLoading />}>
               <Routes>
                 <Route path="/" element={<Landing />} />
@@ -258,7 +245,7 @@ createRoot(rootEl).render(
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </Suspense>
-          </NoopAuthProvider>
+          </AuthProvider>
         </BrowserRouter>
 
         <Toaster />
