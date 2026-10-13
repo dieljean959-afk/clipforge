@@ -575,13 +575,15 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
 
 #: Audio bitrate for the deliverable. 128k AAC is transparent for speech and
 #: is what every platform's own re-encode targets, so 160k was paying ~25% more
-#: for nothing on every clip.    AUDIO_ARGS = ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
+#: for nothing on every clip.
+AUDIO_ARGS = ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
 #: H.264 profile/level are pinned rather than left to x264's defaults. A clip
 #: that came out as High 4.4 (x264 raises the level to fit the bitrate) is
 #: refused outright by older mobile decoders and by some in-app webviews, which
 #: is another way a good file fails to play. High 4.0 covers 1080x1920 and is
 #: universally supported.
-VIDEO_PROFILE_ARGS = [        "-profile:v", "high", "-level:v", "4.0"]
+VIDEO_PROFILE_ARGS = [
+    "-profile:v", "high", "-level:v", "4.0"]
 
 
 def browser_safe_args(encoder: str = "") -> list[str]:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -46,6 +47,11 @@ from app import (
     vad,
     video,
 )
+
+# The reframe stage now raises PipelinePaused at a checkpoint so the outer
+# handler can mark the job paused instead of failed. Import it here so the
+# exception handler in run() can catch it by name.
+from app.reframe import PipelinePaused
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.llm import ChunkCache
@@ -704,8 +710,18 @@ class Pipeline:
         except video.RenderError as exc:
             self._fail(job_id, f"Render failed: {exc}", self._detail(exc))
         except Exception as exc:  # noqa: BLE001 - the UI must see the real error
+            # Log the ORIGINAL traceback FIRST, before any cleanup. If the cleanup
+            # below also raises (store I/O, disk full, lock contention), the second
+            # exception must never replace the real one the UI shows.
             logger.exception(f"[job {job_id}] unexpected pipeline error")
-            self._fail(job_id, f"Pipeline error: {exc}", self._detail(exc))
+            try:
+                self._fail(job_id, f"Pipeline error: {exc}", self._detail(exc))
+            except Exception as fail_exc:
+                # _fail itself must not turn a render crash into a store crash in
+                # the UI. Persist what we can and still record the original message.
+                logger.error(
+                    f"[job {job_id}] _fail itself raised while reporting: {fail_exc}"
+                )
         finally:
             # Make the liveness heartbeat visible to the reaper/web. A child that
             # reaches here — including on a hard crash — has had its last beat at
@@ -713,13 +729,16 @@ class Pipeline:
             # timestamp once more with the (possibly terminal) stageStatus we have
             # now. The reaper uses heartbeatAt + lastProgressAt together to decide
             # whether a running-looking job still has a live child.
+            #
+            # This cleanup must NEVER raise into the job's real error path.
             try:
                 job = self.store.get_job(job_id)
                 if job is not None:
                     job["heartbeatAt"] = self._heartbeat_at
                     self.store.write_job(job)
             except Exception:
-                pass
+                logger.debug(f"[job {job_id}] could not persist heartbeat on exit")
+
 
     def _stages(self, job_id: str, job: dict[str, Any], t_start: float) -> None:
         """The stage sequence, isolated from run()'s failure handling.

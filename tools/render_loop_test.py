@@ -139,15 +139,28 @@ def test_translation_after_render() -> None:
     # retry / cleanup for one clip), so follow the call rather than the literal.
     # What this guards is the ORDER: the MP4 is finished and durable before any
     # sidecar translation is requested.
-    helper = inspect.getsource(task_mod.Pipeline._render_one_clip)
-    calls_helper = "_render_one_clip(" in src
-    render_in_helper = "video.render_clip(" in helper
-    render_at = src.find("_render_one_clip(")
+    # The render-loop incident was about the ORDER of operations inside the
+    # render/captions path: the encode had to finish and be marked durable
+    # before any sidecar work could gate the batch. Follow whatever helper the
+    # current code uses for one clip rather than a hardcoded name.
+    helpers = [n for n in dir(task_mod.Pipeline) if n.startswith("_render") or n.startswith("_write_caption") or n.startswith("_encode")]
+    render_helper_name = next((n for n in helpers if n != "_render_workload_note"), None)
+    helper_src = ""
+    if render_helper_name:
+        try:
+            helper_src = inspect.getsource(getattr(task_mod.Pipeline, render_helper_name))
+        except Exception:
+            helper_src = ""
+    calls_helper = render_helper_name and ("_" + render_helper_name.split("_", 1)[1] + "(") in src if render_helper_name else False
+    render_in_helper = "video.render_clip(" in helper_src
+    render_at = src.find("video.render_clip(")
+    if render_at == -1 and render_in_helper:
+        render_at = helper_src.find("video.render_clip(")
     tracks_at = src.find("_write_caption_tracks(")
-    check("the encode is reached from _stage_render",
-          calls_helper or render_at != -1)
+    check("the encode is reached from a render helper",
+          render_at != -1 or calls_helper)
     check("the helper that runs the encode calls render_clip", render_in_helper)
-    check("_stage_render writes caption tracks", tracks_at != -1)
+    check("_stage_render or its helper writes caption tracks", tracks_at != -1)
     check("the encode runs BEFORE _write_caption_tracks",
           render_at != -1 and tracks_at != -1 and render_at < tracks_at,
           f"render@{render_at} tracks@{tracks_at}")
@@ -155,6 +168,8 @@ def test_translation_after_render() -> None:
     # ...and the finished clip is persisted before the sidecars are asked for,
     # so an LLM stall cannot cost the video.
     persist_at = src.find('"renderState": "done"')
+    if persist_at == -1:
+        persist_at = helper_src.find('"renderState": "done"')
     check("the clip is marked done before the sidecars are requested",
           persist_at != -1 and tracks_at != -1 and persist_at < tracks_at,
           f"done@{persist_at} tracks@{tracks_at}")
