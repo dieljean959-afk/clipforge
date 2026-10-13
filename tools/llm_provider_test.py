@@ -475,7 +475,7 @@ def test_no_gemini_shaped_strings():
     check("the pipeline no longer hardcodes detectedSource=gemini",
           'detected_source="gemini"' not in task_render)
     check("detectedSource records the provider that actually ran",
-          "detected_source=llm.provider(" in task_render)
+          "detected_source=llm.provider_label(self.settings)" in task_src)
     for ui in ("src/components/clipforge/JobCard.tsx", "src/pages/Dashboard.tsx"):
         ui_src = (Path(__file__).resolve().parents[1] / ui).read_text(encoding="utf-8")
         check(f"{Path(ui).name} no longer infers success from the string 'gemini'",

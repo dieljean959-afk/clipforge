@@ -1155,6 +1155,11 @@ class Pipeline:
             should_pause=lambda: self.pause_requested(job_id),
         )
         ws.write_json("detect", "candidates.json", candidates)
+        # Record HOW these clips were chosen so the dashboard can say "AI highlights
+        # via deepseek" instead of a blank "detectedSource". The provider label is
+        # already used a few lines above for the chunk cache and the log line, so this
+        # keeps all three named the same by construction rather than by coincidence.
+        self.store.create_clips(job_id, candidates, detected_source=llm.provider_label(self.settings))
         return candidates
 
     # ------------------------------------------------------------------
@@ -1280,10 +1285,11 @@ class Pipeline:
                 unit_label="clips",
                 units_done=i + 1, units_total=len(cuts),
             )
-            encode.render_clip(
-                src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
-                on_log=lambda line: self._log(job_id, line),
-            )
+            with self._heartbeat(job_id, f"render clip {i + 1}"):
+                encode.render_clip(
+                    src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
+                    on_log=lambda line: self._log(job_id, line),
+                )
         ws.mark_done("export", artifacts=[], count=len(cuts))
 
     # ------------------------------------------------------------------
