@@ -73,6 +73,28 @@ def suggest(duration_sec: float, ceiling: int = HARD_CEILING) -> tuple[int, str]
     return count, f"{mins} min source ({label}) — up to {count} clips"
 
 
+def reasonable_clips(
+    candidates: list[dict],
+    *,
+    max_clips: int | None = None,
+    fallback: int | None = None,
+) -> list[dict]:
+    """Trim a candidate list to a job-safe batch.
+
+    `gate` is the scoring gate (score floor + cap). This is the defensive
+    wrapper the render stage wants: take what detection produced, hard-cap it,
+    and never return nothing when the callers have no other clip source —
+    detection already fell back to heuristics upstream, so an empty list here
+    would only mean detection genuinely produced zero moments.
+    """
+    if not candidates:
+        return []
+    limit = max_clips if max_clips and max_clips > 0 else fallback
+    if limit and limit > 0:
+        return candidates[: int(limit)]
+    return list(candidates)
+
+
 def gate(candidates: list[dict], limit: int, floor: float) -> tuple[list[dict], int, int]:
     """Keep the strong candidates, up to `limit` — never pad to reach it.
 

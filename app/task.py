@@ -48,8 +48,23 @@ from app import (
 )
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
+from app.llm import ChunkCache
 from app.stages import STAGES, StageWorkspace
 from app.store import LocalStore
+
+
+class _PauseRequested(Exception):
+    """A cooperative pause request reached a safe checkpoint.
+
+    Raised by ``Pipeline._checkpoint`` and caught in ``run`` to mark the job
+    paused. It MUST be defined at module level: this exception is raised from
+    several sibling stages, and a class that only exists inside one of them is
+    precisely the NameError that made the pipeline's own failure handler crash
+    while trying to record the stage's real error.
+    """
+
+
+
 
 #: How often a long, silent step re-asserts that the pipeline is alive.
 #:
@@ -759,31 +774,52 @@ class Pipeline:
             if blob.get("status") != "done" and ws.is_done(s):
                 self._mark_stage_done(job_id, s)
 
-        src = self._stage_fetch(job, ws)
-        self._mark_stage_running(job_id, "fetch")
         try:
             src = self._stage_fetch(job, ws)
             self._mark_stage_done(job_id, "fetch")
-        except Exception:
+        except BaseException:
             self._mark_stage_failed(job_id, "fetch", *self._fail_args_for(sys.exc_info()))
             raise
-        self._checkpoint(job_id, "fetch")
-        self._mark_stage_running(job_id, "transcribe")
-        transcript = self._stage_transcribe(job, src, ws)
-        self._mark_stage_done(job_id, "transcribe")
+
+        # Every remaining stage gets the same treatment: its OWN name and
+        # error land in the per-stage status (and the run's job log) the
+        # moment it raises, before run()'s generic handler fires. Previously
+        # only fetch was wrapped, so detect/render failures surfaced as
+        # generic messages with no stage attached while the chips stayed grey.
+        # BaseException on purpose: a KeyboardInterrupt or SystemExit during a
+        # stage must still mark the stage failed rather than leave it "running"
+        # forever, and `raise` rethrows for run() to classify.
+
+        try:
+            self._checkpoint(job_id, "fetch")
+        except BaseException:
+            self._mark_stage_failed(job_id, "fetch", *self._fail_args_for(sys.exc_info()))
+            raise
+
+        def _run_stage(stage: str, fn: Callable[[], Any]) -> Any:
+            """Run one stage, marking it running/done/failed on the job."""
+            self._mark_stage_running(job_id, stage)
+            try:
+                result = fn()
+            except BaseException:
+                self._mark_stage_failed(job_id, stage, *self._fail_args_for(sys.exc_info()))
+                raise
+            self._mark_stage_done(job_id, stage)
+            return result
+
+        transcript = _run_stage("transcribe", lambda: self._stage_transcribe(job, src, ws))
         self._transcript_size_note(len(transcript.words))
+
         self._checkpoint(job_id, "transcribing")
-        self._mark_stage_running(job_id, "detect")
-        candidates = self._stage_detect(job, transcript, ws)
-        self._mark_stage_done(job_id, "detect")
+        candidates = _run_stage("detect", lambda: self._stage_detect(job, transcript, ws))
+
         self._checkpoint(job_id, "finding")
-        self._mark_stage_running(job_id, "reframe")
-        self._stage_render(job, src, transcript, candidates, ws)
-        self._mark_stage_done(job_id, "reframe")
+        _run_stage("reframe", lambda: self._stage_render(job, src, transcript, candidates, ws))
         self._render_workload_note(len(candidates), float(job.get("durationSec") or 0.0))
-        self._mark_stage_running(job_id, "captions")
-        self._mark_stage_done(job_id, "captions")
-        self._mark_stage_running(job_id, "export")
+
+        _run_stage("captions", lambda: self._stage_captions(job, transcript, ws))
+        _run_stage("export", lambda: self._stage_export(job, src, ws))
+
         self._finish(job_id, time.time() - t_start)
         self._mark_stage_done(job_id, "export")
         # Scratch audio is dead weight once the clips exist.
@@ -1278,8 +1314,14 @@ class Pipeline:
 
 
 
-class _StageChunkCache:
-    """Per-chunk persistence for LLM / ASR stages that expose a cache dir."""
+class _StageChunkCache(ChunkCache):
+    """Per-chunk persistence for LLM / ASR stages that expose a cache dir.
+
+    Implements llm.ChunkCache's duck type (`get`/`put`), which detect_clips
+    calls — previously only the stage-local key()/save()/load() helpers
+    existed, so detection crashed with AttributeError on its very first
+    uncached chunk.
+    """
 
     def __init__(self, ws: StageWorkspace, *, model: str) -> None:
         self._ws = ws
@@ -1290,6 +1332,26 @@ class _StageChunkCache:
 
     def key(self, stage: str, index: int) -> str:
         return f"{stage}_chunk_{index}.json"
+
+    def get(self, index: int) -> list[dict[str, Any]] | None:
+        """Cached candidates for chunk `index`, or None when absent.
+
+        A malformed cache row degrades to a miss rather than failing the
+        stage: re-billing one chunk is cheaper than failing a run whose data
+        was on disk.
+        """
+        p = self.dir("detect") / self.key("detect", index)
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
+
+    def put(self, index: int, candidates: list[dict[str, Any]]) -> None:
+        d = self.dir("detect")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / self.key("detect", index)).write_text(json.dumps(candidates))
 
     def loaded(self, stage: str, index: int) -> bool:
         return (self.dir(stage) / self.key(stage, index)).exists()

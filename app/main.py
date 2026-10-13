@@ -472,6 +472,17 @@ class RequeueIn(BaseModel):
     jobId: str
 
 
+class DeleteJobBody(BaseModel):
+    """Body for POST /api/jobs/{id}/delete.
+
+    `keepSource` mirrors the checkbox in the confirm dialog: keep the
+    downloaded/uploaded source video, delete the record + outputs only.
+    Sent as an empty JSON object (or no body at all) for normal deletes.
+    """
+
+    keepSource: bool = False
+
+
 class BulkDeleteIn(BaseModel):
     """An explicit list of ids. Never a filter — see /api/jobs/bulk-delete.
 
@@ -1660,7 +1671,14 @@ def get_job(job_id: str) -> dict:
 
 
 @app.delete("/api/jobs/{job_id}")
-def delete_job(job_id: str) -> dict:
+def delete_job(job_id: str, keepSource: bool = False) -> dict:
+    """Delete a batch and everything it wrote to disk.
+
+    `keepSource` keeps the downloaded/uploaded source video and only removes
+    the job record, workspace artifacts (transcript, detections, cuts) and
+    rendered clips. The checkbox in the confirm dialog backs this: the source
+    is the one artifact that costs real bytes, so the reader decides.
+    """
     # Stop the work FIRST. Deleting the record while a child is still
     # downloading/transcribing/rendering just burns CPU and LLM calls on a job
     # nobody is waiting for — and the child would then write its state back.
@@ -1673,16 +1691,23 @@ def delete_job(job_id: str) -> dict:
     # without this a manual delete only freed a few KB of JSON and the disk
     # stayed full — the retention sweeper already does exactly this.
     remove_workspace(settings.app.paths.data_dir, job_id)
-    for d in settings.app.paths.job_source_dirs(job_id) + (
-        settings.app.paths.outputs_dir / job_id,
-    ):
-        shutil.rmtree(d, ignore_errors=True)
+    if keepSource:
+        # Remove only the per-stage workspace + outputs, keep the source file.
+        # `remove_workspace` already covered data/work/<id>; the source lives
+        # under the per-job source dirs, so removing them now would destroy
+        # the file the reader asked us to keep.
+        shutil.rmtree(settings.app.paths.outputs_dir / job_id, ignore_errors=True)
+    else:
+        for d in settings.app.paths.job_source_dirs(job_id) + (
+            settings.app.paths.outputs_dir / job_id,
+        ):
+            shutil.rmtree(d, ignore_errors=True)
     _purge_remote_job(job_id)
-    return {"deleted": True, "cancelled": cancelled}
+    return {"deleted": True, "cancelled": cancelled, "keptSource": keepSource}
 
 
 @app.post("/api/jobs/{job_id}/delete")
-def delete_job_post(job_id: str) -> dict:
+def delete_job_post(job_id: str, body: DeleteJobBody | None = None) -> dict:
     """The same delete, over POST.
 
     DELETE /api/jobs/{id} answers 200 when it is called directly, through the
@@ -1694,7 +1719,7 @@ def delete_job_post(job_id: str) -> dict:
     it and this route is the one the dashboard calls. The DELETE route stays
     for anything scripted against the API.
     """
-    return delete_job(job_id)
+    return delete_job(job_id, keepSource=bool(body and body.keepSource))
 
 
 @app.post("/api/jobs/bulk-delete")

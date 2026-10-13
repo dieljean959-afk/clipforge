@@ -691,12 +691,16 @@ export const api = {
    * refusal arrived as a bodyless 400 with the batch still sitting in the list
    * and no way to tell why. POST also needs no CORS preflight.
    *
+   * `keepSource` keeps the downloaded/uploaded source video on the server and
+   * removes only the job record, workspace and rendered clips — the checkbox
+   * in the delete dialog. Default false: the usual delete frees everything.
+   *
    * Retried once. Deleting a batch is idempotent — the second attempt answers
    * 404 if the first one actually worked — and a single bodyless 4xx from a
    * proxy should not cost the user their cleanup.
    */
-  deleteJob: async (jobId: string) => {
-    type DeleteResult = { deleted: boolean; cancelled: "queued" | "running" | "absent" };
+  deleteJob: async (jobId: string, keepSource = false) => {
+    type DeleteResult = { deleted: boolean; cancelled: "queued" | "running" | "absent"; keptSource?: boolean };
     const id = encodeURIComponent(jobId);
     // A backend that does not know this route answers 404 "Not Found" or 405
     // "Method Not Allowed" (the GET /api/jobs/{id} pattern claims the path and
@@ -717,7 +721,11 @@ export const api = {
       }
     };
     try {
-      return await withRetry(`/api/jobs/${id}/delete`, { method: "POST" });
+      return await withRetry(`/api/jobs/${id}/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keepSource }),
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       if (routeMissing(msg)) {
