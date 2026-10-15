@@ -218,7 +218,9 @@ class Pipeline:
         except Exception as exc:
             logger.warning(f"[job {job_id}] could not measure disk: {exc}")
             return
-        if free is not None and free < 200 * 1024 * 1024:
+        if free is None:
+            return
+        if free < 200 * 1024 * 1024:
             raise video.RenderError(
                 f"not enough free disk ({lim}) — less than 200 MB free on "
                 f"{path}. The download and transcript are still cached; Retry "
@@ -226,7 +228,7 @@ class Pipeline:
             )
         if source_duration_sec > 0:
             est = source_duration_sec * 0.05
-            if free is not None and est and free < est + 500 * 1024 * 1024:
+            if est and free < est + 500 * 1024 * 1024:
                 logger.warning(
                     f"[job {job_id}] low disk headroom: {free // (1024*1024)} MB free, "
                     f"~{est:.0f} MB estimated render footprint for a "
@@ -685,6 +687,7 @@ class Pipeline:
             # disk; the job reports itself paused and resume picks it up from
             # the same stage via the ordinary stage-marker resume.
             self.mark_paused(job_id, str(pause) or "the current stage")
+
         except llm.DetectionPaused as pause:
             self.mark_paused(job_id, "finding")
             self._log(job_id, f"detection paused: {pause}")
@@ -740,6 +743,7 @@ class Pipeline:
         """
         # ---- remote dispatch mode: hand off, then the agent reports via
         # /api/internal/* — this thread's work is done after handoff.
+
         if self.settings.hosted.worker_url:
             # Remote dispatch still needs the source fetched locally first;
             # the source pointer is reused by the worker-agent handoff.
@@ -1220,7 +1224,6 @@ class Pipeline:
                 should_pause=lambda: self.pause_requested(job_id),
             )
         self._write_cuts(job_id, ws, cuts)
-        ws.mark_done("reframe", artifacts=["reframe/cuts.json"], count=len(cuts))
 
     def _write_cuts(
         self, job_id: str, ws: StageWorkspace, cuts: list[dict[str, Any]],
