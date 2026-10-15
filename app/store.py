@@ -210,6 +210,17 @@ class LocalStore:
         for path in sorted((self._paths.data_dir / "jobs").glob("*.json")):
             try:
                 jobs.append(json.loads(path.read_text(encoding="utf-8")))
+            except UnicodeDecodeError as exc:
+                # A single non-UTF-8 blob on disk must not make the whole list
+                # endpoint 500. The file is garbage and skipped; the logger tells
+                # us to go look at the disk rather than surfacing the exception to
+                # the dashboard.
+                logger.error(f"[store] skipping non-UTF-8 job file {path.name}: {exc}")
+            except json.JSONDecodeError as exc:
+                # Valid UTF-8 that is not valid JSON is skipped, not surfaced. A
+                # partial tmp rename from older builds, or a hand-edited file, both
+                # produce this; one bad file must not take down the whole list.
+                logger.error(f"[store] skipping malformed JSON job file {path.name}: {exc}")
             except Exception as exc:
                 logger.error(f"[store] unreadable job file {path.name}: {exc}")
         jobs.sort(key=lambda j: j.get("createdAt", 0), reverse=True)
