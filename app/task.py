@@ -213,7 +213,7 @@ class Pipeline:
         path = self.settings.app.paths.data_dir
         lim = hostlimits.describe()
         try:
-            _used_bytes = hostlimits.dir_bytes(path)
+            _ = hostlimits.dir_bytes(path)
             free = hostlimits.dir_free(path)
         except Exception as exc:
             logger.warning(f"[job {job_id}] could not measure disk: {exc}")
@@ -1220,11 +1220,8 @@ class Pipeline:
                 should_pause=lambda: self.pause_requested(job_id),
             )
         self._write_cuts(job_id, ws, cuts)
+        ws.mark_done("reframe", artifacts=["reframe/cuts.json"], count=len(cuts))
 
-        # Persist the reframe stage immediately so a retry or a restart can skip
-        # it even if the downstream _mark_stage_done call is delayed by cleanup.
-        if ws.is_done("reframe") is False:
-            ws.mark_done("reframe", artifacts=["reframe/cuts.json"], count=len(cuts))
     def _write_cuts(
         self, job_id: str, ws: StageWorkspace, cuts: list[dict[str, Any]],
     ) -> None:
