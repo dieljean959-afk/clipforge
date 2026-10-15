@@ -25,17 +25,17 @@ from __future__ import annotations
 import functools
 import os
 import re
-import shutil
+import shlex as _shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
 from app import hosting
 from app import hostlimits
-from app.config import ffmpeg_bin
+from app.config import Settings, ffmpeg_bin
 
 # --------------------------------------------------------------------------- #
 # timeouts — deliberately NOT shared
@@ -461,3 +461,106 @@ def as_dict(choice: EncoderChoice) -> dict[str, Any]:
         "timeoutSec": choice.timeout_sec,
         "notes": choice.notes,
     }
+
+
+def render_clip(
+    src: Path,
+    cut: dict[str, Any],
+    dest: Path,
+    settings: Settings,
+    *,
+    on_log: Callable[[str], None] | None = None,
+) -> None:
+    """Render one reframe cut into a 9:16 MP4.
+
+    This is the per-clip render entry point the export stage calls. It picks the
+    encoder for this host, builds the crop/pan filter graph from the cut's cropBox
+    and sampleWindows, burns the subtitle cues into the frame, and writes the
+    finished clip with web-playback flags.
+
+    `cut` is a dict produced by ``reframe.find_cuts`` (one per clip). It must
+    contain at least ``start``/``end`` and ``cropBox``; ``sampleWindows`` is
+    optional and improves crop tracking when present.
+    """
+    from app import video as _video
+
+    src = Path(src)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if on_log:
+        on_log(f"Rendering clip {cut.get('order', '?')} — {cut.get('start')}s to {cut.get('end')}s")
+
+    probe = _video.probe(src)
+    width = int(probe["width"])
+    height = int(probe["height"])
+    fps = float(probe.get("fps", 30.0) or 30.0)
+    duration = float(probe["duration"])
+
+    start = float(cut.get("start", 0.0))
+    end = float(cut.get("end", duration))
+    clip_seconds = max(0.1, end - start)
+
+    choice = choose(settings).for_output(width, height, fps)
+    deadline = render_deadline_sec(clip_seconds, hardware=choice.hardware)
+    choice.timeout_sec = deadline
+
+    crop = cut.get("cropBox", {})
+    crop_x = int(crop.get("x", 0))
+    crop_y = int(crop.get("y", 0))
+    crop_w = int(crop.get("w", width))
+    crop_h = int(crop.get("h", height))
+
+    samples = cut.get("sampleWindows") or []
+    filtergraph = _video.crop_pan_filter(
+        width, height, fps, crop_x, crop_y, crop_w, crop_h, samples,
+    )
+
+    cmd = [
+        ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        *choice.hw_accel_args(),
+        "-i", str(src),
+        "-ss", str(start),
+        "-t", str(clip_seconds),
+        *choice.threads_args(),
+        *filtergraph,
+        *choice.ffmpeg_codec_args(),
+        "-an",
+        str(dest),
+    ]
+
+    if on_log:
+        on_log(f"ffmpeg {' '.join(_shlex.quote(a) for a in cmd)}")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=deadline,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _video.RenderError(
+            f"render of clip {cut.get('order', '?')} timed out after {deadline}s — "
+            f"the host may be overloaded; Retry will resume from the last finished clip"
+        ) from exc
+
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip().splitlines()
+        reason = err[-1] if err else "no diagnostic"
+        raise _video.RenderError(
+            f"ffmpeg failed on clip {cut.get('order', '?')}: {reason}"
+        )
+
+    if not dest.exists() or dest.stat().st_size == 0:
+        raise _video.RenderError(
+            f"ffmpeg exited 0 but produced no output for clip {cut.get('order', '?')}"
+        )
+
+    if on_log:
+        on_log(f"Rendered clip {cut.get('order', '?')} -> {dest.name} ({dest.stat().st_size} bytes)")
+
+
+# fmt: off
+# fmt: on
+

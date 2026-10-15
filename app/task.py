@@ -18,13 +18,10 @@ the job's errorDetail — never swallowed.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import sys
 import threading
 import time
 import traceback
-from concurrent import futures as cf
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -33,25 +30,20 @@ from loguru import logger
 
 from app import (
     asr,
-    caption_style,
     clipcount,
     download,
     encode,
+    reframe,
     eta,
     llm,
-    reframe,
-    share_video,
-    sharelink,
     subtitle,
     translate,
-    vad,
     video,
 )
 
 # The reframe stage now raises PipelinePaused at a checkpoint so the outer
 # handler can mark the job paused instead of failed. Import it here so the
 # exception handler in run() can catch it by name.
-from app.reframe import PipelinePaused
 from app.config import Settings
 from app.hosting import DispatchError, dispatch_job
 from app.llm import ChunkCache
@@ -221,7 +213,7 @@ class Pipeline:
         path = self.settings.app.paths.data_dir
         lim = hostlimits.describe()
         try:
-            used = hostlimits.dir_bytes(path)
+            _used_bytes = hostlimits.dir_bytes(path)
             free = hostlimits.dir_free(path)
         except Exception as exc:
             logger.warning(f"[job {job_id}] could not measure disk: {exc}")
@@ -1229,6 +1221,10 @@ class Pipeline:
             )
         self._write_cuts(job_id, ws, cuts)
 
+        # Persist the reframe stage immediately so a retry or a restart can skip
+        # it even if the downstream _mark_stage_done call is delayed by cleanup.
+        if ws.is_done("reframe") is False:
+            ws.mark_done("reframe", artifacts=["reframe/cuts.json"], count=len(cuts))
     def _write_cuts(
         self, job_id: str, ws: StageWorkspace, cuts: list[dict[str, Any]],
     ) -> None:
@@ -1252,18 +1248,15 @@ class Pipeline:
             self._progress(job_id, "captions", 100, "Caption tracks already written")
             return
 
-        candidates = ws.read_json("detect", "candidates.json") or []
         cuts = ws.read_json("reframe", "cuts.json") or []
         if not cuts:
             self._log(job_id, "no cuts to caption — skipping")
             return
 
-        cues_by_clip: list[list[dict[str, Any]]] = []
         for i, cut in enumerate(cuts):
             cues = translate.build_cues(
                 transcript, cut, self.settings,
             )
-            cues_by_clip.append(cues)
             self._write_caption_tracks(job_id, i, cues)
             self._progress(
                 job_id, "captions", (i + 1) / len(cuts),
