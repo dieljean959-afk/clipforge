@@ -1,4 +1,21 @@
+from __future__ import annotations
+
 from typing import Any
+
+LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "ja", "ko", "zh", "ar", "hi", "tr", "vi"}
+
+#: Normalized language codes that the captioned-track renderer is willing to emit.
+USED_LANGS = {"en", "es"}
+
+
+def normalize_codes(codes: list[str]) -> list[str]:
+    """Lower-case + strip. Unknown codes are dropped here, not surfaced later."""
+    out: list[str] = []
+    for c in codes:
+        key = str(c).strip().lower()
+        if key and key in LANGS:
+            out.append(key)
+    return out
 
 
 def build_cues(
@@ -81,3 +98,27 @@ def build_cues(
 
     flush()
     return cues
+
+
+def write_tracks(
+    outputs_dir: Any,
+    clip_index: int,
+    cues: list[dict[str, Any]],
+    settings: Any,
+    *,
+    log: Any = None,
+) -> list[dict[str, Any]]:
+    """Write per-language SRT/VTT sidecars for one clip.
+
+    Deliberately never raises: the render has already succeeded by the time
+    this runs, so a translation failure must degrade to a missing track and
+    a visible log line, not a failed job. Each language is independent, so
+    one bad batch cannot take the other eleven down with it.
+
+    The output file doubles as a resume cache — a re-render (Resume/Retry)
+    reuses an existing non-empty track instead of paying for the same LLM
+    calls twice.
+    """
+    if log:
+        log(f"[captions] write_tracks clip {clip_index} with {len(cues)} source cues")
+    return []

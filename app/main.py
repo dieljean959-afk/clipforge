@@ -466,6 +466,7 @@ class CreateJobIn(BaseModel):
     maxClipSec: int | None = Field(default=None, ge=10, le=180)
     maxClips: int | None = Field(default=None, ge=1, le=clipcount.HARD_CEILING)
     captionPreset: str | None = Field(default=None, pattern="^(bold_pop|karaoke|lower_third|boxed)$")
+    language: str = Field(default="auto", pattern="^(auto|en|es)$")
 
 
 class RequeueIn(BaseModel):
