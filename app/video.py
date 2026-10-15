@@ -537,7 +537,16 @@ def silence_trim_filter(cuts: list[dict], total_dur: float) -> tuple[str, float]
     )
 
 
-def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out_h: int) -> str:
+def crop_pan_filter(
+    src_w: int,
+    src_h: int,
+    fps: float,
+    crop_x: int,
+    crop_y: int,
+    crop_w: int,
+    crop_h: int,
+    sample_windows: list[dict] | None = None,
+) -> str:
     """crop filter with a time-interpolated x for face tracking.
 
     Between two samples the crop x eases linearly toward the next face
@@ -545,11 +554,18 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
     boundary) the x SNAPS to the new shot's position instead of interpolating
     across the cut — the subject jumps at a cut, so a smooth pan through it
     would be a lie.
+
+    This entry point is the shape the render path calls: it receives the cropBox
+    and the optional sampleWindows list, and builds the per-sample window list
+    internally so the ffmpeg expression is always constructed from real timestamps.
     """
+    windows = _crop_windows(
+        crop_x, crop_y, crop_w, crop_h, fps, sample_windows,
+    )
     if not windows:
-        return f"crop={out_w}:{out_h}:(in_w-out_w)/2:0"
+        return f"crop={crop_w}:{crop_h}:(in_w-{crop_w})/2:0"
     if len(windows) == 1:
-        return f"crop={out_w}:{out_h}:{int(windows[0]['x'])}:0"
+        return f"crop={crop_w}:{crop_h}:{int(windows[0]['x'])}:0"
     parts: list[str] = []
     for i, wdw in enumerate(windows):
         t = wdw["t"]
@@ -570,7 +586,48 @@ def crop_pan_filter(windows: list[dict], src_w: int, src_h: int, out_w: int, out
     # every comma inside the expression (including between nested ifs) must be
     # escaped, or ffmpeg's filtergraph parser treats it as a filter separator
     expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])})" * len(parts)
-    return f"crop={out_w}:{out_h}:{expr}:0"
+    return f"crop={crop_w}:{crop_h}:{expr}:0"
+
+
+def _crop_windows(
+    crop_x: int,
+    crop_y: int,
+    crop_w: int,
+    crop_h: int,
+    fps: float,
+    sample_windows: list[dict] | None,
+) -> list[dict]:
+    """Build the per-sample crop windows from the cut's cropBox + sampleWindows.
+
+    The caller receives crop geometry as explicit scalars; sampleWindows (when
+    present) is the reframe-stage trace with clip-relative sample timestamps.
+    We convert those to frame timestamps and attach the current crop geometry to
+    each one so the filter expression is built from consistent values.
+    """
+    if not sample_windows:
+        base: dict[str, Any] = {"x": crop_x, "y": crop_y, "w": crop_w, "h": crop_h}
+        return [dict(base, t=0.0)]
+    fps = float(fps) or 1.0
+    out: list[dict] = []
+    for w in sample_windows:
+        if not isinstance(w, dict):
+            continue
+        t = float(w.get("t", 0.0))
+        frame = float(w.get("frame", 0.0))
+        # Prefer explicit fps-normalized timestamps, otherwise fall back to
+        # frame-based ones, and to 0.0 when neither is usable.
+        if t:
+            ts = t / fps
+        elif frame:
+            ts = frame / fps
+        else:
+            ts = 0.0
+        out.append(dict(w, x=crop_x, y=crop_y, w=crop_w, h=crop_h, t=ts))
+    if not out:
+        base = {"x": crop_x, "y": crop_y, "w": crop_w, "h": crop_h}
+        return [dict(base, t=0.0)]
+    out.sort(key=lambda w: float(w.get("t", 0.0)))
+    return out
 
 
 #: Audio bitrate for the deliverable. 128k AAC is transparent for speech and
@@ -584,7 +641,6 @@ AUDIO_ARGS = ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
 #: universally supported.
 VIDEO_PROFILE_ARGS = [
     "-profile:v", "high", "-level:v", "4.0"]
-
 
 def browser_safe_args(encoder: str = "") -> list[str]:
     """Container + profile args that make an MP4 playable everywhere.
@@ -606,6 +662,7 @@ def build_output_chain(
     crop_w: int,
     out_w: int,
     out_h: int,
+    fps: float = 30.0,
 ) -> str:
     """The crop → scale → crop → setsar filter chain every render shares.
 
@@ -624,7 +681,18 @@ def build_output_chain(
     """
     chain: list[str] = []
     if crop_windows:
-        chain.append(crop_pan_filter(crop_windows, src_w, src_h, crop_w, src_h))
+        # build_output_chain receives either a reframe trace or an ad-hoc crop
+        # window list. Pass the source fps so crop_pan_filter can normalize the
+        # trace timestamps into the filter expression.
+        xs = [int(w.get("x", 0)) for w in crop_windows if isinstance(w, dict)]
+        ys = [int(w.get("y", 0)) for w in crop_windows if isinstance(w, dict)]
+        w0 = int(crop_windows[0].get("w", src_w)) if crop_windows else src_w
+        h0 = int(crop_windows[0].get("h", src_h)) if crop_windows else src_h
+        crop_x = xs[0] if xs else (src_w - w0) // 2
+        crop_y = ys[0] if ys else 0
+        chain.append(crop_pan_filter(
+            src_w, src_h, fps, crop_x, crop_y, w0, h0, crop_windows,
+        ))
     else:
         chain.append(f"crop={crop_w}:{src_h}:(in_w-{crop_w})/2:0")
     chain.append(f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase")
@@ -731,6 +799,7 @@ def render_clip(
 
     vf = build_output_chain(
         crop_windows, src_w, src_h, crop_w, out_w, out_h,
+        float(src_fps) if src_fps else 30.0,
     )
     if silence_cuts:
         trim_graph, _ = silence_trim_filter(silence_cuts, clip_dur)
