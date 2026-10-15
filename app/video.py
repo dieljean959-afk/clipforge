@@ -584,9 +584,12 @@ def crop_pan_filter(
                     f"if(lt(t\\,{t:.3f})\\,{prev_x}+({x}-{prev_x})*min(1\\,max(0\\,{frac}))"
                 )
     # every comma inside the expression (including between nested ifs) must be
-    # escaped, or ffmpeg's filtergraph parser treats it as a filter separator
-    expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])})" * len(parts)
+    # escaped, or ffmpeg's filtergraph parser treats it as a filter separator.
+    # This function builds exactly one nested-if ladder, so it closes with a
+    # single trailing `)` rather than one per sample.
+    expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])})"
     return f"crop={crop_w}:{crop_h}:{expr}:0"
+
 
 
 def _crop_windows(
@@ -600,29 +603,20 @@ def _crop_windows(
     """Build the per-sample crop windows from the cut's cropBox + sampleWindows.
 
     The caller receives crop geometry as explicit scalars; sampleWindows (when
-    present) is the reframe-stage trace with clip-relative sample timestamps.
-    We convert those to frame timestamps and attach the current crop geometry to
-    each one so the filter expression is built from consistent values.
+    present) is the reframe-stage trace with clip-RELATIVE sample timestamps,
+    where t=0 is the start of the CLIP (after the -ss/-t seek), not necessarily
+    the start of the source. We keep those timestamps exactly as-is so the
+    filter expression is consistent with the clip-relative ffmpeg timeline.
     """
     if not sample_windows:
         base: dict[str, Any] = {"x": crop_x, "y": crop_y, "w": crop_w, "h": crop_h}
         return [dict(base, t=0.0)]
-    fps = float(fps) or 1.0
     out: list[dict] = []
     for w in sample_windows:
         if not isinstance(w, dict):
             continue
         t = float(w.get("t", 0.0))
-        frame = float(w.get("frame", 0.0))
-        # Prefer explicit fps-normalized timestamps, otherwise fall back to
-        # frame-based ones, and to 0.0 when neither is usable.
-        if t:
-            ts = t / fps
-        elif frame:
-            ts = frame / fps
-        else:
-            ts = 0.0
-        out.append(dict(w, x=crop_x, y=crop_y, w=crop_w, h=crop_h, t=ts))
+        out.append(dict(w, x=crop_x, y=crop_y, w=crop_w, h=crop_h, t=t))
     if not out:
         base = {"x": crop_x, "y": crop_y, "w": crop_w, "h": crop_h}
         return [dict(base, t=0.0)]

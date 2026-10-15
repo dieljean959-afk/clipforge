@@ -174,7 +174,7 @@ def _share_backfill() -> dict[str, int]:
 
 
 def _boot() -> None:
-    global settings, store, worker, retention, accounts
+    global settings, store, worker, retention
     try:
         settings = load_config()
     except ConfigError as exc:

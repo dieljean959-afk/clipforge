@@ -16,8 +16,7 @@ def _load_silero():
     if _SILERO_AVAILABLE is False:
         return None
     try:
-        import torch  # noqa: F401
-        from silero_vad import get_speech_timestamps, load_silero_vad  # type: ignore
+        from silero_vad import get_speech_timestamps, load_silero_vad  # type: ignore [import]
         model = load_silero_vad()
         _SILERO_AVAILABLE = True
         return model, get_speech_timestamps
@@ -51,8 +50,7 @@ def detect_speech_windows(wav_path, settings) -> list[dict]:
 
 
 def torch_tensor(audio_f32):
-    import torch
-
+    
     return torch.from_numpy(audio_f32)
 
 
