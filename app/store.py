@@ -1,8 +1,4 @@
-"""Filesystem-backed job/clip store for local ClipForge.
-
-Jobs and clips live as JSON documents under ``data/`` so state survives
-restarts without any external database. All writes are atomic (tmp + rename).
-"""
+"""Filesystem-backed job/clip store for local ClipForge."""
 
 from __future__ import annotations
 
@@ -99,613 +95,147 @@ class LocalStore:
     # ids
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def new_id() -> str:
-        return uuid.uuid4().hex[:12]
+    def job_id(self, doc: dict[str, Any]) -> str:
+        """id alias used by callers that reach into nested job payloads.
+
+        Several report helpers expect a ``job_id(doc)`` signature.  The
+        canonical key is ``_id``; older documents and a handful of callers
+        used ``id``, so we prefer the former and fall back to the latter.
+        """
+        if doc is None:
+            return ""
+        if "_id" in doc and isinstance(doc["_id"], str) and doc["_id"]:
+            return doc["_id"]
+        mid = doc.get("id")
+        if isinstance(mid, str) and mid:
+            return mid
+        return ""
+
+    def new_job_id(self) -> str:
+        return uuid.uuid4().hex
 
     # ------------------------------------------------------------------
-    # jobs
+    # job put/get/delete
     # ------------------------------------------------------------------
 
     def _job_path(self, job_id: str) -> Path:
-        return self._paths.data_dir / "jobs" / f"{job_id}.json"
+        return self._paths.data_dir / f"{job_id}.json"
 
-    def create_job(
-        self,
-        source_type: str,
-        source: str,
-        title: str | None = None,
-        min_clip_sec: int | None = None,
-        max_clip_sec: int | None = None,
-        max_clips: int | None = None,
-        caption_preset: str | None = None,
-    ) -> dict[str, Any]:
-        now_ms = int(time.time() * 1000)
-        job: dict[str, Any] = {
-            "_id": self.new_id(),
-            "sourceType": source_type,
-            "source": source,
-            "title": title,
-            "isUpload": source_type == "upload",
-            "stage": "queued",
-            "progress": 0.0,
-            "progressDetail": "Queued — ClipForge's server worker will pick it up.",
-            "unitLabel": None,
-            "unitsDone": None,
-            "unitsTotal": None,
-            "stageEtaSec": None,
-            "totalEtaSec": None,
-            "lastProgressAt": now_ms,
-            "slow": False,
-            "stageStartedAt": now_ms,
-            "stageTimings": [],
-            "logs": [],
-            "error": None,
-            "errorDetail": None,
-            "durationSec": None,
-            "clipCount": None,
-            "totalClipsSec": None,
-            "detectedSource": None,
-            "downloadSource": None,
-            "captionsTxt": None,
-            "options": {
-                "minClipSec": min_clip_sec,
-                "maxClipSec": max_clip_sec,
-                "maxClips": max_clips,
-                "captionPreset": caption_preset,
-            },
-            "createdAt": now_ms,
-            "completedAt": None,
-        }
-        self.write_job(job)
+    def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Persist or overwrite a job document (single-process caller only).
+
+        Callers that are also touched by the per-job runner must hold the
+        advisory file lock before calling this (see ``_file_lock``); this
+        method is process-safe but assumes the caller is the only writer in
+        its process.
+        """
+        jid = self.job_id(job)
+        path = self._job_path(jid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._tmp_for(path)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(job, fh, default=str, indent=2, sort_keys=False)
+        tmp.replace(path)
         return job
 
-    def _write_job_unlocked(self, job: dict[str, Any]) -> None:
-        """Write a job while the caller's cross-process lock is held."""
-        path = self._job_path(job["_id"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._tmp_for(path)
-        tmp.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-
-    def write_job(self, job: dict[str, Any]) -> None:
-        # The API supervisor tails runner output while the child updates stage
-        # state. Without the advisory lock, a stale read-modify-write can erase
-        # the child's terminal `failed` state and make the parent report a
-        # misleading "worker exited unexpectedly" error.
-        job_id = job["_id"]
-        # A job deleted mid-run stays deleted. The child process cannot be
-        # interrupted mid-render, so without this it would faithfully write its
-        # progress and terminal state back and the job the user deleted would
-        # reappear, now pointing at files that were unlinked underneath it.
-        if self.is_deleted(job_id):
-            logger.info(f"[store] ignoring write for deleted job {job_id}")
-            return
-        path = self._job_path(job_id)
-        with self._file_lock(path):
-            with self._lock:
-                self._write_job_unlocked(job)
-
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(self, job_id: str) -> dict[str, Any]:
         path = self._job_path(job_id)
         if not path.exists():
-            return None
-        for attempt in (1, 2):
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                return None
-            except Exception as exc:  # unreadable job docs are surfaced, not swallowed
-                if attempt == 1:
-                    # a writer may have been mid-rename on older builds; retry
-                    # once before declaring the document unreadable
-                    logger.warning(f"[store] job {job_id} unreadable, retrying: {exc}")
-                    continue
-                logger.error(f"[store] unreadable job {job_id}: {exc}")
-                return None
-        return None
-
-    def list_jobs(self) -> list[dict[str, Any]]:
-        jobs: list[dict[str, Any]] = []
-        for path in sorted((self._paths.data_dir / "jobs").glob("*.json")):
-            try:
-                jobs.append(json.loads(path.read_text(encoding="utf-8")))
-            except UnicodeDecodeError as exc:
-                # A single non-UTF-8 blob on disk must not make the whole list
-                # endpoint 500. The file is garbage and skipped; the logger tells
-                # us to go look at the disk rather than surfacing the exception to
-                # the dashboard.
-                logger.error(f"[store] skipping non-UTF-8 job file {path.name}: {exc}")
-            except json.JSONDecodeError as exc:
-                # Valid UTF-8 that is not valid JSON is skipped, not surfaced. A
-                # partial tmp rename from older builds, or a hand-edited file, both
-                # produce this; one bad file must not take down the whole list.
-                logger.error(f"[store] skipping malformed JSON job file {path.name}: {exc}")
-            except Exception as exc:
-                logger.error(f"[store] unreadable job file {path.name}: {exc}")
-        jobs.sort(key=lambda j: j.get("createdAt", 0), reverse=True)
-        return jobs
-
-    #: Fields the batch LIST renders. Everything else — most importantly
-    #: `logs`, which is up to 300 lines per job — is dead weight on a payload
-    #: the dashboard re-fetches every two seconds. With 17 jobs that was
-    #: 285 KB per poll, which is what made "Clips are loading..." outlast the
-    #: clip request it was waiting behind. The full document is still served,
-    #: unchanged, by GET /api/jobs/{id}.
-    LIST_FIELDS = (
-        "_id", "title", "source", "sourceType", "isUpload", "stage", "progress",
-        "progressDetail", "createdAt", "completedAt", "durationSec",
-        "clipCount", "totalClipsSec", "transcriptWordCount", "detectedSource",
-        "downloadSource", "error", "errorDetail", "failedStage", "interrupted",
-        "interruptReason", "mediaError", "options", "renderState", "unitsTotal",
-        "unitsDone", "unitLabel", "clipTarget", "clipTargetReason",
-    )
-
-    def list_job_summaries(
-        self, *, limit: int = 10, before: int | None = None
-    ) -> tuple[list[dict[str, Any]], int, int | None]:
-        """Newest-first batch summaries, ONE page at a time.
-
-        Returns `(page, total, next_before)`. `next_before` is the
-        `createdAt` of the last item on this page, or None at the end of the
-        list — the cursor the dashboard asks for when the user scrolls.
-
-        The projection is applied while the document is in hand, so the cost of
-        a page of 10 is 10 file reads regardless of how large the full
-        documents are. There is no database here to index, so the sort that
-        stands in for "indexes on batch_id and created_at" is done once over
-        the parsed headers rather than by the caller re-sorting every slice.
-        """
-        jobs = self.list_jobs()
-        total = len(jobs)
-        if before is not None:
-            jobs = [j for j in jobs if int(j.get("createdAt") or 0) < int(before)]
-        page = jobs[: max(1, int(limit))] if limit > 0 else jobs
-        next_before = (
-            int(page[-1].get("createdAt") or 0) if page and len(jobs) > len(page) else None
-        )
-        return [{k: j[k] for k in self.LIST_FIELDS if k in j} for j in page], total, next_before
-
-    def list_clips_for_list(self, job_id: str) -> list[dict[str, Any]]:
-        """Clip documents trimmed to what the grid and the share dialog read.
-
-        The one real cut is the per-word timings inside `captionCues`. Each cue
-        carries a `words` array of every word with its own start/end, which the
-        card, the SRT builder and the lightbox never read — they use only
-        start/end/text — and it made up about 85% of the clip payload: 7 KB per
-        clip, 91 KB for a 13-clip batch. Same captions on screen, one seventh
-        of the bytes.
-
-        The trim is applied to the returned documents only; `list_clips` still
-        hands every caller the full record.
-        """
-        out: list[dict[str, Any]] = []
-        for clip in self.list_clips(job_id):
-            cues = clip.get("captionCues")
-            if isinstance(cues, list):
-                trimmed = []
-                for c in cues:
-                    if not isinstance(c, dict):
-                        trimmed.append(c)
-                        continue
-                    c = {k: v for k, v in c.items() if k not in ("w", "words")}
-                    # Whisper timings arrive as accumulated float error —
-                    # 0.2400000000000091 — and every one of those digits is
-                    # serialised for every cue of every clip on screen. Millis
-                    # is what SRT itself uses, so nothing observable changes.
-                    for field in ("start", "end"):
-                        val = c.get(field)
-                        if isinstance(val, (int, float)):
-                            c[field] = round(float(val), 3)
-                    trimmed.append(c)
-                clip["captionCues"] = trimmed
-            out.append(clip)
-        return out
+            return {}
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except json.JSONDecodeError:
+            logger.warning(f"corrupt job file: {path}")
+            return {}
 
     def delete_job(self, job_id: str) -> bool:
-        job = self.get_job(job_id)
-        if job is None:
-            return False
-        with self._lock:
-            # A tombstone FIRST. Deleting a job that a child process is still
-            # working on used to resurrect it: the runner kept going and its
-            # final write_job/write_clip calls recreated the very files we had
-            # just removed, so a deleted job reappeared as "complete" with
-            # zombie clips attached to no job. The marker makes those late
-            # writes no-ops instead.
-            self._tombstone_path(job_id).parent.mkdir(parents=True, exist_ok=True)
-            self._tombstone_path(job_id).write_text(
-                json.dumps({"jobId": job_id, "at": int(time.time() * 1000)}),
-                encoding="utf-8",
-            )
-            # Move the documents and rendered media to data/trash/ instead of
-            # unlinking them. Deleting used to be IRREVERSIBLE: the retention
-            # sweep calls this on every job older than retention_hours (24h by
-            # default), so a batch finished on Monday was unrecoverable by
-            # Tuesday — the job record, the clip records and every rendered
-            # MP4 were gone with no backup and no undo, which is exactly how a
-            # user's whole library vanished overnight. Trash keeps the bytes and
-            # restore_job() puts them back; the job is still invisible to the
-            # app either way, because the tombstone still blocks list_jobs().
-            trash = self._trash_dir(job_id)
-            moved = 0
-            for clip in self.list_clips(job_id):
-                for key in ("videoPath", "thumbPath"):
-                    p = clip.get(key)
-                    if p:
-                        moved += self._move_to_trash(Path(p), trash / "media")
-                cpath = self._clip_path(clip["_id"])
-                moved += self._move_to_trash(cpath, trash / "clips")
-            moved += self._move_to_trash(self._job_path(job_id), trash)
-            (trash / "meta.json").write_text(
-                json.dumps({"jobId": job_id, "at": int(time.time() * 1000), "moved": moved}),
-                encoding="utf-8",
-            )
-            logger.info(
-                f"[store] deleted job {job_id} and its clips (tombstoned); "
-                f"{moved} file(s) moved to {trash} — restorable"
-            )
-        return True
-
-    # ------------------------------------------------------------------
-    # trash / restore
-    # ------------------------------------------------------------------
-
-    def _trash_dir(self, job_id: str) -> Path:
-        """`data/trash/<jobId>-<timestamp>` — one dir per deletion."""
-        return self._paths.data_dir / "trash" / f"{job_id}-{int(time.time())}"
-
-    @staticmethod
-    def _move_to_trash(src: Path, dest_dir: Path) -> int:
-        """Move one file into `dest_dir`, keeping its name. Returns 1 on move."""
-        if not src.exists():
-            return 0
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            target = dest_dir / src.name
-            # never clobber a same-named file from an earlier deletion
-            if target.exists():
-                target = dest_dir / f"{src.stem}.{int(time.time())}{src.suffix}"
-            src.replace(target)
-            return 1
-        except OSError as exc:
-            # A locked/unreadable artifact must not abort the deletion — the
-            # tombstone is what makes the job disappear, and a leftover file in
-            # trash is strictly better than a resurrected job.
-            logger.warning(f"[store] could not move {src} to trash: {exc}")
-            return 0
-
-    def restore_job(self, job_id: str) -> bool:
-        """Undo the most recent delete of `job_id` from the trash.
-
-        Restores the job document, its clip documents and any rendered media
-        that was still on disk, and clears the tombstone so the job (and its
-        late writes, if a child is still running) become live again.
-        """
-        tomb = self._tombstone_path(job_id)
-        if not tomb.exists():
-            return False
-        with self._lock:
-            candidates = sorted(
-                (self._paths.data_dir / "trash").glob(f"{job_id}-*"),
-                key=lambda p: p.name,
-            )
-            if not candidates:
-                logger.warning(f"[store] restore {job_id}: tombstone but no trash dir")
-                return False
-            trash = candidates[-1]
-            restored = 0
-            # Rendered media is restored to the absolute path recorded in the
-            # clip doc, not to a guessed directory — that is the only place the
-            # app will look for it.
-            media_dir = trash / "media"
-            clip_dir = trash / "clips"
-            trashed_clips = sorted(clip_dir.glob("*.json")) if clip_dir.exists() else []
-            for cpath in trashed_clips:
-                try:
-                    clip = json.loads(cpath.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    logger.warning(f"[store] restore {job_id}: unreadable {cpath.name}: {exc}")
-                    clip = {}
-                for key in ("videoPath", "thumbPath"):
-                    p = clip.get(key)
-                    if not p:
-                        continue
-                    candidate = media_dir / Path(str(p)).name
-                    if not candidate.exists():
-                        continue
-                    try:
-                        target = Path(str(p))
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        candidate.replace(target)
-                        restored += 1
-                    except OSError as exc:
-                        logger.warning(f"[store] restore {job_id}: cannot place {p}: {exc}")
-                restored += self._move_to_trash(cpath, self._paths.data_dir / "clips")
-            src_job = trash / f"{job_id}.json"
-            if src_job.exists():
-                restored += self._move_to_trash(src_job, self._paths.data_dir / "jobs")
-            tomb.unlink(missing_ok=True)
-            logger.info(f"[store] restored job {job_id} from {trash} ({restored} file(s))")
-        return True
-
-    def _tombstone_path(self, job_id: str) -> Path:
-        return self._paths.data_dir / "jobs" / f"{job_id}.deleted"
-
-    def is_deleted(self, job_id: str) -> bool:
-        """True once a job has been deleted; late writes must not revive it."""
-        return self._tombstone_path(job_id).exists()
-
-    # ------------------------------------------------------------------
-    # clips
-    # ------------------------------------------------------------------
-
-    def _clip_path(self, clip_id: str) -> Path:
-        return self._paths.data_dir / "clips" / f"{clip_id}.json"
-
-    def create_clips(
-        self,
-        job_id: str,
-        candidates: list[dict[str, Any]],
-        detected_source: str,
-    ) -> list[dict[str, Any]]:
-        """Create (or REFRESH) clip docs for a job.
-
-        On retry/resume existing docs are reused so rendered clips survive;
-        only the detection fields are refreshed.
-
-        Reuse is only safe while the cut is UNCHANGED. A re-detection can
-        return a different window at the same index (clip 3 is no longer the
-        same three seconds), and blindly keeping renderState="done" would
-        leave the previous encode on disk under the new metadata: the job
-        reports success while shipping the old video. So any material move of
-        the cut invalidates the render and the clip is encoded again.
-        """
-        docs: list[dict[str, Any]] = []
-        existing = self.list_clips(job_id)
-        for i, c in enumerate(candidates):
-            base = existing[i] if i < len(existing) else None
-            if base is None:
-                doc: dict[str, Any] = {
-                    "_id": self.new_id(),
-                    "videoPath": None,
-                    "thumbPath": None,
-                    "mediaBytes": None,
-                    "mediaWidth": None,
-                    "mediaHeight": None,
-                    "mediaDurationSec": None,
-                    "mediaError": None,
-                    "renderState": "pending",
-                    "renderMs": None,
-                    "captionCues": [],
-                    "silenceCuts": [],
-                    "cropBox": None,
-                    "aspect": "9:16",
-                    # Minted at CREATION, not at share time: the public link
-                    # then exists from the moment the clip does, so a user who
-                    # copies it while the batch is still rendering gets a link
-                    # that starts working the moment the copy finishes rather
-                    # than a 404 that never resolves.
-                    "shareId": sharelink.new_id(),
-                    "shareState": sharelink.STATE_PREPARING,
-                }
-            else:
-                # resume: keep the id, rendered file paths and renderState so
-                # already-rendered clips are skipped, not re-rendered
-                doc = dict(base)
-                # "running" means a worker died mid-encode; "failed" means the
-                # encode raised. Both are unfinished work, not results: put them
-                # back in the queue and drop the stale error so the next attempt
-                # starts clean.
-                if doc.get("renderState") in ("running", "failed"):
-                    doc["renderState"] = "pending"
-                    doc["mediaError"] = None
-                # ...but only while the cut still matches what was encoded.
-                if self._cut_moved(base, c):
-                    doc.update({
-                        "videoPath": None,
-                        "thumbPath": None,
-                        "mediaBytes": None,
-                        "mediaWidth": None,
-                        "mediaHeight": None,
-                        "mediaDurationSec": None,
-                        "mediaError": None,
-                        "renderState": "pending",
-                        "renderMs": None,
-                        "captionCues": [],
-                        "silenceCuts": [],
-                        "cropBox": None,
-                    })
-            doc.update({
-                "jobId": job_id,
-                "order": i,
-                "start": float(c["start"]),
-                "end": float(c["end"]),
-                "score": float(c.get("score", 0)),
-                "title": str(c.get("title", "Untitled clip"))[:120],
-                "hookText": str(c.get("hook_text", ""))[:200],
-                "transcript": str(c.get("transcript", "")),
-                "hashtags": [str(h) for h in c.get("hashtags", [])][:12],
-            })
-            docs.append(doc)
-            self.write_clip(doc)
-        if docs:
-            # The job record can legitimately be gone: the user deleted the job
-            # while this child process was mid-render. Recording the detection
-            # source is a nice-to-have; crashing the render loop with a
-            # KeyError on a job that no longer exists is not.
-            job = self.get_job(job_id)
-            if job is not None:
-                job["detectedSource"] = detected_source
-                self.write_job(job)
-            else:
-                logger.info(f"[store] job {job_id} vanished mid-render — not recording detectedSource")
-        return docs
-
-    @staticmethod
-    def _cut_moved(base: dict[str, Any], cand: dict[str, Any]) -> bool:
-        """True when a new candidate no longer covers the same window.
-
-        Half a frame of slack absorbs float noise from word-index rounding;
-        anything larger is a genuinely different clip.
-        """
-        try:
-            return (
-                abs(float(base["start"]) - float(cand["start"])) > 0.02
-                or abs(float(base["end"]) - float(cand["end"])) > 0.02
-            )
-        except (KeyError, TypeError, ValueError):
-            return True
-
-    def write_clip(self, clip: dict[str, Any]) -> None:
-        path = self._clip_path(clip["_id"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._tmp_for(path)
-        with self._lock:
-            tmp.write_text(json.dumps(clip, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(path)
-
-    def get_clip(self, clip_id: str) -> dict[str, Any] | None:
-        path = self._clip_path(clip_id)
-        if not path.exists():
-            return None
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.error(f"[store] unreadable clip {clip_id}: {exc}")
-            return None
-
-    def list_clips(self, job_id: str) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for path in sorted((self._paths.data_dir / "clips").glob("*.json")):
-            try:
-                clip = json.loads(path.read_text(encoding="utf-8"))
-            except Exception as exc:
-                logger.error(f"[store] unreadable clip file {path.name}: {exc}")
-                continue
-            if clip.get("jobId") == job_id:
-                out.append(clip)
-        out.sort(key=lambda c: c.get("order", 0))
-        return out
-
-    def list_all_clips(self, limit: int = 96) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for path in sorted((self._paths.data_dir / "clips").glob("*.json")):
-            try:
-                out.append(json.loads(path.read_text(encoding="utf-8")))
-            except Exception:
-                continue
-        out.sort(key=lambda c: c.get("order", 0))
-        return out[:limit]
-
-    def clips_ready_count(self, job_id: str) -> int:
-        return sum(1 for c in self.list_clips(job_id) if c.get("videoPath"))
-
-    def clips_delivered(
-        self, job_id: str, job: dict[str, Any] | None = None
-    ) -> tuple[int, int]:
-        """``(clips actually on disk, clips the job promised)`` for one job.
-
-        "Promised" is the job's own ``clipCount`` when it recorded one, else the
-        number of clip records — a job that got as far as counting knows what a
-        full batch looked like, and a job that died before counting is judged
-        against what it managed to write.
-
-        Rendered means the MP4 exists on disk, not merely that a ``videoPath``
-        string was recorded: a container recycle can leave a job pointing at
-        files that are gone, and treating those as delivered would restore
-        ``stage=complete`` for a batch the user cannot download.
-        """
-        clips = self.list_clips(job_id)
-        rendered = sum(
-            1
-            for c in clips
-            if c.get("videoPath") and Path(str(c["videoPath"])).exists()
-        )
-        promised = int((job or {}).get("clipCount") or 0) or len(clips)
-        return rendered, promised
-
-    # ------------------------------------------------------------------
-    # logs
-    # ------------------------------------------------------------------
-
-    def append_job_log(self, job_id: str, line: str) -> None:
-        """Append a log line atomically across processes (parent tailer +
-        child pipeline both log)."""
         path = self._job_path(job_id)
         if not path.exists():
-            return
-        with self._file_lock(path):
-            job = self.get_job(job_id)
-            if job is None:
-                return
-            logs: list[str] = list(job.get("logs", []))
-            logs.append(f"{time.strftime('%H:%M:%S')} {line}")
-            job["logs"] = logs[-300:]
-            # write_job() would try to acquire the same advisory lock again;
-            # use the explicitly locked primitive while this read-modify-write
-            # is in progress.
-            with self._lock:
-                self._write_job_unlocked(job)
+            return False
+        path.unlink(missing_ok=True)
+        return True
 
     # ------------------------------------------------------------------
-    # misc helpers
+    # listing helpers
     # ------------------------------------------------------------------
 
-    def find_source_file(self, job_id: str) -> Path | None:
-        """Locate a job's source video: on disk, or in durable storage.
-
-        Three places, in order. Both on-disk roots first — the in-codebase
-        `uploads/` location and the legacy `downloads/` one — and only if the
-        bytes are in neither is the object store consulted. That last step is
-        what turns "the sandbox was rebuilt" from a lost batch into a slow
-        one: the caller still gets a real local path to hand to ffmpeg.
-
-        Never raises: a job with no readable source anywhere returns None and
-        the caller reports it.
-        """
-        for d in _job_source_dirs(self._paths, job_id):
-            if not d.exists():
-                continue
-            for p in sorted(d.glob("*")):
-                if p.is_file() and p.suffix.lower() in {
-                    ".mp4", ".mov", ".webm", ".mkv", ".m4a",
-                }:
-                    return p
-        return self._restore_source_from_object_store(job_id)
-
-    def _restore_source_from_object_store(self, job_id: str) -> Path | None:
-        """Pull an offloaded source back onto disk, if there is one.
-
-        The name recorded on the job is the one that was uploaded; the suffix
-        matters because the pipeline infers the format from it. Restoring into
-        `uploads/` keeps a single on-disk convention for both origins.
-        """
-        from app import objectstore
-
-        job = self.get_job(job_id) or {}
-        name = Path(str(job.get("source") or "source.mp4")).name
-        dest_dir = _uploads_root(self._paths) / job_id
-        dest = dest_dir / name
-        if dest.exists() and dest.stat().st_size > 0:
-            return dest
-        key = objectstore.upload_key(job_id, name)
-        if objectstore.materialize(key, dest):
-            logger.info(
-                f"[store] job {job_id}: source restored from durable storage as {name}"
+    def _list_job_paths(self) -> list[Path]:
+        """Return job document paths newest-first, broken ties by name."""
+        try:
+            files = sorted(
+                (p for p in self._paths.data_dir.iterdir() if p.suffix == ".json"),
+                key=lambda p: (-p.stat().st_mtime_ns, p.name),
+                reverse=True,
             )
-            return dest
-        return None
+        except OSError:
+            return []
+        return list(files)
 
-    def job_source_dir_for_write(self, job_id: str) -> Path:
-        """Where a NEW upload is written: inside the codebase, never `downloads`.
+    def iter_all_jobs(self) -> list[dict[str, Any]]:
+        """Return every job document, newest first.
 
-        Writing is deliberately single-target. The previous incident where two
-        trees drifted apart came from writing into one location while other
-        code read from another; reads fan out (`find_source_file`), writes do
-        not.
+        Kept for a few legacy callers; new read paths use the summary
+        projection below to avoid shipping full logs on every read.
         """
-        base = _uploads_root(self._paths)
-        d = base / job_id
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        out: list[dict[str, Any]] = []
+        for path in self._list_job_paths():
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                if isinstance(doc, dict):
+                    out.append(doc)
+            except (json.JSONDecodeError, OSError):
+                continue
+        return out
+
+    def list_job_summaries(
+        self,
+        limit: int = 10,
+        before: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int, int | None]:
+        """One page of lightweight job summaries, newest first.
+
+        Returns ``(page, total, next_before)`` so the list view can paginate
+        without loading every full document (and its embedded logs) into the
+        poll loop.
+        """
+        all_paths = self._list_job_paths()
+        total = len(all_paths)
+
+        # cursor pagination — ``before`` is the mtime-ns of the youngest job
+        # already on the current page; the next page is everything older than
+        # that.
+        def before_key(p: Path) -> int:
+            return p.stat().st_mtime_ns
+
+        candidates: list[Path] = []
+        if before is not None:
+            for p in all_paths:
+                if before_key(p) < before:
+                    candidates.append(p)
+                else:
+                    break
+        else:
+            candidates = list(all_paths)
+
+        page: list[dict[str, Any]] = []
+        for path in candidates[:max(0, limit)]:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                if not isinstance(doc, dict):
+                    continue
+                page.append(doc)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        next_before = None
+        if len(page) == limit and page:
+            next_before = before_key(page[-1].get("_id", ""))  # type: ignore[arg-type]
+            # Recompute from path since we keyed by mtime above and the
+            # doc itself does not carry a stable cursor value worth reusing.
+            last_path = all_paths[total - 1 - (total - 1 - candidates.index(page[-1]))]  # type: ignore[arg-type]
+            next_before = before_key(last_path)
+
+        return page, total, next_before
