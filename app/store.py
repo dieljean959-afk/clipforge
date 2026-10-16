@@ -347,6 +347,39 @@ class LocalStore:
             return self.list_clips(job_id)
         return self.list_all_clips()
 
+    def create_clips(
+        self,
+        job_id: str,
+        candidates: list[dict[str, Any]],
+        *,
+        detected_source: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Record the AI-detected candidate clips for a job.
+
+        Called after the detection stage finishes. Creates a clips metadata
+        file so the dashboard can show "AI-detected via <source>" and the
+        clip count before rendering finishes.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        clip_data = {
+            "jobId": job_id,
+            "candidateCount": len(candidates),
+            "detectedSource": detected_source,
+            "at": int(time.time() * 1000),
+        }
+        path = clips_dir / f"{job_id}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(clip_data, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        # Also update the job document with the clip count
+        job = self.get_job(job_id)
+        if job:
+            job["candidatesDetected"] = len(candidates)
+            job["clipTarget"] = max(1, int((job.get("durationSec") or 0) / 30))
+            self.write_job(job)
+        return clip_data
+
     # ------------------------------------------------------------------
     # write_job is an alias for save_job (kept for backward compat)
     # ------------------------------------------------------------------
