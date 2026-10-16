@@ -616,7 +616,11 @@ def _crop_windows(
         if not isinstance(w, dict):
             continue
         t = float(w.get("t", 0.0))
-        out.append(dict(w, x=crop_x, y=crop_y, w=crop_w, h=crop_h, t=t))
+        out.append(dict(w, t=t))
+        out[-1].setdefault("x", crop_x)
+        out[-1].setdefault("y", crop_y)
+        out[-1].setdefault("w", crop_w)
+        out[-1].setdefault("h", crop_h)
     if not out:
         base = {"x": crop_x, "y": crop_y, "w": crop_w, "h": crop_h}
         return [dict(base, t=0.0)]

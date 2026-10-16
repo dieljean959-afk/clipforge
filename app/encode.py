@@ -523,7 +523,7 @@ def render_clip(
         "-ss", str(start),
         "-t", str(clip_seconds),
         *choice.threads_args(),
-        *filtergraph,
+        "-vf", filtergraph,
         *choice.ffmpeg_codec_args(),
         "-an",
         str(dest),
