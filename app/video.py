@@ -587,7 +587,7 @@ def crop_pan_filter(
     # escaped, or ffmpeg's filtergraph parser treats it as a filter separator.
     # This function builds exactly one nested-if ladder, so it closes with a
     # single trailing `)` rather than one per sample.
-    expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])})"
+    expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])}" + ")" * len(parts)
     return f"crop={crop_w}:{crop_h}:{expr}:0"
 
 
