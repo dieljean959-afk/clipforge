@@ -119,7 +119,7 @@ class LocalStore:
     # ------------------------------------------------------------------
 
     def _job_path(self, job_id: str) -> Path:
-        return self._paths.data_dir / f"{job_id}.json"
+        return self._paths.data_dir / "jobs" / f"{job_id}.json"
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
         """Persist or overwrite a job document (single-process caller only).
@@ -162,15 +162,29 @@ class LocalStore:
 
     def _list_job_paths(self) -> list[Path]:
         """Return job document paths newest-first, broken ties by name."""
+        # Job documents live in the jobs/ subdirectory, not directly in data_dir.
+        # This keeps data_dir clean (config/status files sit alongside the
+        # subdirectory) and matches how the pipeline has written jobs since the
+        # hosted-worker refactor.
+        jobs_dir = self._paths.data_dir / "jobs"
         try:
             files = sorted(
-                (p for p in self._paths.data_dir.iterdir() if p.suffix == ".json"),
+                (p for p in jobs_dir.iterdir() if p.suffix == ".json" and p.is_file()),
                 key=lambda p: (-p.stat().st_mtime_ns, p.name),
                 reverse=True,
             )
         except OSError:
             return []
         return list(files)
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        """Return every job document, newest first.
+
+        Kept for backward compatibility — some callers still use this name.
+        New read paths use the summary projection below to avoid shipping full
+        logs on every read.
+        """
+        return self.iter_all_jobs()
 
     def iter_all_jobs(self) -> list[dict[str, Any]]:
         """Return every job document, newest first.
@@ -232,10 +246,165 @@ class LocalStore:
 
         next_before = None
         if len(page) == limit and page:
-            next_before = before_key(page[-1].get("_id", ""))  # type: ignore[arg-type]
-            # Recompute from path since we keyed by mtime above and the
-            # doc itself does not carry a stable cursor value worth reusing.
-            last_path = all_paths[total - 1 - (total - 1 - candidates.index(page[-1]))]  # type: ignore[arg-type]
-            next_before = before_key(last_path)
+            # Use the mtime of the last job's file as the cursor
+            last_job = page[-1]
+            last_path = self._job_path(last_job.get("_id", ""))
+            if last_path.exists():
+                next_before = last_path.stat().st_mtime_ns
 
         return page, total, next_before
+
+    # ------------------------------------------------------------------
+    # job log
+    # ------------------------------------------------------------------
+
+    def append_job_log(self, job_id: str, message: str) -> None:
+        """Append a log line to a job's log array."""
+        with self._file_lock(self._job_path(job_id)):
+            job = self.get_job(job_id)
+            if not isinstance(job, dict):
+                job = {}
+            logs = job.get("logs")
+            if not isinstance(logs, list):
+                logs = []
+            logs.append(message)
+            job["logs"] = logs
+            self.save_job(job)
+
+    # ------------------------------------------------------------------
+    # clip operations
+    # ------------------------------------------------------------------
+
+    def clips_delivered(self, job_id: str, job: dict[str, Any]) -> tuple[int, int]:
+        """Return (rendered_count, promised_count) for a job.
+
+        rendered: number of clip files actually on disk
+        promised: number of clips the job was supposed to produce
+        """
+        if not job_id:
+            return 0, 0
+        clip_dir = self._paths.outputs_dir / job_id
+        rendered = 0
+        if clip_dir.exists():
+            for p in clip_dir.iterdir():
+                if p.is_file() and p.suffix in {".mp4", ".mov", ".webm"}:
+                    rendered += 1
+        promised = int(job.get("clipTarget") or job.get("clipCount") or 0)
+        return rendered, promised
+
+    def list_clips(self, job_id: str) -> list[dict[str, Any]]:
+        """Return metadata for all clips belonging to a job."""
+        out: list[dict[str, Any]] = []
+        clip_dir = self._paths.outputs_dir / job_id
+        if not clip_dir.exists():
+            return out
+        for p in sorted(clip_dir.iterdir()):
+            if p.is_file() and p.suffix in {".mp4", ".mov", ".webm"}:
+                out.append({
+                    "_id": p.stem,
+                    "jobId": job_id,
+                    "path": str(p),
+                    "filename": p.name,
+                    "size": p.stat().st_size,
+                })
+        return out
+
+    def get_clip(self, job_id: str, clip_id: str) -> dict[str, Any] | None:
+        """Return metadata for a specific clip."""
+        clips = self.list_clips(job_id)
+        for c in clips:
+            if c.get("_id") == clip_id:
+                return c
+        return None
+
+    def write_clip(self, job_id: str, clip_data: dict[str, Any]) -> dict[str, Any]:
+        """Record a clip's metadata (called after rendering completes)."""
+        clip_id = clip_data.get("_id", self.new_job_id())
+        clip_path = self._paths.outputs_dir / job_id / f"{clip_id}.json"
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = clip_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(clip_data, indent=2), encoding="utf-8")
+        tmp.replace(clip_path)
+        return clip_data
+
+    def list_all_clips(self) -> list[dict[str, Any]]:
+        """Return metadata for all clips across all jobs."""
+        out: list[dict[str, Any]] = []
+        if not self._paths.outputs_dir.exists():
+            return out
+        for job_dir in self._paths.outputs_dir.iterdir():
+            if job_dir.is_dir():
+                out.extend(self.list_clips(job_dir.name))
+        return out
+
+    # ------------------------------------------------------------------
+    # write_job is an alias for save_job (kept for backward compat)
+    # ------------------------------------------------------------------
+
+    def write_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Persist or overwrite a job document. Alias for save_job."""
+        return self.save_job(job)
+
+    # ------------------------------------------------------------------
+    # output management
+    # ------------------------------------------------------------------
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a snapshot of outputs for external reporting."""
+        clips = self.list_all_clips()
+        return {
+            "clipCount": len(clips),
+            "clips": clips,
+        }
+
+    def materialize(self, job_id: str) -> bool:
+        """Ensure outputs for a job are accessible. Returns True if ok."""
+        return (self._paths.outputs_dir / job_id).exists()
+
+    def drop_local_after_push(self, job_id: str) -> bool:
+        """Drop local clip files after they've been pushed to durable storage."""
+        clip_dir = self._paths.outputs_dir / job_id
+        if clip_dir.exists():
+            import shutil
+            shutil.rmtree(clip_dir, ignore_errors=True)
+            return True
+        return False
+
+    def find_source_file(self, job_id: str) -> Path | None:
+        """Find the source video file for a job."""
+        for d in _job_source_dirs(self._paths, job_id):
+            for p in d.iterdir():
+                if p.is_file() and p.suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
+                    return p
+        return None
+
+    def job_source_dir_for_write(self, job_id: str) -> Path:
+        """Return the directory where a job's source file should be written."""
+        return _uploads_root(self._paths) / job_id
+
+    def upload_file(self, job_id: str, filename: str, data: bytes) -> Path:
+        """Store an uploaded file for a job."""
+        upload_dir = self.job_source_dir_for_write(job_id)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        path = upload_dir / filename
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+        return path
+
+    def upload_key(self, job_id: str, filename: str) -> str:
+        """Return a storage key for an uploaded file. Simple filename-based key."""
+        return f"{job_id}/{filename}"
+
+    def restore_job(self, job_id: str) -> bool:
+        """Restore a job's state. No-op for local store."""
+        return True
+
+    def config_from_env(self) -> dict[str, Any]:
+        """Return configuration from environment. Empty for local store."""
+        return {}
+
+    def key_for_path(self, path: Path) -> str:
+        """Return a storage key for a given file path."""
+        rel = path.relative_to(self._paths.outputs_dir)
+        return str(rel).replace("\\", "/")
