@@ -178,6 +178,21 @@ def describe(job: dict[str, Any]) -> dict[str, Any]:
         # A running job is never "done" — clamp so a job at 100% mid-render
         # cannot read as complete, which is the mirror image of the bug above.
         out["progress"] = max(0.0, min(99.0, pct))
+        # A running job whose progress was reset to 0 (e.g. re-queued after a
+        # host restart) still carries stale running-only fields from the prior
+        # attempt. Those fields make a freshly-queued job read as "5 of 15
+        # clips" with a filled-in stage plan, which is the exact contradiction
+        # this module exists to prevent. Clear them the same way we do for
+        # terminal jobs. Preserve progressDetail only if it's a valid resume
+        # message (set by the worker when re-queuing), otherwise clear it too.
+        if out["progress"] == 0.0:
+            for field in _RUNNING_ONLY_FIELDS:
+                out.pop(field, None)
+            # Only preserve progressDetail if it's a resume message set by the
+            # worker when re-queuing. Stale progress details from a prior run
+            # (e.g. "Rendering clip 5 of 15") must be cleared.
+            if not out.get("progressDetail", "").lower().startswith("re-queued"):
+                out.pop("progressDetail", None)
     return out
 
 
