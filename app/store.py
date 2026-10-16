@@ -337,6 +337,16 @@ class LocalStore:
                 out.extend(self.list_clips(job_dir.name))
         return out
 
+    def list_clips_for_list(self, job_id: str | None = None) -> list[dict[str, Any]]:
+        """Return clips for the clip list endpoint, with share state attached.
+        
+        Called by /api/clips. Returns lightweight clip metadata suitable for
+        the dashboard clip list.
+        """
+        if job_id:
+            return self.list_clips(job_id)
+        return self.list_all_clips()
+
     # ------------------------------------------------------------------
     # write_job is an alias for save_job (kept for backward compat)
     # ------------------------------------------------------------------

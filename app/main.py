@@ -233,6 +233,7 @@ def _boot() -> None:
                 "stage": "complete",
                 "progress": 100,
                 "progressDetail": f"{rendered} clips ready.",
+                "clipCount": rendered,
                 "completedAt": job.get("completedAt") or int(time.time() * 1000),
                 "failedStage": None,
                 "error": None,
