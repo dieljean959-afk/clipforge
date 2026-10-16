@@ -60,7 +60,7 @@ export function buildPostCaption(caption: string, tags: string[]): string {
 }
 
 export function clipFileStem(clip: ClipDto): string {
-  const safe = clip.title
+  const safe = (clip.title ?? "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
