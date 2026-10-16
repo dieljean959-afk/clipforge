@@ -1573,8 +1573,14 @@ def list_jobs(
     # the request budget proving that nothing had changed; a short floor keeps
     # the guarantee while removing the duplicate work.
     worker.reconcile_stale_running(min_interval_sec=LIST_RECONCILE_FLOOR_SEC)
+    # When all=True, fetch every job — use a large limit so the pagination
+    # layer returns everything instead of an empty page (limit=0 means "no
+    # jobs" in list_job_summaries).
+    page_limit = 0 if all else limit
+    if all:
+        page_limit = 999999  # effectively unlimited
     page, total, next_before = store.list_job_summaries(
-        limit=0 if all else limit, before=before
+        limit=page_limit, before=before
     )
     # live queue positions — a job waiting at 0% must be distinguishable from
     # one that is genuinely stuck
