@@ -381,8 +381,21 @@ class LocalStore:
         return False
 
     def find_source_file(self, job_id: str) -> Path | None:
-        """Find the source video file for a job."""
+        """Find the source video file for a job.
+        
+        Checks both the new uploads dir and the legacy downloads dir
+        (for jobs that were processed before the uploads refactor).
+        """
+        # Legacy downloads dir (pre-uploads-refactor jobs)
+        legacy_dir = self._paths.downloads_dir / job_id
+        if legacy_dir.exists():
+            for p in legacy_dir.iterdir():
+                if p.is_file() and p.suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
+                    return p
+        # New uploads dir
         for d in _job_source_dirs(self._paths, job_id):
+            if not d.exists():
+                continue
             for p in d.iterdir():
                 if p.is_file() and p.suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
                     return p
