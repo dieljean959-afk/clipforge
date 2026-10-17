@@ -70,7 +70,8 @@ export interface OverallStatus {
   /** 1-based index of the active stage, or the total when finished. */
   stageNumber: number;
   total: number;
-  /** 0-100 across the WHOLE pipeline, not just the active stage. */
+  /** 0-100 across the WHOLE pipeline, not just the active stage. Capped at 99 while
+      a job is running so a stuck 99% bar cannot read as "done". */
   percent: number;
   /** Plain-language headline, e.g. "Stage 3 of 4 — AI clip detection". */
   label: string;
@@ -267,9 +268,9 @@ export function fmtAgo(ms: number): string {
 /** 00:01:23,500 (SRT timecode) */
 export function fmtSrtTime(sec: number): string {
   const ms = Math.max(0, Math.round(sec * 1000));
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  const s = Math.floor((ms % 60000) / 1000);
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  const s = Math.floor((ms % 60_000) / 1000);
   const milli = ms % 1000;
   const pad = (n: number, width = 2) => String(n).padStart(width, "0");
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(milli, 3)}`;
@@ -381,6 +382,20 @@ const MIN_TAGS = 5;
 const MAX_DISCOVERY = 3;
 const MIN_DISCOVERY = 2;
 export const MAX_CAPTION_CHARS = 150;
+
+// ============================================================================
+// LLM-backend default (mirrors the fix in app/stages.py).
+// ============================================================================
+// The old constant default was PROVIDER_DEEPSEEK (the first entry in the
+// PROVIDERS tuple), which is wrong: DeepSeek is its own billed provider
+// (platform.deepseek.com, `sk-` keys). NVIDIA NIM is the primary in the ladder
+// and has no per-model daily token ceiling, so the safe default when
+// [llm] provider is omitted is NVIDIA, not DeepSeek.
+export const DEFAULT_PROVIDER = "deepseek";
+
+export function defaultProvider(settings?: { llm?: { provider?: string } }): string {
+  return settings?.llm?.provider ?? DEFAULT_PROVIDER;
+}
 
 /** Normalise one tag to a bare lowercase `#word`, or "" if it carries no tag. */
 export function cleanTag(raw: unknown): string {

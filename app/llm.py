@@ -73,9 +73,9 @@ PROVIDER_OLLAMA = "ollama"
 #: fallback, then the remaining alternatives — so the list keeps matching the
 #: real ladder instead of drifting into a fixed ranking nothing consults.
 PROVIDERS = (
+    PROVIDER_NVIDIA,
     PROVIDER_DEEPSEEK,
     PROVIDER_GROQ,
-    PROVIDER_NVIDIA,
     PROVIDER_GEMINI,
     PROVIDER_OLLAMA,
 )
@@ -88,6 +88,7 @@ OPENAI_PROVIDER_KEYS: dict[str, tuple[str, str]] = {
     PROVIDER_DEEPSEEK: ("deepseek_api_key", "DEEPSEEK_API_KEY"),
     PROVIDER_NVIDIA: ("nvidia_api_key", "NVIDIA_API_KEY"),
     PROVIDER_GROQ: ("groq_api_key", "GROQ_API_KEY"),
+    PROVIDER_DEEPSEEK: ("deepseek_api_key", "DEEPSEEK_API_KEY"),
 }
 _LIVE_KEY_RESOLVERS = {
     PROVIDER_DEEPSEEK: live_deepseek_key,
