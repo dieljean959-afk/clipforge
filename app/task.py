@@ -1170,11 +1170,14 @@ class Pipeline:
             should_pause=lambda: self.pause_requested(job_id),
         )
         ws.write_json("detect", "candidates.json", candidates)
+        # Persist one stage artifact per candidate so a retry can tell which clips
+        # were already rendered and which still need the export stage.
+        ws.write_clips("detect", candidates)
         # Record HOW these clips were chosen so the dashboard can say "AI highlights
         # via deepseek" instead of a blank "detectedSource". The provider label is
         # already used a few lines above for the chunk cache and the log line, so this
         # keeps all three named the same by construction rather than by coincidence.
-        self.store.create_clips(job_id, candidates, detected_source=llm.provider_label(self.settings))
+        summary = self.store.create_clips(job_id, candidates, detected_source=llm.provider_label(self.settings))
         return candidates
 
     # ------------------------------------------------------------------
@@ -1203,6 +1206,23 @@ class Pipeline:
             fallback=self.settings.gemini.max_clips,
         )
         job = self._patch_job(job_id, clipTarget=len(clips))
+
+        # Clamp every cut into the source duration before reframe sees it, so a
+        # candidate whose end drifted past the source (or whose start is below 0)
+        # never asks ffmpeg to seek past EOF.
+        src_dur = float(job.get("durationSec") or 0.0)
+        if src_dur > 0:
+            for c in clips:
+                s = float(c.get("start", 0.0) or 0.0)
+                e = float(c.get("end", 0.0) or 0.0)
+                if s < 0:
+                    s = 0.0
+                if e > src_dur:
+                    e = src_dur
+                if e <= s:
+                    e = s + float(self.settings.gemini.min_clip_sec or 5.0)
+                c["start"] = round(s, 3)
+                c["end"] = round(e, 3)
 
         rtf = self._current_rtf()
         self._progress(
@@ -1289,6 +1309,11 @@ class Pipeline:
         dest = self.settings.app.paths.outputs_dir / job_id
         dest.mkdir(parents=True, exist_ok=True)
 
+        src_dur = float(job.get("durationSec") or 0.0)
+        total_sec = 0.0
+        rendered = 0
+        failed: list[tuple[int, str, str]] = []
+
         for i, cut in enumerate(cuts):
             self._progress(
                 job_id, "exporting",
@@ -1297,12 +1322,96 @@ class Pipeline:
                 unit_label="clips",
                 units_done=i + 1, units_total=len(cuts),
             )
+            clip_id = cut.get("clipId") or f"clip_{i:03d}"
+            self.store.write_clip(
+                clip_id,
+                {"renderState": "running", "jobId": job_id},
+                job_id=job_id,
+            )
             with self._heartbeat(job_id, f"render clip {i + 1}"):
-                encode.render_clip(
-                    src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
-                    on_log=lambda line: self._log(job_id, line),
+                try:
+                    meta = encode.render_clip(
+                        src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
+                        on_log=lambda line: self._log(job_id, line),
+                    )
+                except Exception as exc:
+                    detail = str(exc)[:500]
+                    self._log(job_id, f"render failed clip {i + 1}: {detail}")
+                    failed.append((i, clip_id, detail))
+                    try:
+                        self.store.write_clip(
+                            clip_id,
+                            {
+                                "renderState": "failed",
+                                "mediaError": detail,
+                                "jobId": job_id,
+                            },
+                            job_id=job_id,
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+            thumb = dest.parent / f"{cut.get('order', i):03d}.thumb.jpg"
+            thumb_path = dest / f"clip_{i:03d}.thumb.jpg"
+            try:
+                _video.render_first_frame_thumb(dest, thumb_path)
+                self.store.write_clip(
+                    clip_id,
+                    {
+                        "videoPath": meta["videoPath"],
+                        "thumbPath": str(thumb_path),
+                        "mediaBytes": meta["bytes"],
+                        "mediaWidth": meta["width"],
+                        "mediaHeight": meta["height"],
+                        "mediaDurationSec": meta["durationSec"],
+                        "renderState": "done",
+                        "renderMs": meta.get("renderMs"),
+                        "encoder": meta.get("encoder"),
+                        "encoderLabel": meta.get("encoderLabel"),
+                        "hardwareEncoded": meta.get("hardwareEncoded"),
+                        "preset": meta.get("preset"),
+                        "ffmpegCommand": meta.get("ffmpegCommand"),
+                        "ffmpegStderr": meta.get("ffmpegStderr"),
+                        "jobId": job_id,
+                    },
+                    job_id=job_id,
                 )
+            except Exception as thumb_exc:
+                self._log(job_id, f"thumb failed for clip {i + 1}: {thumb_exc}")
+                self.store.write_clip(
+                    clip_id,
+                    {
+                        "videoPath": meta["videoPath"],
+                        "mediaBytes": meta["bytes"],
+                        "mediaWidth": meta["width"],
+                        "mediaHeight": meta["height"],
+                        "mediaDurationSec": meta["durationSec"],
+                        "renderState": "done",
+                        "renderMs": meta.get("renderMs"),
+                        "encoder": meta.get("encoder"),
+                        "encoderLabel": meta.get("encoderLabel"),
+                        "hardwareEncoded": meta.get("hardwareEncoded"),
+                        "preset": meta.get("preset"),
+                        "ffmpegCommand": meta.get("ffmpegCommand"),
+                        "ffmpegStderr": meta.get("ffmpegStderr"),
+                        "jobId": job_id,
+                    },
+                    job_id=job_id,
+                )
+            total_sec += meta["durationSec"]
+            rendered += 1
+
         ws.mark_done("export", artifacts=[], count=len(cuts))
+        if failed:
+            reasons = "; ".join(f"clip {i+1}: {r}" for i, _, r in failed)
+            self._log(job_id, f"{len(failed)} clip(s) failed to render: {reasons}")
+        self._patch_job(
+            job_id,
+            clipCount=rendered,
+            totalClipsSec=round(total_sec, 3),
+            renderFailures=len(failed),
+        )
 
     # ------------------------------------------------------------------
     # finish

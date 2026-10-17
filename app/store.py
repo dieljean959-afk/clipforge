@@ -356,28 +356,247 @@ class LocalStore:
     ) -> list[dict[str, Any]]:
         """Record the AI-detected candidate clips for a job.
 
-        Called after the detection stage finishes. Creates a clips metadata
-        file so the dashboard can show "AI-detected via <source>" and the
-        clip count before rendering finishes.
+        Called after the detection stage finishes. Persists one clip document
+        per candidate under ``data/clips/<job_id>/<clip_id>.json`` so the
+        ``/api/clips`` endpoint can return real ``ClipDto`` records (with
+        start/end, renderState, captionCues, shareState, ...) instead of a
+        single summary blob.
+
+        Also writes the lightweight ``data/clips/<job_id>.json`` summary used
+        by the job card ("AI-detected via <source>", candidate count) and
+        patches the job document with the clip target + detected count.
         """
         clips_dir = self._paths.data_dir / "clips"
         clips_dir.mkdir(parents=True, exist_ok=True)
-        clip_data = {
+
+        now_ms = int(time.time() * 1000)
+        clip_ids: list[str] = []
+        for i, c in enumerate(candidates):
+            clip_id = c.get("_id") or self.new_job_id()
+            order = int(c.get("order", i))
+            start = float(c.get("start", 0.0) or 0.0)
+            end = float(c.get("end", 0.0) or 0.0)
+            if end <= start:
+                end = start + 5.0
+            if end - start < 1.0:
+                end = start + 5.0
+            doc: dict[str, Any] = {
+                "_id": clip_id,
+                "jobId": job_id,
+                "order": order,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "score": float(c.get("score", 0.0) or 0.0),
+                "title": str(c.get("title", "Clip") or "Clip"),
+                "hookText": str(c.get("hook_text", "") or ""),
+                "transcript": str(c.get("transcript", "") or ""),
+                "hashtags": [str(h) for h in (c.get("hashtags") or [])],
+                "captionCues": [],
+                "aspect": str(c.get("aspect", "9:16") or "9:16"),
+                "videoPath": None,
+                "thumbPath": None,
+                "mediaBytes": None,
+                "mediaWidth": None,
+                "mediaHeight": None,
+                "mediaDurationSec": None,
+                "mediaError": None,
+                "renderState": "pending",
+                "renderMs": None,
+                "shareId": None,
+                "shareState": "missing",
+                "shareDetail": None,
+                "shareUrl": None,
+                "sharePageUrl": None,
+                "translationTracks": None,
+                "detectedSource": detected_source,
+                "createdAt": now_ms,
+            }
+            clip_doc_path = clips_dir / f"{clip_id}.json"
+            tmp = clip_doc_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(clip_doc_path)
+            clip_ids.append(clip_id)
+
+        # lightweight summary blob used by the job card
+        summary = {
             "jobId": job_id,
             "candidateCount": len(candidates),
+            "clipCount": len(clip_ids),
             "detectedSource": detected_source,
-            "at": int(time.time() * 1000),
+            "detectedAt": now_ms,
+            "clipIds": clip_ids,
         }
-        path = clips_dir / f"{job_id}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(clip_data, indent=2), encoding="utf-8")
-        tmp.replace(path)
-        # Also update the job document with the clip count
+        summary_path = clips_dir / f"{job_id}.json"
+        tmp = summary_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(summary_path)
+
+        # Patch the job document so the UI can show the clip target + detected count
         job = self.get_job(job_id)
         if job:
             job["candidatesDetected"] = len(candidates)
-            job["clipTarget"] = max(1, int((job.get("durationSec") or 0) / 30))
+            job["clipTarget"] = len(clip_ids) or max(1, int((job.get("durationSec") or 0) / 30))
+            job["clipIds"] = clip_ids
+            job["detectedSource"] = detected_source
             self.write_job(job)
+        return summary
+
+    # ------------------------------------------------------------------
+    # per-clip writes (updated by the render stage / share path)
+    # ------------------------------------------------------------------
+
+    def write_clip(
+        self,
+        clip_id: str,
+        fields: dict[str, Any],
+        *,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist updated fields on a single clip document.
+
+        ``job_id`` is optional; when absent the store infers it from the clip
+        document currently on disk.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        clip_path = clips_dir / f"{clip_id}.json"
+        if not clip_path.exists():
+            raise FileNotFoundError(clip_path)
+        existing = json.loads(clip_path.read_text(encoding="utf-8"))
+        resolved_job_id = job_id or existing.get("jobId", "")
+        merged = {**existing, **fields}
+        merged["jobId"] = resolved_job_id
+        tmp = clip_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(clip_path)
+
+        # keep the summary blob's clipIds list in sync (best-effort)
+        if resolved_job_id:
+            summary_path = clips_dir / f"{resolved_job_id}.json"
+            if summary_path.exists():
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                    ids = list(summary.get("clipIds", []) or [])
+                    if clip_id not in ids:
+                        ids.append(clip_id)
+                    summary["clipIds"] = ids
+                    summary_path.with_suffix(".json.tmp").write_text(
+                        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+                    ).replace(summary_path)
+                except Exception:
+                    pass
+        return merged
+
+    def list_clip_docs(self, job_id: str) -> list[dict[str, Any]]:
+        """Return the per-clip ``ClipDto`` documents for one job.
+
+        This is the source of truth for ``/api/clips?jobId=...``. It reads the
+        individual ``data/clips/<clip_id>.json`` files (not the summary blob)
+        so every field the render/share/caption stages write is visible.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        out: list[dict[str, Any]] = []
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            if doc.get("jobId") != job_id:
+                continue
+            # skip the summary blob (it has candidateCount / clipIds / detectedAt)
+            if "candidateCount" in doc or "clipIds" in doc:
+                continue
+            if not doc.get("_id"):
+                continue
+            out.append(doc)
+        out.sort(key=lambda d: (int(d.get("order", 0)) if str(d.get("order", 0)).isdigit() else 0, d.get("_id", "")))
+        return out
+
+    def list_clips_for_list(self, job_id: str | None = None) -> list[dict[str, Any]]:
+        """Return clips for the clip list endpoint, with share state attached.
+
+        Called by /api/clips. Returns lightweight clip metadata suitable for
+        the dashboard clip list.
+        """
+        if job_id:
+            return self.list_clip_docs(job_id)
+        return self.list_all_clips()
+
+    def list_all_clips(self, limit: int = 512) -> list[dict[str, Any]]:
+        """Return metadata for all clips across all jobs."""
+        out: list[dict[str, Any]] = []
+        clips_dir = self._paths.data_dir / "clips"
+        if not clips_dir.exists():
+            return out
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            if "candidateCount" in doc or "clipIds" in doc:
+                continue
+            if not doc.get("_id"):
+                continue
+            out.append(doc)
+            if len(out) >= limit:
+                break
+        return out
+
+    def get_clip_doc(self, clip_id: str) -> dict[str, Any] | None:
+        """Return a single clip document by id, or None."""
+        clips_dir = self._paths.data_dir / "clips"
+        p = clips_dir / f"{clip_id}.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def get_clip_doc_safe(self, clip_id: str) -> dict[str, Any] | None:
+        """Return a single clip document by id, or None."""
+        return self.get_clip_doc(clip_id)
+
+    # ------------------------------------------------------------------
+    # legacy clip helpers — rewrite to use the new clip-doc layer
+    # ------------------------------------------------------------------
+
+    def list_clips(self, job_id: str) -> list[dict[str, Any]]:
+        """Return metadata for all clips belonging to a job."""
+        out: list[dict[str, Any]] = []
+        clip_dir = self._paths.outputs_dir / job_id
+        if not clip_dir.exists():
+            return out
+        for p in sorted(clip_dir.iterdir()):
+            if p.is_file() and p.suffix in {".mp4", ".mov", ".webm"}:
+                out.append({
+                    "_id": p.stem,
+                    "jobId": job_id,
+                    "path": str(p),
+                    "filename": p.name,
+                    "size": p.stat().st_size,
+                })
+        return out
+
+    def get_clip(self, job_id: str, clip_id: str) -> dict[str, Any] | None:
+        """Return metadata for a specific clip."""
+        clips = self.list_clips(job_id)
+        for c in clips:
+            if c.get("_id") == clip_id:
+                return c
+        return None
+
+    def write_clip_legacy(self, job_id: str, clip_data: dict[str, Any]) -> dict[str, Any]:
+        """Legacy write into outputs/<job>/<clip>.json. Keep for callers that still need it."""
+        clip_id = clip_data.get("_id", self.new_job_id())
+        clip_path = self._paths.outputs_dir / job_id / f"{clip_id}.json"
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = clip_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(clip_data, indent=2), encoding="utf-8")
+        tmp.replace(clip_path)
         return clip_data
 
     # ------------------------------------------------------------------

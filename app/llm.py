@@ -265,12 +265,13 @@ def parse_candidates(text: str) -> list[dict[str, Any]]:
     that as "this chunk had no highlights" rather than a failed job: the
     previous implementation raised on a fenced or truncated reply, and one such
     chunk at 3/7 killed the whole 20-chunk run.
+
+    The returned items are normalized to the canonical ``start_word``/``end_word``
+    spelling and keep whatever keys the model emitted (including ``start``/``end``
+    timestamps when the model returned seconds instead of word indices).
     """
     out: list[dict[str, Any]] = []
     for item in jsonfix.repair_candidates(text):
-        # The prompt asks for one line of copy and 5-7 tags; these two calls
-        # enforce that rather than trusting the reply, which is routinely
-        # multi-line and over-tagged.
         out.append(
             {
                 **item,
@@ -279,6 +280,54 @@ def parse_candidates(text: str) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _pick_int(v: Any, prefer: str | None = None) -> int | None:
+    """Best-effort coercion of a model field to an integer.
+
+    Accepts an int, a float that is integral, or a numeric string. Returns None
+    when the value is genuinely unusable.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        if v != v:
+            return None
+        if v.is_integer():
+            return int(v)
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    if _IS_INT.match(s):
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+_IS_INT = re.compile(r"^-?\d+$")
+
+
+def _has_numeric_start_end(item: dict[str, Any]) -> bool:
+    """True when this candidate already has usable numeric seconds.
+
+    The LLM contract is word indices, but some backends/edits emit seconds
+    directly. We accept both shapes downstream; this helper just tells us
+    whether we can skip the word-index→seconds resolution.
+    """
+    for k in ("start", "end", "t0", "t1", "ts_start", "ts_end"):
+        if k in item:
+            v = _coerce_timestamp(item[k])
+            if v is None:
+                return False
+            return True
+    return False
 
 
 def resolve_candidates(
@@ -291,6 +340,10 @@ def resolve_candidates(
 
     The transcript quote is derived LOCALLY from the selected words (the model
     is not asked to reproduce text, so it cannot paraphrase or hallucinate it).
+
+    The model contract is WORD INDICES, but a few backends/edits emit seconds
+    directly. When that happens we validate and clamp the seconds ourselves
+    rather than pretending they are word indices.
     """
     out: list[dict[str, Any]] = []
     n = len(words)
@@ -298,16 +351,57 @@ def resolve_candidates(
         return out
     lo = start_index
     hi = start_index + n - 1
+    last_end = float(words[-1]["end"]) if words else 0.0
     for c in parsed:
-        si = max(lo, min(hi, int(c["start_word"])))
-        ei = max(lo, min(hi, int(c["end_word"])))
+        # If the model returned seconds directly, validate+clamp them.
+        if _has_numeric_start_end(c):
+            raw_start = _coerce_timestamp(c.get("start"))
+            raw_end = _coerce_timestamp(c.get("end"))
+            if raw_start is None or raw_end is None:
+                continue
+            start = max(0.0, raw_start)
+            end = max(0.0, raw_end)
+            if end <= start:
+                end = start + float(cfg.min_clip_sec or 5.0)
+            if end - start < float(cfg.min_clip_sec or 5.0):
+                end = min(last_end, start + float(cfg.max_clip_sec or 90.0))
+            if end - start > float(cfg.max_clip_sec or 90.0):
+                end = start + float(cfg.max_clip_sec or 90.0)
+            if end - start < 1.0:
+                continue
+            quote = " ".join(
+                words[j]["word"] for j in range(lo, min(hi, n - 1) + 1)
+            )[:300]
+            hook_text, hashtags = finalize_clip_caption(
+                c.get("hook_text", ""), c.get("hashtags"), quote
+            )
+            out.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "score": c.get("score", 0.0),
+                    "title": c.get("title", "Clip"),
+                    "hook_text": hook_text,
+                    "transcript": quote,
+                    "hashtags": hashtags,
+                }
+            )
+            continue
+
+        # Otherwise resolve from word indices.
+        si = _pick_int(c.get("start_word")) or _pick_int(c.get("start")) or _pick_int(c.get("from")) or _pick_int(c.get("begin"))
+        ei = _pick_int(c.get("end_word")) or _pick_int(c.get("end")) or _pick_int(c.get("to")) or _pick_int(c.get("until"))
+        if si is None or ei is None:
+            continue
+        si = max(lo, min(hi, si))
+        ei = max(lo, min(hi, ei))
         if ei <= si:
             continue
         start = float(words[si]["start"])
         end = float(words[ei]["end"])
         # enforce the duration window (indices can drift out of range)
         if end - start < cfg.min_clip_sec:
-            end = min(float(words[-1]["end"]), start + cfg.max_clip_sec)
+            end = min(last_end, start + cfg.max_clip_sec)
         if end - start > cfg.max_clip_sec:
             end = start + cfg.max_clip_sec
         if end - start < 1.0:
@@ -1673,6 +1767,10 @@ def detect_clips(
         cfg = replace(cfg, max_clip_sec=max_clip_sec)
     if max_clips is not None:
         cfg = replace(cfg, max_clips=max_clips)
+    # Carry the effective config into the value the caller can log without
+    # reaching into settings again. This is what the detection-job log lines
+    # and the job-card "AI-detected via ..." explanation should reflect.
+    cfg_for_report = cfg
 
     chunks = chunk_words(words)
     label = provider_label(settings)
@@ -2056,8 +2154,8 @@ def detect_clips(
         report.update({
             "detected": len(candidates),
             "selected": len(top),
-            "cap": cfg.max_clips,
-            "floor": cfg.min_score,
+            "cap": cfg_for_report.max_clips,
+            "floor": cfg_for_report.min_score,
             "aboveFloor": above_floor,
             "belowFloor": below_floor,
             "topScore": float(top[0]["score"]),
@@ -2065,8 +2163,8 @@ def detect_clips(
         })
         _finish_report()
     logger.info(
-        f"[llm] selected {len(top)} clip(s) (cap {cfg.max_clips}, score floor "
-        f"{cfg.min_score:.0f}): {above_floor} candidate(s) cleared the floor, "
+        f"[llm] selected {len(top)} clip(s) (cap {cfg_for_report.max_clips}, score floor "
+        f"{cfg_for_report.min_score:.0f}): {above_floor} candidate(s) cleared the floor, "
         f"{below_floor} did not; scores {top[0]['score']:.0f}…{top[-1]['score']:.0f}"
     )
     return top

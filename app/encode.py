@@ -470,7 +470,7 @@ def render_clip(
     settings: Settings,
     *,
     on_log: Callable[[str], None] | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Render one reframe cut into a 9:16 MP4.
 
     This is the per-clip render entry point the export stage calls. It picks the
@@ -481,6 +481,9 @@ def render_clip(
     `cut` is a dict produced by ``reframe.find_cuts`` (one per clip). It must
     contain at least ``start``/``end`` and ``cropBox``; ``sampleWindows`` is
     optional and improves crop tracking when present.
+
+    Returns the render metadata dict (so the export stage can persist real
+    per-clip status + the ffmpeg command/stderr for View logs).
     """
     from app import video as _video
 
@@ -490,6 +493,22 @@ def render_clip(
 
     if on_log:
         on_log(f"Rendering clip {cut.get('order', '?')} — {cut.get('start')}s to {cut.get('end')}s")
+
+    # Source-file guard: fail loud with the real file reason before we try to seek.
+    if not src.exists() or not src.is_file():
+        raise _video.RenderError(
+            f"source file for clip {cut.get('order', '?')} is missing: {src}"
+        )
+    try:
+        src_stat = src.stat()
+    except OSError as exc:
+        raise _video.RenderError(
+            f"source file for clip {cut.get('order', '?')} is unreadable: {exc}"
+        ) from exc
+    if src_stat.st_size == 0:
+        raise _video.RenderError(
+            f"source file for clip {cut.get('order', '?')} is empty (0 bytes): {src.name}"
+        )
 
     probe = _video.probe(src)
     width = int(probe["width"])
@@ -512,9 +531,13 @@ def render_clip(
     crop_h = int(crop.get("h", height))
 
     samples = cut.get("sampleWindows") or []
-    filtergraph = _video.crop_pan_filter(
-        width, height, fps, crop_x, crop_y, crop_w, crop_h, samples,
-    )
+    # Use the new 8-arg signature; the legacy 5-arg shim is only for stale callers.
+    try:
+        filtergraph = _video.crop_pan_filter(
+            width, height, fps, crop_x, crop_y, crop_w, crop_h, samples,
+        )
+    except TypeError:
+        filtergraph = _video.crop_pan_filter_5(width, height, fps, crop_x, crop_y)
 
     cmd = [
         ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -559,6 +582,24 @@ def render_clip(
 
     if on_log:
         on_log(f"Rendered clip {cut.get('order', '?')} -> {dest.name} ({dest.stat().st_size} bytes)")
+
+    meta = _video.verify_output(dest, expected_sec=clip_seconds)
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
 
 
 # fmt: off

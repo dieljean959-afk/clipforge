@@ -154,6 +154,63 @@ def _ffmpeg_slots() -> int:
     return 2
 
 
+@app.post("/api/clips/{clip_id}/retry-render")
+def retry_clip_render(clip_id: str) -> dict:
+    """Re-render ONE clip by id, without re-running detection/transcription.
+
+    The repair path for a single clip whose render.state is "failed": it
+    re-encodes just that clip from the existing cuts, reusing the cached
+    transcript and the (possibly re-translated) caption cues.
+    """
+    clip = store.get_clip_doc(clip_id)
+    if clip is None:
+        raise HTTPException(404, "clip not found")
+    job_id = clip.get("jobId") or ""
+    job = store.get_job(job_id) if job_id else None
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.get("stage") in {"queued", "grabbing", "transcribing", "finding", "rendering", "exporting"}:
+        raise HTTPException(409, "this job is still running — wait for it to finish")
+    src = store.find_source_file(job_id)
+    if src is None:
+        raise HTTPException(400, "source file no longer on disk — this clip cannot be re-rendered")
+    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
+    cuts = ws.read_json("reframe", "cuts.json") or []
+    cut = next((c for c in cuts if f"clip_{c.get('order', 0):03d}" == clip_id), None)
+    if cut is None:
+        try:
+            order = int(clip_id.split("_")[-1])
+        except ValueError:
+            raise HTTPException(400, "could not map clip id to a cut")
+        tmp = [c for c in cuts if int(c.get("order", -1)) == order]
+        cut = tmp[0] if tmp else None
+        if cut is None:
+            raise HTTPException(400, "no cut found for this clip")
+    if clip.get("renderState") == "done" and clip.get("videoPath"):
+        raise HTTPException(409, "this clip is already rendered")
+    dest = settings.app.paths.outputs_dir / job_id / f"clip_{int(cut.get('order', 0)):03d}.mp4"
+    try:
+        meta = encode.render_clip(src, cut, dest, settings, on_log=lambda line: store.append_job_log(job_id, line))
+    except video.RenderError as exc:
+        store.write_clip(clip_id, {"renderState": "failed", "mediaError": str(exc), "jobId": job_id}, job_id=job_id)
+        raise HTTPException(400, str(exc))
+    store.write_clip(
+        clip_id,
+        {
+            "videoPath": meta["videoPath"],
+            "thumbPath": str(dest.parent / f"{int(cut.get('order', 0)):03d}.thumb.jpg"),
+            "mediaBytes": meta["bytes"],
+            "mediaWidth": meta["width"],
+            "mediaHeight": meta["height"],
+            "mediaDurationSec": meta["durationSec"],
+            "renderState": "done",
+            "jobId": job_id,
+        },
+        job_id=job_id,
+    )
+    return {"queued": True, "clipId": clip_id}
+
+
 _FFMPEG_SEM: threading.BoundedSemaphore = threading.BoundedSemaphore(_ffmpeg_slots())
 _FFMPEG_LIMIT = _ffmpeg_slots()
 # Per-thread depth, because the calls are NESTED: probe() runs ffprobe through
@@ -589,6 +646,25 @@ def crop_pan_filter(
     # single trailing `)` rather than one per sample.
     expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])}" + ")" * len(parts)
     return f"crop={crop_w}:{crop_h}:{expr}:0"
+
+
+# ---------------------------------------------------------------------------
+# compat wrapper: the encode-stage helper used to call crop_pan_filter with 5
+# positional args (src_w, src_h, fps, crop_x, crop_y). Keep a safe shim so a
+# stale caller does not TypeError the whole render. New call sites use the full
+# 8-arg signature above.
+# ---------------------------------------------------------------------------
+def crop_pan_filter_5(
+    src_w: int,
+    src_h: int,
+    fps: float,
+    crop_x: int,
+    crop_y: int,
+) -> str:
+    """Legacy 5-arg crop — centered crop of the full source height."""
+    w = min(int(src_h * (1080 / 1920)), src_w) if src_w and src_h else src_w or 1080
+    h = src_h or 1920
+    return f"crop={w}:{h}:(in_w-{w})/2:0"
 
 
 

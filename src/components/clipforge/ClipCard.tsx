@@ -6,10 +6,12 @@ import {
   EarOff,
   Flame,
   Loader2,
+  RefreshCw,
   Scissors,
   Thermometer,
   TriangleAlert,
 } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { ClipPreview } from "./ClipPreview";
 import { PostMenu } from "./PostMenu";
@@ -17,6 +19,7 @@ import { ShareButton, XQuickButton } from "./ShareButton";
 import { buildClipSrt, copyClipMeta, downloadClipMp4 } from "@/lib/clip-export";
 import { scoreBand, fmtDuration } from "@/lib/clipforge";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 import type { ClipDto } from "@/lib/api";
 
 const BAND_STYLES: Record<string, string> = {
@@ -42,8 +45,9 @@ export function ClipCard({
   const BandIcon = BAND_ICONS[score];
   const [downloading, setDownloading] = useState(false);
 
-  const rendered = clip.renderState === "done" && clip.videoPath !== null;
+    const rendered = clip.renderState === "done" && clip.videoPath !== null;
   const failed = clip.renderState === "failed";
+  const hasTimestamps = Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end > clip.start;
 
   const downloadMp4 = async () => {
     if (!rendered) {
@@ -90,8 +94,20 @@ export function ClipCard({
           )}
           {!failed && !rendered && (
             <span className="flex items-center gap-1 rounded-full border border-border bg-black/60 px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-              <Loader2 className="size-3 animate-spin" />
-              {clip.renderState === "running" ? "rendering" : "not rendered"}
+              <Loader2 className={clip.renderState === "running" ? "size-3 animate-spin" : "size-3"} />
+              {hasTimestamps && clip.renderState === "pending"
+                ? "queued"
+                : clip.renderState === "running"
+                  ? "rendering"
+                  : hasTimestamps
+                    ? "not rendered"
+                    : "no timestamps"}
+            </span>
+          )}
+          {failed && (
+            <span className="flex items-center gap-1 rounded-full border border-destructive/50 bg-destructive/15 px-2 py-0.5 text-[10px] font-bold text-destructive" title={clip.mediaError ?? "render failed"}>
+              <TriangleAlert className="size-3" />
+              render failed
             </span>
           )}
         </div>
@@ -105,16 +121,19 @@ export function ClipCard({
             title={clip.title}
           >
             {clip.title}
-          </button>
-          <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-            {clip.hookText}
-          </p>
+          </button>            <span className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+              {clip.hookText}
+            </p>
         </div>
         <p className="font-mono text-[10px] text-muted-foreground">
-          {fmtDuration(clip.start)} → {fmtDuration(clip.end)} ·{" "}
-          {fmtDuration(clip.end - clip.start)} · 9:16 1080×1920
-          {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
+          {hasTimestamps
+            ? `${fmtDuration(clip.start)} → ${fmtDuration(clip.end)} · ${fmtDuration(clip.end - clip.start)}`
+            : "— → — · —″}
+          · 9:16 1080×1920              {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
             ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`}
+          {failed && clip.mediaError && (
+            ` · ${String(clip.mediaError).slice(0, 60)}`
+          )}
         </p>
         {/* Says out loud that some captions are markers, not transcriptions —
             otherwise [muttering] in the video looks like a bug. */}
@@ -166,6 +185,8 @@ export function ClipCard({
             size="sm"
             variant="outline"
             className="h-7 cursor-pointer gap-1.5 text-xs"
+            disabled={!rendered}
+            title={rendered ? "Download the rendered MP4" : "No rendered MP4 yet"}
             onClick={() => {
               buildClipSrt(clip);
               toast.success("SRT downloaded.");
@@ -173,7 +194,26 @@ export function ClipCard({
           >
             .srt
           </Button>
+          {failed && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 cursor-pointer gap-1.5 text-xs"
+              onClick={async () => {
+                try {
+                  await api.retryClipRender(clip._id);
+                  toast.success("Re-render requested for this clip.");
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : "Retry render failed.");
+                }
+              }}
+            >
+              <RefreshCw className="size-3.5" />
+              Retry render
+            </Button>
+          )}
         </div>
+        <CaptionTracks clip={clip} />
         {/* "Share..." gets its OWN row. Social is strictly additive: it can
             never take space from, reorder or hide the download above. */}
         <div className="flex flex-wrap items-center gap-1.5">
@@ -181,7 +221,6 @@ export function ClipCard({
           <XQuickButton clip={clip} />
           <PostMenu clip={clip} rendered={rendered} />
         </div>
-        <CaptionTracks clip={clip} />
       </div>
     </div>
   );

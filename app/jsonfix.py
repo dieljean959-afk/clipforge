@@ -248,6 +248,66 @@ def loads_lenient(text: str) -> Any:
             continue
         # Some replies are several concatenated JSON values.
     # Per-element salvage: an array whose 3rd object is broken.
+
+
+def _is_timestampish_string(v: Any) -> tuple[bool, float]:
+    """True when `v` looks like a timestamp string we can parse to seconds.
+
+    Accepted forms:
+      * "12.5"            -> 12.5
+      * "12:34"           -> 12*60 + 34 = 754
+      * "00:12:34"        -> 12*60 + 34 = 754 (leading 00 = hours)
+      * "1:02:03.4"       -> 1*3600 + 2*60 + 3.4
+    Anything else returns (False, 0.0).
+    """
+    s = str(v or "").strip()
+    if not s:
+        return False, 0.0
+    if _IS_NUMERIC.match(s):
+        try:
+            f = float(s)
+            if f != f:
+                return False, 0.0
+            return True, f
+        except (ValueError, TypeError):
+            return False, 0.0
+    m = _TIME_RE.match(s)
+    if not m:
+        return False, 0.0
+    h = float(m.group(1) or 0)
+    mm = float(m.group(2))
+    sec = float(m.group(3) or 0)
+    total = h * 3600 + mm * 60 + sec
+    if total != total:
+        return False, 0.0
+    return True, total
+
+
+_IS_NUMERIC = re.compile(r"^-?\d+(\.\d+)?$")
+_TIME_RE = re.compile(r"^(\d{1,3}):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$|^(\d{1,2}):(\d{1,2}(?:\.\d+)?)$")
+
+
+def _coerce_timestamp(v: Any) -> float | None:
+    """Best-effort coerce a model field to a numeric seconds value.
+
+    Accepts numbers and the timestamp strings listed in ``_is_timestampish_string``
+    so a model that emits "12:34" or "754.2" is not silently dropped. Returns
+    ``None`` when the value is genuinely unusable (null, boolean, object, array,
+    empty string, nan).
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+        if f != f:
+            return None
+        return f
+    ok, total = _is_timestampish_string(v)
+    if ok:
+        return total
+    return None
     return _salvage_array(stripped)
 
 

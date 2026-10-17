@@ -102,6 +102,29 @@ class StageWorkspace:
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(self._marker(stage))
 
+    def write_clips(self, stage: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Persist detection candidates as per-clip stage artifacts + a merged list.
+
+        Detection now writes ONE file per candidate under
+        ``<stage>/clips/<i:03d>.json``, plus a merged ``candidates.json`` that
+        the downstream stages already read. Writing per-clip makes the render
+        stage resumable per clip: if the host dies mid-export, a retry can read
+        the clips that were already persisted and only re-render the missing
+        ones, instead of re-relying on a single point-in-time ``candidates.json``
+        that might have been overwritten by a later (failed) re-detect.
+
+        Each candidate is written with its resolved ``start``/``end`` in seconds
+        so downstream stages never re-derive them from word indices.
+        """
+        clips_dir = self.stage_dir(stage) / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        written: list[dict[str, Any]] = []
+        for i, c in enumerate(candidates):
+            p = clips_dir / f"{i:03d}.json"
+            p.write_text(json.dumps(c, indent=2, ensure_ascii=False), encoding="utf-8")
+            written.append(c)
+        return written
+
     def done_meta(self, stage: str) -> dict[str, Any]:
         try:
             return json.loads(self._marker(stage).read_text(encoding="utf-8"))

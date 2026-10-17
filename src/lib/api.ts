@@ -889,6 +889,15 @@ export const api = {
   /** Drop every override and fall back to config.toml. */
   resetCaptionStyle: () =>
     request<CaptionStyleDto>("/api/settings/captions", { method: "DELETE" }),
+  /**
+   * Re-render a single clip (its export stage) without re-running detection or
+   * transcription. Useful when a clip's render state is "failed" and you want
+   * to retry just that one.
+   */
+  retryClipRender: (clipId: string) =>
+    request<{ queued: boolean; clipId: string }>(`/api/clips/${clipId}/retry-render`, {
+      method: "POST",
+    }),
   listClips: (jobId: string) => request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>
     requestBlob("/api/export/zip", {
