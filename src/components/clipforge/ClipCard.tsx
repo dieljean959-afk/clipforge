@@ -45,7 +45,7 @@ export function ClipCard({
   const BandIcon = BAND_ICONS[score];
   const [downloading, setDownloading] = useState(false);
 
-    const rendered = clip.renderState === "done" && clip.videoPath !== null;
+  const rendered = clip.renderState === "done" && clip.videoPath !== null;
   const failed = clip.renderState === "failed";
   const hasTimestamps = Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end > clip.start;
 
@@ -121,15 +121,17 @@ export function ClipCard({
             title={clip.title}
           >
             {clip.title}
-          </button>            <span className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-              {clip.hookText}
-            </p>
+          </button>
+          <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+            {clip.hookText}
+          </p>
         </div>
-        <p className="font-mono text-[10px] text-muted-foreground">
+        <p className="mt-2 font-mono text-[10px] text-muted-foreground">
           {hasTimestamps
             ? `${fmtDuration(clip.start)} → ${fmtDuration(clip.end)} · ${fmtDuration(clip.end - clip.start)}`
-            : "— → — · —″}
-          · 9:16 1080×1920              {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
+            : "— → — · —"}
+          · 9:16 1080×1920
+          {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
             ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`}
           {failed && clip.mediaError && (
             ` · ${String(clip.mediaError).slice(0, 60)}`
@@ -213,7 +215,6 @@ export function ClipCard({
             </Button>
           )}
         </div>
-        <CaptionTracks clip={clip} />
         {/* "Share..." gets its OWN row. Social is strictly additive: it can
             never take space from, reorder or hide the download above. */}
         <div className="flex flex-wrap items-center gap-1.5">
@@ -221,6 +222,7 @@ export function ClipCard({
           <XQuickButton clip={clip} />
           <PostMenu clip={clip} rendered={rendered} />
         </div>
+        <CaptionTracks clip={clip} />
       </div>
     </div>
   );
