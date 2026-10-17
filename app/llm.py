@@ -74,8 +74,8 @@ PROVIDER_OLLAMA = "ollama"
 #: real ladder instead of drifting into a fixed ranking nothing consults.
 PROVIDERS = (
     PROVIDER_NVIDIA,
-    PROVIDER_DEEPSEEK,
     PROVIDER_GROQ,
+    PROVIDER_DEEPSEEK,
     PROVIDER_GEMINI,
     PROVIDER_OLLAMA,
 )
@@ -88,7 +88,6 @@ OPENAI_PROVIDER_KEYS: dict[str, tuple[str, str]] = {
     PROVIDER_DEEPSEEK: ("deepseek_api_key", "DEEPSEEK_API_KEY"),
     PROVIDER_NVIDIA: ("nvidia_api_key", "NVIDIA_API_KEY"),
     PROVIDER_GROQ: ("groq_api_key", "GROQ_API_KEY"),
-    PROVIDER_DEEPSEEK: ("deepseek_api_key", "DEEPSEEK_API_KEY"),
 }
 _LIVE_KEY_RESOLVERS = {
     PROVIDER_DEEPSEEK: live_deepseek_key,
@@ -121,7 +120,7 @@ class LlmError(Exception):
 
 def provider(settings: Settings) -> str:
     """Which detection backend is active. Defaults to the hosted one."""
-    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_DEEPSEEK)
+    return getattr(getattr(settings, "llm", None), "provider", PROVIDER_NVIDIA)
 
 
 def provider_label(settings: Settings) -> str:

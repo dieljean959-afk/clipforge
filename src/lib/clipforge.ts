@@ -391,7 +391,7 @@ export const MAX_CAPTION_CHARS = 150;
 // (platform.deepseek.com, `sk-` keys). NVIDIA NIM is the primary in the ladder
 // and has no per-model daily token ceiling, so the safe default when
 // [llm] provider is omitted is NVIDIA, not DeepSeek.
-export const DEFAULT_PROVIDER = "deepseek";
+export const DEFAULT_PROVIDER = "nvidia";
 
 export function defaultProvider(settings?: { llm?: { provider?: string } }): string {
   return settings?.llm?.provider ?? DEFAULT_PROVIDER;
