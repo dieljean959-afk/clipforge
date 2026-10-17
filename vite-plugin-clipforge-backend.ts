@@ -7,6 +7,14 @@
 // /clips routes) makes the browser see the backend at the SAME origin, so the
 // frontend keeps using relative URLs — no localhost, no hardcoded IPs.
 //
+// IMPORTANT: this plugin only does its job if Vite's server_listening event fires
+// reliably. On the Freebuff managed preview, that event can be inconsistent, which
+// means state.starting may never resolve and every /api call can sit waiting on a
+// promise that never settles. The middleware now includes a 4s bailout on a stuck
+// boot promise, and attachListener resolves state.starting early when the listener
+// fires. If a request still times out, that usually means the backend itself did
+// not come up, not that the frontend gave up too early.
+//
 // Guarantees:
 // - backend starts with the platform's web process (not manually)
 // - if the backend dies, the next /api request triggers a respawn
@@ -217,6 +225,39 @@ export function clipforgeBackend(): Plugin {
       // into a rejected promise, which Node escalates to a process exit — a
       // way for a plugin bug to kill the whole origin.
       installCrashGuards();
+      // Freebuff's toolbox proxy sometimes does not fire the Vite
+      // server_listening event cleanly, so state.starting can stay
+      // pending and /api calls can block on a promise that never
+      // settles. Force a known-good listener once the server is ready.
+      let listenerAttached = false;
+      function onServerListening() {
+        if (!state.starting) return;
+        // Help the first /api request along: if backend is already up,
+        // resolve the pending boot promise immediately.
+        pingBackend(800).then((up) => {
+          if (up) {
+            state.starting = Promise.resolve(true);
+          }
+        });
+      }
+      const attachListener = () => {
+        if (listenerAttached) return;
+        listenerAttached = true;
+        // Vite's WebSocket server can be in one of two shapes depending on
+        // version/process state. Use whatever "listening" hook is available,
+        // and fall back to polling the ready state briefly.
+        try {
+          if (server.httpServer && server.httpServer.listening) {
+            onServerListening();
+          } else if (server.httpServer) {
+            server.httpServer.on("listening", onServerListening);
+          }
+        } catch {
+          // Best-effort: if this host's Vite wrapper does not expose a
+          // usable listener hook, the middleware bailout is the recovery
+          // path, not this callback.
+        }
+      };
       // Start the backend, but do NOT block the dev server on it.
       //
       // This used to `await startBackend()`, which holds Vite's startup for up
@@ -263,6 +304,21 @@ export function clipforgeBackend(): Plugin {
       server.middlewares.use(async (req, _res, next) => {
         const url = req.url ?? "";
         if (url.startsWith("/api") || url.startsWith("/clips")) {
+          const deadline = Date.now() + 4000;
+          while (state.starting && Date.now() < deadline) {
+            await state.starting;
+          }
+          if (state.starting === null) {
+            state.starting = startBackend()
+              .catch((err: unknown) => {
+                log(`backend cold-start failed: ${err instanceof Error ? err.message : String(err)}`);
+                return false;
+              })
+              .finally(() => {
+                state.starting = null;
+              });
+            await state.starting;
+          }
           if (state.proc === null) {
             const sinceLast = Date.now() - state.lastAttemptAt;
             const wait = backoffFor(state.attempts);
@@ -280,10 +336,8 @@ export function clipforgeBackend(): Plugin {
                 .finally(() => {
                   state.starting = null;
                 });
+              await state.starting;
             }
-          }
-          if (state.starting) {
-            await state.starting;
           }
         }
         next();

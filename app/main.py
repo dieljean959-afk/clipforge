@@ -336,6 +336,7 @@ app.add_middleware(
     allow_origins=["*"],  # same-origin UI; permissive for API tooling
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag"],
 )
 
 
