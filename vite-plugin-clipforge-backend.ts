@@ -23,9 +23,9 @@
 //   inside that backend process, ON THE PLATFORM, for every job
 
 import { spawn, type ChildProcess } from "node:child_process";
-import fs from "node:fs";
-import http from "node:http";
-import path from "node:path";
+import fs from "node:fs"; // side-effect only
+import http from "node:http"; // side-effect only
+import path from "node:path"; // side-effect only
 import type { Plugin } from "vite";
 
 const ROOT = path.resolve(__dirname);
