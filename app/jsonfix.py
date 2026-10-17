@@ -308,7 +308,6 @@ def _coerce_timestamp(v: Any) -> float | None:
     if ok:
         return total
     return None
-    return _salvage_array(stripped)
 
 
 def _extract_only(text: str) -> str | None:

@@ -26,11 +26,13 @@ from loguru import logger
 from app import encode, hostlimits
 from app import subtitle as subtitle_svc
 from app.config import Settings, ffmpeg_bin, ffprobe_bin
+from app import store
+
+from fastapi import HTTPException
 
 
 class RenderError(Exception):
     pass
-
 
 def probe(path: Path) -> dict[str, Any]:
     """ffprobe a media file → {duration, width, height}."""
@@ -61,14 +63,12 @@ def probe(path: Path) -> dict[str, Any]:
     except Exception as exc:
         raise RenderError(f"ffprobe failed for {path.name}: {exc}") from exc
 
-
 def verify_source(path: Path) -> None:
     """Verify the source MP4 plays (duration > 0) before any pipeline work."""
     meta = probe(path)
     if meta["duration"] <= 0:
         raise RenderError(f"source file {path.name} has no playable duration — download is corrupt")
     logger.info(f"[video] source verified: {meta['width']}x{meta['height']}, {meta['duration']:.1f}s")
-
 
 def verify_output(path: Path, *, expected_sec: float | None = None) -> dict[str, Any]:
     """Prove a rendered clip is a real, playable file before we call it done.
@@ -104,11 +104,9 @@ def verify_output(path: Path, *, expected_sec: float | None = None) -> dict[str,
     )
     return meta
 
-
 # ffmpeg writes progress to stderr as carriage-return updates, so these lines
 # dominate any naive tail of the output.
 _FFMPEG_PROGRESS = re.compile(r"^\s*frame=\s*\d+.*(fps=|size=|time=)")
-
 
 def _ffmpeg_error_tail(stderr: str, limit: int = 8) -> str:
     """Pull the DIAGNOSTIC lines out of ffmpeg's stderr.
@@ -132,7 +130,6 @@ def _ffmpeg_error_tail(stderr: str, limit: int = 8) -> str:
         )
     return "(ffmpeg produced no output)"
 
-
 def _ffmpeg_slots() -> int:
     """How many ffmpeg children may run at once on this host.
 
@@ -153,8 +150,6 @@ def _ffmpeg_slots() -> int:
         return 1
     return 2
 
-
-@app.post("/api/clips/{clip_id}/retry-render")
 def retry_clip_render(clip_id: str) -> dict:
     """Re-render ONE clip by id, without re-running detection/transcription.
 
@@ -202,14 +197,13 @@ def retry_clip_render(clip_id: str) -> dict:
             "mediaBytes": meta["bytes"],
             "mediaWidth": meta["width"],
             "mediaHeight": meta["height"],
-            "mediaDurationSec": meta["durationSec"],
+            "mediaDurationSec": round(float(meta["duration"]), 3),
             "renderState": "done",
             "jobId": job_id,
         },
         job_id=job_id,
     )
     return {"queued": True, "clipId": clip_id}
-
 
 _FFMPEG_SEM: threading.BoundedSemaphore = threading.BoundedSemaphore(_ffmpeg_slots())
 _FFMPEG_LIMIT = _ffmpeg_slots()
@@ -218,7 +212,6 @@ _FFMPEG_LIMIT = _ffmpeg_slots()
 # would take two slots from one thread and deadlock outright the moment the
 # host limit is 1.
 _FFMPEG_DEPTH = threading.local()
-
 
 class _FfmpegSlot:
     """Context manager that holds one of the host's ffmpeg slots.
@@ -259,7 +252,6 @@ class _FfmpegSlot:
         if self._acquired:
             _FFMPEG_SEM.release()
 
-
 def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> tuple[int, str]:
     """Run ffmpeg, failing with a message that says WHICH deadline was hit.
 
@@ -277,7 +269,6 @@ def _run(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_ca
     logger.info("[video] ffmpeg command: " + " ".join(cmd))
     with _FfmpegSlot("ffmpeg"):
         return _run_locked(cmd, timeout=timeout, mode=mode, _progress_callback=_progress_callback)
-
 
 def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _progress_callback: Callable | None = None) -> tuple[int, str]:
     """Run ffmpeg with optional real-time progress parsing.
@@ -346,7 +337,6 @@ def _run_locked(cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", _prog
             + _ffmpeg_error_tail(proc.stderr or "")
         )
     return proc.returncode, (proc.stderr or "")
-
 
 def _run_with_progress(
     cmd: list[str], *, timeout: int = 3600, mode: str = "cpu", callback: Callable[[], None]
@@ -476,7 +466,6 @@ def _run_with_progress(
         )
     return proc.returncode, "".join(stderr_chunks)
 
-
 def extract_wav(src: Path, dest: Path) -> Path:
     # `-f wav` is explicit for the same reason as app.subtitle._extract_audio:
     # `dest` is caller-supplied and may be a `.part`/temp path, where ffmpeg's
@@ -491,7 +480,6 @@ def extract_wav(src: Path, dest: Path) -> Path:
     ])
     return dest
 
-
 def _ffmpeg_has_filter(filt: str) -> bool:
     """True when this ffmpeg build supports `filt` (e.g. libass `subtitles`)."""
     try:
@@ -505,7 +493,6 @@ def _ffmpeg_has_filter(filt: str) -> bool:
         )
     except Exception:
         return False
-
 
 def detect_scene_cuts(
     src: Path,
@@ -567,7 +554,6 @@ def detect_scene_cuts(
     logger.info(f"[video] scene cuts detected: {len(cuts)}")
     return cuts
 
-
 def silence_trim_filter(cuts: list[dict], total_dur: float) -> tuple[str, float]:
     """Build an ffmpeg filter that drops [start,end] windows (clip-relative).
 
@@ -592,7 +578,6 @@ def silence_trim_filter(cuts: list[dict], total_dur: float) -> tuple[str, float]
         f"aselect='{conds}',asetpts=N/SR/TB",
         new_dur,
     )
-
 
 def crop_pan_filter(
     src_w: int,
@@ -647,7 +632,6 @@ def crop_pan_filter(
     expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])}" + ")" * len(parts)
     return f"crop={crop_w}:{crop_h}:{expr}:0"
 
-
 # ---------------------------------------------------------------------------
 # compat wrapper: the encode-stage helper used to call crop_pan_filter with 5
 # positional args (src_w, src_h, fps, crop_x, crop_y). Keep a safe shim so a
@@ -665,8 +649,6 @@ def crop_pan_filter_5(
     w = min(int(src_h * (1080 / 1920)), src_w) if src_w and src_h else src_w or 1080
     h = src_h or 1920
     return f"crop={w}:{h}:(in_w-{w})/2:0"
-
-
 
 def _crop_windows(
     crop_x: int,
@@ -703,7 +685,6 @@ def _crop_windows(
     out.sort(key=lambda w: float(w.get("t", 0.0)))
     return out
 
-
 #: Audio bitrate for the deliverable. 128k AAC is transparent for speech and
 #: is what every platform's own re-encode targets, so 160k was paying ~25% more
 #: for nothing on every clip.
@@ -727,7 +708,6 @@ def browser_safe_args(encoder: str = "") -> list[str]:
     if encoder == "h264_vaapi":
         return []
     return list(VIDEO_PROFILE_ARGS)
-
 
 def build_output_chain(
     crop_windows: list[dict] | None,
@@ -773,7 +753,6 @@ def build_output_chain(
     chain.append(f"crop={out_w}:{out_h}")
     chain.append("setsar=1")
     return ",".join(chain)
-
 
 def render_clip(
     src: Path,
@@ -986,14 +965,12 @@ def render_clip(
         "ffmpegStderr": stderr,
     }
 
-
 #: Width of a clip thumbnail. The grid cell is a 9:16 frame a few hundred CSS
 #: pixels wide at most, and the poster is downloaded for EVERY card on screen.
 #: At full 1080x1920 each poster was 50-70 KB, so a thirteen-clip grid pulled
 #: ~800 KB of images before a single video byte — all of it scaled away by the
 #: browser. 320px wide is indistinguishable at card size and ~7 KB.
 THUMB_WIDTH = int(os.getenv("CLIPFORGE_THUMB_WIDTH", "320"))
-
 
 def render_first_frame_thumb(clip_path: Path, thumb_path: Path) -> Path:
     """Thumbnail = REAL first frame of the rendered clip (no generated images).
@@ -1015,7 +992,6 @@ def render_first_frame_thumb(clip_path: Path, thumb_path: Path) -> Path:
         "-f", "image2", str(thumb_path),
     ], timeout=120)
     return thumb_path
-
 
 def thumb_needs_rewrite(p: Path) -> bool:
     """Is this poster one of the old full-resolution ones?

@@ -531,14 +531,9 @@ def render_clip(
     crop_h = int(crop.get("h", height))
 
     samples = cut.get("sampleWindows") or []
-    # Use the new 8-arg signature; the legacy 5-arg shim is only for stale callers.
-    try:
-        filtergraph = _video.crop_pan_filter(
-            width, height, fps, crop_x, crop_y, crop_w, crop_h, samples,
-        )
-    except TypeError:
-        filtergraph = _video.crop_pan_filter_5(width, height, fps, crop_x, crop_y)
-
+    filtergraph = _video.crop_pan_filter(
+        width, height, fps, crop_x, crop_y, crop_w, crop_h, samples,
+    )
     cmd = [
         ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         *choice.hw_accel_args(),

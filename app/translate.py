@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+from app.stages import StageWorkspace
+
 
 LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "ja", "ko", "zh", "ar", "hi", "tr", "vi"}
 
@@ -107,6 +111,8 @@ def write_tracks(
     settings: Any,
     *,
     log: Any = None,
+    job_id: str | None = None,
+    use_stage_workspace: bool = False,
 ) -> list[dict[str, Any]]:
     """Write per-language SRT/VTT sidecars for one clip.
 
@@ -139,7 +145,13 @@ def write_tracks(
         if not records:
             continue
         srt_text = _build_srt(records)
+        if use_stage_workspace and job_id:
+            if use_stage_workspace and job_id:
+        out_dir = StageWorkspace(settings.app.paths.data_dir, job_id).stage_dir("captions")
+    else:
         out_dir = Path(outputs_dir)
+        else:
+            out_dir = Path(outputs_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         base = f"clip{clip_index:03d}"
         files: dict[str, str] = {}
