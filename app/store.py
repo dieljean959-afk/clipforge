@@ -115,6 +115,65 @@ class LocalStore:
         return uuid.uuid4().hex
 
     # ------------------------------------------------------------------
+    # job creation
+    # ------------------------------------------------------------------
+
+    def create_job(
+        self,
+        *,
+        source_type: str,
+        source: str | None,
+        title: str | None = None,
+        min_clip_sec: int | None = None,
+        max_clip_sec: int | None = None,
+        max_clips: int | None = None,
+        caption_preset: str | None = None,
+        language: str = "auto",
+        duration: float | None = None,
+    ) -> dict[str, Any]:
+        """Create and persist a new job document (stage: queued).
+
+        This was previously missing entirely — both ``POST /api/jobs`` and
+        ``POST /api/jobs/upload`` called ``store.create_job(...)`` and
+        crashed with ``AttributeError: 'LocalStore' object has no attribute
+        'create_job'`` → the raw 500 the user saw on every "Forge clips"
+        submit.
+
+        Field names match what the pipeline (``app/task.py``) and the API
+        serializers actually read:
+
+        - ``source`` / ``url``: source filename or URL (pipeline reads ``source``)
+        - ``options``: minClipSec / maxClipSec / maxClips (read by the detect stage)
+        - ``language``: caption language ("auto" | "en" | "es")
+        - ``durationSec``: pre-probed source length, when known
+        """
+        now_ms = int(time.time() * 1000)
+        job: dict[str, Any] = {
+            "_id": self.new_job_id(),
+            "sourceType": source_type,
+            "source": source,
+            "url": source if source_type == "url" else None,
+            "title": title,
+            "stage": "queued",
+            "status": "queued",
+            "createdAt": now_ms,
+            "durationSec": duration,
+            "language": language,
+            "options": {
+                "minClipSec": min_clip_sec,
+                "maxClipSec": max_clip_sec,
+                "maxClips": max_clips,
+            },
+            "captionPreset": caption_preset or "bold_pop",
+            "clips": [],
+            "logs": [],
+            "progress": 0.0,
+            "isTerminal": False,
+        }
+        self.save_job(job)
+        return job
+
+    # ------------------------------------------------------------------
     # job put/get/delete
     # ------------------------------------------------------------------
 
@@ -373,6 +432,12 @@ class LocalStore:
         clip_ids: list[str] = []
         for i, c in enumerate(candidates):
             clip_id = c.get("_id") or self.new_job_id()
+            # Write the minted id BACK onto the candidate object. Downstream
+            # stages (reframe cuts, captions, export) key their work on these
+            # in-place ids; without this, export fabricated ids like clip_000
+            # that have no clip document on disk and crashed the render with
+            # FileNotFoundError on the first clip of every batch.
+            c["_id"] = clip_id
             order = int(c.get("order", i))
             start = float(c.get("start", 0.0) or 0.0)
             end = float(c.get("end", 0.0) or 0.0)

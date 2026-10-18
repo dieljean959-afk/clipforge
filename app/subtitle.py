@@ -442,6 +442,7 @@ def transcribe(
     cache_dir: Path | None = None,
     should_pause=None,
     on_chunk=None,
+    language: str | None = None,
 ) -> Transcript:
     """Word-level transcription through the configured ASR engine.
 
@@ -468,7 +469,12 @@ def transcribe(
     """
     loaded = _load_model(settings)
     duration = _probe_duration(path)
-    language = None if settings.whisper.language == "auto" else settings.whisper.language
+    # Explicit call-site language (per-job ENG/ESP selection) wins over the
+    # global config; None falls back to the config's own auto/explicit choice.
+    if language:
+        language = str(language).strip().lower() or None
+    else:
+        language = None if settings.whisper.language == "auto" else settings.whisper.language
     sample_rate = 16000
 
     windows = _plan_windows(duration)

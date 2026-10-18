@@ -174,6 +174,10 @@ def find_cuts(
         }
         cuts.append({
             "order": i,
+            # Carry the candidate's real clip id (minted by store.create_clips)
+            # through to the export stage — export writes render state onto the
+            # clip document with this id, so a fabricated one crashes.
+            "clipId": clip.get("_id"),
             "start": round(start, 3),
             "end": round(end, 3),
             "cropBox": {

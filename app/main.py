@@ -1433,6 +1433,8 @@ def create_job(body: CreateJobIn) -> dict:
         max_clip_sec=body.maxClipSec,
         max_clips=body.maxClips,
         caption_preset=body.captionPreset,
+        language=body.language,
+        duration=duration,
     )
     job_id = job["_id"]
     store.append_job_log(job_id, f"job created ({body.sourceType}: {body.source[:80]})")
@@ -1447,6 +1449,7 @@ async def upload_job(
     maxClipSec: int | None = None,
     maxClips: int | None = None,
     captionPreset: str | None = None,
+    language: str = "auto",
 ) -> dict:
     """Manual upload: always works, no URL fetching involved.
 
@@ -1462,6 +1465,7 @@ async def upload_job(
         max_clip_sec=maxClipSec,
         max_clips=maxClips,
         caption_preset=captionPreset,
+        language=language,
     )
     job_id = job["_id"]
     dest_dir = store.job_source_dir_for_write(job_id)

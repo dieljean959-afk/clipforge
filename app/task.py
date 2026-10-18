@@ -18,6 +18,7 @@ the job's errorDetail — never swallowed.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 import time
@@ -213,8 +214,11 @@ class Pipeline:
         path = self.settings.app.paths.data_dir
         lim = hostlimits.describe()
         try:
-            _ = hostlimits.dir_bytes(path)
-            free = hostlimits.dir_free(path)
+            # hostlimits has no dir_bytes/dir_free helpers; shutil answers the
+            # same question directly (total/free on the filesystem holding the
+            # data dir — the conservative free figure, not an invented number).
+            usage = shutil.disk_usage(path)
+            free = usage.free
         except Exception as exc:
             logger.warning(f"[job {job_id}] could not measure disk: {exc}")
             return
@@ -869,7 +873,10 @@ class Pipeline:
 
         dest_dir = self.settings.app.paths.downloads_dir / job_id
         self._progress(job_id, "grabbing", 0, "Clippy is grabbing the video...")
-        self._log(job_id, f"Stage: fetch — {job['source'][:80]}")
+        # Legacy/partial job documents can carry source=None (seen in a real
+        # data/jobs/*.json): logging it with [:80] raised TypeError and turned
+        # a data problem into a downstream pipeline crash.
+        self._log(job_id, f"Stage: fetch — {(job.get('source') or '<missing source>')[:80]}")
 
         if job.get("sourceType") == "upload":
             # Search BOTH storage locations. The expected name is tried first
@@ -1034,12 +1041,17 @@ class Pipeline:
         # A single Whisper chunk can run for minutes on a small host. The
         # heartbeat keeps the job visibly alive across it; the chunk callback
         # still owns the real progress numbers.
+        # Per-job caption language (ENG/ESP/Auto) steers transcription ONLY
+        # when explicit; "auto" keeps the engine's own detection.
+        job_language = str(job.get("language") or "auto").strip().lower()
+        transcribe_language = None if job_language == "auto" else job_language
         with self._heartbeat(job_id, "transcribe"):
             transcript = subtitle.transcribe(
                 src, self.settings, on_progress=on_progress,
                 cache_dir=chunk_cache_dir,
                 should_pause=lambda: self.pause_requested(job_id),
                 on_chunk=on_chunk,
+                language=transcribe_language,
             )
         # Record what this host actually achieved so the next job's ETA starts
         # from a measurement instead of the documented prior.
@@ -1323,6 +1335,19 @@ class Pipeline:
                 units_done=i + 1, units_total=len(cuts),
             )
             clip_id = cut.get("clipId") or f"clip_{i:03d}"
+            # Per-clip resume: a clip that is already rendered AND recorded as
+            # done must not pay for a second ffmpeg pass on every retry — the
+            # bounded-runner path re-enters this loop from clip 0 each time.
+            existing_doc = self.store.get_clip_doc(clip_id)
+            existing_file = dest / f"clip_{i:03d}.mp4"
+            if (
+                existing_doc is not None
+                and existing_doc.get("renderState") == "done"
+                and existing_file.exists()
+                and existing_file.stat().st_size > 0
+            ):
+                self._log(job_id, f"resume: clip {i + 1} already rendered, skipping")
+                continue
             self.store.write_clip(
                 clip_id,
                 {"renderState": "running", "jobId": job_id},
@@ -1352,10 +1377,11 @@ class Pipeline:
                         pass
                     continue
 
-            thumb = dest.parent / f"{cut.get('order', i):03d}.thumb.jpg"
             thumb_path = dest / f"clip_{i:03d}.thumb.jpg"
             try:
-                _video.render_first_frame_thumb(dest, thumb_path)
+                # Source is the RENDERED CLIP FILE, not the output directory
+                # (passing dest made ffmpeg read a directory and exit 1).
+                video.render_first_frame_thumb(dest / f"clip_{i:03d}.mp4", thumb_path)
                 self.store.write_clip(
                     clip_id,
                     {
