@@ -55,6 +55,8 @@ export interface DetectionDto {
   /** Ollama only: is the local server reachable with the model pulled? */
   ready?: boolean;
   detail?: string;
+  /** The backend the app falls back to when the primary's quota runs out. */
+  fallbackProvider?: string | null;
 }
 
 export interface JobDto {
@@ -63,6 +65,30 @@ export interface JobDto {
   source: string;
   title?: string | null;
   isUpload: boolean;
+  /** Wall-clock creation time (ms), sent by the backend's job list/detail. */
+  createdAt?: number;
+  /** Clips actually rendered for this job (0 or absent while running). */
+  clipCount?: number;
+  /** Seconds of source video, probed server-side. */
+  durationSec?: number | null;
+  /** Seconds of rendered clip footage across all clips. */
+  totalClipsSec?: number | null;
+  /** Which provider's model detected the highlights, e.g. "deepseek". */
+  detectedSource?: string | null;
+  /** Where the source video was fetched from (yt-dlp profile, "direct", ...). */
+  downloadSource?: string | null;
+  /** Word count of the transcript (server-measured). */
+  transcriptWordCount?: number | null;
+  /** Human-readable failure message. Present on failed jobs. */
+  error?: string | null;
+  /** Full traceback / detail behind `error`, shown collapsed. */
+  errorDetail?: string | null;
+  /** The stage the job died in (recorded before `stage` is overwritten). */
+  failedStage?: string | null;
+  /** True when the job was interrupted by a host/sandbox restart. */
+  interrupted?: boolean;
+  interruptCount?: number;
+  interruptReason?: string | null;
   stage: ClipStage;
   /** Authoritative status from the backend's single derivation. Prefer this
    *  over inferring one from `stage` + `progress` — those two disagreeing is
@@ -156,14 +182,122 @@ export interface ClipDto {
   sharePageUrl?: string | null;
 }
 
+export interface KeyStatusDto {
+  provider: string;
+  keyLoaded: boolean;
+  source: string;
+  problem: string | null;
+  lastCheckedAt: number;
+  aliases: string[];
+}
+
+export interface StorageKeysInput {
+  endpoint?: string;
+  bucket?: string;
+  accessKey?: string;
+  secretKey?: string;
+  region?: string;
+  prefix?: string;
+}
+
+/** A failed/empty job returned by GET /api/jobs/junk (or derived client-side). */
+export interface JunkJobDto {
+  _id: string;
+  title: string;
+  stage: string;
+  createdAt?: number;
+  reason: string;
+}
+
+/** Result of GET /api/dev/verify-clips for one job. */
+export interface VerifyClipsDto {
+  total: number;
+  valid: number;
+  invalid: number;
+  clips: {
+    clipId: string;
+    order?: number;
+    title?: string;
+    valid: boolean;
+    reason: string;
+    durationSec?: number;
+    width?: number;
+    height?: number;
+    bytes?: number;
+  }[];
+}
+
 export interface HealthDto {
   ok: boolean;
+  /** Names of the health blocks that degraded — present only when ok is false. */
+  degraded?: string[];
   version: string;
   worker: {
     online: boolean;
     currentJob: string | null;
     queueDepth: number;
+    concurrency?: number;
+    activeCount?: number;
+    stallTimeoutSec?: number | null;
   };
+  /** Model warmup progress (loading_model / failed / skipped / ...). */
+  warmup?: { stage: string; detail?: string } | null;
+  /** The optional remote home-worker dispatch (Tailscale). */
+  dispatch?: {
+    enabled: boolean;
+    workerUrl?: string | null;
+    remote?: { online: boolean; detail?: string } | null;
+  };
+  /** AI highlight-detection backend state (probe=False: key presence only). */
+  detection?: DetectionDto;
+  /** The RESOLVED transcription engine, not what config.toml asks for. */
+  whisper?: {
+    model: string;
+    compute: string;
+    configuredModel?: string | null;
+    engine?: string | null;
+    isWhisperx?: boolean;
+  };
+  /** Real transcription facts: engine, RTF this host measured, host limits. */
+  asr?: {
+    engine?: string | null;
+    model?: string | null;
+    device?: string | null;
+    detail?: string | null;
+    estimatedRtf?: number | null;
+    rtfSource?: string | null;
+  };
+  system?: {
+    cpuPercent?: number | null;
+    cores?: number | null;
+    memUsedBytes?: number | null;
+    memTotalBytes?: number | null;
+    load1?: number | null;
+  } | null;
+  disk?: {
+    freeBytes?: number | null;
+    totalBytes?: number | null;
+    path?: string | null;
+  } | null;
+  tailnetIp?: string | null;
+  limits?: { maxSourceMin?: number; retentionHours?: number } | null;
+  /** Durable media offload (S3/R2) state, present once /api/health answers. */
+  storage?: {
+    enabled: boolean;
+    clientReady: boolean;
+    bucket?: string | null;
+    endpoint?: string | null;
+    prefix?: string;
+    deleteLocal?: boolean;
+  };
+  /** The worker's real silence budget in seconds (drives stall detection). */
+  stallTimeoutSec?: number | null;
+  /** Live key state per vendor (Gemini / Groq / NVIDIA / DeepSeek). */
+  llm?: KeyStatusDto;
+  llmGroq?: KeyStatusDto;
+  llmNvidia?: KeyStatusDto;
+  llmDeepSeek?: KeyStatusDto;
+  encode?: { engine?: string | null; [k: string]: unknown };
 }
 
 export interface DoctorCheck {
@@ -252,12 +386,7 @@ export async function waitForSandbox(
         `Sandbox did not become ready within ${timeoutMs / 1000}s — it may still be starting.`;
   opts.onUpdate?.(("failed" as const), msg);
   return { ok: false, health: null, error: msg };
-}
-
-/** Minimal internal sleep used by the readiness helper. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
+}  /** Minimal internal sleep used by the readiness helper. */
 
 /** API base URL, normalised. */
 const BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
@@ -434,6 +563,37 @@ export const api = {
       body: fd,
     });
   },
+  /** URL-path convenience wrapper (health-gated). Delegates to createJobWithLanguage. */
+  createJobWithLanguageFromUrl: (
+    url: string,
+    captionPreset?: string,
+    maxClips?: number,
+    language: CaptionLanguage = "auto",
+    opts?: WaitForSandboxOptions,
+  ) =>
+    waitForSandbox(opts).then((ready) => {
+      if (!ready.ok) {
+        throw new Error(ready.error);
+      }
+      return api.createJobWithLanguage(url.trim(), "url", captionPreset, maxClips, language);
+    }),
+  /** Language-aware upload job: sends the ENG/ESP choice as a `language` field. */
+  uploadJobWithLanguage: (
+    file: File,
+    captionPreset?: string,
+    maxClips?: number,
+    language: CaptionLanguage = "auto",
+  ) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (captionPreset) fd.append("captionPreset", captionPreset);
+    if (maxClips) fd.append("maxClips", String(maxClips));
+    fd.append("language", language);
+    return request<{ jobId: string; file: string; bytes: number }>("/api/jobs/upload", {
+      method: "POST",
+      body: fd,
+    });
+  },
   /** Delete one batch. */
   deleteJob: async (jobId: string, keepSource = false) => {
     type DeleteResult = { deleted: boolean; cancelled: "queued" | "running" | "absent"; keptSource?: boolean };
@@ -464,7 +624,7 @@ export const api = {
     }
   },
   /** Failed batches with nothing delivered — the deletable ones. */
-  listJunkJobs: () => request<{ jobs: { _id: string; title: string; stage: string; createdAt?: number; reason: string }[] }>("/api/jobs/junk"),
+  listJunkJobs: () => request<{ jobs: JunkJobDto[] }>("/api/jobs/junk"),
   /** Delete many batches in one call (max 200 ids per request). */
   bulkDeleteJobs: (jobIds: string[]) =>
     request<{ deleted: string[]; missing: string[] }>("/api/jobs/bulk-delete", {
@@ -486,7 +646,7 @@ export const api = {
   retranscribe: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/retranscribe`, { method: "POST" }),
   verifyClips: (jobId: string) =>
-    request<{ total: number; valid: number; invalid: number; clips: { clipId: string; valid: boolean; reason: string }[] }>(
+    request<VerifyClipsDto>(
       `/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`,
     ),
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),
@@ -513,7 +673,7 @@ export const api = {
       { method: "DELETE" },
     ),
   /** Save/replace the S3/R2 offload credentials in the backend's env file. */
-  setStorageKeys: (keys: { endpoint?: string; bucket?: string; accessKey?: string; secretKey?: string; region?: string; prefix?: string }) =>
+  setStorageKeys: (keys: StorageKeysInput) =>
     request<{ enabled: boolean; clientReady: boolean; bucket: string | null; endpoint: string | null; prefix: string; deleteLocal: boolean; savedFields: string[]; storedShape: { secretLength: number; accessKeyFirst4: string } }>(
       "/api/settings/s3-key",
       {
@@ -576,11 +736,31 @@ export const api = {
       "/api/settings/gemini-key?confirm=true",
       { method: "DELETE" },
     ),
+  /** Which detection backend is active right now. */
+  detectBackend: () => request<DetectionDto>("/api/settings/detection"),
   /** Switch the AI detection backend. Transcription engine is untouched. */
   setDetectionBackend: (provider: DetectionProvider) =>
     request<DetectionDto>("/api/settings/detection", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider }),
+    }),
+  /** Language-aware job creation: sends the ENG/ESP choice as `language`. */
+  createJobWithLanguage: (
+    source: string,
+    sourceType: "url" | "upload" = "url",
+    captionPreset?: string,
+    maxClips?: number,
+    language: CaptionLanguage = "auto",
+  ) =>
+    request<{ jobId: string }>("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        maxClips
+          ? { sourceType, source, captionPreset, maxClips, language }
+          : { sourceType, source, captionPreset, language },
+      ),
     }),
   /** The caption knobs, merged over config.toml, plus which ones are pinned. */
   captionStyle: () => request<CaptionStyleDto>("/api/settings/captions"),

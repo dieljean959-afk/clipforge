@@ -8,7 +8,7 @@ import type { CaptionLanguage } from "@/lib/api";
 
 type LanguageChoice = CaptionLanguage;
 
-export function CaptionLanguageToggle({
+export function NewJobForm({
   className,
   usage,
   onSandboxState,

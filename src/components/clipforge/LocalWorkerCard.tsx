@@ -130,7 +130,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   // which is a statement about the server's configuration that the server has
   // not actually made. Say unknown instead.
   const storageKnown = storage !== undefined;
-  const storageOn = storageKnown && storage.enabled === true;
+  const storageOn = storage !== undefined && storage.enabled === true;
   // Empty fields mean "leave the saved value alone" (that is how a secret gets
   // rotated without retyping the endpoint), so Save must stay disabled until
   // something has actually been typed — otherwise the button looks broken.
@@ -170,7 +170,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   // The host-limit downgrade is invisible unless the label says so: the server
   // may load `small` while config.toml still asks for `medium`.
   const downgraded =
-    !!health?.whisper.configuredModel &&
+    !!health?.whisper?.configuredModel &&
     health.whisper.configuredModel !== health.whisper.model;
 
   // null-safe system stats — the server sends null for anything it can't read
@@ -588,15 +588,15 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               className="flex items-center gap-1 text-muted-foreground"
               title={
                 health.asr?.detail ??
-                `${health.whisper.engine ?? "engine"}: ${health.whisper.model} on ${health.whisper.compute}`
+                `${health.whisper?.engine ?? "engine"}: ${health.whisper?.model} on ${health.whisper?.compute}`
               }
             >
               <ServerCog className="size-3.5" />
               {health.asr?.engine ? `${health.asr.engine} · ` : ""}
-              {health.whisper.model} ({health.whisper.compute})
+              {health.whisper?.model} ({health.whisper?.compute})
               {downgraded && (
                 <span className="text-amber-300/80">
-                  (host limit, configured {health.whisper.configuredModel})
+                  (host limit, configured {health.whisper?.configuredModel})
                 </span>
               )}
               {typeof health.asr?.estimatedRtf === "number" &&
@@ -749,7 +749,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
         <span
           className={cn(
             "flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-bold",
-            storageOn && storage.clientReady
+            storageOn && storage?.clientReady
               ? "border-border text-muted-foreground"
               : storageKnown && !storageOn
                 ? "border-border text-muted-foreground"
@@ -761,7 +761,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             !storageKnown
               ? "The server has not reported its storage state yet"
               : storageOn
-                ? `Media is offloaded to s3://${storage.bucket}/${storage.prefix}/ — finished clips survive a sandbox rebuild`
+                ? `Media is offloaded to s3://${storage?.bucket ?? ""}/${storage?.prefix ?? ""}/ — finished clips survive a sandbox rebuild`
                 : "Media offload is off: rendered clips only exist inside this sandbox and are lost if it is rebuilt"
           }
         >
@@ -773,7 +773,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
           {!storageKnown
             ? "Media offload — checking…"
             : storageOn
-              ? storage.clientReady
+              ? storage?.clientReady
                 ? `Media offload on — ${storage.bucket}`
                 : "Offload configured, but boto3 is missing"
               : "Media offload off"}

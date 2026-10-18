@@ -104,6 +104,7 @@ function useStalled(job: JobDoc, thresholdMs: number): boolean {
     const check = () => {
       const j = jobRef.current;
       const last = j.lastProgressAt ?? j.stageStartedAt ?? j.createdAt;
+      if (typeof last !== "number") return;
       setStalled(Date.now() - last > thresholdMs);
     };
     // first evaluation deferred a tick — no synchronous setState on mount

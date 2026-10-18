@@ -277,7 +277,8 @@ export function fmtSrtTime(sec: number): string {
 }
 
 /** "Mar 14, 3:42 PM" */
-export function fmtDate(ts: number): string {
+export function fmtDate(ts: number | null | undefined): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return "";
   return new Date(ts).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
