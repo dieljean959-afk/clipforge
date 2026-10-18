@@ -146,10 +146,7 @@ def write_tracks(
             continue
         srt_text = _build_srt(records)
         if use_stage_workspace and job_id:
-            if use_stage_workspace and job_id:
-        out_dir = StageWorkspace(settings.app.paths.data_dir, job_id).stage_dir("captions")
-    else:
-        out_dir = Path(outputs_dir)
+            out_dir = StageWorkspace(settings.app.paths.data_dir, job_id).stage_dir("captions")
         else:
             out_dir = Path(outputs_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
