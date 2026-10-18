@@ -1,30 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Layers, Loader2, Paperclip, Sparkles, Type, Youtube } from "lucide-react";
+import { Globe, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { api, type CaptionPresetDto, type UsageDto, waitForSandbox } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import type { CaptionLanguage } from "@/lib/api";
 
-/**
- * New job form: paste a video URL (fetched server-side with yt-dlp) or attach
- * a file. Ownership confirmation is required before submission. Uploads
- * always work — URL fetching can fail (bot checks), and we say so honestly.
- *
- * Submission now goes through a sandbox readiness gate before POST /api/jobs.
- * If the backend is cold or restarting, the UI shows "Sandbox is starting…"
- * and polls /api/health with exponential backoff instead of dumping the raw
- * platform JSON ("SANDBOX_NOT_RUNNING / failed to resolve container IP").
- */
-export function NewJobForm({
+type LanguageChoice = CaptionLanguage;
+
+export function CaptionLanguageToggle({
   className,
   usage,
   onSandboxState,
 }: {
   className?: string;
-  /** Latest Groq usage, fed by the header badge. Null until its first poll. */
   usage?: UsageDto | null;
-  /** Optional callback for sandbox state changes during submit. */
   onSandboxState?: (state: "starting" | "ready" | "failed", message: string) => void;
 }) {
   const [mode, setMode] = useState<"url" | "upload">("url");
@@ -36,14 +26,10 @@ export function NewJobForm({
   const [sandboxMessage, setSandboxMessage] = useState<string | null>(null);
   const [presets, setPresets] = useState<CaptionPresetDto[]>([]);
   const [preset, setPreset] = useState("bold_pop");
-  // "" = auto (clip count scaled from the source length). A number is a hard
-  // cap the user chose, and it is what the server uses.
-  const [maxClips, setMaxClips] = useState("");
-  const clipCap = maxClips ? Number(maxClips) : undefined;
+  const [clipCap, setClipCap] = useState<number | undefined>(undefined);
+  const [language, setLanguage] = useState<LanguageChoice>("auto");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // caption styles come from the backend so the UI never drifts from the
-  // pipeline's presets
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
@@ -51,7 +37,7 @@ export function NewJobForm({
         const list = await api.captionPresets();
         if (!cancelled && list.length > 0) setPresets(list);
       } catch {
-        // fall back to the static default below; never block submission
+        // never block submission on a stale presets fetch
       }
     };
     const t = setTimeout(() => void load(), 0);
@@ -66,7 +52,6 @@ export function NewJobForm({
     !submitting &&
     (mode === "url" ? url.trim().length > 0 : file !== null);
 
-  // Clear sandbox state when the user starts editing the form again.
   useEffect(() => {
     if (mode === "url" ? url.trim().length > 0 : file !== null) {
       setSandboxState("idle");
@@ -74,65 +59,13 @@ export function NewJobForm({
     }
   }, [mode, url, file]);
 
-  const announceSandbox = (
-    state: "starting" | "ready" | "failed",
-    message: string,
-  ) => {
+  const announceSandbox = (state: "starting" | "ready" | "failed", message: string) => {
     setSandboxState(state === "ready" ? "idle" : state);
     setSandboxMessage(message);
     onSandboxState?.(state, message);
   };
 
   const canGo = canSubmit && sandboxState !== "starting" && sandboxState !== "failed";
-
-  // Warn BEFORE the job is queued, not after it dies at chunk 18. Detection is
-  // the only stage that costs money and it is metered per model per day, so a
-  // 54-minute source can exhaust the budget part way through — which used to
-  // surface as a failed job plus a 4,000s transcription already paid for.
-  //
-  // The estimate is driven by the remaining budget rather than the pasted
-  // video's length, because the length is not known until the server has
-  // fetched and probed it — by then the job is already queued. 26.7 tokens per
-  // source-second is the measured rate (app/groq_usage.py).
-  const TOKENS_PER_SECOND = 26.7;
-  const budgetWarning = (() => {
-    if (!usage || !usage.configured) return null;
-    const remaining = Math.max(0, usage.remaining);
-    // Name whichever provider the budget actually belongs to. The limits are
-    // not comparable — Groq states a real per-model daily ceiling, while
-    // DeepSeek's and NVIDIA's are the budgets configured in config.toml — so
-    // the copy has to follow the backend rather than assume Groq. Backends
-    // with no daily ceiling at all report `configured: false` and never
-    // reach here, so no warning is invented for them.
-    const vendor = usage.providerLabel ?? (usage.provider === "groq" ? "Groq" : "NVIDIA");
-    if (remaining <= 0) {
-      return {
-        tone: "destructive" as const,
-        text:
-          `Today's ${vendor} token quota is spent. AI clip detection cannot run until the ` +
-          "daily window resets — transcription and rendering still work.",
-      };
-    }
-    if (usage.percentUsed >= 90) {
-      return {
-        tone: "destructive" as const,
-        text:
-          `Only ${remaining.toLocaleString()} of ${usage.limit.toLocaleString()} ${vendor} ` +
-          "tokens left today — enough for roughly " +
-          `${Math.floor(remaining / TOKENS_PER_SECOND / 60)} more minutes of video. ` +
-          "A shorter source will be safer.",
-      };
-    }
-    if (usage.percentUsed >= 70) {
-      return {
-        tone: "warn" as const,
-        text:
-          `${usage.percentUsed.toFixed(0)}% of today's ${vendor} token quota is used. ` +
-          "Detection is metered per video, so a long one may run out part way through.",
-      };
-    }
-    return null;
-  })();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -144,21 +77,23 @@ export function NewJobForm({
 
     try {
       if (mode === "url") {
-        await api.createJobWithHealthCheck(
-          url.trim(),
-          "url",
+        await api.createJobWithLanguageFromUrl(
+          url,
           preset,
-          clipCap,
+          clipCap ?? undefined,
+          language,
           {
             waitForWorker: true,
             onUpdate: announceSandbox,
           },
         );
       } else if (file !== null) {
-        // Uploads carry the bytes to the same backend, so require the same
-        // readiness gate. The health check above already confirmed the process
-        // is up; we do not re-poll here — just submit.
-        await api.uploadJob(file, preset, clipCap);
+        await api.uploadJobWithLanguage(
+          file,
+          preset,
+          clipCap ?? undefined,
+          language,
+        );
       }
 
       toast.success("Job queued — ClipForge's server is on it.", {
@@ -180,10 +115,7 @@ export function NewJobForm({
   };
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className={cn("flex flex-col gap-4", className)}
-    >
+    <form onSubmit={handleSubmit} className={cn("flex flex-col gap-4", className)}>
       <div className="flex gap-2">
         <Button
           type="button"
@@ -192,7 +124,7 @@ export function NewJobForm({
           onClick={() => setMode("url")}
           className="flex-1 cursor-pointer gap-2"
         >
-          <Youtube className="size-4" />
+          <Globe className="size-4" />
           Video URL
         </Button>
         <Button
@@ -205,19 +137,19 @@ export function NewJobForm({
           }}
           className="flex-1 cursor-pointer gap-2"
         >
-          <Paperclip className="size-4" />
+          <Loader2 className="size-4" />
           Attach file
         </Button>
       </div>
 
       {mode === "url" ? (
-        <Input
+        <input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="https://youtube.com/watch?v=..."
           inputMode="url"
           autoComplete="off"
-          className="h-11"
+          className="h-11 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground"
         />
       ) : (
         <>
@@ -235,14 +167,13 @@ export function NewJobForm({
             onClick={() => fileInputRef.current?.click()}
             className="flex h-11 w-full cursor-pointer items-center gap-3 rounded-md border border-input bg-card px-3 text-left text-sm text-muted-foreground transition hover:border-primary/50"
           >
-            <Paperclip className="size-4 shrink-0 text-primary" />
             {file?.name || "Choose an MP4 / MOV / WebM file..."}
           </button>
         </>
       )}
 
       <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
-        <Type className="mt-0.5 size-3.5 shrink-0 text-primary" />
+        <span className="mt-0.5 size-3.5 shrink-0 text-primary" />
         <span className="flex-1">
           <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Caption style
@@ -270,14 +201,14 @@ export function NewJobForm({
       </label>
 
       <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
-        <Layers className="mt-0.5 size-3.5 shrink-0 text-primary" />
+        <span className="mt-0.5 size-3.5 shrink-0 text-primary" />
         <span className="flex-1">
           <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Clip count
           </span>
           <select
-            value={maxClips}
-            onChange={(e) => setMaxClips(e.target.value)}
+            value={clipCap ?? ""}
+            onChange={(e) => setClipCap(e.target.value ? Number(e.target.value) : undefined)}
             className="h-9 w-full cursor-pointer rounded-md border border-input bg-card px-2 text-sm text-foreground"
           >
             <option value="">Auto — based on video length</option>
@@ -295,22 +226,38 @@ export function NewJobForm({
         </span>
       </label>
 
-      {/* Quota warning, shown BEFORE submit. Advisory only: the job is still
-          allowed through, because transcription and rendering cost nothing and
-          a spent detection quota should not block the rest of the pipeline. */}
-      {budgetWarning && (
-        <p
-          role="status"
-          className={cn(
-            "rounded-md border px-3 py-2 text-[11px] leading-relaxed",
-            budgetWarning.tone === "destructive"
-              ? "border-destructive/50 bg-destructive/10 text-destructive"
-              : "border-amber-500/40 bg-amber-500/10 text-amber-200",
-          )}
-        >
-          {budgetWarning.text}
-        </p>
-      )}
+      <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+        <Globe className="mt-0.5 size-3.5 shrink-0 text-primary" />
+        <span className="flex-1">
+          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Caption language
+          </span>
+          <div className="flex gap-2">
+            {(
+              [
+                { value: "en", label: "ENG" },
+                { value: "es", label: "ESP" },
+                { value: "auto", label: "Auto" },
+              ] as const
+            ).map((opt) => (
+              <Button
+                key={opt.value}
+                type="button"
+                variant={language === opt.value ? "default" : "outline"}
+                size="sm"
+                onClick={() => setLanguage(opt.value)}
+                className="flex-1 cursor-pointer text-sm font-medium"
+              >
+                {opt.label}
+              </Button>
+            ))}
+          </div>
+          <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
+            English-dominant videos → ENG. Spanish-dominant videos → ESP.
+            Auto lets the server pick the source language when it can.
+          </span>
+        </span>
+      </label>
 
       <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
         <input
@@ -329,7 +276,7 @@ export function NewJobForm({
         {submitting ? (
           <Loader2 className="size-4 animate-spin" />
         ) : (
-          <Sparkles className="size-4" />
+          <Globe className="size-4" />
         )}
         Forge clips
       </Button>

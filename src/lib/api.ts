@@ -113,36 +113,7 @@ export interface JobDto {
   slow?: boolean;
   stageStartedAt?: number;
   /** Present on GET /api/jobs/{id}; omitted from the list projection. */
-  logs?: string[];
-  error?: string | null;
-  errorDetail?: string | null;
-  /** The stage that failed — `stage` is overwritten with "failed", so this
-   *  is the only way to tell the user WHICH step broke. */
-  failedStage?: string | null;
-  durationSec?: number | null;
-  clipCount?: number | null;
-  totalClipsSec?: number | null;
-  detectedSource?: string | null;
-  downloadSource?: string | null;
-  transcriptWordCount?: number | null;
-  captionsTxt?: string | null;
-  options?: {
-    minClipSec?: number | null;
-    maxClipSec?: number | null;
-    maxClips?: number | null;
-    captionPreset?: string | null;
-  } | null;
-  createdAt: number;
-  completedAt?: number | null;
-  /**
-   * Set when the host killed the worker (SIGTERM/SIGKILL) mid-job, e.g. a
-   * container restart. The job is auto-resumed rather than failed, so this is
-   * normally transient and does not mean the job is lost.
-   */
-  interrupted?: boolean | null;
-  interruptReason?: string | null;
-  /** How many host restarts this job has survived; bounded server-side. */
-  interruptCount?: number | null;
+  logs?: string[] | null;
 }
 
 export interface ClipDto {
@@ -176,103 +147,13 @@ export interface ClipDto {
   mediaError?: string | null;
   renderState: "pending" | "running" | "done" | "failed";
   renderMs?: number | null;
-  /** Sidecar caption tracks written by [translate], one record per language. */
-  translationTracks?: TranslationTrack[] | null;
-  /** Short permanent public id for this clip, minted at creation. */
+  translationTracks?: { lang: string; source?: boolean; cached?: boolean; error?: string; files?: Record<string, string> }[] | null;
   shareId?: string | null;
-  /** missing | preparing | ready | failed — from a real probe of the file. */
   shareState?: "missing" | "preparing" | "ready" | "failed";
-  /** Why it is in that state, safe to show as-is. */
   shareDetail?: string;
-  /** True only when the public URL is really serving bytes. */
   shareReady?: boolean;
-  /** Relative public URLs, ready to hand to a social app. */
   shareUrl?: string | null;
   sharePageUrl?: string | null;
-}
-
-export interface TranslationTrack {
-  /** ISO-639-1 code, e.g. "fr". */
-  lang: string;
-  /** True for the original transcript, which is never machine-translated. */
-  source?: boolean;
-  /** True when the track was reused from a previous run. */
-  cached?: boolean;
-  /** Present when this language failed; the other languages still wrote. */
-  error?: string;
-  /** Format -> filename, e.g. { srt: "clip01_fr.srt", vtt: "clip01_fr.vtt" }. */
-  files?: Record<string, string>;
-}
-
-export interface SystemStatsDto {
-  cpuPercent: number | null;
-  cores: number | null;
-  memTotalBytes: number | null;
-  memUsedBytes: number | null;
-  load1: number | null;
-  pid: number | null;
-}
-
-export interface DiskStatsDto {
-  freeBytes: number | null;
-  totalBytes: number | null;
-  /**
-   * The filesystem actually measured — the data dir jobs write to, which is
-   * NOT the repo root once CLIPFORGE_DATA_DIR / CLIPFORGE_STORAGE_DIR point
-   * job artefacts at a larger volume. Null when the server could not resolve it.
-   */
-  path?: string | null;
-}
-
-/**
- * Durable-media offload (S3/R2). Mirrors objectstore.status().
- *
- * `enabled` means all four credential fields are set; `clientReady` means boto3
- * is installed AND a client could actually be built. Those differ on a host
- * without boto3, and telling the operator "offload is on" when nothing can be
- * pushed is the misleading state this split exists to prevent.
- */
-export interface StorageDto {
-  enabled: boolean;
-  clientReady: boolean;
-  bucket: string | null;
-  endpoint: string | null;
-  prefix: string;
-  deleteLocal: boolean;
-}
-
-/** The save form. Every field optional; blank/absent means "keep saved value". */
-export interface StorageKeysInput {
-  endpoint?: string;
-  bucket?: string;
-  accessKey?: string;
-  secretKey?: string;
-  region?: string;
-  prefix?: string;
-}
-
-export interface KeyStatusDto {
-  keyLoaded: boolean;
-  source: string;
-  problem: string | null;
-  lastCheckedAt: number;
-  aliases: string[];
-}
-
-export interface AsrDto {
-  engine: "whisperx" | "faster-whisper" | string;
-  device: string;
-  computeType: string;
-  model: string;
-  batchSize: number;
-  batched: boolean;
-  detail: string;
-  estimatedRtf: number;
-  rtfSource: string;
-  rtfHistory?: Record<
-    string,
-    { rtf: number; lastRtf?: number; samples: number; engine?: string; device?: string; model?: string }
-  >;
 }
 
 export interface HealthDto {
@@ -282,63 +163,7 @@ export interface HealthDto {
     online: boolean;
     currentJob: string | null;
     queueDepth: number;
-    concurrency?: number;
-    activeCount?: number;
-    activeJobs?: string[];
-    queuedJobs?: string[];
   };
-  warmup: { stage: string; detail: string; startedAt: number | null };
-  llm: KeyStatusDto;
-  /** Live GROQ_API_KEY state — the key for the BACKUP detection backend. */
-  llmGroq?: KeyStatusDto;
-  /** Live NVIDIA_API_KEY state — an alternative detection backend. */
-  llmNvidia?: KeyStatusDto;
-  /** Live DEEPSEEK_API_KEY state — the key for the DEFAULT detection backend. */
-  llmDeepSeek?: KeyStatusDto;
-  detection?: DetectionDto;
-  // Resolved engine/model/compute (already host-limit adjusted). The raw
-  // config.toml request, when it differs, is `configuredModel`.
-  whisper: {
-    model: string;
-    compute: string;
-    engine?: string;
-    configuredModel?: string;
-    isWhisperx?: boolean;
-  };
-  asr?: AsrDto;
-  system: SystemStatsDto;
-  disk: DiskStatsDto;
-  /** Durable-media offload state. Absent only if the server could not read it. */
-  storage?: StorageDto;
-  tailnetIp: string | null;
-  stallTimeoutSec?: number | null;
-  limits: { maxSourceMin: number; retentionHours: number };
-  dispatch:
-    | { enabled: false }
-    | {
-        enabled: true;
-        workerUrl: string;
-        remote: { online: boolean; detail: string; queueDepth?: number } | null;
-      };
-}
-
-export interface VerifyClipResult {
-  clipId: string;
-  order?: number;
-  title?: string;
-  valid: boolean;
-  reason: string;
-  durationSec?: number;
-  width?: number;
-  height?: number;
-  bytes?: number;
-}
-
-export interface VerifyClipsDto {
-  total: number;
-  valid: number;
-  invalid: number;
-  clips: VerifyClipResult[];
 }
 
 export interface DoctorCheck {
@@ -346,16 +171,6 @@ export interface DoctorCheck {
   status: "ok" | "warn" | "fail";
   detail: string;
   fix: string;
-}
-
-/** A batch the cleanup dialog offers to delete. */
-export interface JunkJobDto {
-  _id: string;
-  title: string;
-  stage: string;
-  createdAt?: number;
-  /** Why it counts as junk: the failure text, or "no clips rendered". */
-  reason: string;
 }
 
 export interface DoctorReport {
@@ -369,27 +184,12 @@ export interface CaptionPresetDto {
   label: string;
 }
 
-/**
- * Sandbox/backend readiness helper for cold starts and restarts.
- *
- * The app now treats a missing or not-yet-ready backend as a
- * "sandbox is starting" state instead of dumping raw fetch errors into the UI.
- * This is the shared primitive for that: it polls /api/health, waits for the
- * process to answer, and then optionally waits until the worker is online.
- *
- * Backoff is exponential-ish and capped so a cold start does not become an
- * instant hammering of the proxy/platform before the container has started.
- */
+/** Sandbox/backend readiness helper for cold starts and restarts. */
 export interface WaitForSandboxOptions {
-  /** Milliseconds before the first probe. Defaults to 1500. */
   initialDelayMs?: number;
-  /** Backoff per attempt, in ms. Defaults to 2000, 5000, 10000, 20000. */
   backoffMs?: number[];
-  /** Max total time including backoff. Defaults to 60000. */
   timeoutMs?: number;
-  /** If true, wait until `health.worker.online` is true in addition to 200. */
   waitForWorker?: boolean;
-  /** Called on each failed probe with the latest error text. Optional. */
   onUpdate?: (state: "starting" | "ready" | "failed", message: string) => void;
 }
 
@@ -397,13 +197,13 @@ const DEFAULT_BACKOFF_MS = [2000, 5000, 10000, 20000];
 
 export async function waitForSandbox(
   opts: WaitForSandboxOptions = {},
-): Promise<{ ok: boolean; health: import("./api").HealthDto | null; error: string }> {
+): Promise<{ ok: boolean; health: HealthDto | null; error: string }> {
   const initialDelayMs = opts.initialDelayMs ?? 1500;
   const backoffMs = opts.backoffMs ?? DEFAULT_BACKOFF_MS;
   const timeoutMs = opts.timeoutMs ?? 60000;
   const waitForWorker = opts.waitForWorker ?? false;
 
-  await sleep(initialDelayMs);
+  await new Promise((r) => setTimeout(r, initialDelayMs));
 
   const start = Date.now();
   let lastError = "";
@@ -417,7 +217,7 @@ export async function waitForSandbox(
           ? `The backend is up but unhealthy: ${lastError}`
           : lastError ||
             `Sandbox did not become ready within ${timeoutMs / 1000}s — it may still be starting.`;
-      opts.onUpdate?.("failed", msg);
+      opts.onUpdate?.(("failed" as const), msg);
       return { ok: false, health: null, error: msg };
     }
 
@@ -425,14 +225,14 @@ export async function waitForSandbox(
       const health = await api.health();
       if (waitForWorker && !health.worker?.online) {
         lastError = "worker not yet online";
-        opts.onUpdate?.("starting", `Sandbox is starting… (worker not online yet)`);
+        opts.onUpdate?.(("starting" as const), `Sandbox is starting… (worker not online yet)`);
       } else {
-        opts.onUpdate?.("ready", "Sandbox is ready.");
+        opts.onUpdate?.(("ready" as const), "Sandbox is ready.");
         return { ok: true, health, error: "" };
       }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
-      opts.onUpdate?.("starting", `Sandbox is starting… (${lastError})`);
+      opts.onUpdate?.(("starting" as const), `Sandbox is starting… (${lastError})`);
     }
 
     const delay =
@@ -441,7 +241,7 @@ export async function waitForSandbox(
         : backoffMs[backoffMs.length - 1];
     const waited = Date.now() - start + delay;
     if (waited > timeoutMs) break;
-    await sleep(delay);
+    await new Promise((r) => setTimeout(r, delay));
   }
 
   const msg =
@@ -450,7 +250,7 @@ export async function waitForSandbox(
       ? `The backend is up but unhealthy: ${lastError}`
       : lastError ||
         `Sandbox did not become ready within ${timeoutMs / 1000}s — it may still be starting.`;
-  opts.onUpdate?.("failed", msg);
+  opts.onUpdate?.(("failed" as const), msg);
   return { ok: false, health: null, error: msg };
 }
 
@@ -459,29 +259,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * API base URL, normalised.
- *
- * A trailing slash on VITE_API_BASE produced "/api//health"-style URLs — the
- * Vite dev proxy still matched them, but the FastAPI route did not, and the
- * response came back as a 400/404 that the dashboard reported as "API
- * unreachable". Collapsing duplicates at the one place the two strings meet
- * removes that whole failure class.
- */
+/** API base URL, normalised. */
 const BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
 
 /** Same guarantee for the path half of every URL this module builds. */
-const path = (p: string) => (p.startsWith("/") ? p : `/${p}`).replace(/\/{2,}/g, "/");
+function path(p: string): string {
+  return (p.startsWith("/") ? p : `/${p}`).replace(/\/{2,}/g, "/");
+}
 
-/**
- * Turn a failed response into a message a human can act on.
- *
- * This used to read `body.detail` and fall back to `HTTP 400`, which meant the
- * two worst cases looked identical: FastAPI saying something useful, and a hop
- * in front of it answering with no body at all. Every report of "the deleter
- * does nothing, it says HTTP 400" was the second kind, so the fallback now
- * names what it saw instead of a bare status code.
- */
+/** Turn a failed response into a message a human can act on. */
 async function errorText(res: Response): Promise<string> {
   let raw = "";
   try {
@@ -493,9 +279,8 @@ async function errorText(res: Response): Promise<string> {
     try {
       const body = JSON.parse(raw) as { detail?: unknown; errorMessage?: unknown };
       if (typeof body.detail === "string") return body.detail;
-      // FastAPI validation errors are an array of objects, not a string.
       if (Array.isArray(body.detail)) {
-        const first = body.detail[0] as { msg?: unknown; loc?: unknown } | undefined;
+        const first = body.detail[0] as { msg?: unknown } | undefined;
         if (first && typeof first.msg === "string") return first.msg;
       }
       if (typeof body.errorMessage === "string") return body.errorMessage;
@@ -513,7 +298,6 @@ async function request<T>(path_: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** Request that returns a raw Blob (file downloads). */
 async function requestBlob(path_: string, init?: RequestInit): Promise<Blob> {
   const res = await fetch(`${BASE}${path(path_)}`, init);
   if (!res.ok) {
@@ -532,13 +316,10 @@ async function requestBlob(path_: string, init?: RequestInit): Promise<Blob> {
 export interface SocialPlatformDto {
   slug: SocialSlug;
   label: string;
-  /** needs_app | not_connected | connected -- what the UI should offer next. */
   status: "needs_app" | "not_connected" | "connected";
-  /** Plain-language reason for `status`, safe to show as-is. */
   reason: string;
   accountName: string;
   connected: boolean;
-  /** none | payment | audit | app_review -- how hard approval actually is. */
   gate: "none" | "payment" | "audit" | "app_review";
   headline: string;
   detail: string;
@@ -552,7 +333,6 @@ export interface PostResultDto {
   id: string;
   url: string;
   privacy: string;
-  /** TikTok only: an unaudited app can only publish privately. */
   audited?: boolean;
   note?: string;
   postedAt: number;
@@ -567,23 +347,13 @@ export interface UsageModelDto {
 }
 
 export interface UsageDto {
-  /** Tokens used today — the provider's own figure when it has told us, else our sum. */
   used: number;
   limit: number;
   remaining: number;
   percentUsed: number;
-  /**
-   * `provider-report` = the provider's own 429 figure (authoritative, Groq
-   * only). `local-sum` = our own tally, which is the only source on providers
-   * that bill a balance rather than publishing a per-model daily token
-   * ceiling. Every number here is scoped to the ACTIVE provider — the daily
-   * budgets are not comparable, so mixing them would report one provider's
-   * spend against another's limit.
-   */
   source: "provider-report" | "local-sum";
   localTokens: number;
   reportedUsed: number | null;
-  /** Epoch ms when the daily window next frees capacity, or null if unknown. */
   refillAt: number | null;
   refillSec: number | null;
   calls: number;
@@ -592,22 +362,8 @@ export interface UsageDto {
   models: UsageModelDto[];
   rateLimit: Record<string, string>;
   configured: boolean;
-  /**
-   * Which provider `limit`/`used` describe, and the ONLY provider they count.
-   * The figures are scoped to it, not a cross-provider total: the budgets are
-   * not comparable (Groq states a real per-model tokens-per-day ceiling;
-   * DeepSeek and NIM bill a balance or credits), so a combined total would
-   * report one provider's spend against another's limit.
-   */
   provider?: DetectionProvider;
-  /**
-   * False when the active backend has no daily token budget to meter at all
-   * (Ollama is local and free; Gemini has no published daily ceiling). The
-   * numbers are then zeroed placeholders, not a real allowance — the UI says
-   * so rather than drawing a meter against an invented denominator.
-   */
   budgeted?: boolean;
-  /** Display name for the active provider ("NVIDIA", "Groq", ...). */
   providerLabel?: string;
 }
 
@@ -617,12 +373,7 @@ export const api = {
   /** Today's token budget for the ACTIVE detection provider. Never throws. */
   usage: () => request<UsageDto>("/api/usage"),
   captionPresets: () => request<CaptionPresetDto[]>("/api/caption-presets"),
-  /**
-   * One page of batches, newest first. The list projection deliberately omits
-   * `logs`: the dashboard re-polls this every two seconds and shipping 300 log
-   * lines per job on every poll was 285 KB a time for seventeen batches.
-   * `nextBefore` is the cursor to pass as `before` for the following page.
-   */
+  /** One page of batches, newest first. */
   listJobs: (limit = 10) =>
     request<{ jobs: JobDto[]; total: number; nextBefore: number | null }>(
       `/api/jobs?limit=${limit}`,
@@ -683,34 +434,12 @@ export const api = {
       body: fd,
     });
   },
-  /**
-   * Delete one batch.
-   *
-   * POST /api/jobs/{id}/delete, not DELETE /api/jobs/{id}: a verb is the one
-   * thing a proxy in front of the app can silently refuse, and the browser's
-   * refusal arrived as a bodyless 400 with the batch still sitting in the list
-   * and no way to tell why. POST also needs no CORS preflight.
-   *
-   * `keepSource` keeps the downloaded/uploaded source video on the server and
-   * removes only the job record, workspace and rendered clips — the checkbox
-   * in the delete dialog. Default false: the usual delete frees everything.
-   *
-   * Retried once. Deleting a batch is idempotent — the second attempt answers
-   * 404 if the first one actually worked — and a single bodyless 4xx from a
-   * proxy should not cost the user their cleanup.
-   */
+  /** Delete one batch. */
   deleteJob: async (jobId: string, keepSource = false) => {
     type DeleteResult = { deleted: boolean; cancelled: "queued" | "running" | "absent"; keptSource?: boolean };
     const id = encodeURIComponent(jobId);
-    // A backend that does not know this route answers 404 "Not Found" or 405
-    // "Method Not Allowed" (the GET /api/jobs/{id} pattern claims the path and
-    // refuses the verb) — never this app's "job not found". Those two mean the
-    // route is missing, and the DELETE verb still works there.
     const routeMissing = (msg: string) =>
       /^not found$/i.test(msg) || /method not allowed/i.test(msg);
-    // One retry, because deleting a batch is idempotent and a single bodyless
-    // 4xx from something in the request path should not cost the user a
-    // cleanup they were owed. Never retried when the route itself is missing.
     const withRetry = async (url: string, init: RequestInit): Promise<DeleteResult> => {
       try {
         return await request<DeleteResult>(url, init);
@@ -735,8 +464,7 @@ export const api = {
     }
   },
   /** Failed batches with nothing delivered — the deletable ones. */
-  listJunkJobs: () =>
-    request<{ jobs: JunkJobDto[] }>("/api/jobs/junk"),
+  listJunkJobs: () => request<{ jobs: { _id: string; title: string; stage: string; createdAt?: number; reason: string }[] }>("/api/jobs/junk"),
   /** Delete many batches in one call (max 200 ids per request). */
   bulkDeleteJobs: (jobIds: string[]) =>
     request<{ deleted: string[]; missing: string[] }>("/api/jobs/bulk-delete", {
@@ -744,53 +472,33 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jobIds }),
     }),
-  retryJob: (jobId: string) =>
-    request<{ queued: boolean }>(`/api/jobs/${jobId}/retry`, { method: "POST" }),
-  /** Cooperative stop at the next safe boundary. "pausing" means the current
-      unit of work (one chunk / one clip) is still finishing. */
+  retryJob: (jobId: string) => request<{ queued: boolean }>(`/api/jobs/${jobId}/retry`, { method: "POST" }),
+  /** Cooperative stop at the next safe boundary. */
   pauseJob: (jobId: string) =>
-    request<{ state: "paused" | "pausing"; stage: string }>(`/api/jobs/${jobId}/pause`, {
-      method: "POST",
-    }),
+    request<{ state: "paused" | "pausing"; stage: string }>(`/api/jobs/${jobId}/pause`, { method: "POST" }),
   resumeJob: (jobId: string) =>
-    request<{ resumed: boolean; queueDepth: number }>(`/api/jobs/${jobId}/resume`, {
-      method: "POST",
-    }),
-  redetect: (jobId: string) =>
-    request<{ queued: boolean }>(`/api/jobs/${jobId}/redetect`, { method: "POST" }),
-  /**
-   * Re-encode with fresh captions, reusing the cached transcript and cuts.
-   * No re-transcription and no AI call — minutes of CPU, nothing else.
-   */
+    request<{ resumed: boolean; queueDepth: number }>(`/api/jobs/${jobId}/resume`, { method: "POST" }),
+  redetect: (jobId: string) => request<{ queued: boolean }>(`/api/jobs/${jobId}/redetect`, { method: "POST" }),
+  /** Re-encode with fresh captions, reusing the cached transcript and cuts. */
   rerender: (jobId: string) =>
-    request<{ queued: boolean; clipsReset: number }>(`/api/jobs/${jobId}/rerender`, {
-      method: "POST",
-    }),
-  /**
-   * Re-decode the audio (and re-score the cuts), then re-encode. The repair
-   * path for anything wrong with WHAT WAS HEARD rather than how it looks.
-   */
+    request<{ queued: boolean; clipsReset: number }>(`/api/jobs/${jobId}/rerender`, { method: "POST" }),
+  /** Re-decode the audio (and re-score the cuts), then re-encode. */
   retranscribe: (jobId: string) =>
     request<{ queued: boolean }>(`/api/jobs/${jobId}/retranscribe`, { method: "POST" }),
   verifyClips: (jobId: string) =>
-    request<VerifyClipsDto>(`/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`),
+    request<{ total: number; valid: number; invalid: number; clips: { clipId: string; valid: boolean; reason: string }[] }>(
+      `/api/dev/verify-clips?jobId=${encodeURIComponent(jobId)}`,
+    ),
   jobLogs: (jobId: string) => request<string[]>(`/api/jobs/${jobId}/logs`),
   /** Force the server to re-read env files and re-resolve the LLM keys. */
   reloadSecrets: () =>
-    request<
-      KeyStatusDto & {
-        groq?: KeyStatusDto;
-        nvidia?: KeyStatusDto;
-        deepseek?: KeyStatusDto;
-        activeProvider?: string;
-      }
-    >(
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; groq?: { keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[] }; nvidia?: { keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[] }; deepseek?: { keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[] }; activeProvider?: string }>(
       "/api/settings/reload-secrets",
       { method: "POST" },
     ),
   /** Save/replace DEEPSEEK_API_KEY in the backend's env file. */
   setDeepseekKey: (key: string) =>
-    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; storedShape: { first6: string; last4: string; length: number } }>(
       "/api/settings/deepseek-key",
       {
         method: "POST",
@@ -800,17 +508,13 @@ export const api = {
     ),
   /** Delete DEEPSEEK_API_KEY from the backend's env file. */
   deleteDeepseekKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/deepseek-key?confirm=true", {
-      method: "DELETE",
-    }),
-  /** Save/replace the S3/R2 offload credentials in the backend's env file.
-   *
-   *  Every field is optional and blank means "keep what is already saved", so
-   *  a rotated secret can be pasted on its own. The server persists what it is
-   *  given, re-reads the environment per operation and keys its S3 client on
-   *  the resolved config, so this takes effect with no restart. */
-  setStorageKeys: (keys: StorageKeysInput) =>
-    request<StorageDto & { savedFields: string[]; storedShape: { secretLength: number; accessKeyFirst4: string } }>(
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; linesRemoved: number }>(
+      "/api/settings/deepseek-key?confirm=true",
+      { method: "DELETE" },
+    ),
+  /** Save/replace the S3/R2 offload credentials in the backend's env file. */
+  setStorageKeys: (keys: { endpoint?: string; bucket?: string; accessKey?: string; secretKey?: string; region?: string; prefix?: string }) =>
+    request<{ enabled: boolean; clientReady: boolean; bucket: string | null; endpoint: string | null; prefix: string; deleteLocal: boolean; savedFields: string[]; storedShape: { secretLength: number; accessKeyFirst4: string } }>(
       "/api/settings/s3-key",
       {
         method: "POST",
@@ -820,12 +524,13 @@ export const api = {
     ),
   /** Delete the S3/R2 credentials. Region and prefix (non-secret) survive. */
   deleteStorageKeys: () =>
-    request<StorageDto & { linesRemoved: number }>("/api/settings/s3-key?confirm=true", {
-      method: "DELETE",
-    }),
+    request<{ enabled: boolean; clientReady: boolean; bucket: string | null; endpoint: string | null; prefix: string; deleteLocal: boolean; linesRemoved: number }>(
+      "/api/settings/s3-key?confirm=true",
+      { method: "DELETE" },
+    ),
   /** Save/replace NVIDIA_API_KEY in the backend's env file. */
   setNvidiaKey: (key: string) =>
-    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; storedShape: { first6: string; last4: string; length: number } }>(
       "/api/settings/nvidia-key",
       {
         method: "POST",
@@ -835,12 +540,13 @@ export const api = {
     ),
   /** Delete NVIDIA_API_KEY from the backend's env file. */
   deleteNvidiaKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/nvidia-key?confirm=true", {
-      method: "DELETE",
-    }),
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; linesRemoved: number }>(
+      "/api/settings/nvidia-key?confirm=true",
+      { method: "DELETE" },
+    ),
   /** Save/replace GROQ_API_KEY in the backend's env file. */
   setGroqKey: (key: string) =>
-    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; storedShape: { first6: string; last4: string; length: number } }>(
       "/api/settings/groq-key",
       {
         method: "POST",
@@ -850,12 +556,13 @@ export const api = {
     ),
   /** Delete GROQ_API_KEY from the backend's env file. */
   deleteGroqKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/groq-key?confirm=true", {
-      method: "DELETE",
-    }),
-  /** Save/replace GEMINI_API_KEY in the backend's env file (missing Edit button). */
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; linesRemoved: number }>(
+      "/api/settings/groq-key?confirm=true",
+      { method: "DELETE" },
+    ),
+  /** Save/replace GEMINI_API_KEY in the backend's env file. */
   setGeminiKey: (key: string) =>
-    request<KeyStatusDto & { storedShape: { first6: string; last4: string; length: number } }>(
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; storedShape: { first6: string; last4: string; length: number } }>(
       "/api/settings/gemini-key",
       {
         method: "POST",
@@ -863,12 +570,13 @@ export const api = {
         body: JSON.stringify({ key }),
       },
     ),
-  /** Delete GEMINI_API_KEY from the backend's env file (missing Delete button). */
+  /** Delete GEMINI_API_KEY from the backend's env file. */
   deleteGeminiKey: () =>
-    request<KeyStatusDto & { linesRemoved: number }>("/api/settings/gemini-key?confirm=true", {
-      method: "DELETE",
-    }),
-  /** Switch the AI-detection backend. Transcription engine is untouched. */
+    request<{ keyLoaded: boolean; source: string; problem: string | null; lastCheckedAt: number; aliases: string[]; linesRemoved: number }>(
+      "/api/settings/gemini-key?confirm=true",
+      { method: "DELETE" },
+    ),
+  /** Switch the AI detection backend. Transcription engine is untouched. */
   setDetectionBackend: (provider: DetectionProvider) =>
     request<DetectionDto>("/api/settings/detection", {
       method: "POST",
@@ -878,22 +586,15 @@ export const api = {
   captionStyle: () => request<CaptionStyleDto>("/api/settings/captions"),
   /** Save the caption knobs. Takes effect on the next render, not this one. */
   saveCaptionStyle: (values: CaptionStyleUpdate) =>
-    request<CaptionStyleDto & { saved: Record<string, unknown>; styleId: string }>(
-      "/api/settings/captions",
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
-      },
-    ),
+    request<CaptionStyleDto & { saved: Record<string, unknown>; styleId: string }>("/api/settings/captions", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    }),
   /** Drop every override and fall back to config.toml. */
   resetCaptionStyle: () =>
     request<CaptionStyleDto>("/api/settings/captions", { method: "DELETE" }),
-  /**
-   * Re-render a single clip (its export stage) without re-running detection or
-   * transcription. Useful when a clip's render state is "failed" and you want
-   * to retry just that one.
-   */
+  /** Re-render a single clip (its export stage) without re-running detection or transcription. */
   retryClipRender: (clipId: string) =>
     request<{ queued: boolean; clipId: string }>(`/api/clips/${clipId}/retry-render`, {
       method: "POST",
@@ -906,27 +607,13 @@ export const api = {
       body: JSON.stringify({ clipIds }),
     }),
   clipVideoUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/video`,
-  /**
-   * The small, share-sized copy (<=3 MB, 720x1280, faststart) built on first
-   * request by app/share_video.py. This is what the Web Share sheet consumes:
-   * the 1080p master is 6-10 MB and would blow the user-activation window
-   * before `navigator.share()` could be called.
-   */
+  /** The small, share-sized copy (<=3 MB, 720x1280, faststart). */
   clipShareUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/share`,
-  /**
-   * The PUBLIC mp4 URL, `/s/<id>.mp4`.
-   *
-   * Public on purpose: no login, no expiry, survives the batch and the host.
-   * This is what "Share link" copies and what a social app is pointed at.
-   */
+  /** The PUBLIC mp4 URL, `/s/<id>.mp4`. */
   clipPublicMp4Url: (shareId: string) => `${BASE}/s/${shareId}.mp4`,
-  /** The public OG page, `/s/<id>` — what X and "Share..." post. */
+  /** The public OG page, `/s/<id>`. */
   clipPublicPageUrl: (shareId: string) => `${BASE}/s/${shareId}`,
-  /**
-   * Mint/verify this clip's share link and read back its real state.
-   * Idempotent: an already-ready clip costs one stat, and the returned id is
-   * the same one forever.
-   */
+  /** Mint/verify this clip's share link and read back its real state. */
   ensureShareLink: (clipId: string) =>
     request<{
       shareId: string | null;
@@ -942,18 +629,14 @@ export const api = {
   jobCaptionsUrl: (jobId: string) => `${BASE}/api/jobs/${jobId}/captions.txt`,
 
   // --- "Post to..." (additive; none of this affects the download paths) ----
-  socialAccounts: () =>
-    request<{ platforms: SocialPlatformDto[] }>("/api/social/accounts"),
+  socialAccounts: () => request<{ platforms: SocialPlatformDto[] }>("/api/social/accounts"),
   /** Begin OAuth. Resolves to the provider's consent URL to open in a tab. */
   socialConnect: (slug: SocialSlug) =>
-    request<{ authUrl: string; state: string }>(`/api/social/${slug}/connect`, {
+    request<{ authUrl: string; state: string }>(`/api/social/${slug}/connect`, { method: "POST" }),
+  socialDisconnect: (slug: SocialSlug) =>
+    request<{ disconnected: boolean; platforms: SocialPlatformDto[] }>(`/api/social/${slug}/disconnect`, {
       method: "POST",
     }),
-  socialDisconnect: (slug: SocialSlug) =>
-    request<{ disconnected: boolean; platforms: SocialPlatformDto[] }>(
-      `/api/social/${slug}/disconnect`,
-      { method: "POST" },
-    ),
   postClip: (
     clipId: string,
     body: { platform: SocialSlug; caption?: string; title?: string; privacy?: string },
@@ -964,3 +647,112 @@ export const api = {
       body: JSON.stringify(body),
     }),
 };
+
+// ---------------------------------------------------------------------------
+// Caption language extension (ENG / ESP for DeepSeek subtitle generation)
+// ---------------------------------------------------------------------------
+
+/** Caption language choices for the DeepSeek subtitle path.
+ *
+ *  `auto` is the default and lets the backend decide when it can.
+ *  `en` and `es` are explicit declarations for English- or Spanish-dominant
+ *  source videos.
+ */
+export type CaptionLanguage = "en" | "es" | "auto";
+
+export const LANGUAGE_LABELS: Readonly<Record<CaptionLanguage, string>> = {
+  en: "English",
+  es: "Español",
+  auto: "Auto (detect from video)",
+};
+
+export const LANGUAGE_CODES: Readonly<Record<Exclude<CaptionLanguage, "auto">, string>> = {
+  en: "en",
+  es: "es",
+};
+
+const DEFAULT_LANGUAGE: CaptionLanguage = "auto";
+
+/** Create a job the same way the dashboard does today, but also pass a chosen
+ *  caption language into the backend's POST /api/jobs `language` field.
+ *
+ *  The backend already accepts `language` on the job-in body (pattern
+ *  `^(auto|en|es)$`), and the worker reads that field at the translate stage,
+ *  so this helper is the client-side hook for the ENG/ESP choice.
+ */
+export function createJobWithLanguage(
+  source: string,
+  sourceType: "url" | "upload" = "url",
+  captionPreset?: string,
+  maxClips?: number,
+  language: CaptionLanguage = DEFAULT_LANGUAGE,
+  opts?: WaitForSandboxOptions,
+): Promise<{ jobId: string }> {
+  return waitForSandbox(opts).then((ready) => {
+    if (!ready.ok) {
+      throw new Error(ready.error);
+    }
+    return api.createJobWithLanguage(source, sourceType, captionPreset, maxClips, language);
+  });
+}
+
+/** Direct (no health gate) variant of the language-aware job creation call. */
+export function createJobWithLanguageDirect(
+  source: string,
+  sourceType: "url" | "upload" = "url",
+  captionPreset?: string,
+  maxClips?: number,
+  language: CaptionLanguage = DEFAULT_LANGUAGE,
+): Promise<{ jobId: string }> {
+  return api.createJobWithLanguage(source, sourceType, captionPreset, maxClips, language);
+}
+
+/** Convenience wrapper for the "Video URL" path: pick the language that
+ *  matches the user's ENG/ESP choice for an English- or Spanish-dominant
+ *  source video.
+ */
+export function createJobWithLanguageFromUrl(
+  url: string,
+  captionPreset?: string,
+  maxClips?: number,
+  language: CaptionLanguage = DEFAULT_LANGUAGE,
+  opts?: WaitForSandboxOptions,
+): Promise<{ jobId: string }> {
+  return createJobWithLanguage(
+    url.trim(),
+    "url",
+    captionPreset,
+    maxClips,
+    language,
+    opts,
+  );
+}
+
+/** Upload-based variant that also sends the chosen caption language. */
+export function uploadJobWithLanguage(
+  file: File,
+  captionPreset?: string,
+  maxClips?: number,
+  language: CaptionLanguage = DEFAULT_LANGUAGE,
+): Promise<{ jobId: string; file: string; bytes: number }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (captionPreset) fd.append("captionPreset", captionPreset);
+  if (maxClips) fd.append("maxClips", String(maxClips));
+  fd.append("language", language);
+  return request<{ jobId: string; file: string; bytes: number }>("/api/jobs/upload", {
+    method: "POST",
+    body: fd,
+  });
+}
+
+/** Switch the AI detection backend and then reload secrets so the newly-chosen
+ *  provider's key is picked up immediately. Returns the refreshed DetectionDto.
+ */
+export async function switchBackend(
+  provider: "deepseek" | "nvidia" | "groq" | "gemini" | "ollama",
+): Promise<DetectionDto> {
+  await api.setDetectionBackend(provider);
+  await api.reloadSecrets();
+  return (await api.detectBackend()) as DetectionDto;
+}
