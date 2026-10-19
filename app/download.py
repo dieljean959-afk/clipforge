@@ -114,6 +114,11 @@ def download_url(
     fail (or when the first failure happens with auto-update disabled).
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
+    fetch_log: list[str] = []
+    def _log(line: str) -> None:
+        fetch_log.append(line)
+        if on_log:
+            on_log(line)
     ydl_opts: dict[str, Any] = {
         "format": f"bv*[height<={settings.download.max_height}]+ba/b[height<={settings.download.max_height}]",
         "merge_output_format": "mp4",
@@ -154,24 +159,43 @@ def download_url(
             f"yt-dlp is not importable ({exc}); run `pip install yt-dlp`"
         ) from exc
 
-    try:
-        logger.info(f"[download] yt-dlp fetching: {url}")
+    def _run_fetch(attempt_label: str) -> Path:
+        if on_log:
+            on_log(f"yt-dlp fetcher: {attempt_label}, {url}")
+        logger.info(f"[download] yt-dlp fetching ({attempt_label}): {url}")
+        ydl_opts["verbose"] = False
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = (info or {}).get("title") or "video"
-        # locate the merged output file
         for cand in sorted(dest_dir.glob("source.*")):
             if cand.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
                 if on_log:
-                    on_log(f"yt-dlp finished: {title}")
+                    on_log(f"yt-dlp finished: {title} ({cand.name})")
                 logger.info(f"[download] saved {cand.name} ({cand.stat().st_size} bytes)")
                 return cand
         raise DownloadError("yt-dlp reported success but no media file was found")
+
+    try:
+        return _run_fetch("attempt 1")
     except DownloadError:
         raise
     except Exception as exc:
         last_error = str(exc)
-        logger.warning(f"[download] attempt failed: {last_error[:300]}")
+        logger.warning(f"[download] fetch failed: {last_error[:400]}")
+        if on_log:
+            on_log(f"yt-dlp failed: {last_error}")
+        fetch_log_text = "\n".join(fetch_log[-40:])
+        ydl_debug = (
+            "yt-dlp "
+            + getattr(yt_dlp, "version", "?")
+            + "\n"
+            + "DOWNLOAD ATTEMPT LOG:\n"
+            + fetch_log_text
+            + "\n"
+            + last_error
+        )
+        if on_log:
+            on_log("yt-dlp FAILED — captured output:\n" + ydl_debug)
 
     if not settings.download.auto_update:
         raise DownloadError(f"yt-dlp failed: {last_error}")
@@ -189,20 +213,11 @@ def download_url(
         logger.warning(f"[download] reload failed ({exc}); continuing with fresh process import")
 
     try:
-        logger.info(f"[download] retrying with updated yt-dlp: {url}")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = (info or {}).get("title") or "video"
-        for cand in sorted(dest_dir.glob("source.*")):
-            if cand.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
-                if on_log:
-                    on_log(f"yt-dlp finished after self-update retry: {title}")
-                logger.info(f"[download] saved {cand.name} ({cand.stat().st_size} bytes)")
-                return cand
-        raise DownloadError("yt-dlp reported success but no media file was found")
+        return _run_fetch("attempt 2 after auto-update")
     except Exception as exc:
         raise DownloadError(
             f"yt-dlp failed after auto-update retry. Tried: yt-dlp (attempt 1: {last_error[:200]}) → yt-dlp-updated (attempt 2: {str(exc)[:200]}). Manual upload always works — 'Attach file' on the dashboard."
+            + ("") if False else "",
         ) from exc
 
 

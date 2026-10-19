@@ -905,7 +905,8 @@ class Pipeline:
         # Legacy/partial job documents can carry source=None (seen in a real
         # data/jobs/*.json): logging it with [:80] raised TypeError and turned
         # a data problem into a downstream pipeline crash.
-        self._log(job_id, f"Stage: fetch — {(job.get('source') or '<missing source>')[:80]}")
+        src_ref = job.get("source") or "<missing source>"
+        self._log(job_id, f"Stage: fetch — {src_ref[:80] if isinstance(src_ref, str) else src_ref}")
 
         if job.get("sourceType") == "upload":
             # Search BOTH storage locations. The expected name is tried first
@@ -935,14 +936,86 @@ class Pipeline:
             self._progress(job_id, "grabbing", 100, "Upload verified on disk")
             self._log(job_id, f"upload present: {src.name} ({src.stat().st_size} bytes)")
         else:
+            url = job.get("source")
+            if not url:
+                raise download.DownloadError(
+                    "This batch has no video URL recorded. The job document is missing "
+                    "the `source` field the pipeline needs to fetch the video. Re-create "
+                    "the batch from the dashboard — 'Paste YouTube/TikTok URL' or 'Attach "
+                    "file' — rather than re-running an incomplete job."
+                )
+            if not isinstance(url, str) or not url.strip():
+                raise download.DownloadError(
+                    "The job's `source` is not a usable URL. It was stored as "
+                    f"{type(url).__name__} and cannot be fetched. Re-create the batch "
+                    "from the dashboard with a real YouTube/TikTok URL, or use 'Attach "
+                    "file' for a local upload."
+                )
+            url = url.strip()
             def on_progress(frac: float, _eta: float | None) -> None:
                 self._progress(job_id, "grabbing", frac, "Clippy is grabbing the video...")
 
-            src = download.download_url(
-                job["source"], dest_dir, self.settings,
-                on_progress=on_progress,
-                on_log=lambda line: self._log(job_id, line),
+            fetch_log_out: list[str] = []
+            def _on_dl_log(line: str) -> None:
+                fetch_log_out.append(line)
+                self._log(job_id, line)
+
+            try:
+                src = download.download_url(
+                    url, dest_dir, self.settings,
+                    on_progress=on_progress,
+                    on_log=_on_dl_log,
+                )
+            except download.DownloadError as exc:
+                raise
+            except download.DownloadError as exc:
+                # Make the next fetch failure diagnosable instead of a generic
+                # "Worker process exited unexpectedly" / empty error message.
+                ydl_debug = ""
+                try:
+                    import yt_dlp as _ydl
+
+                    ydl_debug = (
+                        "yt-dlp "
+                        + getattr(_ydl, "version", "?")
+                        + "\n"
+                        + "DOWNLOAD ATTEMPT LOG:\n"
+                        + "\n".join(fetch_log_out[-40:])
+                        + "\n"
+                        + "".join(
+                            traceback.format_exception_only(type(exc), exc)
+                        )[-1200:]
+                    )
+                except Exception:
+                    ydl_debug = "yt-dlp not importable during failure diagnostics"
+                cfg_snapshot = ""
+                try:
+                    s = self.settings.download
+                    cfg_snapshot = (
+                        "download config: max_height="
+                        + repr(getattr(s, "max_height", None))
+                        + ", auto_update="
+                        + repr(getattr(s, "auto_update", None))
+                        + ", cookies_from_browser="
+                        + repr(getattr(s, "cookies_from_browser", None))
+                    )
+                except Exception:
+                    cfg_snapshot = "download config unavailable"
+            self._log(
+                job_id,
+                "DOWNLOAD FAILED — yt-dlp debug:\n"
+                + ydl_debug
+                + "\n"
+                + cfg_snapshot,
             )
+            if on_log:
+                on_log(
+                    "DOWNLOAD FAILED — yt-dlp debug:\n"
+                    + ydl_debug
+                    + "\n"
+                    + cfg_snapshot,
+                )
+            raise
         video.verify_source(src)
         meta = video.probe(src)
         max_seconds = self.settings.hosted.max_source_min * 60
