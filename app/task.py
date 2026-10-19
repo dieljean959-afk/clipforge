@@ -1289,6 +1289,13 @@ class Pipeline:
             cues = translate.build_cues(
                 transcript, cut, self.settings,
             )
+            # Persist the cue list per clip so the export stage can burn the
+            # same cues into the frames without holding the transcript in
+            # memory across the stage boundary (and so re-renders reuse them).
+            ws.write_json(
+                "captions", f"cues_{i:03d}.json",
+                {"cues": cues, "clipId": cut.get("clipId")},
+            )
             self._write_caption_tracks(job_id, i, cues)
             self._progress(
                 job_id, "captions", (i + 1) / len(cuts),
@@ -1357,6 +1364,8 @@ class Pipeline:
                 try:
                     meta = encode.render_clip(
                         src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
+                        cues=(ws.read_json("captions", f"cues_{i:03d}.json") or {}).get("cues") or [],
+                        preset_key=job.get("captionPreset") or "bold_pop",
                         on_log=lambda line: self._log(job_id, line),
                     )
                 except Exception as exc:

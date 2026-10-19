@@ -469,6 +469,8 @@ def render_clip(
     dest: Path,
     settings: Settings,
     *,
+    cues: list[dict[str, Any]] | None = None,
+    preset_key: str | None = None,
     on_log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Render one reframe cut into a 9:16 MP4.
@@ -534,6 +536,34 @@ def render_clip(
     filtergraph = _video.crop_pan_filter(
         width, height, fps, crop_x, crop_y, crop_w, crop_h, samples,
     )
+
+    # Burn the captions into the frames: an ASS file is written per clip from
+    # the cue list (clip-relative timings), then applied via ffmpeg's
+    # subtitles filter AFTER the crop/pan graph. Clips keep captions even
+    # when played on platforms that never read sidecar SRTs.
+    ass_path: Path | None = None
+    if cues:
+        from app import subtitle as _subtitle
+
+        ass_path = dest.with_suffix(".ass")
+        _subtitle.write_ass(
+            cues, settings, ass_path, width, height,
+            start_offset=start, preset_key=preset_key or "bold_pop",
+        )
+
+        # Escape for ffmpeg's filter parser: backslash, colon and quote are
+        # all meaningful inside a filter argument.
+        esc = str(ass_path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        fontdir = getattr(_subtitle, "font_dir_for", None)
+        if callable(fontdir):
+            font_path = str(fontdir(settings)).replace("\\", "/").replace(":", "\\:")
+            ass_arg = "subtitles=" + esc + ":fontsdir=" + font_path
+        else:
+            ass_arg = "subtitles=" + esc
+        filtergraph = filtergraph + "," + ass_arg
+
+    # Audio: clips ship with their own source audio as AAC (a silent clip
+    # looks broken next to every other Shorts/TikTok post).
     cmd = [
         ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         *choice.hw_accel_args(),
@@ -543,10 +573,13 @@ def render_clip(
         *choice.threads_args(),
         "-vf", filtergraph,
         *choice.ffmpeg_codec_args(),
-        "-an",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ar", "44100",
         str(dest),
     ]
-
     if on_log:
         on_log(f"ffmpeg {' '.join(_shlex.quote(a) for a in cmd)}")
 
