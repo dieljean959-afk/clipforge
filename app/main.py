@@ -1438,6 +1438,7 @@ def create_job(body: CreateJobIn) -> dict:
     )
     job_id = job["_id"]
     store.append_job_log(job_id, f"job created ({body.sourceType}: {body.source[:80]})")
+    store.write_job(job)
     worker.enqueue(job_id)
     return {"jobId": job_id, "title": title, "duration": duration}
 
@@ -1468,6 +1469,7 @@ async def upload_job(
         language=language,
     )
     job_id = job["_id"]
+    store.write_job(job)
     dest_dir = store.job_source_dir_for_write(job_id)
     tmp = dest_dir / "upload.bin"
     max_mb = settings.hosted.max_source_mb

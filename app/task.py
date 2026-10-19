@@ -153,6 +153,28 @@ class Pipeline:
         self._heartbeat_at: int | None = None
 
     # ------------------------------------------------------------------
+    # resume plumbing: pick up a job from the persisted stageStatus, including
+    # the very first pipeline heartbeat so a recovered run is visible to the
+    # reaper as soon as it starts working.
+    # ------------------------------------------------------------------
+
+    def _resume_from_store(self, job_id: str, job: dict[str, Any]) -> None:
+        """Rehydrate the run's working copies from the persisted job doc.
+
+        ``run()`` already loaded the job, but it never repopulated
+        ``_stage_status`` or ``_heartbeat_at`` from the disk copy. That is fine
+        for a fresh job, and fatal for a resumed one: ``_stages`` uses
+        ``_stage_status_for`` / ``_first_incomplete_stage``, and the exit-path
+        heartbeat flush reads ``self._heartbeat_at`` -- both of which kept the
+        module defaults ({}) / None and then crashed the moment they were used
+        as if they were real data.
+        """
+        if isinstance(job.get("stageStatus"), dict):
+            self._stage_status = _validate_and_normalize_stage_statuses(job["stageStatus"])
+        if isinstance(job.get("heartbeatAt"), (int, float)):
+            self._heartbeat_at = int(job["heartbeatAt"])
+
+    # ------------------------------------------------------------------
     # long-input guard queries (descriptive only; no caps)
     # ------------------------------------------------------------------
 
@@ -671,6 +693,13 @@ class Pipeline:
         if job is None:
             logger.error(f"[job {job_id}] missing at pipeline start")
             return
+        # Rehydrate the run's working copies from the persisted job doc before
+        # we open the pipeline heartbeat or touch any stage machinery. A fresh
+        # job leaves both at the safe module defaults; a resumed job must carry
+        # its real stageStatus and heartbeatAt or the run will crash on the
+        # first resume query (empty dict used as a dict) or on the first
+        # heartbeat-free flush at the end of the run.
+        self._resume_from_store(job_id, job)
         t_start = time.time()
         # The heartbeat spans the WHOLE pipeline, not just the encode and the
         # decode. The stall deadline is now 3 minutes, and every stage has a
