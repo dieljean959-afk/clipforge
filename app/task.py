@@ -1201,6 +1201,15 @@ class Pipeline:
         if ws.is_done("detect"):
             cached = ws.read_json("detect", "candidates.json")
             if cached:
+                # Re-attach the clip ids minted when these candidates were
+                # persisted. candidates.json is written BEFORE create_clips, so
+                # it has no `_id`; without this every resume handed reframe
+                # id-less cuts, export fabricated "clip_000", and the run died
+                # with FileNotFoundError instead of rendering.
+                ids = self.store.summary_clip_ids(job_id)
+                for i, c in enumerate(cached):
+                    if not c.get("_id") and i < len(ids):
+                        c["_id"] = ids[i]
                 self._log(job_id, f"resume: reusing {len(cached)} detected candidates")
                 self._progress(job_id, "finding", 100, "Reusing AI clip selection")
                 # Re-derive the count explanation from the candidates we are
@@ -1292,6 +1301,11 @@ class Pipeline:
         # already used a few lines above for the chunk cache and the log line, so this
         # keeps all three named the same by construction rather than by coincidence.
         summary = self.store.create_clips(job_id, candidates, detected_source=llm.provider_label(self.settings))
+        # Mark the workspace stage done. WITHOUT this marker every resume re-ran
+        # detection: one more LLM call, and create_clips minted a BRAND NEW set
+        # of clip documents — which is exactly how one batch ended up showing
+        # each clip twice (rendered old card + "Not rendered yet" new twin).
+        ws.mark_done("detect", artifacts=["detect/candidates.json"], count=len(candidates))
         return candidates
 
     # ------------------------------------------------------------------
@@ -1362,6 +1376,15 @@ class Pipeline:
     def _write_cuts(
         self, job_id: str, ws: StageWorkspace, cuts: list[dict[str, Any]],
     ) -> None:
+        # A cut without a clipId makes export fabricate "clip_000", which has no
+        # clip document and used to abort the whole render. Mint the id HERE, at
+        # the boundary where candidates become deliverable clips.
+        for cut in cuts:
+            if not cut.get("clipId"):
+                cut["clipId"] = self.store.new_job_id()
+        # Keep the dashboard's clip set equal to what was actually cut, so a
+        # rejected candidate never leaves a permanent "Not rendered yet" card.
+        self.store.sync_clip_docs(job_id, cuts)
         ws.write_json("reframe", "cuts.json", cuts)
         ws.mark_done("reframe", artifacts=["reframe/cuts.json"], count=len(cuts))
         logger.info(f"[job {job_id}] wrote {len(cuts)} clip cuts")
@@ -1426,6 +1449,19 @@ class Pipeline:
         if not cuts:
             self._log(job_id, "no cuts to export — skipping")
             return
+
+        # Reconcile before rendering. On a resumed run cuts.json may predate
+        # the clip documents (or carry ids from a previous detection pass), and
+        # rendering against that stale set is how a "complete" batch ended up
+        # with zero playable videos.
+        missing_id = False
+        for cut in cuts:
+            if not cut.get("clipId"):
+                cut["clipId"] = self.store.new_job_id()
+                missing_id = True
+        if missing_id:
+            ws.write_json("reframe", "cuts.json", cuts)
+        self.store.sync_clip_docs(job_id, cuts)
 
         dest = self.settings.app.paths.outputs_dir / job_id
         dest.mkdir(parents=True, exist_ok=True)

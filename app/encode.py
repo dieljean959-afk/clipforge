@@ -522,7 +522,15 @@ def render_clip(
     end = float(cut.get("end", duration))
     clip_seconds = max(0.1, end - start)
 
-    choice = choose(settings).for_output(width, height, fps)
+    # The deliverable geometry, not the source's. The clip is cropped to a
+    # 9:16 window around the subject and then SCALED up to this frame; using
+    # the source height for the bitrate ceiling (and the source dimensions for
+    # the caption layout) produced 404x720 files while the UI advertised
+    # 1080x1920.
+    out_w = int(settings.video.width)
+    out_h = int(settings.video.height)
+
+    choice = choose(settings).for_output(out_w, out_h, fps)
     deadline = render_deadline_sec(clip_seconds, hardware=choice.hardware)
     choice.timeout_sec = deadline
 
@@ -533,9 +541,22 @@ def render_clip(
     crop_h = int(crop.get("h", height))
 
     samples = cut.get("sampleWindows") or []
-    filtergraph = _video.crop_pan_filter(
-        width, height, fps, crop_x, crop_y, crop_w, crop_h, samples,
+    # crop/pan -> scale to the exact 9:16 output -> exact crop -> square pixels.
+    # build_output_chain is the shared chain video.render_clip uses; skipping it
+    # here is what left clips at the crop's native size (405x720).
+    filtergraph = _video.build_output_chain(
+        samples, width, height, crop_w, out_w, out_h, fps,
     )
+    if not samples:
+        # build_output_chain's no-windows branch centre-crops at src height;
+        # honour the cut's own cropBox x/y so the subject stays framed.
+        filtergraph = (
+            _video.crop_pan_filter(
+                width, height, fps, crop_x, crop_y, crop_w, crop_h, None,
+            )
+            + f",scale={out_w}:{out_h}:force_original_aspect_ratio=increase"
+            + f",crop={out_w}:{out_h},setsar=1"
+        )
 
     # Burn the captions into the frames: an ASS file is written per clip from
     # the cue list (clip-relative timings), then applied via ffmpeg's
@@ -547,7 +568,7 @@ def render_clip(
 
         ass_path = dest.with_suffix(".ass")
         _subtitle.write_ass(
-            cues, settings, ass_path, width, height,
+            cues, settings, ass_path, out_w, out_h,
             start_offset=start, preset_key=preset_key or "bold_pop",
         )
 
@@ -567,9 +588,15 @@ def render_clip(
     cmd = [
         ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         *choice.hw_accel_args(),
+        # Seek on the INPUT: `-ss` before `-i` jumps straight to the segment,
+        # while `-ss` after `-i` makes ffmpeg decode and discard every frame
+        # from 0. On a 21-minute source that turned a 25s clip into minutes of
+        # decoding before the first frame reached the encoder. Crop windows
+        # and ASS cues are clip-relative (t=0 at the seek point), so this does
+        # not shift the reframe or the captions.
+        "-ss", f"{start:.3f}",
         "-i", str(src),
-        "-ss", str(start),
-        "-t", str(clip_seconds),
+        "-t", f"{clip_seconds:.3f}",
         *choice.threads_args(),
         "-vf", filtergraph,
         *choice.ffmpeg_codec_args(),
