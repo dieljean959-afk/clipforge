@@ -246,6 +246,14 @@ def _boot() -> None:
                 "so the recorded failure had no output to show for it",
             )
             continue
+        # A finished batch can still carry `interrupted: true` from an earlier
+        # attempt that was killed and then resumed successfully. Re-queueing on
+        # that stale flag flipped a COMPLETE batch back to "queued" after every
+        # restart and sent it through the pipeline again for no output.
+        if job.get("stage") == "complete" and job.get("interrupted"):
+            job["interrupted"] = False
+            store.write_job(job)
+            continue
         reason = None
         if job.get("stage") in recoverable:
             reason = "mid-flight"
@@ -446,6 +454,19 @@ def _start_worker() -> None:
             logger.info(f"[boot] startup sweep removed {swept} expired/orphaned item(s)")
     except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
         logger.warning(f"[boot] startup sweep failed: {exc}")
+    # Clip documents whose job is gone are invisible in the UI but still on
+    # disk (a previous build's deletes left them behind). Reconcile at boot so
+    # the dashboard starts from a consistent set instead of showing phantom
+    # "queued" cards until the 7-day orphan window elapses.
+    try:
+        stats = store.reconcile_clips()
+        if any(stats.values()):
+            logger.info(
+                "[boot] clip reconcile: "
+                + ", ".join(f"{v} {k}" for k, v in stats.items() if v)
+            )
+    except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
+        logger.warning(f"[boot] clip reconcile failed: {exc}")
     tailnet = hosting.tailnet_ip()
     logger.info(
         f"[boot] API up on http://{settings.app.host}:{settings.app.port} "
@@ -2146,9 +2167,9 @@ def clip_video(clip_id: str) -> FileResponse:
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
-    p = Path(clip["videoPath"])
-    if not _restore_media(p):
-        raise HTTPException(404, f"clip file missing on disk: {p.name}")
+    p = _clip_media(clip, "video")
+    if p is None:
+        raise HTTPException(404, "clip file missing on disk")
     return FileResponse(
         p,
         media_type="video/mp4",
@@ -2190,6 +2211,54 @@ def _purge_remote_job(job_id: str) -> None:
                 )
     except Exception as exc:  # noqa: BLE001 - a stale object is not worth a 500
         logger.warning(f"[objectstore] could not purge remote objects for {job_id}: {exc}")
+
+
+def _clip_media(clip: dict, kind: str) -> Path | None:
+    """Locate a clip's video/poster on disk, healing a drifted stored path.
+
+    Clip documents carry an absolute ``videoPath``/``thumbPath`` written when
+    the clip was rendered. Those paths stop resolving when the media tree is
+    relocated (the hosted storage move leaves documents pointing at the old
+    root) or when a job is restored onto a new filesystem. Falling straight
+    through to 404 is what made a perfectly good batch look like a wall of
+    black, unplayable cards.
+
+    So: try the recorded path, then the canonical
+    ``outputs/<job>/clip_<order>.mp4`` name, then the recorded basename inside
+    the job's output directory. The first hit is written back to the document,
+    so the repair costs one lookup, not one per request.
+    """
+    field = "videoPath" if kind == "video" else "thumbPath"
+    suffix = ".mp4" if kind == "video" else ".thumb.jpg"
+    order = int(clip.get("order") or 0)
+    job_id = str(clip.get("jobId") or "")
+    raw = clip.get(field)
+    candidates: list[Path] = []
+    if raw:
+        candidates.append(Path(raw))
+    if job_id:
+        out_dir = settings.app.paths.outputs_dir / job_id
+        candidates.append(out_dir / f"clip_{order:03d}{suffix}")
+        if raw:
+            candidates.append(out_dir / Path(raw).name)
+    seen: set[str] = set()
+    for cand in candidates:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _restore_media(cand):
+            continue
+        if raw != key:
+            try:
+                store.write_clip(
+                    str(clip.get("_id")), {field: key}, job_id=job_id or None
+                )
+                logger.info(f"[api] clip {clip.get('_id')}: {field} healed to {key}")
+            except Exception as exc:  # noqa: BLE001 - serving matters, healing is a bonus
+                logger.warning(f"[api] could not persist healed {field}: {exc}")
+        return cand
+    return None
 
 
 def _media_etag(p: Path) -> str:
@@ -2489,14 +2558,31 @@ def clip_thumb(clip_id: str) -> FileResponse:
     call guarded by a file-size test.
     """
     clip = store.get_clip(clip_id)
-    if clip is None or not clip.get("thumbPath"):
+    if clip is None:
         raise HTTPException(404, "thumbnail not available")
-    p = Path(clip["thumbPath"])
-    if not _restore_media(p):
-        raise HTTPException(404, "thumbnail file missing")
-    if clip.get("videoPath") and video_svc.thumb_needs_rewrite(p):
+    p = _clip_media(clip, "thumb")
+    if p is None:
+        # No poster on disk: make one from the clip rather than showing a black
+        # card. This is also what heals posters rendered before the
+        # non-black-frame selection existed.
+        master = _clip_media(clip, "video") if clip.get("videoPath") else None
+        if master is None:
+            raise HTTPException(404, "thumbnail file missing")
+        p = Path(clip["thumbPath"]) if clip.get("thumbPath") else (
+            settings.app.paths.outputs_dir / str(clip.get("jobId"))
+            / f"clip_{int(clip.get('order') or 0):03d}.thumb.jpg"
+        )
         try:
-            video_svc.render_first_frame_thumb(Path(clip["videoPath"]), p)
+            video_svc.render_first_frame_thumb(master, p)
+            store.write_clip(
+                str(clip["_id"]), {"thumbPath": str(p)}, job_id=str(clip.get("jobId") or "") or None
+            )
+        except Exception as exc:  # noqa: BLE001 - a poster is never worth a 500
+            raise HTTPException(404, f"thumbnail could not be created: {exc}") from exc
+    master_for_thumb = _clip_media(clip, "video") if clip.get("videoPath") else None
+    if master_for_thumb is not None and video_svc.thumb_needs_rewrite(p):
+        try:
+            video_svc.render_first_frame_thumb(master_for_thumb, p)
         except Exception as exc:  # noqa: BLE001 - a poster is never worth a 500
             logger.warning(f"[thumb] could not rewrite {p.name} small: {exc}")
     return FileResponse(
@@ -2514,9 +2600,9 @@ def clip_download(clip_id: str) -> FileResponse:
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
-    p = Path(clip["videoPath"])
-    if not _restore_media(p):
-        raise HTTPException(404, f"clip file missing on disk: {p.name}")
+    p = _clip_media(clip, "video")
+    if p is None:
+        raise HTTPException(404, "clip file missing on disk")
     safe = "".join(ch for ch in clip.get("title", "clip") if ch.isalnum() or ch in " -_")[:40] or "clip"
     return FileResponse(
         p,

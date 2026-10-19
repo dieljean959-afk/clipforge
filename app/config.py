@@ -1235,6 +1235,10 @@ class DownloadConfig:
     max_height: int
     cookies_from_browser: str
     auto_update: bool
+    #: Path to a Netscape-format cookies.txt, for sites that refuse anonymous
+    #: requests from a datacenter IP (YouTube's "Sign in to confirm you're not
+    #: a bot" is the common one). Empty means no cookie file.
+    cookies_file: str = ""
 
 
 @dataclass
@@ -1768,6 +1772,9 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         max_height=int(d.get("max_height", 1080)),
         cookies_from_browser=cookies,
         auto_update=bool(d.get("auto_update", True)),
+        cookies_file=str(
+            os.getenv("YT_DLP_COOKIES_FILE", d.get("cookies_file", "") or "")
+        ).strip(),
     )
 
     h = raw.get("hosted", {})

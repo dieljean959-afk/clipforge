@@ -846,6 +846,17 @@ class Pipeline:
 
         def _run_stage(stage: str, fn: Callable[[], Any]) -> Any:
             """Run one stage, marking it running/done/failed on the job."""
+            # Refresh the in-memory job from the store before every stage.
+            # `_stage_fetch` re-reads the job to write durationSec, but that was
+            # a LOCAL rebind — the dict the later stages received still had
+            # durationSec=None, so a source with no speech failed detection
+            # with "the video's length is unknown too" even though the length
+            # had just been probed. Stages that persist progress (clipTarget,
+            # stageStatus) have the same requirement.
+            fresh = self.store.get_job(job_id)
+            if fresh:
+                job.clear()
+                job.update(fresh)
             self._mark_stage_running(job_id, stage)
             try:
                 result = fn()
@@ -967,17 +978,25 @@ class Pipeline:
                     on_log=_on_dl_log,
                 )
             except download.DownloadError as exc:
-                raise
-            except download.DownloadError as exc:
-                # Make the next fetch failure diagnosable instead of a generic
+                # Make the fetch failure diagnosable instead of a generic
                 # "Worker process exited unexpectedly" / empty error message.
+                #
+                # This MUST live inside the except: it used to sit after the
+                # try/except, where `ydl_debug` is only bound on the failure
+                # path — so a SUCCESSFUL download fell through to the logging
+                # lines and died with UnboundLocalError. Every URL job was
+                # therefore reported as "Pipeline error: cannot access local
+                # variable 'ydl_debug'", while manual uploads still worked.
                 ydl_debug = ""
                 try:
                     import yt_dlp as _ydl
 
+                    version = getattr(getattr(_ydl, "version", None), "__version__", None)
+                    if not isinstance(version, str):
+                        version = getattr(_ydl, "__version__", "unknown")
                     ydl_debug = (
                         "yt-dlp "
-                        + getattr(_ydl, "version", "?")
+                        + str(version)
                         + "\n"
                         + "DOWNLOAD ATTEMPT LOG:\n"
                         + "\n".join(fetch_log_out[-40:])
@@ -998,24 +1017,23 @@ class Pipeline:
                         + repr(getattr(s, "auto_update", None))
                         + ", cookies_from_browser="
                         + repr(getattr(s, "cookies_from_browser", None))
+                        + ", cookies_file="
+                        + repr(bool(getattr(s, "cookies_file", "")))
                     )
                 except Exception:
                     cfg_snapshot = "download config unavailable"
-            self._log(
-                job_id,
-                "DOWNLOAD FAILED — yt-dlp debug:\n"
-                + ydl_debug
-                + "\n"
-                + cfg_snapshot,
-            )
-            if on_log:
-                on_log(
-                    "DOWNLOAD FAILED — yt-dlp debug:\n"
-                    + ydl_debug
-                    + "\n"
-                    + cfg_snapshot,
+                self._log(
+                    job_id,
+                    "DOWNLOAD FAILED — yt-dlp debug:\n" + ydl_debug + "\n" + cfg_snapshot,
                 )
-            raise
+                if on_log:
+                    on_log(
+                        "DOWNLOAD FAILED — yt-dlp debug:\n"
+                        + ydl_debug
+                        + "\n"
+                        + cfg_snapshot
+                    )
+                raise
         video.verify_source(src)
         meta = video.probe(src)
         max_seconds = self.settings.hosted.max_source_min * 60
@@ -1271,6 +1289,15 @@ class Pipeline:
         def on_progress(fraction: float, line: str) -> None:
             self._progress(job_id, "finding", fraction, line, unit_label="chunk")
 
+        # Source length drives the no-speech fallback (evenly spaced clips).
+        # Prefer the job document, fall back to the fetch stage's own record,
+        # so an older job whose durationSec was never patched still works.
+        duration_sec = float(job.get("durationSec") or 0.0)
+        if duration_sec <= 0:
+            duration_sec = float((ws.read_json("fetch", "meta.json") or {}).get("duration") or 0.0)
+            if duration_sec > 0:
+                self._patch_job(job_id, durationSec=duration_sec)
+
         report: dict[str, Any] = {}
         candidates = llm.detect_clips(
             words,
@@ -1282,7 +1309,7 @@ class Pipeline:
             # no transcript to work from: it is what lets the pipeline return
             # evenly spaced clips instead of failing a job whose source simply
             # has no speech in it.
-            duration_sec=float(job.get("durationSec") or 0.0),
+            duration_sec=duration_sec,
             on_log=on_log,
             on_progress=on_progress,
             report=report,
@@ -1597,11 +1624,19 @@ class Pipeline:
         now_ms = int(time.time() * 1000)
         job.update({
             "stage": "complete",
+            "status": "complete",
             "progress": 100.0,
             "progressDetail": "All clips ready",
             "completedAt": now_ms,
             "lastProgressAt": now_ms,
             "stageStatus": self._stage_status,
+            # A completion must not inherit the flag left by an interrupted
+            # attempt: boot treats `interrupted` as "resume me" and would put a
+            # finished batch back in the queue on the next restart.
+            "interrupted": False,
+            "interruptReason": None,
+            "error": None,
+            "errorDetail": None,
         })
         self.store.write_job(job)
         self.store.append_job_log(job_id, f"COMPLETE in {elapsed_sec:.1f}s")

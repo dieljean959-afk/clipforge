@@ -312,6 +312,44 @@ def _pick_int(v: Any, prefer: str | None = None) -> int | None:
 
 
 _IS_INT = re.compile(r"^-?\d+$")
+_IS_NUM = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+
+def _coerce_timestamp(v: Any) -> float | None:
+    """Seconds from whatever the model wrote as a timestamp.
+
+    Some backends answer the word-index contract with plain seconds, "12.5" as
+    a string, or a clock string ("00:42", "1:02:03.5"). Returning None only
+    for a value that is genuinely unreadable is what lets resolve_candidates
+    validate those instead of skipping them.
+
+    This function was REFERENCED but never defined: every candidate carrying a
+    literal `start`/`end` (rather than word indices) crashed detection with
+    NameError, so those responses looked like "the AI returned nothing".
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return None if v != v else float(v)  # NaN is not a timestamp
+    s = str(v).strip()
+    if not s:
+        return None
+    if _IS_NUM.match(s):
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    parts = s.split(":")
+    if 2 <= len(parts) <= 3:
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return None
+        total = 0.0
+        for n in nums:
+            total = total * 60.0 + n
+        return total
+    return None
 
 
 def _has_numeric_start_end(item: dict[str, Any]) -> bool:
@@ -411,13 +449,26 @@ def resolve_candidates(
         # where the clip's real transcript text exists, and the content-tag
         # top-up is mined from it. Doing it earlier could only pad with generic
         # discovery tags.
-        hook_text, hashtags = finalize_clip_caption(c["hook_text"], c["hashtags"], quote)
+        # `.get` on purpose: a model that omits `hook_text` or `hashtags` is
+        # common (and valid — both are optional in the prompt). Indexing raised
+        # KeyError here, which failed the whole detection stage for one
+        # otherwise-perfect candidate.
+        hook_text, hashtags = finalize_clip_caption(
+            c.get("hook_text", ""), c.get("hashtags"), quote
+        )
+        # Same reason as hook_text above: score and title are optional in the
+        # reply, and a missing one used to raise KeyError and lose the clip
+        # (or fail detection with a message about the AI backend).
+        try:
+            score = float(c.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
         out.append(
             {
                 "start": start,
                 "end": end,
-                "score": c["score"],
-                "title": c["title"],
+                "score": score,
+                "title": str(c.get("title") or "Clip"),
                 "hook_text": hook_text,
                 "transcript": quote,
                 "hashtags": hashtags,

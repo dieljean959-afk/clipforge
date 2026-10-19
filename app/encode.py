@@ -583,62 +583,138 @@ def render_clip(
             ass_arg = "subtitles=" + esc
         filtergraph = filtergraph + "," + ass_arg
 
-    # Audio: clips ship with their own source audio as AAC (a silent clip
-    # looks broken next to every other Shorts/TikTok post).
-    cmd = [
-        ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-        *choice.hw_accel_args(),
-        # Seek on the INPUT: `-ss` before `-i` jumps straight to the segment,
-        # while `-ss` after `-i` makes ffmpeg decode and discard every frame
-        # from 0. On a 21-minute source that turned a 25s clip into minutes of
-        # decoding before the first frame reached the encoder. Crop windows
-        # and ASS cues are clip-relative (t=0 at the seek point), so this does
-        # not shift the reframe or the captions.
-        "-ss", f"{start:.3f}",
-        "-i", str(src),
-        "-t", f"{clip_seconds:.3f}",
-        *choice.threads_args(),
-        "-vf", filtergraph,
-        *choice.ffmpeg_codec_args(),
-        "-map", "0:v:0",
-        "-map", "0:a:0?",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-ar", "44100",
-        str(dest),
-    ]
-    if on_log:
-        on_log(f"ffmpeg {' '.join(_shlex.quote(a) for a in cmd)}")
+    # Encode to a temp file and only then replace the destination. A render
+    # that is killed mid-write (host restart, stall watchdog, a re-render
+    # overlapping the previous one) used to leave a PARTIALLY WRITTEN MP4 at
+    # the real path: it still probes with the right duration, but decodes to
+    # garbage/black frames later in the clip — the exact "the clip is broken
+    # but the app says done" failure. `os.replace` is atomic on one filesystem,
+    # so a reader either sees the previous complete file or the new complete
+    # one, never a half-written one.
+    tmp_dest = dest.with_name(dest.stem + ".part.mp4")
 
+    # ---- ffmpeg execution -------------------------------------------------
+    # The command is rebuilt per attempt so a failed first pass can retry with
+    # a different filter chain / encoder instead of aborting the clip. Both
+    # re-invocations use the same seek semantics, so the output geometry and
+    # captions are unchanged.
+    def _build(graph: str, enc: Any) -> list[str]:
+        return [
+            ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            *enc.hw_accel_args(),
+            # Seek on the INPUT: `-ss` before `-i` jumps straight to the segment,
+            # while `-ss` after `-i` makes ffmpeg decode and discard every frame
+            # from 0. On a 21-minute source that turned a 25s clip into minutes of
+            # decoding before the first frame reached the encoder. Crop windows
+            # and ASS cues are clip-relative (t=0 at the seek point), so this does
+            # not shift the reframe or the captions.
+            "-ss", f"{start:.3f}",
+            "-i", str(src),
+            "-t", f"{clip_seconds:.3f}",
+            *enc.threads_args(),
+            "-vf", graph,
+            *enc.ffmpeg_codec_args(),
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            str(tmp_dest),
+        ]
+
+    def _attempt(graph: str, enc: Any) -> tuple[list[str], Any]:
+        cmd = _build(graph, enc)
+        if on_log:
+            on_log(f"ffmpeg {' '.join(_shlex.quote(a) for a in cmd)}")
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=enc.timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise _video.RenderError(
+                f"render of clip {cut.get('order', '?')} timed out after "
+                f"{enc.timeout_sec}s — the host may be overloaded; Retry will "
+                f"resume from the last finished clip"
+            ) from exc
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip().splitlines()
+            reason = err[-1] if err else "no diagnostic"
+            raise _video.RenderError(
+                f"ffmpeg failed on clip {cut.get('order', '?')}: {reason}"
+            )
+        if not tmp_dest.exists() or tmp_dest.stat().st_size == 0:
+            raise _video.RenderError(
+                f"ffmpeg exited 0 but produced no output for clip {cut.get('order', '?')}"
+            )
+        return cmd, proc
+
+    # Attempt 1: the real chain (face-tracked crop/pan, hardware encoder if
+    # this host has one). Attempt 2 exists because a render can come back
+    # either broken or black on a source the first path cannot handle — a
+    # face-tracking expression the decoder seeks into oddly, a hardware
+    # encoder that writes empty frames, an AV1/VP9 source that decodes to
+    # zeros. In that case re-run with a static crop and the software encoder
+    # rather than surfacing a black clip as "done".
+    static_w = max(2, min(crop_w, width))
+    static_h = max(2, min(crop_h, height))
+    static_x = max(0, min(crop_x, width - static_w))
+    static_y = max(0, min(crop_y, height - static_h))
+    static_graph = (
+        f"crop={static_w}:{static_h}:{static_x}:{static_y}"
+        f",scale={out_w}:{out_h}:force_original_aspect_ratio=increase"
+        f",crop={out_w}:{out_h},setsar=1"
+    )
+    if cues:
+        static_graph = static_graph + "," + ass_arg
+
+    safe_choice = choose(settings, force_software=True).for_output(out_w, out_h, fps)
+    safe_choice.timeout_sec = render_deadline_sec(clip_seconds, hardware=safe_choice.hardware)
+    plans: list[tuple[str, str, Any]] = [("primary", filtergraph, choice)]
+    if static_graph != filtergraph or choice.encoder != safe_choice.encoder:
+        plans.append(("static-crop/software", static_graph, safe_choice))
+
+    last_error: Exception | None = None
+    cmd: list[str] = []
+    proc: Any = None
+    meta: dict[str, Any] | None = None
+    for label, graph, enc in plans:
+        try:
+            cmd, proc = _attempt(graph, enc)
+            meta = _video.verify_output(tmp_dest, expected_sec=clip_seconds)
+            if label != "primary" and on_log:
+                on_log(f"clip {cut.get('order', '?')}: recovered with {label}")
+            break
+        except _video.RenderError as exc:
+            last_error = exc
+            # A timeout means the work is too slow, not that the graph is
+            # wrong — retrying would just burn another full deadline.
+            if "timed out" in str(exc):
+                raise
+            if label == plans[-1][0]:
+                raise
+            if on_log:
+                on_log(
+                    f"clip {cut.get('order', '?')} attempt '{label}' failed "
+                    f"({str(exc)[:200]}) — retrying with a static crop"
+                )
+            tmp_dest.unlink(missing_ok=True)
+    if meta is None:
+        assert last_error is not None
+        raise last_error
+
+    # Verified — publish it. Nothing else ever sees a partial encode.
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=deadline,
-        )
-    except subprocess.TimeoutExpired as exc:
+        os.replace(tmp_dest, dest)
+    except OSError as exc:
         raise _video.RenderError(
-            f"render of clip {cut.get('order', '?')} timed out after {deadline}s — "
-            f"the host may be overloaded; Retry will resume from the last finished clip"
+            f"could not publish rendered clip {dest.name}: {exc}"
         ) from exc
-
-    if proc.returncode != 0:
-        err = (proc.stderr or "").strip().splitlines()
-        reason = err[-1] if err else "no diagnostic"
-        raise _video.RenderError(
-            f"ffmpeg failed on clip {cut.get('order', '?')}: {reason}"
-        )
-
-    if not dest.exists() or dest.stat().st_size == 0:
-        raise _video.RenderError(
-            f"ffmpeg exited 0 but produced no output for clip {cut.get('order', '?')}"
-        )
 
     if on_log:
         on_log(f"Rendered clip {cut.get('order', '?')} -> {dest.name} ({dest.stat().st_size} bytes)")
-
-    meta = _video.verify_output(dest, expected_sec=clip_seconds)
     return {
         "clipOrder": int(cut.get("order", 0)),
         "start": round(start, 3),

@@ -23,7 +23,7 @@
 //   inside that backend process, ON THE PLATFORM, for every job
 
 import { spawn, type ChildProcess } from "node:child_process";
-import fs from "node:fs"; // side-effect only
+import fs from "node:fs"; // also used for the source watcher below
 import http from "node:http"; // side-effect only
 import path from "node:path"; // side-effect only
 import type { Plugin } from "vite";
@@ -62,6 +62,98 @@ const MAX_ATTEMPTS = 12;
 // still at most one spawn per COOLDOWN_MS — while making the failure
 // self-healing instead of requiring a manual reload.
 const COOLDOWN_MS = 60_000;
+
+// Python source watcher.
+//
+// uvicorn is spawned WITHOUT --reload on purpose: uvicorn's reloader watches
+// the whole cwd, and this project's cwd contains every rendered clip and
+// every job document, so each write during a render would trigger a reload
+// storm on a 1-vCPU host. The cost of that choice is that edits to app/*.py
+// never take effect until the managed web process is restarted, which the user
+// cannot do — the app then serves a 500 from code that was already fixed on
+// disk. That is exactly the "it's still broken after the fix" loop.
+//
+// So watch ONLY app/ (plus config.toml) and restart the child, debounced, after
+// an edit settles. Job artifacts live under data/ and outputs/, which are not
+// watched, so a running render does not restart anything by itself.
+let sourceWatcher: fs.FSWatcher | null = null;
+let restartTimer: NodeJS.Timeout | null = null;
+let restarting = false;
+
+/// Wait for the current child to actually go away before starting another.
+///
+/// Without the wait, the replacement uvicorn races the old one for port 8000,
+/// fails with EADDRINUSE and exits — leaving the app with no backend at all
+/// until the middleware happens to respawn it. The 4s cap covers a child that
+/// ignores SIGTERM (uvicorn does not, but a wedged ffmpeg descendant might).
+async function stopBackend(): Promise<void> {
+  const proc = state.proc;
+  if (!proc) return;
+  // Clear state.proc FIRST: the exit handler only clears it when it still
+  // points at this child, so the replacement spawned below cannot be wiped out
+  // by the old process's exit event arriving late.
+  state.proc = null;
+  await new Promise<void>((resolve) => {
+    let finished = false;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      resolve();
+    };
+    proc.once("exit", done);
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      done();
+    }
+    setTimeout(done, 4000);
+  });
+}
+
+function restartBackend(reason: string) {
+  if (restarting) return;
+  restarting = true;
+  log(`backend source changed (${reason}) — restarting to load the new code`);
+  state.attempts = 0;
+  const boot = async () => {
+    await stopBackend();
+    return startBackend();
+  };
+  state.starting = boot()
+    .catch((err: unknown) => {
+      log(`backend restart failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    })
+    .finally(() => {
+      state.starting = null;
+      restarting = false;
+    });
+}
+
+function watchPythonSources() {
+  if (sourceWatcher) return;
+  const schedule = (reason: string) => {
+    if (restartTimer) clearTimeout(restartTimer);
+    restartTimer = setTimeout(() => restartBackend(reason), 1500);
+  };
+  try {
+    sourceWatcher = fs.watch(path.join(ROOT, "app"), { recursive: true }, (_event, file) => {
+      if (file && !String(file).endsWith(".py")) return;
+      schedule(String(file || "app"));
+    });
+    sourceWatcher.on("error", (err) => log(`source watcher error: ${err.message}`));
+    log("watching app/**.py — backend restarts automatically after an edit");
+  } catch (err) {
+    // Recursive fs.watch is available on Linux since Node 20; if this host's
+    // Node is older, the plugin still works, edits just need a reload.
+    log(`source watcher unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    fs.watch(path.join(ROOT, "config.toml"), () => schedule("config.toml"));
+  } catch {
+    // config.toml is optional
+  }
+}
 
 function backoffFor(attempts: number): number {
   if (attempts >= MAX_ATTEMPTS) return COOLDOWN_MS;
@@ -153,13 +245,17 @@ async function startBackend(): Promise<boolean> {
   );
 
   state.proc = proc;
+  // Compare-and-clear: a restart kills this child and immediately spawns a
+  // replacement. An unconditional `state.proc = null` here would blank the
+  // NEW child when the old one's exit event lands a moment later, and the
+  // middleware would then spawn a third uvicorn on the same port.
   proc.on("exit", (code, signal) => {
     log(`backend exited (code=${code} signal=${signal})`);
-    state.proc = null;
+    if (state.proc === proc) state.proc = null;
   });
   proc.on("error", (err) => {
     log(`backend spawn error: ${err.message}`);
-    state.proc = null;
+    if (state.proc === proc) state.proc = null;
   });
 
   // wait for the API to answer (imports + whisper import are not trivial)
@@ -225,6 +321,10 @@ export function clipforgeBackend(): Plugin {
       // into a rejected promise, which Node escalates to a process exit — a
       // way for a plugin bug to kill the whole origin.
       installCrashGuards();
+      // Pick up Python edits without a manual process restart (see the watcher
+      // comment above). Installed before the first boot so a boot-time fix is
+      // never served stale.
+      watchPythonSources();
       // Freebuff's toolbox proxy sometimes does not fire the Vite
       // server_listening event cleanly, so state.starting can stay
       // pending and /api calls can block on a promise that never

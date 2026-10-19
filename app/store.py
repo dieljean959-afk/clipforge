@@ -209,11 +209,112 @@ class LocalStore:
             return {}
 
     def delete_job(self, job_id: str) -> bool:
+        """Delete a job document AND the clip documents it owns.
+
+        Removing only the job document left every clip document behind. The
+        dashboard lists clips through the clip documents (and the all-batches
+        view walks the whole clip directory), so a deleted batch kept showing
+        up as a grid of “queued · not rendered yet” cards — one twin per clip,
+        forever. The media and workspace are removed by the API/hosting layers;
+        the metadata belongs here because this is the object that owns it.
+        """
         path = self._job_path(job_id)
         if not path.exists():
             return False
         path.unlink(missing_ok=True)
+        self.delete_clip_docs(job_id)
         return True
+
+    def delete_clip_docs(self, job_id: str) -> int:
+        """Delete every clip document (and the summary blob) for a job."""
+        clips_dir = self._paths.data_dir / "clips"
+        if not clips_dir.exists():
+            return 0
+        removed = 0
+        for p in clips_dir.glob("*.json"):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(doc, dict) and doc.get("jobId") == job_id:
+                p.unlink(missing_ok=True)
+                removed += 1
+        summary = clips_dir / f"{job_id}.json"
+        if summary.exists():
+            summary.unlink(missing_ok=True)
+            removed += 1
+        return removed
+
+    def reconcile_clips(self) -> dict[str, int]:
+        """Drop clip documents whose job no longer exists, plus temp leftovers.
+
+        A clip document is only meaningful alongside its job: the dashboard
+        shows a card per document, and a document without a job can never be
+        rendered, opened or deleted through the UI. Deleting the job used to
+        leave them on disk (see delete_job), which is where the permanent
+        “queued” twins came from. Runs at boot and from the orphan sweeper, so
+        leftovers from an older build heal themselves instead of waiting for
+        the 7-day orphan window.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        stats = {"orphans": 0, "duplicates": 0, "temps": 0}
+        if not clips_dir.exists():
+            return stats
+        for tmp in clips_dir.glob("*.tmp"):
+            try:
+                tmp.unlink(missing_ok=True)
+                stats["temps"] += 1
+            except OSError:
+                continue
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                # Unreadable document: it can never be listed or rendered.
+                p.unlink(missing_ok=True)
+                stats["temps"] += 1
+                continue
+            if not isinstance(doc, dict):
+                continue
+            job_id = doc.get("jobId")
+            if not job_id or not self._job_path(str(job_id)).exists():
+                p.unlink(missing_ok=True)
+                stats["orphans"] += 1
+        # Duplicate documents for the same (job, order) from a pre-fix
+        # detection pass: keep the one that has media, else the one whose
+        # summary lists it (the current detection). Read everything once —
+        # this runs over every clip document on disk.
+        docs: list[tuple[Path, dict[str, Any]]] = []
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(doc, dict) and "candidateCount" not in doc:
+                docs.append((p, doc))
+        summaries: dict[str, set[str]] = {}
+        for p, doc in docs:
+            job_id = str(doc.get("jobId"))
+            if job_id not in summaries:
+                summaries[job_id] = set(self.summary_clip_ids(job_id))
+        best: dict[tuple[str, int], tuple[int, Path]] = {}
+        for p, doc in docs:
+            key = (str(doc.get("jobId")), int(doc.get("order") or 0))
+            authoritative = str(doc.get("_id")) in summaries.get(key[0], set())
+            rank = (
+                (4 if doc.get("renderState") == "done" else 0)
+                + (2 if doc.get("videoPath") else 0)
+                + (1 if authoritative else 0)
+            )
+            if key not in best or rank > best[key][0]:
+                best[key] = (rank, p)
+        if len(best) < len(docs):
+            keep = {p for _rank, p in best.values()}
+            for p, _doc in docs:
+                if p not in keep:
+                    p.unlink(missing_ok=True)
+                    stats["duplicates"] += 1
+        return stats
 
     # ------------------------------------------------------------------
     # listing helpers
@@ -708,11 +809,22 @@ class LocalStore:
         return ids
 
     def list_all_clips(self, limit: int = 512) -> list[dict[str, Any]]:
-        """Return metadata for all clips across all jobs."""
+        """Return clip documents across all LIVE jobs, newest job first.
+
+        Documents whose job no longer exists are skipped: they can never be
+        opened, re-rendered or deleted through the UI, and listing them is what
+        made a deleted batch reappear as a permanent grid of “queued” cards.
+        One document per (job, order) is returned so a pre-fix detection pass
+        cannot show the same clip twice.
+        """
         out: list[dict[str, Any]] = []
         clips_dir = self._paths.data_dir / "clips"
         if not clips_dir.exists():
             return out
+        # Keep the most complete document per (job, order): a rendered one
+        # beats a pending twin, whatever order the directory happens to list
+        # them in.
+        best: dict[tuple[str, int], tuple[int, dict[str, Any]]] = {}
         for p in sorted(clips_dir.glob("*.json")):
             try:
                 doc = json.loads(p.read_text(encoding="utf-8"))
@@ -724,9 +836,20 @@ class LocalStore:
                 continue
             if not doc.get("_id"):
                 continue
-            out.append(doc)
-            if len(out) >= limit:
+            job_id = str(doc.get("jobId") or "")
+            if not job_id or not self._job_path(job_id).exists():
+                continue
+            key = (job_id, int(doc.get("order") or 0))
+            rank = (
+                (4 if doc.get("renderState") == "done" else 0)
+                + (2 if doc.get("videoPath") else 0)
+                + (1 if doc.get("thumbPath") else 0)
+            )
+            if key not in best or rank > best[key][0]:
+                best[key] = (rank, doc)
+            if len(best) >= limit * 3:
                 break
+        out = [doc for _rank, doc in best.values()][:limit]
         return out
 
     def get_clip_doc(self, clip_id: str) -> dict[str, Any] | None:

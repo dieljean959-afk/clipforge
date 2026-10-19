@@ -70,6 +70,66 @@ def verify_source(path: Path) -> None:
         raise RenderError(f"source file {path.name} has no playable duration — download is corrupt")
     logger.info(f"[video] source verified: {meta['width']}x{meta['height']}, {meta['duration']:.1f}s")
 
+#: Mean luma (0-255) below which a frame is black rather than "dark".
+#:
+#: A fade-to-black still passes through ~20 on the luma plane, so this only
+#: catches an encode whose pixels are genuinely empty. Used to refuse a clip
+#: that would otherwise be presented as rendered while playing pure black —
+#: the failure the user sees as "the clip is broken" with no error anywhere.
+BLACK_FRAME_LUMA = 8.0
+
+
+def frame_luma(path: Path, at_sec: float = 0.0) -> float:
+    """Mean luma (0-255) of one frame near ``at_sec``. -1.0 when unreadable."""
+    seek = max(0.0, float(at_sec))
+    args = [ffmpeg_bin(), "-v", "error"]
+    if seek > 0:
+        # No `-ss 0` for a still image: seeking a one-frame input past t=0
+        # yields nothing, which is how every poster luma check returned -1.
+        args += ["-ss", f"{seek:.3f}"]
+    args += [
+        "-i", str(path),
+        "-frames:v", "1",
+        # Downscale first: the mean of a 32x32 gray frame is the same number as
+        # the mean of a 1080x1920 one, for 1/2000th the work.
+        "-vf", "scale=32:32:flags=neighbor,format=gray",
+        "-f", "rawvideo", "-",
+    ]
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=60)
+    except Exception:
+        return -1.0
+    data = proc.stdout or b""
+    if not data:
+        return -1.0
+    return sum(data) / len(data)
+
+
+def black_frame_reason(path: Path, duration: float) -> str | None:
+    """Explain why a rendered clip is pitch black, or None when it has picture.
+
+    Samples five points across the clip instead of the first frame only: a clip
+    may legitimately start on a fade, and only an encode where EVERY sample is
+    empty is a broken render. This is the check that stops "pitch black" clips
+    from ever being marked done.
+    """
+    dur = max(0.0, float(duration or 0.0))
+    if dur <= 0:
+        return "rendered clip reports no duration"
+    fractions = (0.05, 0.25, 0.5, 0.75, 0.92)
+    samples = [frame_luma(path, dur * f) for f in fractions]
+    readable = [s for s in samples if s >= 0]
+    if not readable:
+        return "rendered clip has no decodable picture"
+    brightest = max(readable)
+    if brightest < BLACK_FRAME_LUMA:
+        return (
+            "rendered clip is pitch black (mean luma "
+            f"{brightest:.1f}/255 across {len(readable)} sampled frames)"
+        )
+    return None
+
+
 def verify_output(path: Path, *, expected_sec: float | None = None) -> dict[str, Any]:
     """Prove a rendered clip is a real, playable file before we call it done.
 
@@ -98,6 +158,9 @@ def verify_output(path: Path, *, expected_sec: float | None = None) -> dict[str,
                 f"{path.name} is only {got:.1f}s but should be ~{expected_sec:.1f}s "
                 f"— the encode was cut short"
             )
+    black = black_frame_reason(path, float(meta.get("duration") or 0.0))
+    if black:
+        raise RenderError(f"{path.name}: {black}")
     logger.info(
         f"[video] verified {path.name}: {size / 1024:.0f} KB, "
         f"{meta['width']}x{meta['height']}, {meta['duration']:.1f}s"
@@ -169,6 +232,12 @@ def retry_clip_render(clip_id: str) -> dict:
     src = store.find_source_file(job_id)
     if src is None:
         raise HTTPException(400, "source file no longer on disk — this clip cannot be re-rendered")
+    # Imported here rather than at module scope: app.stages imports nothing
+    # from video, but keeping the dependency lazy avoids an import cycle if it
+    # ever does. `StageWorkspace` used to be referenced with no import at all,
+    # so this repair path raised NameError the first time anyone called it.
+    from app.stages import StageWorkspace
+
     ws = StageWorkspace(settings.app.paths.data_dir, job_id)
     cuts = ws.read_json("reframe", "cuts.json") or []
     cut = next((c for c in cuts if f"clip_{c.get('order', 0):03d}" == clip_id), None)
@@ -186,14 +255,22 @@ def retry_clip_render(clip_id: str) -> dict:
     dest = settings.app.paths.outputs_dir / job_id / f"clip_{int(cut.get('order', 0)):03d}.mp4"
     try:
         meta = encode.render_clip(src, cut, dest, settings, on_log=lambda line: store.append_job_log(job_id, line))
-    except video.RenderError as exc:
+    except RenderError as exc:
         store.write_clip(clip_id, {"renderState": "failed", "mediaError": str(exc), "jobId": job_id}, job_id=job_id)
         raise HTTPException(400, str(exc))
+    # The poster has to be regenerated too: a re-render overwrites the MP4, so
+    # the old poster is a frame from the previous encode. It also used to be
+    # written as "000.thumb.jpg" (no `clip_` prefix), a name nothing serves.
+    thumb_path = dest.parent / f"clip_{int(cut.get('order', 0)):03d}.thumb.jpg"
+    try:
+        render_first_frame_thumb(dest, thumb_path)
+    except Exception as exc:  # noqa: BLE001 - the clip matters, the poster is best-effort
+        logger.warning(f"[video] re-render poster failed for {clip_id}: {exc}")
     store.write_clip(
         clip_id,
         {
             "videoPath": meta["videoPath"],
-            "thumbPath": str(dest.parent / f"{int(cut.get('order', 0)):03d}.thumb.jpg"),
+            "thumbPath": str(thumb_path),
             "mediaBytes": meta["bytes"],
             "mediaWidth": meta["width"],
             "mediaHeight": meta["height"],
@@ -972,25 +1049,45 @@ def render_clip(
 #: browser. 320px wide is indistinguishable at card size and ~7 KB.
 THUMB_WIDTH = int(os.getenv("CLIPFORGE_THUMB_WIDTH", "320"))
 
-def render_first_frame_thumb(clip_path: Path, thumb_path: Path) -> Path:
-    """Thumbnail = REAL first frame of the rendered clip (no generated images).
-
-    Scaled to `THUMB_WIDTH`. The frame is real either way; only its size is a
-    delivery decision.
-    """
-    thumb_path.parent.mkdir(parents=True, exist_ok=True)
-    _run([
-        ffmpeg_bin(), "-y",
-        "-ss", "0", "-i", str(clip_path),
+def _thumb_at(clip_path: Path, thumb_path: Path, at_sec: str, *, thumbnail_filter: bool) -> None:
+    """Write one poster frame at ``at_sec`` (a str so it can be empty)."""
+    vf = f"scale={THUMB_WIDTH}:-2:flags=bicubic"
+    args = [ffmpeg_bin(), "-y"]
+    if at_sec:
+        args += ["-ss", at_sec]
+    args += ["-i", str(clip_path)]
+    if thumbnail_filter:
+        # analyse the opening seconds and let ffmpeg pick the most
+        # representative frame (histogram-based) rather than frame 0
+        args += ["-vf", f"thumbnail=100,{vf}"]
+    else:
+        args += ["-vf", vf]
+    args += [
         "-frames:v", "1",
         # -2 keeps the 9:16 aspect with an even height, which mjpeg requires.
-        "-vf", f"scale={THUMB_WIDTH}:-2:flags=bicubic",
         # Pin encoder + muxer: `thumb_path` is caller-supplied, and inferring
         # either from its extension is the same class of bug as the `.wav.part`
         # extraction failure.
         "-c:v", "mjpeg", "-q:v", "4",
         "-f", "image2", str(thumb_path),
-    ], timeout=120)
+    ]
+    _run(args, timeout=120)
+
+
+def render_first_frame_thumb(clip_path: Path, thumb_path: Path) -> Path:
+    """Poster for a rendered clip — a REAL frame, chosen so it is not black.
+
+    Frame 0 was the whole rule, and a clip that opens on a fade from black (or
+    a dark scene) got a pure-black poster. The card then looked like a failed
+    render even though the MP4 played fine. ffmpeg's `thumbnail` filter picks
+    the most representative frame of the opening batch, which skips the fade;
+    if the result is still black (a genuinely dark clip) the poster is taken a
+    couple of seconds in, where the subject is usually lit.
+    """
+    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+    _thumb_at(clip_path, thumb_path, "", thumbnail_filter=True)
+    if frame_luma(thumb_path) < BLACK_FRAME_LUMA:
+        _thumb_at(clip_path, thumb_path, "2.0", thumbnail_filter=False)
     return thumb_path
 
 def thumb_needs_rewrite(p: Path) -> bool:

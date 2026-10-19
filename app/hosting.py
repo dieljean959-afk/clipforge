@@ -566,16 +566,17 @@ class RetentionCleaner:
         # left by a process that was killed mid-write.
         clips_dir = paths.data_dir / "clips"
         if clips_dir.exists():
+            # A clip document with no owning job is unusable: the dashboard
+            # lists documents per job, and a document whose job is gone can
+            # never be rendered, opened or deleted. Holding it for the full
+            # 7-day orphan window meant a deleted batch came back as a grid of
+            # "queued" cards for a week (the exact complaint the fix in
+            # delete_job addresses). One hour is enough to never race a job
+            # record that is being rewritten, and short enough to self-heal.
+            recent = time.time() - 3600
             for f in clips_dir.glob("*.json"):
                 try:
-                    # OLDER than the cutoff is the orphan; a fresh one is left
-                    # alone. This comparison was inverted (`<= cutoff` to
-                    # continue), so the sweeper deleted clip documents the
-                    # instant they appeared and kept the stale ones forever —
-                    # the exact opposite of the 24h rule every other branch
-                    # here obeys, and the one place it could quietly discard a
-                    # record that a job was about to re-adopt.
-                    if f.stat().st_mtime > cutoff:
+                    if f.stat().st_mtime > max(cutoff, recent):
                         continue
                     clip = json.loads(f.read_text(encoding="utf-8"))
                 except Exception:
@@ -583,6 +584,13 @@ class RetentionCleaner:
                 if clip.get("jobId") not in known:
                     f.unlink(missing_ok=True)
                     removed += 1
+            # Collapse duplicate documents for the same (job, order) and drop
+            # unreadable/temp leftovers. Documents for live jobs are never
+            # touched.
+            try:
+                removed += sum(self.store.reconcile_clips().values())
+            except Exception as exc:
+                logger.warning(f"[hosting] clip reconcile failed: {exc}")
 
         for root in (paths.downloads_dir, paths.uploads_dir or (paths.data_dir / "uploads"),
                    paths.outputs_dir):

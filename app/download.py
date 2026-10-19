@@ -119,8 +119,21 @@ def download_url(
         fetch_log.append(line)
         if on_log:
             on_log(line)
+    max_h = int(settings.download.max_height)
+    # Codec preference, in order. H.264 first: it is what the renderer
+    # re-encodes to anyway, every decoder handles it, and AV1/VP9 sources cost
+    # minutes of CPU decode per clip on a 1-vCPU host. The two fallbacks exist
+    # because not every site (Twitch clips, older uploads, members-only HLS)
+    # offers an H.264 stream at all — refusing those would mean "this URL does
+    # not work" for the whole class. Final fallback is a single progressive
+    # file (`b`), which is always muxed and always playable.
+    format_prefs = [
+        f"bv*[vcodec^=avc1][height<={max_h}]+ba/bv*[vcodec^=h264][height<={max_h}]+ba",
+        f"bv*[height<={max_h}]+ba/b[height<={max_h}]",
+        f"b[height<={max_h}]/b",
+    ]
     ydl_opts: dict[str, Any] = {
-        "format": f"bv*[height<={settings.download.max_height}]+ba/b[height<={settings.download.max_height}]",
+        "format": format_prefs[0],
         "merge_output_format": "mp4",
         "outtmpl": str(dest_dir / "source.%(ext)s"),
         "noplaylist": True,
@@ -139,6 +152,12 @@ def download_url(
     }
     if settings.download.cookies_from_browser:
         ydl_opts["cookiesfrombrowser"] = (settings.download.cookies_from_browser,)
+    cookies_file = getattr(settings.download, "cookies_file", "") or ""
+    if cookies_file and Path(cookies_file).expanduser().is_file():
+        # Netscape cookies.txt. This is the one lever that gets a datacenter
+        # IP past YouTube's "Sign in to confirm you're not a bot" page, which
+        # otherwise makes every YouTube URL fail from this host.
+        ydl_opts["cookiefile"] = str(Path(cookies_file).expanduser())
 
     def _hook(d: dict[str, Any]) -> None:
         if d.get("status") == "downloading" and on_progress is not None:
@@ -159,21 +178,80 @@ def download_url(
             f"yt-dlp is not importable ({exc}); run `pip install yt-dlp`"
         ) from exc
 
+    def _verify_source(path: Path) -> str | None:
+        """Why this download is unusable as a render source, or None.
+
+        A directory can hold a file yt-dlp considers finished and the renderer
+        cannot use: a video-only stream that merged badly, an audio-only
+        variant, or a zero-duration container. Verifying here — once, before a
+        twelve-minute transcribe — turns "the clips are black" into an honest
+        download error with a fallback already attempted.
+        """
+        try:
+            from app import video as _video
+
+            meta = _video.probe(path)
+        except Exception as exc:  # noqa: BLE001 - unreadable == unusable
+            return f"unreadable media ({exc})"
+        if int(meta.get("width") or 0) <= 0 or int(meta.get("height") or 0) <= 0:
+            return "no video stream"
+        if float(meta.get("duration") or 0.0) <= 0:
+            return "zero duration"
+        return None
+
     def _run_fetch(attempt_label: str) -> Path:
-        if on_log:
-            on_log(f"yt-dlp fetcher: {attempt_label}, {url}")
-        logger.info(f"[download] yt-dlp fetching ({attempt_label}): {url}")
-        ydl_opts["verbose"] = False
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = (info or {}).get("title") or "video"
-        for cand in sorted(dest_dir.glob("source.*")):
-            if cand.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
-                if on_log:
-                    on_log(f"yt-dlp finished: {title} ({cand.name})")
-                logger.info(f"[download] saved {cand.name} ({cand.stat().st_size} bytes)")
-                return cand
-        raise DownloadError("yt-dlp reported success but no media file was found")
+        last_error_local = ""
+        last_unplayable = ""
+        last_exc: Exception | None = None
+        for idx, fmt in enumerate(format_prefs):
+            ydl_opts["format"] = fmt
+            label = attempt_label if idx == 0 else f"{attempt_label}, format {idx + 1} fallback"
+            if on_log:
+                on_log(f"yt-dlp fetcher: {label}, {url}")
+            logger.info(f"[download] yt-dlp fetching ({label}): {url}")
+            ydl_opts["verbose"] = False
+            for leftover in dest_dir.glob("source.*"):
+                if leftover.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".part"}:
+                    leftover.unlink(missing_ok=True)
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    title = (info or {}).get("title") or "video"
+            except Exception as exc:  # noqa: BLE001 - try the next format
+                last_error_local = str(exc)
+                last_exc = exc
+                logger.warning(f"[download] format {idx + 1} failed: {last_error_local[:300]}")
+                continue
+            cand = None
+            for c in sorted(dest_dir.glob("source.*")):
+                if c.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
+                    cand = c
+                    break
+            if cand is None:
+                last_error_local = "yt-dlp reported success but no media file was found"
+                continue
+            unplayable = _verify_source(cand)
+            if unplayable is not None:
+                last_unplayable = f"{cand.name} is not a usable source ({unplayable})"
+                logger.warning(f"[download] {last_unplayable} — trying next format")
+                cand.unlink(missing_ok=True)
+                continue
+            if on_log:
+                on_log(f"yt-dlp finished: {title} ({cand.name})")
+            logger.info(f"[download] saved {cand.name} ({cand.stat().st_size} bytes)")
+            return cand
+        # A source that downloaded but cannot be rendered is not a yt-dlp
+        # version problem, so surface it directly. An extraction failure IS
+        # often the rotating-site problem the auto-update retry exists for, so
+        # the original exception is re-raised and the caller's rot policy
+        # re-runs every format after updating.
+        if last_unplayable:
+            raise DownloadError(
+                f"{last_unplayable} after trying {len(format_prefs)} formats"
+            )
+        if last_exc is not None:
+            raise last_exc
+        raise DownloadError("yt-dlp failed to produce a usable video file")
 
     try:
         return _run_fetch("attempt 1")
@@ -185,9 +263,16 @@ def download_url(
         if on_log:
             on_log(f"yt-dlp failed: {last_error}")
         fetch_log_text = "\n".join(fetch_log[-40:])
+        # `yt_dlp.version` is a MODULE, so `getattr(yt_dlp, "version")` is not
+        # a string — concatenating it raised TypeError inside the failure
+        # handler, which replaced the real yt-dlp error with an unrelated
+        # "can only concatenate str (not module) to str".
+        version_text = getattr(getattr(yt_dlp, "version", None), "__version__", None)
+        if not isinstance(version_text, str):
+            version_text = getattr(yt_dlp, "__version__", "unknown")
         ydl_debug = (
             "yt-dlp "
-            + getattr(yt_dlp, "version", "?")
+            + str(version_text)
             + "\n"
             + "DOWNLOAD ATTEMPT LOG:\n"
             + fetch_log_text
@@ -196,6 +281,36 @@ def download_url(
         )
         if on_log:
             on_log("yt-dlp FAILED — captured output:\n" + ydl_debug)
+
+        # YouTube's bot check is per client. The default web client is the one
+        # that answers "Sign in to confirm you're not a bot" from a server IP;
+        # the iOS/Safari/mobile clients frequently do not. One retry with those
+        # clients is cheap and turns a dead URL into a working job on hosts
+        # where no cookies are configured.
+        bot_block = any(
+            marker in last_error.lower()
+            for marker in ("not a bot", "sign in to confirm", "login required", "confirm your age")
+        )
+        if bot_block and "youtube" in url.lower() and not cookies_file:
+            if on_log:
+                on_log("YouTube asked for a sign-in — retrying with alternate clients")
+            ydl_opts["extractor_args"] = {
+                "youtube": {"player_client": ["ios", "mweb", "web_safari"]}
+            }
+            try:
+                return _run_fetch("youtube alternate client")
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(f"[download] alternate client failed: {last_error[:300]}")
+            finally:
+                ydl_opts.pop("extractor_args", None)
+        if bot_block:
+            raise DownloadError(
+                "This site asked this server to sign in before it would serve the "
+                "video (YouTube: \"Sign in to confirm you're not a bot\"). Export "
+                "cookies.txt from a logged-in browser and set YT_DLP_COOKIES_FILE, "
+                "or attach the video file directly — it is not a ClipForge bug."
+            )
 
     if not settings.download.auto_update:
         raise DownloadError(f"yt-dlp failed: {last_error}")

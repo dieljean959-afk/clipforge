@@ -50,7 +50,21 @@ def detect_speech_windows(wav_path, settings) -> list[dict]:
 
 
 def torch_tensor(audio_f32):
-    
+    """numpy float32 audio → the tensor Silero's VAD expects.
+
+    `torch` is imported HERE, not at module scope: silero-vad is optional and
+    the module must import cleanly without torch installed. The previous
+    version referenced a `torch` name that was never imported anywhere, so on
+    a host that DID have silero-vad, the first silence-detection call died with
+    NameError and the failure looked like a broken ASR stage.
+    """
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "silero-vad is installed but torch is not — `pip install torch` or "
+            "remove silero-vad to skip silence trimming"
+        ) from exc
     return torch.from_numpy(audio_f32)
 
 
