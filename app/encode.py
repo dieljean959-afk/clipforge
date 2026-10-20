@@ -541,13 +541,73 @@ def render_clip(
     crop_h = int(crop.get("h", height))
 
     samples = cut.get("sampleWindows") or []
-    # crop/pan -> scale to the exact 9:16 output -> exact crop -> square pixels.
-    # build_output_chain is the shared chain video.render_clip uses; skipping it
-    # here is what left clips at the crop's native size (405x720).
-    filtergraph = _video.build_output_chain(
-        samples, width, height, crop_w, out_w, out_h, fps,
-    )
-    if not samples:
+    # TARGET A: per-shot framing mode. The reframe stage decides FIT vs FILL
+    # per shot segment and records the choice (and the reason) on the cut.
+    # FILL keeps today's tight 9:16 crop; FIT scales the FULL 16:9 frame to
+    # 1080px wide, centers it vertically over a blurred copy of the same
+    # frame (scaled to cover, gaussian sigma ~30). Segments come as a list:
+    # [{"start": 0.0, "end": 2.1, "mode": "fit", "reason": "..."}, ...]
+    # (absolute source seconds). Segments disappear (or never arrive) →
+    # every clip is FILL exactly as before, so existing batches don't change.
+    fit_segments = cut.get("framingSegments") or []
+
+    if fit_segments:
+        clip_segments = [
+            {
+                "start": max(0.0, float(s.get("start", 0.0)) - start),
+                "end": min(clip_seconds, float(s.get("end", 0.0)) - start),
+                "mode": str(s.get("mode", "fill")),
+            }
+            for s in fit_segments
+            if float(s.get("end", 0.0)) > start and float(s.get("start", 0.0)) < end
+        ]
+    else:
+        clip_segments = [{"start": 0.0, "end": clip_seconds, "mode": "fill"}]
+
+    def _fit_graph() -> str:
+        """FULL-frame FIT: source shown whole over its blurred self.
+
+        The blurred pad is the SAME frame scaled to COVER 1080x1920 (it must
+        be bigger than the frame, not letterboxed inside it), gaussian-blurred
+        sigma 30, then the sharp copy is scaled to 1080 wide (~608 high for a
+        16:9 source) and centered. ``setsar=1`` pins square pixels on both
+        branches the same way build_output_chain does.
+        """
+        return (
+            f"split=2[bg][fg];"
+            f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{out_h},gblur=sigma=30,setsar=1[bgb];"
+            f"[fg]scale={out_w}:-2:flags=bicubic,setsar=1[fgs];"
+            f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2"
+        )
+
+    has_fit = any(s["mode"] == "fit" for s in clip_segments)
+    fills = [s for s in clip_segments if s["mode"] != "fit"]
+    if has_fit and not fills:
+        # whole clip FIT: full frame shown over its blurred self
+        filtergraph = _fit_graph()
+    elif has_fit:
+        # mixed FILL/FIT within one clip. Both branches render the FULL
+        # 1080x1920 frame; the switch is a hard cut done by ``overlay`` with
+        # ``enable=between(...)`` — when enabled it covers the base with the
+        # FIT frame (same size), when disabled the FILL base shows through.
+        # No frames are dropped or re-timed, so audio stays in sync and the
+        # switch lands exactly on the reframe stage's chosen boundaries
+        # (guaranteed >=1s apart and never mid-word).
+        fill_chain = _video.build_output_chain(
+            samples, width, height, crop_w, out_w, out_h, fps,
+        )
+        fit_cond = "+".join(
+            f"between(t,{s['start']:.3f},{s['end']:.3f})"
+            for s in clip_segments if s["mode"] == "fit"
+        )
+        filtergraph = (
+            f"split=2[modesrc][fitref];"
+            f"[modesrc]{fill_chain},setsar=1[fillbase];"
+            f"[fitref]{_fit_graph()},setsar=1[fitscale];"
+            f"[fillbase][fitscale]overlay=0:0:enable='{fit_cond}'"
+        )
+    else:
         # build_output_chain's no-windows branch centre-crops at src height;
         # honour the cut's own cropBox x/y so the subject stays framed.
         filtergraph = (
@@ -575,13 +635,31 @@ def render_clip(
         # Escape for ffmpeg's filter parser: backslash, colon and quote are
         # all meaningful inside a filter argument.
         esc = str(ass_path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-        fontdir = getattr(_subtitle, "font_dir_for", None)
-        if callable(fontdir):
-            font_path = str(fontdir(settings)).replace("\\", "/").replace(":", "\\:")
+        # Per-preset fonts dir: the Viral look ships Montserrat inside app/fonts
+        # (host has no system Montserrat), so libass must be pointed at it.
+        font_dir = _subtitle.ass_font_dir(settings, preset_key or "bold_pop")
+        if font_dir:
+            font_path = str(font_dir).replace(":", "\\:")
             ass_arg = "subtitles=" + esc + ":fontsdir=" + font_path
         else:
             ass_arg = "subtitles=" + esc
         filtergraph = filtergraph + "," + ass_arg
+
+        # Optional hook title (TARGET optional): one 3-8-word title centred at
+        # 5-13% height, bold black text on a white rounded box. Drawn as
+        # drawtext (Pillow-free) over the FIRST caption window so it does not
+        # cover captions — hooks read while the first burst is spoken.
+        hook = cut.get("hookTitle") or ""
+        if hook:
+            hook_ass = _subtitle.write_hook_ass(
+                str(hook), settings, dest.with_suffix(".hook.ass"),
+                out_w, out_h,
+            )
+            hook_esc = (
+                str(hook_ass).replace("\\", "/").replace(":", "\\:")
+                .replace("'", "\\'")
+            )
+            filtergraph = filtergraph + "," + "subtitles=" + hook_esc
 
     # Encode to a temp file and only then replace the destination. A render
     # that is killed mid-write (host restart, stall watchdog, a re-render

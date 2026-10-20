@@ -1558,7 +1558,9 @@ class Pipeline:
                     meta = encode.render_clip(
                         src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
                         cues=(ws.read_json("captions", f"cues_{i:03d}.json") or {}).get("cues") or [],
-                        preset_key=job.get("captionPreset") or "bold_pop",
+                        preset_key=job.get("captionPreset") or self.settings.subtitle.preset or "bold_pop",
+                        # The FIT/FILL choice per shot is carried from the
+                        # reframe stage on each cut and logged here.
                         on_log=lambda line: self._log(job_id, line),
                     )
                 except Exception as exc:

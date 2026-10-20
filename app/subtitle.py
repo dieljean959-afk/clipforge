@@ -1302,6 +1302,50 @@ def display_text(text: str, *, uppercase: bool, max_line: int = 0) -> str:
     return t
 
 
+def write_hook_ass(
+    title: str,
+    settings: Settings,
+    path: Path,
+    width: int,
+    height: int,
+) -> Path:
+    """The optional hook title: bold black text on a white rounded box.
+
+    Rendered as a SECOND tiny .ass script layered by a second ``subtitles``
+    filter (libass handles the rounded-box look via BorderStyle=3 +
+    BackColour=white, and rounds the corners itself with
+    ScaledBorderAndShadow). Centred horizontally at 5-13% height — the band
+    above the captions where the target places it. Duration is the whole clip
+    (the hook is the clip's pitch, it leads), which the caller reads as
+    "always on"; the target's own examples keep it for the clip's first
+    seconds, which a caller can trim with the file's own Dialogue line.
+    """
+    p = get_preset("viral")
+    black = _hex_to_ass("#0A0A0A")
+    white = _hex_to_ass("#FFFFFF")
+    font = p.font_override or settings.subtitle.font
+    # 5-13% window: centre at 9% via Alignment 8 (top-middle) + MarginV 9%.
+    margin_v = int(height * 0.09)
+    content = f"""[Script Info]
+Title: ClipForge Hook
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Hook,{font},{int(p.font_size * 0.66)},{black},{white},{white},{white},-1,0,0,0,100,100,0,0,3,{int(p.font_size * 0.18)},0,8,40,40,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:10.00,Hook,,0,0,0,,{title.replace("{", "(").replace("}", ")")}
+"""
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def hook_title_text(
     cue_texts: list[str],
     *,
