@@ -161,7 +161,7 @@ def write_tracks(
             if log:
                 log(f"[captions] wrote {srt_name} ({len(srt_text)} bytes, utf-8)")
         if "vtt" in _formats(settings):
-            vtt_text = _srt_to_vtt(srt_text)
+            vtt_text = _srt_to_vtt(srt_text, lang=lang)
             vtt_name = f"{base}_{lang}.vtt"
             vtt_path = out_dir / vtt_name
             vtt_path.write_text(vtt_text, encoding="utf-8")
@@ -228,10 +228,11 @@ def _build_srt(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _srt_to_vtt(srt_text: str) -> str:
-    body = srt_text.replace(",", ".", 2)  # naive srt->vtt time comma->dot for the first two commas per cue
+def _srt_to_vtt(srt_text: str, lang: str | None = None) -> str:
     segments = srt_text.split("\n\n")
     out: list[str] = ["WEBVTT"]
+    if lang:
+        out.append(f"Language: {lang}")
     for seg in segments:
         if not seg.strip():
             continue

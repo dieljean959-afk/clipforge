@@ -417,7 +417,7 @@ def _post_chunk(
 
     fields = {
         "model": cfg.model,
-        "language": language or "es",
+        "language": language or "en",
         "response_format": "verbose_json",
         "timestamp_granularities[]": "segment",
         "prompt": prompt,
