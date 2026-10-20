@@ -225,18 +225,74 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       return;
     }
 
-    // Not cached yet: post the LINK right now rather than make them wait.
-    void nav
-      .share({ text: caption, url: publicUrl, title: clip.title })
-      .then(() => {
-        /* shared */
-      })
-      .catch((err: unknown) => {
-        if (isAbort(err)) return;
-        toast.error("Could not open the share sheet.", {
-          description: "Use the MP4 button, or copy the caption.",
-        });
-      })
+    // File not cached yet: fetch it now with high priority and share the
+    // actual MP4 once it arrives. The user asked to send the video, not the
+    // link — so we burn a focused fetch inside the activation window rather
+    // than handing them a link they then have to post manually.
+    if (publicUrl) {
+      let settled = false;
+      const controller = new AbortController();
+      void (async () => {
+        try {
+          const res = await fetch(publicUrl, {
+            signal: controller.signal,
+            cache: "force-cache",
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          if (!blob || blob.size === 0) throw new Error("empty response");
+          if (settled) return;
+          settled = true;
+          const file = new File([blob], fileName, { type: "video/mp4" });
+          void nav
+            .share({ files: [file], text: caption, title: clip.title })
+            .catch((err: unknown) => {
+              if (!isAbort(err)) {
+                toast.error("Could not share the video file.", {
+                  description: "Use the MP4 button instead.",
+                });
+              }
+            })
+            .finally(() => setBusy(false));
+        } catch (err) {
+          if (settled) return;
+          settled = true;
+          // Fetch failed or timed out: fall back to the link, which always
+          // works and still lets the user post to social media.
+          void nav
+            .share({ text: caption, url: publicUrl, title: clip.title })
+            .catch((err: unknown) => {
+              if (!isAbort(err)) {
+                toast.error("Could not open the share sheet.", {
+                  description: "Use the MP4 button, or copy the caption.",
+                });
+              }
+            })
+            .finally(() => setBusy(false));
+        }
+      })();
+      // Give the fetch a hard ceiling inside the activation window. After this
+      // the link path is the only thing left that can still respond.
+      window.setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          controller.abort();
+          setBusy(false);
+          toast.info("File download took too long — sharing the link instead.");
+        }
+      }, 4500);
+      return;
+    }
+
+    // No public url: copy the caption as a last resort.
+    void navigator.clipboard
+      .writeText(caption)
+      .then(() =>
+        toast.success("Caption copied."),
+      )
+      .catch(() =>
+        toast.error("This browser blocked the clipboard."),
+      )
       .finally(() => setBusy(false));
     // --- end of the synchronous window --------------------------------------
   }, [clip._id, clip.title, clip.hookText, clip.hashtags, fileName]);

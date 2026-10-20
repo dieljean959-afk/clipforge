@@ -254,7 +254,21 @@ export function networkSaysNoPrefetch(): boolean {
 
 /** True when prefetching is allowed at all on this connection. */
 export function prefetchAllowed(): boolean {
-  return !networkSaysNoPrefetch();
+  // Only suppress prefetch when the browser explicitly asks us not to waste
+  // the user's data. Slow connections still prefetch — the Share button needs
+  // the bytes on device, and a link-only fallback is a worse experience than a
+  // slow download that completes before the user taps Share.
+  const c = (
+    navigator as Navigator & {
+      connection?: {
+        saveData?: boolean;
+        effectiveType?: string;
+        type?: string;
+      };
+    }
+  ).connection;
+  if (!c) return true;
+  return c.saveData !== true;
 }
 
 /** Fraction downloaded, 0..1, or null when the total is unknown. */
