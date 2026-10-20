@@ -146,7 +146,6 @@ def write_tracks(
             continue
         srt_text = _build_srt(records)
         out_dir: Path
-        out_dir: Path
         if use_stage_workspace and job_id:
             out_dir = StageWorkspace(settings.app.paths.data_dir, job_id).stage_dir("captions")
         else:

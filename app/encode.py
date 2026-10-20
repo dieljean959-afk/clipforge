@@ -569,7 +569,7 @@ def render_clip(
         ass_path = dest.with_suffix(".ass")
         _subtitle.write_ass(
             cues, settings, ass_path, out_w, out_h,
-            start_offset=start, preset_key=preset_key or "bold_pop",
+            preset_key=preset_key or "bold_pop",
         )
 
         # Escape for ffmpeg's filter parser: backslash, colon and quote are

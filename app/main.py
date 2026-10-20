@@ -2369,16 +2369,13 @@ def _clip_for_share_id(share_id: str) -> dict | None:
 
 def _share_copy_for(clip: dict) -> Path | None:
     """Where this clip's share-sized MP4 lives, building it if needed."""
-    master = clip.get("videoPath")
-    if not master:
-        return None
-    master_path = Path(master)
-    if not master_path.exists():
+    master = _clip_media(clip, "video")
+    if master is None:
         return None
     try:
-        return share_video.build_share_version(master_path)
+        return share_video.build_share_version(master)
     except share_video.ShareRenderError as exc:
-        logger.warning(f"[share] {master_path.name}: {exc}")
+        logger.warning(f"[share] {master.name}: {exc}")
         return None
 
 
