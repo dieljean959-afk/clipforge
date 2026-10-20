@@ -501,12 +501,56 @@ class LocalStore:
             return self.list_clips(job_id)
         return self.list_all_clips()
 
+    def _title_from_words(
+        self,
+        candidate: dict[str, Any],
+        words: list[dict[str, Any]] | None,
+    ) -> str | None:
+        """Best available clip title from the transcript, falling back to None.
+
+        Detection already emits a ``hook_text`` for the viral-moment caption; when
+        that exists it is the better first choice because it was written as a hook
+        rather than lifted verbatim from speech. When it is empty we mine a short
+        title from the words whose timestamps overlap the clip window, because a
+        word-based title is more specific than a generic ``"Clip"`` and survives
+        resume/re-detect without needing the LLM again.
+
+        Returns None only when there is genuinely nothing to say; the caller then
+        uses the final ``"Clip"`` default.
+        """
+        if hook := str(candidate.get("hook_text") or "").strip():
+            return hook
+        if not words:
+            return None
+        cut_start = float(candidate.get("start", 0.0) or 0.0)
+        cut_end = float(candidate.get("end", 0.0) or 0.0)
+        if cut_end <= cut_start:
+            return None
+        inside: list[str] = []
+        for w in words:
+            try:
+                ws = float(w.get("start", 0.0) or 0.0)
+                we = float(w.get("end", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if we <= cut_start or ws >= cut_end:
+                continue
+            word = str(w.get("word") or "").strip()
+            if not word:
+                continue
+            inside.append(word)
+        if not inside:
+            return None
+        head = " ".join(inside[:6]).strip()
+        return head[:80] or None
+
     def create_clips(
         self,
         job_id: str,
         candidates: list[dict[str, Any]],
         *,
         detected_source: str | None = None,
+        words: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Record the AI-detected candidate clips for a job.
 

@@ -1327,7 +1327,11 @@ class Pipeline:
         # via deepseek" instead of a blank "detectedSource". The provider label is
         # already used a few lines above for the chunk cache and the log line, so this
         # keeps all three named the same by construction rather than by coincidence.
-        summary = self.store.create_clips(job_id, candidates, detected_source=llm.provider_label(self.settings))
+        summary = self.store.create_clips(
+            job_id, candidates,
+            detected_source=llm.provider_label(self.settings),
+            words=words,
+        )
         # Mark the workspace stage done. WITHOUT this marker every resume re-ran
         # detection: one more LLM call, and create_clips minted a BRAND NEW set
         # of clip documents — which is exactly how one batch ended up showing
