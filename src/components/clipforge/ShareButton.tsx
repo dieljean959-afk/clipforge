@@ -248,7 +248,17 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
   // working for a recipient. Only the second one earns the green tick.
   const fileReady = entry.ready;
   const label = fileReady ? "Share" : "Share link";
-  const onClick = fileReady ? onShare : onCopyLink;
+  const onClick = useCallback(() => {
+    // Prefer the OS share sheet (file or link) over a silent clipboard copy.
+    // The share sheet is what lets the user send the clip to social media
+    // without downloading it first; a clipboard copy is the fallback for
+    // browsers that do not expose navigator.share at all.
+    if (typeof navigator !== "undefined" && typeof (navigator as unknown as { share?: unknown }).share === "function") {
+      onShare();
+    } else {
+      onCopyLink();
+    }
+  }, [fileReady, onShare, onCopyLink]);
 
   return (
     <Button
