@@ -1448,9 +1448,26 @@ class Pipeline:
             self._log(job_id, "no cuts to caption — skipping")
             return
 
+        # Caption language (TARGET C): use the DETECTED language recorded at
+        # transcription when the job left it on "auto"; a forced job language
+        # ("es"]/"en") still wins. Never machine-translate — the words are
+        # burned exactly as spoken.
+        job_language = str(job.get("language") or "auto").strip().lower()
+        if job_language and job_language != "auto":
+            caption_language: str | None = job_language
+        else:
+            recorded = str(getattr(transcript, "language", "") or "").strip().lower()
+            caption_language = (
+                recorded or translate.guess_language(transcript) or "en"
+            )
+            self._log(job_id, f"caption language: {caption_language} (auto)")
+
+        style_key = str(job.get("captionPreset") or self.settings.subtitle.preset or "bold_pop")
         for i, cut in enumerate(cuts):
             cues = translate.build_cues(
                 transcript, cut, self.settings,
+                language=caption_language,
+                style=style_key,
             )
             # Persist the cue list per clip so the export stage can burn the
             # same cues into the frames without holding the transcript in
