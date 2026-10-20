@@ -12,6 +12,42 @@ LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "ja", "ko", "zh",
 USED_LANGS = {"en", "es"}
 
 
+def guess_language(transcript: Any) -> str | None:
+    """Cheap, honest language guess from the transcript's own words.
+
+    Used ONLY for the caption planner (stopword selection). Prefer an explicit
+    job language hint when the caller has one; this heuristic answers the
+    "auto" case. Spanish markers: ¿ ¡ á é í ó ú ñ plus high-frequency Spanish
+    function words; a score of both marks the majority.
+    """
+    words = getattr(transcript, "words", None)
+    if not words:
+        return None
+    text = " ".join(str(getattr(w, "word", "")) for w in words)
+    es_marks = sum(text.count(c) for c in "¿¡áéíóúñü")
+    es_words = sum(
+        1 for t in text.split()
+        if t.lower().strip(".,!?;:\"¿¡()") in {
+            "que", "de", "el", "la", "los", "las", "una", "uno", "con", "por",
+            "para", "pero", "muy", "esto", "esta", "eso", "aquí", "hay", "más",
+        }
+    )
+    en_words = sum(
+        1 for t in text.split()
+        if t.lower().strip(".,!?;:\"()") in {
+            "the", "and", "is", "that", "this", "you", "with", "for", "was",
+            "are", "have", "they", "what", "like", "just", "know", "going",
+        }
+    )
+    es_score = es_marks * 2 + es_words
+    en_score = en_words
+    if es_score > en_score * 2:
+        return "es"
+    if en_score > es_score * 2:
+        return "en"
+    return "es" if es_score > en_score else ("en" if en_score else None)
+
+
 def normalize_codes(codes: list[str]) -> list[str]:
     """Lower-case + strip. Unknown codes are dropped here, not surfaced later."""
     out: list[str] = []
@@ -26,6 +62,9 @@ def build_cues(
     transcript: Any,
     cut: dict[str, Any],
     settings: Any,
+    *,
+    language: str | None = None,
+    style: str = "viral",
 ) -> list[dict[str, Any]]:
     """Assemble caption cues for ONE rendered clip from a transcript + cut window.
 
@@ -33,10 +72,16 @@ def build_cues(
     the reframe stage's ``cuts`` list and must have numeric ``start``/``end``
     (clip-relative within the source).
 
-    Returns a list of ``{"start": float, "end": float, "text": str}`` cues,
-    clip-relative. This is the shape the caption stage consumes both for building
-    translated tracks and for the burned-in ASS path downstream.
+    SHORT-BURST chunking (the Ssemble-style rhythm): 2-3 word bursts cut on
+    natural pauses, max ~18 characters per display line, each burst shown from
+    its FIRST word's start to its LAST word's end (+80ms linger). With word
+    timings straight from Whisper there is no overlap and no drift — the cue
+    boundary IS the word boundary.
+
+    Returns a list of ``{"start", "end", "text", "words"}`` cues, clip-relative.
     """
+    from app import subtitle as _subtitle
+
     words = getattr(transcript, "words", None)
     if not words:
         return []
@@ -57,50 +102,46 @@ def build_cues(
     if not inside:
         return []
 
-    cues: list[dict[str, Any]] = []
-    buf: list[Any] = []
-    buf_start = inside[0].start
-    buf_end = inside[0].end
-    running = 0.0
+    # Display pipeline shared with the burn stage: bilingual fixes then burst
+    # grouping then the emphasis planner. All timings are clip-relative.
+    lang = language or guess_language(transcript) or "en"
+    as_dicts = [
+        {
+            "start": float(getattr(w, "start", 0.0)) - cut_start,
+            "end": float(getattr(w, "end", 0.0)) - cut_start,
+            "word": str(getattr(w, "word", "")),
+            "conf": float(getattr(w, "conf", 1.0) or 1.0),
+        }
+        for w in inside
+    ]
+    as_dicts, _merged_contr = _subtitle.merge_broken_contractions(as_dicts)
+    as_dicts, _merged_nums = _subtitle.merge_number_runs(as_dicts, lang)
+    kept, _removed = _subtitle.strip_fillers(as_dicts)
+    kept = _subtitle.normalize_word_timings(kept)
 
-    def flush() -> None:
-        nonlocal buf, running
-        if not buf:
-            return
-        text = " ".join(str(getattr(w, "word", "")) for w in buf).strip()
-        cues.append({
-            "start": round(max(0.0, buf_start - cut_start), 3),
-            "end": round(max(0.0, min(cut_end, buf_end) - cut_start), 3),
-            "text": text,
-        })
-        buf = []
-        running = 0.0
-
-    for w in inside:
-        ws = float(getattr(w, "start", 0.0))
-        we = float(getattr(w, "end", 0.0))
-        gap = ws - buf_end if buf else 0.0
-        word_len = we - ws
-
-        if not buf:
-            buf.append(w)
-            buf_start = ws
-            buf_end = we
-            running = word_len
-            continue
-
-        if gap > 0.45:
-            flush()
-            buf_start = ws
-            buf_end = we
-            running = word_len
-        else:
-            buf_end = max(buf_end, we)
-            running += gap + word_len
-
-        buf.append(w)
-
-    flush()
+    preset = _subtitle.get_preset(style)
+    max_chars = preset.max_chars_per_line or 18
+    cues = _subtitle.words_to_cues(
+        kept,
+        words_per_cue=2,
+        max_words=3,
+        max_chars=max_chars * 2,   # cue-level cap = 2 display lines
+        max_duration=2.2,
+        pause_sec=0.30,
+    )
+    # end+80ms linger, clamped by the next cue's start — never overlaps.
+    for i, c in enumerate(cues):
+        nxt = cues[i + 1] if i + 1 < len(cues) else None
+        limit = (float(nxt.get("start") or 0.0) - 0.001) if nxt else None
+        shifted = float(c.get("end") or 0.0) + 0.08
+        c["end"] = min(shifted, limit) if limit is not None and limit > c["end"] else max(c["end"], min(shifted, limit) if limit is not None else shifted)
+    _subtitle.build_emphasis(cues, language=lang)
+    # display text: only up to 2 lines per burst, wrapped on words
+    for c in cues:
+        c["text"] = _subtitle.display_text(
+            c["text"], uppercase=preset.uppercase,
+            max_line=(preset.max_chars_per_line or 18),
+        )
     return cues
 
 

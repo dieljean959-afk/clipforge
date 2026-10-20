@@ -1069,6 +1069,9 @@ class Pipeline:
                     duration=float(data.get("duration", 0)),
                     model_size=str(data.get("model", self.settings.whisper.model)),
                     engine=str(data.get("engine", "")),
+                    # Recorded detected language survives the resume; older
+                    # transcripts without the key read as "" (unknown → guess).
+                    language=str(data.get("language", "") or ""),
                 )
                 self._set_word_count(job_id, len(words))
                 return transcript
@@ -1190,6 +1193,10 @@ class Pipeline:
             "model": transcript.model_size,
             "engine": transcript.engine,
             "rtf": transcript.rtf,
+            # Record the DETECTED language so the caption stage never guesses
+            # when the engine already knows. Older transcripts without the key
+            # get "" and fall back to the heuristic guess.
+            "language": getattr(transcript, "language", "") or "",
         })
         ws.mark_done("transcribe", artifacts=["transcribe/words.json"],
                      words=len(transcript.words))

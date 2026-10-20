@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import threading
 import time
@@ -101,9 +102,36 @@ class CaptionPreset:
     # short bursts, the word being spoken lit up as it is spoken.
     highlight: bool = False
     position_y: float = 0.78
+    # Per-chunk 1-2 keyword emphasis with rotating accent colours (see
+    # EMPHASIS_COLORS below). Not every cue gets a highlight; the choice
+    # and the colours are decided by the emphasis planner, not by the ASS
+    # writer.
+    word_emphasis: bool = False
+    # Display text in UPPERCASE. Spanish accents and inverted punctuation
+    # survive uppercasing because it is done with str.upper() — Unicode
+    # aware ("é".upper() -> "É", "¿" stays "¿", "ñ" -> "Ñ").
+    uppercase: bool = False
+    # Per-preset font override: some looks are font-specific (the
+    # Ssemble-style preset is a Montserrat ExtraBold look; the others keep
+    # the configured family). ``None`` inherits [subtitle] font.
+    font_override: str | None = None
+    fonts_dir_override: str | None = None
+    max_chars_per_line: int = 0  # 0 = no per-line cap (words wrap naturally)
+
+
+EMPHASIS_COLORS: tuple[str, ...] = ("#1FE01F", "#FFF000", "#FF1A1A")
 
 
 CAPTION_PRESETS: dict[str, CaptionPreset] = {
+    "viral": CaptionPreset(
+        key="viral", label="Ssemble-style viral",
+        font_size=70, primary="#FFFFFF", secondary="#1FE01F",
+        outline_color="#0A0A0A", outline_width=7, shadow=1,
+        font_override="Montserrat ExtraBold",
+        fonts_dir_override="fonts",
+        pop=True, word_emphasis=True, position_y=0.71,
+        uppercase=True, max_chars_per_line=18,
+    ),
     "bold_pop": CaptionPreset(
         key="bold_pop", label="Bold pop (default)",
         font_size=68, primary="#FFFFFF", secondary="#39FF14",
@@ -176,6 +204,10 @@ class Transcript:
     # (RTF = wall-seconds / audio-seconds; lower is faster).
     engine: str = ""
     rtf: float | None = None
+    # ISO code the engine detected or the job forced ("en", "es"...). Empty on
+    # transcripts written before this field existed — every reader treats ""
+    # as "unknown, guess from the words" (translate.guess_language).
+    language: str = ""
 
 
 _MODEL_LOCK = threading.Lock()
@@ -510,6 +542,12 @@ def transcribe(
     resumed = 0
     decoded_seconds = 0.0
     decode_wall = 0.0
+    # Language pinning (TARGET C): None means "auto" — the first chunk lets the
+    # engine detect, then every later chunk receives the DETECTED language
+    # explicitly instead of re-detecting. `language` given by the caller means
+    # the job forced a language and detection never runs.
+    detect_pinned: str | None = None if language is None else "en-forced"
+    detected_language: str | None = None
     try:
         for idx, (w_start, w_end) in enumerate(windows):
             # Pause between transcript chunks, never mid-decode. Every finished
@@ -580,9 +618,26 @@ def transcribe(
                 if attempt > CHUNK_ATTEMPTS:
                     engine = _load_smaller_model(settings, loaded)
                 try:
+                    # 'auto' pins NOTHING on the first chunk: the engine is
+                    # allowed to detect, and whatever it detected is then
+                    # PASSED EXPLICITLY to every later chunk — Whisper's own
+                    # per-chunk redetection is what breaks a mixed stream.
+                    # An explicitly configured/forced language always wins.
+                    # (detect_pinned is the sentinel "en-forced" when the
+                    # caller forced a language, so the truthy test below keeps
+                    # chunks honest in both modes.)
+                    chunk_lang = language or (detect_pinned if detect_pinned != "en-forced" else None)
                     words, _detected = engine.asr_words(
-                        audio, language, on_segment=on_segment,
+                        audio, chunk_lang, on_segment=on_segment,
                     )
+                    if _detected and not language and detect_pinned is None:
+                        # first auto chunk: pin what the engine heard
+                        detect_pinned = _detected
+                        detected_language = _detected
+                        logger.info(
+                            f"[subtitle] engine detected language=\"{_detected}\" "
+                            "on the first chunk — pinning it for the rest"
+                        )
                     if attempt > 1:
                         logger.warning(
                             f"[subtitle] chunk {idx + 1}/{len(windows)} decoded on "
@@ -679,11 +734,13 @@ def transcribe(
         model_size=ran_model,
         engine=loaded.engine,
         rtf=round(rtf, 4) if rtf is not None else None,
+        language=language or detected_language or "",
     )
     logger.info(
         f"[subtitle] transcribed {len(words_out)} words across {len(windows)} chunk(s), "
         f"{transcript.duration:.1f}s of audio, model '{ran_model}'"
         + (f", RTF {rtf:.3f} ({loaded.engine})" if rtf is not None else "")
+        + (f", language '{transcript.language}'" if transcript.language else ""),
     )
     return transcript
 
@@ -771,6 +828,10 @@ def _placeholder_for(conf: float, inaudible_threshold: float = INAUDIBLE_BELOW) 
 FILLER_WORDS = frozenset({
     "um", "umm", "uh", "uhh", "uhm", "erm", "er", "ah", "eh", "hmm", "hm",
     "mhm", "mm", "mmh", "uhhuh", "huh", "huhhuh", "ummm", "hmmmm",
+    # Spanish vocal fillers heard on Caribbean/US LatAm speech (same rule as
+    # the English ones: unambiguous noise only, real words never blanked —
+    # notably NOT "pues", which carries meaning).
+    "ehh", "ahh", "ehm", "mmm", "mmmh",
 })
 
 #: Two identical words count as a stutter only if this little time separates
@@ -786,6 +847,166 @@ def _norm_token(word: str) -> str:
 
 def is_filler(word: str) -> bool:
     return _norm_token(word) in FILLER_WORDS
+
+
+# --------------------------------------------------------------------------- #
+# Bilingual caption fixes (English + Spanish)
+#
+# Whisper's known failure modes on this content are the same in both languages:
+#   * numbers split into many words ("tres mil millones", "one point five")
+#   * contractions broken into two words by the tokenizer (English "isn't" ->
+#     "is n't", "gon na", "wan na")
+#
+# Both fixes are TIMING-preserving: the words are merged into one visual word
+# and the merged span is the union of the spans, so caption sync never drifts.
+# Spanish keeps every accent and inverted mark (¿ ¡) intact throughout — none
+# of these rules ever normalise or strip characters.
+# --------------------------------------------------------------------------- #
+
+#: Number words that merge with their neighbour when they form one number.
+#: "tres mil millones" -> one number phrase, not three captions.
+#: Purely additive, never subtractive: all three words stay on screen, they are
+#: simply shown as one longer burst rather than three separate ones.
+_ES_NUMBER_WORDS = frozenset({
+    "cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho",
+    "nueve", "diez", "once", "doce", "trece", "catorce", "quince", "veinte",
+    "treinta", "cuarenta", "cincuenta", "sesenta", "setenta", "ochenta",
+    "noventa", "cien", "ciento", "doscientos", "trescientos", "quinientos",
+    "mil", "millón", "millon", "millones", "mil millones", "medio", "media",
+})
+
+_EN_NUMBER_WORDS = frozenset({
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "twenty", "thirty", "forty", "fifty",
+    "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million",
+    "billion", "trillion", "point", "half", "double", "triple",
+})
+
+#: English tokenizer splits that Whisper commonly emits, merged back.
+#: Keys are the split pair in sequence; the first word ends the lookbehind.
+#:
+#: This is DEBATEABLE on tod-day speech only when the pair arrives as separate
+#: Whisper tokens, which is the split case, not genuine speech — genuine speech
+#: arrives as one token ("isn't"), so the merge never touches it.
+EN_CONTRACTIONS = {
+    ("is", "n't"): "isn't",    ("are", "n't"): "aren't",
+    ("was", "n't"): "wasn't",
+    ("were", "n't"): "weren't",
+    ("does", "n't"): "doesn't",
+    ("did", "n't"): "didn't",
+    ("do", "n't"): "don't",
+    ("wo", "n't"): "won't",
+    ("ca", "n't"): "can't",
+    ("could", "n't"): "couldn't",
+    ("would", "n't"): "wouldn't",
+    ("should", "n't"): "shouldn't",
+    ("has", "n't"): "hasn't",
+    ("have", "n't"): "haven't",
+    ("had", "n't"): "hadn't",
+    ("gon", "na"): "gonna",
+    ("wan", "na"): "wanna",
+    ("got", "ta"): "gotta",
+    ("kind", "of"): "kinda",
+    ("lot", "of"): "lotta",
+    ("out", "of"): "outta",
+}
+
+
+def merge_broken_contractions(
+    words: list[dict],
+) -> tuple[list[dict], int]:
+    """Merge Whisper-split English contractions back into one word.
+
+    "is n't" -> "isn't". The merged word keeps the UNION of the two time
+    spans, so the karaoke highlight for the word covers the whole spoken
+    contraction rather than only its first half.
+
+    Never merges a pair that is genuinely separated in time or across a
+    detected pause (a gap larger than a third of a second means the "is" and
+    the "n't" came from different speech), and never merges across removed
+    filler words.
+    """
+    out: list[dict] = []
+    merged = 0
+    i = 0
+    while i < len(words):
+        w = words[i]
+        w0 = _norm_token(str(w.get("word", "")))
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        if nxt is not None:
+            w1 = _norm_token(str(nxt.get("word", "")))
+            gap = float(nxt.get("start") or 0.0) - float(w.get("end") or 0.0)
+            joined = EN_CONTRACTIONS.get((w0, w1))
+            if joined and gap <= 0.33:
+                out.append({
+                    **w,
+                    "word": joined,
+                    "end": max(float(w.get("end") or 0.0), float(nxt.get("end") or 0.0)),
+                    "conf": min(float(w.get("conf") or 1.0), float(nxt.get("conf") or 1.0)),
+                })
+                merged += 1
+                i += 2
+                continue
+        out.append(w)
+        i += 1
+    return out, merged
+
+
+def merge_number_runs(
+    words: list[dict],
+    language: str | None = None,
+) -> tuple[list[dict], int]:
+    """Glue spoken-out numbers into runs of words grouped per caption.
+
+    "tres mil millones" spoken across three Whisper tokens is ONE number; the
+    three tokens usually land in two different captions, which is how a
+    caption showing a bare "mil" reads like a mistake. Merging the run into a
+    single visual word (union span, single highlight) puts it together.
+
+    The merge NEVER spans a pause (gap > 0.4s): a number followed by a breath
+    and new speech is not one phrase.
+
+    Runs are bounded: at most four consecutive number-words become one visual
+    word, so a pathological run of digits/number-words cannot build a caption
+    so wide it overflows the frame.
+    """
+    es = _ES_NUMBER_WORDS if (language or "").startswith("es") else _EN_NUMBER_WORDS
+    out: list[dict] = []
+    merged = 0
+    i = 0
+    while i < len(words):
+        w = words[i]
+        w0 = _norm_token(str(w.get("word", "")))
+        if w0 not in es:
+            out.append(w)
+            i += 1
+            continue
+        run: list[dict] = [w]
+        j = i + 1
+        while (
+            j < len(words)
+            and len(run) < 4
+            and _norm_token(str(words[j].get("word", ""))) in es
+        ):
+            gap = float(words[j].get("start") or 0.0) - float(run[-1].get("end") or 0.0)
+            if gap > 0.4:
+                break
+            run.append(words[j])
+            j += 1
+        if len(run) > 1:
+            joined = " ".join(str(x.get("word", "")) for x in run)
+            out.append({
+                **run[0],
+                "word": joined,
+                "end": max(float(x.get("end") or 0.0) for x in run),
+                "conf": min(float(x.get("conf") or 1.0) for x in run),
+            })
+            merged += len(run) - 1
+            i = j
+        else:
+            out.append(w)
+            i += 1
+    return out, merged
 
 
 def strip_fillers(
@@ -930,6 +1151,189 @@ def words_to_cues(
     return cues
 
 
+# --------------------------------------------------------------------------- #
+# Keyword emphasis (TARGET B) — 1-2 highlighted words per chunk in rotating
+# #1FE01F / #FFF000 / #FF1A1A, chosen with language-aware stopword lists so
+# Spanish and English get the same treatment by the same code.
+#
+# Not every chunk gets a highlight: a chunk whose words are all stopwords, or
+# one that already had one in the previous chunk, stays white. The rotation is
+# a module-level counter shared across one build_emphasis() call (per clip),
+# which is what makes the colours alternate rather than repeat.
+# --------------------------------------------------------------------------- #
+
+#: Features that make a word worth emphasising. Numbers first (they carry the
+#: claim), then strong verbs/nouns, then anything long and uncommon. Built from
+#: the target's own rule: "numbers, strong verbs, emotional or punchline words".
+_STRONG_WORD_SUFFIXES_ES = ("ísimo", "ísima", "azo", "aza", "ote", "ota", "mente")
+_STRONG_WORD_SUFFIXES_EN = ("ing", "ed", "est", "er")
+
+_STOPWORDS_ES = frozenset("""
+    a al algo alguien algunas algunos ante antes como con contra cual cuando
+    de del desde donde dos el ella ellas ellos en entre era erais eran eras
+    eres es esa esas ese eso esos esta estaba estaban estamos estar esto estos
+    estoy fue fueron fui ha habia han hasta hay he hemos la las le les lo los
+    mas me mi mia mias mientras mio mios mis misma mismo mucho muy nada ni no
+    nos nosotros nuestra nuestras nuestro nuestros o os otra otras otro otros
+    para pero poco por porque quien que se sea segun ser si sido siempre sin
+    sobre solo son su sus tambien tan tanto te tiene tienen toda todas todo
+    todos tu tus un una uno unos ustede ustedes va vale y ya yo ese esa
+    este esta esos esas esto entonces entonces pero bueno pues mira oye
+    claro si vale ok perfecto Gracias gracias hola adios
+""".split())
+
+_STOPWORDS_EN = frozenset("""
+    a about above after again all also am an and any are as at be because
+    been before being between both but by can cant come could did do does
+    doing dont down during each even every few for from get gets getting give
+    go goes going gonna got great had has have having he her here hers him
+    his how i id if im in into is it its ive just know like me mean more most
+    much must my never new no not now of off on once one only or other our
+    out over own really right said same say see she should so some still such
+    sure take than that the their them then there these they thing think
+    this those though through to too under until up us use used using very
+    was way we well were what when where which while who why will with would
+    yeah yes you your youre okay ok um uh like so just well actually literally
+""".split())
+
+_NUMBER_TOKEN = re.compile(r"[0-9]+([.,][0-9]+)?")
+
+
+def _word_feature(word: str, language: str | None) -> int:
+    """How worth emphasising a single word is. Higher is better."""
+    w = _norm_token(word)
+    if not w:
+        return 0
+    stops = _STOPWORDS_ES if (language or "").startswith("es") else _STOPWORDS_EN
+    suffixes = (
+        _STRONG_WORD_SUFFIXES_ES if (language or "").startswith("es")
+        else _STRONG_WORD_SUFFIXES_EN
+    )
+    if _NUMBER_TOKEN.search(word):
+        return 10  # numbers carry the claim — always emphasise them first
+    if w in stops:
+        return 0
+    score = min(len(w), 6)
+    if any(w.endswith(s) for s in suffixes):
+        score += 2
+    # ALL-CAPS source words (model emphasis) and quoted span go first
+    if word.isupper():
+        score += 3
+    return score
+
+
+def build_emphasis(
+    cues: list[dict],
+    *,
+    language: str | None = None,
+    enabled: bool = True,
+) -> None:
+    """Pick 1-2 key words per cue and tag them with rotating accent colours.
+
+    Mutates each cue dict in place, adding ``emphasis`` = list of
+    ``{"word": str, "color": "#RRGGBB"}`` pairs. Consumed by the ASS writer
+    (``_karaoke_tags``/``build_ass_events``) so the highlighted word is
+    painted in its colour for the span the word is SPOKEN, and white
+    otherwise — the target's rule, not "every word karaoke-filled".
+
+    Rule: at most 1-2 words per chunk, highest feature score first, the two
+    colours rotate through EMPHASIS_COLORS across the clip as a whole, and a
+    chunk with no strong word at all (all stopwords) gets nothing — not every
+    chunk is emphasised.
+    """
+    if not enabled:
+        return
+    rotation = 0
+    last_cue_had = False
+    for cue in cues:
+        if cue.get("uncertain"):
+            continue
+        words = cue.get("words") or []
+        scored = sorted(
+            (( _word_feature(str(w.get("word", "")), language), i, w)
+             for i, w in enumerate(words)),
+            key=lambda t: (-t[0], t[1]),
+        )
+        picks: list[dict] = []
+        for score, _i, w in scored:
+            if score < 2:
+                continue
+            wtxt = str(w.get("word", "")).strip()
+            if any(p["word"].lower() == wtxt.lower() for p in picks):
+                continue
+            picks.append({"word": wtxt, "color": EMPHASIS_COLORS[rotation % len(EMPHASIS_COLORS)]})
+            rotation += 1
+            if len(picks) >= (2 if score >= 6 else 1):
+                break
+        # Not every chunk: skip when nothing scored and the previous chunk was
+        # ALSO left plain, so at least every other cue carries colour.
+        if not picks:
+            if not last_cue_had and scored and scored[0][0] >= 2:
+                pass  # nothing strong enough — stay white
+            last_cue_had = False
+            cue["emphasis"] = []
+            continue
+        cue["emphasis"] = picks
+        last_cue_had = True
+
+
+def display_text(text: str, *, uppercase: bool, max_line: int = 0) -> str:
+    """Caption display text: Unicode uppercase, optionally wrapped per line.
+
+    Uppercasing is str.upper() — Unicode-aware, so Spanish accents and the
+    inverted ¿ ¡ survive ("á”.upper() -> "Á", "¿" unchanged). The optional
+    per-line cap is a target (about 18 chars), not a hard cut: it wraps on a
+    word boundary so no word is ever split.
+    """
+    t = text.upper() if uppercase else text
+    if max_line and len(t) > max_line:
+        words = t.split()
+        lines: list[str] = []
+        cur = ""
+        for w in words:
+            if cur and len(cur) + 1 + len(w) > max_line:
+                lines.append(cur)
+                cur = w
+            else:
+                cur = f"{cur} {w}" if cur else w
+        if cur:
+            lines.append(cur)
+        t = "\\N".join(lines)
+    return t
+
+
+def hook_title_text(
+    cue_texts: list[str],
+    *,
+    language: str | None = None,
+    existing_title: str | None = None,
+) -> str:
+    """A 3-8 word hook title for the whole clip, in the audio's language.
+
+    Prefers the detection stage's own title (it is already the AI's chosen
+    hook), truncated/filled to the 3-8 word window; falls back to the clip's
+    first strong sentence fragment. Never translates — whatever language the
+    transcript is in is what comes out.
+    """
+    words: list[str]
+    if existing_title and existing_title.strip():
+        words = existing_title.strip().split()
+    else:
+        joined = " ".join(cue_texts)
+        # take the longest strong-worded opening — enough for a hook
+        strong = [w for w in joined.split() if _word_feature(w, language) >= 4]
+        words = (strong or joined.split())[:8] or [""]
+    if len(words) < 3:
+        # pad from the transcript's own first words so the hook is 3+ words
+        extra = " ".join(cue_texts).split()
+        for w in extra:
+            if len(words) >= 3:
+                break
+            if w not in words:
+                words.append(w)
+    return " ".join(words[:8]).strip()
+
+
 def _make_cue(
     start: float, end: float, text: str, words: list[dict],
     threshold: float, inaudible_threshold: float,
@@ -949,6 +1353,22 @@ def _make_cue(
         cue["uncertain"] = True
         cue["confidence"] = round(conf, 3)
     return cue
+
+
+def ass_font_dir(settings: Settings, preset_key: str | None = None) -> str | None:
+    """The fonts dir libass should load for this preset, or None.
+
+    The Viral preset ships Montserrat inside ``app/fonts``; libass must be
+    told to look there (fontsdir) because the host has no system Montserrat.
+    Returns a POSIX path, ready to interpolate into a filtergraph argument.
+    """
+    p = get_preset(preset_key)
+    dir_name = p.fonts_dir_override
+    if not dir_name:
+        return None
+    # app/fonts, relative to this module
+    d = Path(__file__).resolve().parent / dir_name
+    return str(d).replace("\\", "/") if d.exists() else None
 
 
 def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
@@ -984,7 +1404,10 @@ def build_ass_header(
     settings: Settings, width: int, height: int, preset_key: str | None = None
 ) -> str:
     p = get_preset(preset_key, settings.subtitle.highlight_color)
-    font = settings.subtitle.font
+    # Per-preset font override: the Viral look is a Montserrat ExtraBold look;
+    # shipping it in the configured family would erase the style. Falls back
+    # to the [subtitle] font when the preset does not name one.
+    font = p.font_override or settings.subtitle.font
     primary = _hex_to_ass(p.primary)
     secondary = _hex_to_ass(p.secondary)
     outline = _hex_to_ass(p.outline_color)
@@ -1057,7 +1480,27 @@ def build_ass_events(
     for c in cues:
         start = _ass_time(c["start"] - start_offset)
         end = _ass_time(c["end"] - start_offset)
-        if highlight and c.get("words") and not c.get("uncertain"):
+        # The Viral preset: static keyword colours + UPPERCASE display text,
+        # not karaoke fill. Emphasis is planned per cue (build_emphasis),
+        # consumed here, and degrades to plain text when the cue was left
+        # un-emphasised — never every chunk painted.
+        if p.word_emphasis and not c.get("uncertain"):
+            text = display_text(
+                c["text"], uppercase=p.uppercase,
+                max_line=(p.max_chars_per_line or 0),
+            ).replace("{", "(").replace("}", ")")
+            tagged = _emphasis_tags({**c, "text": text}, uppercase=True)
+            if tagged:
+                plain = tagged
+            else:
+                plain = text
+            if p.pop:
+                plain = (
+                    r"{\fad(60,40)\fscx90\fscy90\t(0,100,\fscx100\fscy100)}"
+                    + plain
+                )
+            text = plain
+        elif highlight and c.get("words") and not c.get("uncertain"):
             # A cue whose words are all blank still has to render as text —
             # an empty Dialogue line is a caption that shows nothing.
             tagged = _karaoke_tags(c)
@@ -1080,6 +1523,63 @@ def build_ass_events(
                 )
         lines.append(f"Dialogue: 0,{start},{end},ClipForge,,0,0,0,,{text}")
     return "\n".join(lines) + "\n"
+
+
+def _emphasis_tags(cue: dict, uppercase: bool) -> str:
+    """Per-word inline colouring for the keyword-emphasis styles.
+
+    Every word is wrapped in ``{\\1c&H..&}`` — white for normal words, the
+    planned accent for emphasized ones. Unlike karaoke (\\k), the colour is
+    static per word: the target's look paints the KEY WORDS, not the word
+    being spoken. The cue's own text is used (already display-cased) so the
+    burn matches word-for-word what the plain path renders.
+
+    ``_hex_to_ass`` maps #RRGGBB into ASS BGR (&H00BBGGRR), so quoting the
+    converted string directly is correct and no channel reshuffling is done
+    here — doing it twice is the classic inline-colour bug.
+    """
+    emph: dict[str, str] = {}
+    colored_words: dict[str, str] = {}
+    for e in (cue.get("emphasis") or []):
+        key = str(e.get("word", "")).strip()
+        if not key:
+            continue
+        color = _hex_to_ass(str(e.get("color", "#FFFFFF")))
+        emph[key.upper()] = color
+        # A merged phrase ("tres mil millones") is one emphasis entry but
+        # arrives as several display tokens — register each of its words so
+        # every token of the phrase is painted, not just the first.
+        for word in key.split():
+            colored_words.setdefault(_norm_display_word(word), color)
+    if not emph:
+        return ""
+    white = _hex_to_ass("#FFFFFF")
+    parts: list[str] = []
+    for w in [str(w or "") for w in str(cue.get("text", "")).split()]:
+        # A display token can carry the ASS \\N line-break inside it
+        # (max_chars_per_line wrapping), and the two halves may belong to
+        # DIFFERENT states — "CASI\\NIMPOSIBLE" has CASI emphasized and
+        # IMPOSIBLE plain. Colour per sub-word, keep the break where it was.
+        subs = w.split("\\N")
+        colored: list[str] = []
+        for sub in subs:
+            text = sub.replace("{", "(").replace("}", ")")
+            color = colored_words.get(_norm_display_word(sub))
+            colored.append(
+                r"{\1c" + color + "&}" + text + r"{\1c" + white + "&}"
+                if color else text
+            )
+        parts.append("\\N".join(colored))
+    return " ".join(parts)
+
+
+def _norm_display_word(w: str) -> str:
+    """Display token -> comparable key: strip the ASS line-break, case-fold,
+    and strip edge punctuation."""
+    return (
+        w.replace("\\N", " ").strip().strip(".,!?;:\"()[]…¿¡").strip()
+        .upper()
+    )
 
 
 def write_ass(

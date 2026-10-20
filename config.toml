@@ -37,7 +37,12 @@ compute_type = "auto"
 # which truncates the transcript and quietly wrecks clip boundaries).
 # WARNING: a WRONG forced language is worse than "auto" — it does not fall
 # back. Set this to the language your sources are actually in.
-language = "en"
+#
+# "auto" is the right default for mixed EN/ES batches: the FIRST chunk is
+# allowed to detect, and the detected language is then passed EXPLICITLY to
+# every later chunk (app/subtitle.transcribe) instead of Whisper re-detecting
+# per chunk — which is what breaks a stream that starts in one language.
+language = "auto"
 # 30s windows decoded per batched pass (WhisperX's default is 8).
 # Lower it if the host is RAM-constrained; raise it on a big GPU.
 batch_size = 8
