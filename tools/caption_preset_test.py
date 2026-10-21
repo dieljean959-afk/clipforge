@@ -100,6 +100,66 @@ def main() -> int:
     else:
         tr_settings = None
 
+    _tm = translate_mod
+    _settings_cls = getattr(_tm, 'Settings', None)
+    if _settings_cls is not None:
+        tr_settings = _settings_cls(
+            source_lang="en",
+            target_langs=[lang],
+            glossary=[],
+            model="gpt-4o-mini",
+            provider="openai",
+            batch_size=30,
+            temperature=0.0,
+        )
+    else:
+        tr_settings = None
+
+    _tm = translate_mod
+    _settings_cls = getattr(_tm, 'Settings', None)
+    if _settings_cls is not None:
+        tr_settings = _settings_cls(
+            source_lang="en",
+            target_langs=[lang],
+            glossary=[],
+            model="gpt-4o-mini",
+            provider="openai",
+            batch_size=30,
+            temperature=0.0,
+        )
+    else:
+        tr_settings = None
+
+    _tm = translate_mod
+    _settings_cls = getattr(_tm, 'Settings', None)
+    if _settings_cls is not None:
+        tr_settings = _settings_cls(
+            source_lang="en",
+            target_langs=[lang],
+            glossary=[],
+            model="gpt-4o-mini",
+            provider="openai",
+            batch_size=30,
+            temperature=0.0,
+        )
+    else:
+        tr_settings = None
+
+    _tm = translate_mod
+    _settings_cls = getattr(_tm, 'Settings', None)
+    if _settings_cls is not None:
+        tr_settings = _settings_cls(
+            source_lang="en",
+            target_langs=[lang],
+            glossary=[],
+            model="gpt-4o-mini",
+            provider="openai",
+            batch_size=30,
+            temperature=0.0,
+        )
+    else:
+        tr_settings = None
+
     # bold_pop is the DEFAULT: no preset_key must behave identically to
     # explicitly asking for it, or a job submitted without a choice would
     # silently pick a different style.
