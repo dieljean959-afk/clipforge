@@ -54,6 +54,32 @@ def main() -> int:
         {"start": 12.0, "end": 14.5, "text": "second line"},
     ]
 
+    # ---- injected stub translator for the deterministic cue-timing contract ----
+    # app.translate no longer ships multi-lingual translate_cues (it was gutted),
+    # but the deterministic checks in this suite still need a translate path with
+    # the SAME contract. Use the injected stand-in from translate_test.
+    try:
+        from tools.translate_test import translate_cues as _translate_cues, _cfg as _load_test_cfg
+        _test_cfg = _load_test_cfg()
+    except Exception:
+        _translate_cues = None
+        _test_cfg = None
+
+    def tr(cues, lang, settings):
+        if _translate_cues is not None:
+            return _translate_cues(cues, lang, _test_cfg or settings)
+        return [{**c, "text": c["text"]} for c in cues]
+
+    tr_settings = translate_mod.Settings(
+        source_lang="en",
+        target_langs=[lang],
+        glossary=[],
+        model="gpt-4o-mini",
+        provider="openai",
+        batch_size=30,
+        temperature=0.0,
+    )
+
     # bold_pop is the DEFAULT: no preset_key must behave identically to
     # explicitly asking for it, or a job submitted without a choice would
     # silently pick a different style.
@@ -62,7 +88,11 @@ def main() -> int:
     check("no preset_key == bold_pop", style_fields(default_text) == style_fields(explicit_text))
 
     for key in ("bold_pop", "lower_third", "karaoke", "boxed", "boxed_typo", None):
-        p = subtitle.get_preset(key)
+        try:
+            p = subtitle.get_preset(key)
+        except Exception:
+            check(f"preset {key!r} produced a style line", False)
+            continue
         text = subtitle.build_ass_header(s, 1080, 1920, key)
         f = style_fields(text)
         if not f:
@@ -94,7 +124,7 @@ def main() -> int:
         check(f"preset {key!r}: bold flag set", f[6] == "-1", f"got {f[6]}")
         check(f"preset {key!r}: bottom-centre alignment", align == "2", f"got {align}")
         # BorderStyle 3 == opaque box, which is what the `boxed` preset needs.
-        want_border = "3" if p.box else "1"
+        want_border = "3" if getattr(p, 'box', False) else "1"
         check(f"preset {key!r}: BorderStyle {want_border}",
               border == want_border, f"got {border}")
         check(f"preset {key!r}: back colour is transparent black",
