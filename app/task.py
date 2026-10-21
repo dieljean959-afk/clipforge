@@ -924,7 +924,8 @@ class Pipeline:
             # so a job whose recorded filename is authoritative still resolves
             # the same way it always did; the general sweep is the fallback for
             # a job written under the other root.
-            expected = f"source{Path(job['source']).suffix.lower() or '.mp4'}"
+            source_file = job.get("source") or ""
+            expected = "source" + Path(source_file).suffix.lower() or ".mp4"
             src: Path | None = None
             for candidate_dir in self.settings.app.paths.job_source_dirs(job_id):
                 named = candidate_dir / expected

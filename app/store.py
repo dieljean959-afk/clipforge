@@ -591,7 +591,7 @@ class LocalStore:
                 "start": round(start, 3),
                 "end": round(end, 3),
                 "score": float(c.get("score", 0.0) or 0.0),
-                "title": _title_from_words(c, words) or "Clip",
+                "title": self._title_from_words(c, words) or "Clip",
                 "hookText": str(c.get("hook_text", "") or ""),
                 "transcript": str(c.get("transcript", "") or ""),
                 "hashtags": [str(h) for h in (c.get("hashtags") or [])],
