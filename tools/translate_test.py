@@ -14,10 +14,9 @@ good at French", it is the deterministic parts around it —
   4. TEXT IS NEVER LOST. Over-long cues are flagged, not truncated.
   5. GLOSSARY. Brand terms must survive; a miss is reported, and a term the
      speaker never said must not raise a false alarm.
-  6. FORMAT. SRT uses comma milliseconds, VTT uses dots and a WEBVTT header.
-
-Run: python3 tools/translate_test.py
+  6. FORMAT. SRT uses comma milliseconds, VTT uses dots and a WEBVTT header.Run:  python3 tools/translate_test.py
 """
+
 from __future__ import annotations
 
 import json
