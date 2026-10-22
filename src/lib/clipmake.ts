@@ -1,4 +1,4 @@
-// Shared ClipForge client library. Formatting helpers and stage metadata.
+// Shared Clipmake client library. Formatting helpers and stage metadata.
 // NOTE: the old "scene preview" generator (invented labels/gradients) was
 // deleted on purpose — previews are real <video> elements of rendered MP4s.
 
@@ -218,7 +218,7 @@ export function fmtEta(sec: number): string {
  *   a verdict: a single long ffmpeg encode legitimately produces no progress
  *   line for a while, so this must not look like an error.
  * - The STALL budget is owned by the SERVER (app/worker.py
- *   STALL_TIMEOUT_SEC, overridable per-deploy with CLIPFORGE_STALL_TIMEOUT_SEC)
+ *   STALL_TIMEOUT_SEC, overridable per-deploy with CLIPMAKE_STALL_TIMEOUT_SEC)
  *   and reaches the UI as health.worker.stallTimeoutSec. A frontend copy of
  *   that number is what let the card promise recovery "1.5 minutes" after the
  *   server was really waiting 3, so there is deliberately no hardcoded stall

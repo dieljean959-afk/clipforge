@@ -309,7 +309,7 @@ def download_url(
                 "This site asked this server to sign in before it would serve the "
                 "video (YouTube: \"Sign in to confirm you're not a bot\"). Export "
                 "cookies.txt from a logged-in browser and set YT_DLP_COOKIES_FILE, "
-                "or attach the video file directly — it is not a ClipForge bug."
+                "or attach the video file directly — it is not a Clipmake bug."
             )
 
     if not settings.download.auto_update:

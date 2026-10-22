@@ -1,4 +1,4 @@
-// ClipForge backend supervisor plugin.
+// Clipmake backend supervisor plugin.
 //
 // The Freebuff platform runs ONE managed web process: the Vite dev server
 // (vite.config.ts `server` block). There is no Procfile/Docker/systemd on this
@@ -30,7 +30,7 @@ import type { Plugin } from "vite";
 
 const ROOT = path.resolve(__dirname);
 const HEALTH = "http://127.0.0.1:8000/api/health";
-const LOG_TAG = "[clipforge-backend]";
+const LOG_TAG = "[clipmake-backend]";
 
 const state = {
   proc: null as ChildProcess | null,
@@ -312,7 +312,7 @@ function installCrashGuards() {
 
 export function clipforgeBackend(): Plugin {
   return {
-    name: "clipforge-backend-supervisor",
+    name: "clipmake-backend-supervisor",
     // 'pre' so the backend boots before the first page request can proxy /api
     enforce: "pre",
 

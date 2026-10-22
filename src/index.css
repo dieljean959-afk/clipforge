@@ -44,7 +44,7 @@
   --animate-neon-pulse: neon-pulse 2.4s ease-in-out infinite;
 }
 
-/* CHANGE VALUES FOR THEME — ClipForge: dark studio palette, neon green #39FF14 accent */
+/* CHANGE VALUES FOR THEME — Clipmake: dark studio palette, neon green #39FF14 accent */
 :root {
   --radius: 0.625rem;
   --background: oklch(0.145 0.012 150);
@@ -80,7 +80,7 @@
   --sidebar-ring: oklch(0.83 0.24 141);
 }
 
-/* Dark mode uses the same ClipForge palette (the app is dark-first) */
+/* Dark mode uses the same Clipmake palette (the app is dark-first) */
 .dark {
   --background: oklch(0.145 0.012 150);
   --foreground: oklch(0.97 0.008 150);

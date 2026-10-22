@@ -1,4 +1,4 @@
-"""Filesystem-backed job/clip store for local ClipForge."""
+"""Filesystem-backed job/clip store for local Clipmake."""
 
 from __future__ import annotations
 

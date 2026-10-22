@@ -13,7 +13,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { api, type JobDto } from "@/lib/api";
-import { sourceLabel } from "@/lib/clipforge";
+import { sourceLabel } from "@/lib/clipmake";
 import { cn } from "@/lib/utils";
 
 /**

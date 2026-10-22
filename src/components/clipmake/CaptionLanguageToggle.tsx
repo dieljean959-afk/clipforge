@@ -97,7 +97,7 @@ export function CaptionLanguageToggle({
         );
       }
 
-      toast.success("Job queued — ClipForge's server is on it.", {
+      toast.success("Job queued — Clipmake's server is on it.", {
         description: mode === "url" ? url.trim() : file?.name,
       });
       setUrl("");

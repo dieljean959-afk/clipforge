@@ -12,12 +12,12 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fmtClock, fmtDuration } from "@/lib/clipforge";
+import { fmtClock, fmtDuration } from "@/lib/clipmake";
 import { api } from "@/lib/api";
 import type { ClipDto } from "@/lib/api";
 
 /** Fired whenever one preview starts playing, so every other one pauses. */
-const PLAY_EVENT = "clipforge:clip-play";
+const PLAY_EVENT = "clipmake:clip-play";
 
 /** HTMLMediaElement error codes, named. */
 const MEDIA_ERR_ABORTED = 1;
@@ -170,7 +170,7 @@ export function ClipPreview({
         // a decode error rejects too. Either way the card must say so rather
         // than sitting on a play icon that does nothing.
         setVideoFailed(true);
-        console.warn("[ClipForge] playback refused", err);
+        console.warn("[Clipmake] playback refused", err);
       }
     } else {
       v.pause();

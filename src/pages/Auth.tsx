@@ -65,7 +65,7 @@ export function AuthPage({ returnTo = "/dashboard" }: AuthPageProps) {
             <div className="flex size-12 items-center justify-center rounded-xl border border-primary/30 bg-primary/10">
               <Sparkles className="size-6 text-primary" />
             </div>
-            <p className="text-sm font-semibold tracking-tight">ClipForge</p>
+            <p className="text-sm font-semibold tracking-tight">Clipmake</p>
             <p className="text-xs text-muted-foreground">
               Sign in to use the hosted pipeline
             </p>

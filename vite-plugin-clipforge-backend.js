@@ -77,7 +77,7 @@ var node_http_1 = require("node:http");
 var node_path_1 = require("node:path");
 var ROOT = node_path_1.default.resolve(__dirname);
 var HEALTH = "http://127.0.0.1:8000/api/health";
-var LOG_TAG = "[clipforge-backend]";
+var LOG_TAG = "[clipmake-backend]";
 var state = {
     proc: null,
     python: null,

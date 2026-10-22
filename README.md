@@ -1,9 +1,9 @@
-# ClipForge
+# Clipmake
 
 **Hosted video → viral clips.** Paste a link to a video you own (or attach the
-file), and ClipForge finds the most viral moments and renders them as vertical
-9:16 clips with animated, burned-in captions — processed on ClipForge's
-server, with files deleted after you download them.
+file), and Clipmake finds the most viral moments and renders them as vertical
+9:16 clips with animated, burned-in captions —processed on Clipmake's
+  server, with files deleted after you download them.
 
 Forked from [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo)
 (MIT) and repurposed from "topic → stock-footage video" to "existing video →
@@ -16,7 +16,7 @@ viral clips". See [LICENSE](LICENSE).
    videos). Manual file upload always works as the fallback.
 2. **Transcribes** it — WhisperX runs VAD-filtered, batched `medium` inference
    and forced alignment for precise **word-level timestamps**. If the optional
-   WhisperX/torch stack is unavailable, ClipForge visibly falls back to
+   WhisperX/torch stack is unavailable, Clipmake visibly falls back to
    batched faster-whisper (`medium`, CPU int8) rather than failing silently.
    Both paths use anti-repetition/no-speech thresholds and overlapping
    resumable chunks. The active engine, device, compute type, model and batch
@@ -256,7 +256,7 @@ The real `clip_05.ass` from the reference batch (21 `Dialogue` lines):
 ```ini
 PlayResX: 1080
 PlayResY: 1920
-Style: ClipForge,Arial Black,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,
+Style: Clipmake,Arial Black,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,
        -1,0,0,0,100,100,0,0,1,2,2,2,60,60,268,1
 Dialogue: 0,0:00:00.00,0:00:02.23,ClipForge,,0,0,0,,What did
 Dialogue: 0,0:00:02.23,0:00:02.45,ClipForge,,0,0,0,,he say?

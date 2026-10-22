@@ -1,7 +1,7 @@
-// Typed REST client for the ClipForge backend (FastAPI, same origin).
+// Typed REST client for the Clipmake backend (FastAPI, same origin).
 // Every call uses relative /api URLs — same origin, no localhost, no IPs.
 
-import type { ClipStage } from "@/lib/clipforge";
+import type { ClipStage } from "@/lib/clipmake";
 
 // NVIDIA NIM is the primary hosted backend; Groq is the backup and shares the
 // same OpenAI-compatible wire format. Order matters — it is the order the

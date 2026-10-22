@@ -25,7 +25,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
-import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
+import { ConfirmDeleteJob } from "@/components/clipmake/ConfirmDeleteJob";
 import { cn } from "@/lib/utils";
 import {
   STAGES,
@@ -44,7 +44,7 @@ import {
   sourceLabel,
   type ClipStage,
   type JobDoc,
-} from "@/lib/clipforge";
+} from "@/lib/clipmake";
 
 const STAGE_ICONS: Record<string, typeof Clock> = {
   queued: Clock,
@@ -58,7 +58,7 @@ const STAGE_ICONS: Record<string, typeof Clock> = {
 
 /** The stall budget is the SERVER's (app/worker.py STALL_TIMEOUT_SEC), read
  * from health and threaded in as `stallTimeoutSec`. These shared constants
- * from @/lib/clipforge only cover the cold first paint, before /api/health has
+ * from @/lib/clipmake only cover the cold first paint, before /api/health has
  * answered.
  *
  * This card used to hold its own hardcoded 90s threshold and then describe it

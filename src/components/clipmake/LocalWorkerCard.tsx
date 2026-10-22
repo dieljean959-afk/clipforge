@@ -34,7 +34,7 @@ import {
   type KeyStatusDto,
   type StorageKeysInput,
 } from "@/lib/api";
-import { fmtBytes } from "@/lib/clipforge";
+import { fmtBytes } from "@/lib/clipmake";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -184,7 +184,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
     typeof health?.disk?.freeBytes === "number" ? health.disk.freeBytes : null;
   const diskTotal =
     typeof health?.disk?.totalBytes === "number" ? health.disk.totalBytes : null;
-  // WHICH volume these numbers describe. Once CLIPFORGE_DATA_DIR moves job
+  // WHICH volume these numbers describe. Once CLIPMAKE_DATA_DIR moves job
   // artefacts to a bigger mount, the sandbox root is irrelevant — saying so
   // keeps the reading honest instead of implying the 4 GB sandbox is full.
   const diskPath = health?.disk?.path ?? null;
@@ -478,7 +478,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             </span>
             <span className="text-primary">API online</span>
             <span className="font-normal text-muted-foreground">
-              — pipeline runs on ClipForge's server
+              — pipeline runs on Clipmake's server
             </span>
           </span>
         )}
@@ -814,7 +814,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             />
             <StorageField
               label="Bucket"
-              placeholder="clipforge-media"
+              placeholder="clipmake-media"
               value={storageForm.bucket ?? ""}
               onChange={(v) => setStorageForm((f) => ({ ...f, bucket: v }))}
             />
@@ -840,7 +840,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               />
               <StorageField
                 label="Prefix (optional)"
-                placeholder="clipforge"
+                placeholder="clipmake"
                 value={storageForm.prefix ?? ""}
                 onChange={(v) => setStorageForm((f) => ({ ...f, prefix: v }))}
               />

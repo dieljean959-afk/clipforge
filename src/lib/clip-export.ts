@@ -2,12 +2,15 @@
 // captions.txt rendering, and the batch ZIP assembly for "Export all 9:16".
 // The ZIP carries the REAL rendered MP4s — no metadata-only exports.
 
+// Built for Clipmake: every name is derived from the clip's own title, so a
+// whole job archives cleanly across machines and re-runs.
+
 import { downloadBlob, downloadText } from "@/lib/zip";
 import {
   fmtSrtTime,
   normalizeHashtags,
   shortenCaption,
-} from "@/lib/clipforge";
+} from "@/lib/clipmake";
 import type { ClipDto, JobDto } from "@/lib/api";
 
 /** Build and download the SRT for one clip. */

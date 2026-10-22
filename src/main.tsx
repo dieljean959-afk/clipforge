@@ -56,7 +56,7 @@ class ToolbarErrorBoundary extends React.Component<
 declare global {
   interface Window {
     /** Set by main.tsx the moment React owns the page; see index.html. */
-    __clipforgeBooted?: boolean;
+    __clipmakeBooted?: boolean;
   }
 }
 
@@ -74,7 +74,7 @@ class RootErrorBoundary extends React.Component<
   }
   componentDidCatch(err: Error) {
     console.error("[WebContainer preview] Root crash:", err);
-    document.title = `ClipForge error: ${err.message || "runtime failure"}`;
+    document.title = `Clipmake error: ${err.message || "runtime failure"}`;
   }
   render() {
     if (this.state.hasError) {
@@ -151,10 +151,10 @@ function AuthRouteContent() {
 }
 const rootEl = document.getElementById("root");
 if (!rootEl) {
-  throw new Error("ClipForge: #root is missing from index.html");
+  throw new Error("Clipmake: #root is missing from index.html");
 }
 
-window.__clipforgeBooted = true;
+window.__clipmakeBooted = true;
 
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
   window.addEventListener("load", () => {
@@ -185,10 +185,10 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
 // worker and old shell cache before the new load starts.
 (() => {
   try {
-    const stuckFlag = sessionStorage.getItem("clipforge.bootLoop");
+    const stuckFlag = sessionStorage.getItem("clipmake.bootLoop");
     const wasStuck = stuckFlag === "aborted";
     if (wasStuck) {
-      console.warn("[clipforge/boot] recovering from prior boot-loop state");
+      console.warn("[clipmake/boot] recovering from prior boot-loop state");
       if (navigator.serviceWorker) {
         navigator.serviceWorker.getRegistrations().then((regs) => {
           regs.forEach((r) => r.unregister());
@@ -199,13 +199,13 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
           Promise.all(
             names
               .filter((n) =>
-                n.indexOf("clipforge-shell-") === 0 || n === "clipforge-share-v1",
+                n.indexOf("clipmake-shell-") === 0 || n === "clipmake-share-v1",
               )
               .map((n) => caches.delete(n)),
           ).catch(() => {});
         }).catch(() => {});
       }
-      sessionStorage.removeItem("clipforge.bootLoop");
+      sessionStorage.removeItem("clipmake.bootLoop");
       logBootEvent("recovered", { clearedWorker: true, clearedShellCaches: true });
     }
   } catch (e) { /* ignore storage errors on some browsers */ }
@@ -213,15 +213,15 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
 
 function logBootEvent(event: string, detail?: Record<string, unknown>) {
   try {
-    (window as any).__clipforgeBootEvents =
-      (window as any).__clipforgeBootEvents || [];
-    (window as any).__clipforgeBootEvents.push({
+    (window as any).__clipmakeBootEvents =
+      (window as any).__clipmakeBootEvents || [];
+    (window as any).__clipmakeBootEvents.push({
       event,
       ts: Date.now(),
       detail,
     });
     if (event === "recovered" || event === "worker-activated") {
-      console.info("[clipforge/boot] " + event, detail);
+      console.info("[clipmake/boot] " + event, detail);
     }
   } catch (e) { /* ignore */ }
 }

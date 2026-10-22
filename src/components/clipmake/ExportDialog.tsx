@@ -48,7 +48,7 @@ export function ExportDialog({
       setZipProgress(50);
       const blob = await api.exportZip(rendered.map((c) => c._id));
       setZipProgress(100);
-      downloadBlob(blob, `clipforge-${job._id}.zip`);
+      downloadBlob(blob, `clipmake-${job._id}.zip`);
       toast.success(`Export ZIP downloaded — ${rendered.length} real MP4${rendered.length === 1 ? "" : "s"}.`, {
         description: "9:16 1080×1920 · H.264/AAC · captions.txt included",
       });

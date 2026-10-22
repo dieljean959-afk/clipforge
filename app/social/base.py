@@ -21,7 +21,7 @@ import urllib.request
 from typing import Any
 
 USER_AGENT = (
-    "ClipForge/1.2 (+https://github.com/harry0703/MoneyPrinterTurbo)"
+    "Clipmake/1.2 (+https://github.com/harry0703/MoneyPrinterTurbo)"
 )
 
 

@@ -1,6 +1,6 @@
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { LogoWordmark } from "@/components/clipforge/LogoMark";
+import { LogoWordmark } from "@/components/clipmake/LogoMark";
 
 export default function NotFound() {
   return (

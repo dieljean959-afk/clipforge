@@ -17,7 +17,7 @@ import { ClipPreview } from "./ClipPreview";
 import { PostMenu } from "./PostMenu";
 import { ShareButton, XQuickButton } from "./ShareButton";
 import { buildClipSrt, copyClipMeta, downloadClipMp4 } from "@/lib/clip-export";
-import { scoreBand, fmtDuration } from "@/lib/clipforge";
+import { scoreBand, fmtDuration } from "@/lib/clipmake";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type { ClipDto } from "@/lib/api";

@@ -1,7 +1,7 @@
 [project]
-name = "clipforge"
+name = "clipmake"
 version = "1.0.0"
-description = "ClipForge — local video → viral clips pipeline (MoneyPrinterTurbo heritage, MIT)"
+description = "Clipmake — local video → viral clips pipeline (MoneyPrinterTurbo heritage, MIT)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

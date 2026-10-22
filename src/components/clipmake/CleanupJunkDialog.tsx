@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { api, type JunkJobDto } from "@/lib/api";
-import { fmtDate } from "@/lib/clipforge";
+import { fmtDate } from "@/lib/clipmake";
 
 /** The server caps one bulk request at 200 ids. */
 const MAX_PER_REQUEST = 200;

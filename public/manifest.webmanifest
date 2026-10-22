@@ -1,10 +1,10 @@
 {
-  "name": "ClipForge",
-  "short_name": "ClipForge",
+  "name": "Clipmake",
+  "short_name": "Clipmake",
   "description": "Turn one long video into ten viral 9:16 clips.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0b120c",
+  "background_color": "#0B120C",
   "theme_color": "#39FF14",
   "icons": [
     {

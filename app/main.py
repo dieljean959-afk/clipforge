@@ -1,4 +1,4 @@
-"""ClipForge local API — FastAPI backend + in-process worker, one process.
+"""Clipmake local API — FastAPI backend + in-process worker, one process.
 
 Endpoints serve the React dashboard and the pipeline artifacts on ./downloads
 and ./outputs. Boot sequence: config validation → ffmpeg check → Whisper model
@@ -334,7 +334,7 @@ def _boot() -> None:
 _boot()
 
 app = FastAPI(
-    title="ClipForge",
+    title="Clipmake",
     version="1.1.0",
     description="Hosted video → viral clips pipeline (MoneyPrinterTurbo heritage).",
 )

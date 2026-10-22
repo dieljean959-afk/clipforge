@@ -24,7 +24,7 @@
 // mechanism; this is the HTTP-layer backstop for clips prefetched outside a
 // live page (share target reopening, a cold start).
 
-const CACHE = "clipforge-share-v1";
+const CACHE = "clipmake-share-v1";
 
 /** True only for the small share artifact. */
 function isShareClip(url) {
@@ -49,7 +49,7 @@ self.addEventListener("activate", (event) => {
     (async () => {
       const names = await caches.keys();
       await Promise.all(
-        names.filter((n) => n !== CACHE && n.indexOf("clipforge-shell-") !== 0).map((n) => caches.delete(n)),
+        names.filter((n) => n !== CACHE && n.indexOf("clipmake-shell-") !== 0).map((n) => caches.delete(n)),
       );
       // Do NOT claim clients here. Claiming every client on activation can
       // interleave an in-flight load with a new worker and is one of the
@@ -69,7 +69,7 @@ self.addEventListener("message", (event) => {
       caches.keys().then((names) => {
         return Promise.all(
           names
-            .filter((n) => n.indexOf("clipforge-shell-") === 0)
+            .filter((n) => n.indexOf("clipmake-shell-") === 0)
             .map((n) => caches.delete(n)),
         );
       }),

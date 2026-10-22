@@ -1327,7 +1327,7 @@ def write_hook_ass(
     # 5-13% window: centre at 9% via Alignment 8 (top-middle) + MarginV 9%.
     margin_v = int(height * 0.09)
     content = f"""[Script Info]
-Title: ClipForge Hook
+Title: Clipmake Hook
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
@@ -1460,7 +1460,7 @@ def build_ass_header(
     back = "&HA0000000" if p.box else "&H80000000"
     pos = p.position_y if preset_key else settings.subtitle.position_y
     return f"""[Script Info]
-Title: ClipForge Captions
+Title: Clipmake Captions
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
@@ -1469,7 +1469,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ClipForge,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0,0,0,100,100,0,0,{border_style},{p.outline_width},{p.shadow},2,60,60,{int(height * (1 - pos))},1
+Style: Clipmake,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0,0,0,100,100,0,0,{border_style},{p.outline_width},{p.shadow},2,60,60,{int(height * (1 - pos))},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

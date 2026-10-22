@@ -1,4 +1,4 @@
-"""Central configuration for the hosted ClipForge service.
+"""Central configuration for the hosted Clipmake service.
 
 ``config.toml`` holds the pruned MoneyPrinterTurbo-style settings. Secret keys
 are supplied by the platform and loaded via python-dotenv. Validation fails

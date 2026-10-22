@@ -9,23 +9,23 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { LogoWordmark } from "@/components/clipforge/LogoMark";
-import { LocalWorkerCard } from "@/components/clipforge/LocalWorkerCard";
-import { RightsNotice } from "@/components/clipforge/RightsNotice";
-import { NewJobForm } from "@/components/clipforge/NewJobForm";
-import { JobCard } from "@/components/clipforge/JobCard";
-import { ClipCard, ScoreBadge } from "@/components/clipforge/ClipCard";
-import { ShareReadinessSummary } from "@/components/clipforge/ShareButton";
-import { ClipPreview } from "@/components/clipforge/ClipPreview";
-import { ExportDialog } from "@/components/clipforge/ExportDialog";
-import { ConfirmDeleteJob } from "@/components/clipforge/ConfirmDeleteJob";
-import { CleanupJunkDialog } from "@/components/clipforge/CleanupJunkDialog";
-import { CaptionStyleDialog } from "@/components/clipforge/CaptionStyleDialog";
-import { GroqUsageBadge } from "@/components/clipforge/GroqUsageBadge";
+import { LogoWordmark } from "@/components/clipmake/LogoMark";
+import { LocalWorkerCard } from "@/components/clipmake/LocalWorkerCard";
+import { RightsNotice } from "@/components/clipmake/RightsNotice";
+import { NewJobForm } from "@/components/clipmake/NewJobForm";
+import { JobCard } from "@/components/clipmake/JobCard";
+import { ClipCard, ScoreBadge } from "@/components/clipmake/ClipCard";
+import { ShareReadinessSummary } from "@/components/clipmake/ShareButton";
+import { ClipPreview } from "@/components/clipmake/ClipPreview";
+import { ExportDialog } from "@/components/clipmake/ExportDialog";
+import { ConfirmDeleteJob } from "@/components/clipmake/ConfirmDeleteJob";
+import { CleanupJunkDialog } from "@/components/clipmake/CleanupJunkDialog";
+import { CaptionStyleDialog } from "@/components/clipmake/CaptionStyleDialog";
+import { GroqUsageBadge } from "@/components/clipmake/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips, useHealth } from "@/hooks/use-poll";
 import { api, type UsageDto, type VerifyClipsDto, waitForSandbox } from "@/lib/api";
-import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipforge";
+import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipmake";
 import { cn } from "@/lib/utils";
 import type { ClipDto } from "@/lib/api";
 
@@ -103,7 +103,7 @@ export default function Dashboard() {
   const { clips, loaded: clipsLoaded } = useClips(effectiveJobId, 2000);
   // The worker's real silence budget. A stall banner that quotes a number
   // invented in the frontend will drift from the server the moment
-  // CLIPFORGE_STALL_TIMEOUT_SEC is set, so the card reads it from health.
+  // CLIPMAKE_STALL_TIMEOUT_SEC is set, so the card reads it from health.
   const { health } = useHealth(10_000);
 
   // "Load older batches" as the reader reaches the end of the pill list. The
@@ -273,7 +273,7 @@ export default function Dashboard() {
         <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">
-              Processed on ClipForge's server — videos are deleted after you download them
+              Processed on Clipmake's server — videos are deleted after you download them
             </p>
             <h1 className="mt-1 text-3xl font-black tracking-tight">
               The forge
