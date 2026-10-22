@@ -41,11 +41,19 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from app.config import ffmpeg_bin, ffprobe_bin
 
 logger = logging.getLogger(__name__)
+
+#: One per-source transcode at a time. A grid of cards all prefetching the
+#: same share copy used to launch N concurrent ffmpeg processes for the same
+#: output and race each other onto the same temp file; the lock is what keeps
+#: that from stalling the whole share route.
+_share_encode_locks: dict[str, Lock] = {}
+_locks_guard = Lock()
 
 #: Geometry of the share copy. 720x1280 is the smallest 9:16 size every
 #: platform still treats as HD, and it is a clean 2x downscale of 1440p.
@@ -86,22 +94,80 @@ SHARE_MOVFLAGS = ["-movflags", "+faststart", "-profile:v", "high", "-level:v", "
 #: One transcode per (master, share) pair at a time, process-wide. Without it,
 #: a grid of cards all prefetching at once would launch N concurrent ffmpeg
 #: processes for the same output and race each other onto the same temp file.
-_encode_locks: dict[str, threading.Lock] = {}
-_locks_guard = threading.Lock()
+_encode_locks: dict[str, Lock] = {}
+_locks_guard = Lock()
 
 
 class ShareRenderError(Exception):
     """The share transcode failed. Callers degrade to the link, never fail."""
 
 
-def _lock_for(path: Path) -> threading.Lock:
+def _lock_for(path: Path) -> Lock:
     key = str(path)
     with _locks_guard:
         lock = _encode_locks.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = Lock()
             _encode_locks[key] = lock
         return lock
+
+
+class JobShareLocker:
+    """Build each job's share copy exactly once, keyed on the job's master.
+
+    The dashboard renders several clips off one job, so without this every
+    clip asks for a *new* 720x1280 downscale and a *new* audio re-encode of a
+    file that is already sitting on disk beside the master. This class keeps
+    the encode, the file, and the invalidation stamp per source master, so a
+    re-render invalidates the derived copy and the next request rebuilds only
+    what changed.
+
+    Access through `get(share_copy_for)` only: the shared lock and the stamp
+    are internal. `force` re-builds a job that has already cached bytes.
+    """
+
+    def __init__(self) -> None:
+        self._by_master: dict[str, Path] = {}
+        self._master_to_job: dict[str, str] = {}
+        self._job_locks: dict[str, Lock] = {}
+
+    def _lock(self, master: Path) -> Lock:
+        key = str(master)
+        with _locks_guard:
+            lock = self._by_master.get(key)
+            if lock is None:
+                lock = Lock()
+                self._by_master[key] = lock
+                self._master_to_job[lock] = str(master)
+            return lock
+
+    def get(self, master: Path, *, force: bool = False) -> Path | None:
+        """Return the share copy for `master`, or None when the encode failed.
+
+        A successful build (bytes on disk, non-empty) is returned on every
+        later call, so a job with several clips is encoded once and then
+        served from disk for every clip in that same job.
+        """
+        key = str(master)
+        if not force and key in self._by_master:
+            return self._by_master[key]
+        with self._lock(master):
+            if not force and key in self._by_master:
+                return self._by_master[key]
+            share = share_path_for(master)
+            stamp = _stamp_path(share)
+            if not force and share.exists() and share.stat().st_size > 0 and stamp.exists():
+                try:
+                    if stamp.read_text(encoding="utf-8").strip() == _fingerprint(master):
+                        self._by_master[key] = share
+                        return share
+                except OSError:
+                    pass
+            share = build_share_version(master)
+            if share is None:
+                return None
+            self._by_master[key] = share
+            return share
 
 
 def share_path_for(master: Path) -> Path:

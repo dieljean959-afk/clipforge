@@ -2373,9 +2373,11 @@ def _share_copy_for(clip: dict) -> Path | None:
     if master is None:
         return None
     try:
-        return share_video.build_share_version(master)
-    except share_video.ShareRenderError as exc:
-        logger.warning(f"[share] {master.name}: {exc}")
+        return _JOB_SHARE.get(master)
+    except Exception:
+        # A transient path/lock issue must never turn a share request into a
+        # 503: degrade to the link, and let the lock reap the copy later.
+        logger.warning(f"[share] _share_copy_for failed for {clip.get('_id')}: {exc}")
         return None
 
 
@@ -2934,6 +2936,11 @@ else:
             "docs": "/docs",
             "ui": "The hosted dashboard is served by the platform's web process.",
         }
+
+
+#: One share copy per job, built the first time anything in the job asks for
+#: it, so several clips of the same batch never re-encode the same video.
+_JOB_SHARE = share_video.JobShareLocker()
 
 
 def main() -> None:
