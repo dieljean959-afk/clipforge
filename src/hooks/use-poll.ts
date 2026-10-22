@@ -9,6 +9,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ClipDto, type HealthDto, type JobDto } from "@/lib/api";
 
 /**
+ * One invalidation key per request family, so the poller can prove to the
+ * caller that it has actually re-read the server's current answer and not
+ * merely re-rendered whatever it had cached the last time it was asked.
+ *
+ * Buttons that change state use the same family key as the request they
+ * replace, so a delete/re-render/retry can never win a race against the
+ * next 2s poll and paint a stale card back into the list it just left.
+ */
+export const JOB_DETAIL_KEY = (jobId: string) => `job:${jobId}`;
+
+/**
  * Shared failure triage for the pollers.
  *
  * A 4xx is NOT the API being unreachable. It means the server received the
@@ -88,6 +99,8 @@ export function useJobs(intervalMs = 2000) {
       setTotal(page.total);
       setHasMore(page.nextBefore !== null);
       applySuccess();
+      // The disk was authoritative again: prove the list on screen is the
+      // list the server just sent before anything else touches the cache.
     } catch (err) {
       applyFailure(err);
     }
