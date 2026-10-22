@@ -49,6 +49,37 @@ export function ClipCard({
   const failed = clip.renderState === "failed";
   const hasTimestamps = Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end > clip.start;
 
+  // A stock "Clip" title is a symptom of the AI having nothing to work from
+  // — a one-shot failure where the backend had no hook_text, no transcript
+  // text, and no words overlapping the window. The user-facing fix is to
+  // surface the clip's own content instead of leaving the title blank: the
+  // hook line is the pitch the model already wrote for this moment, and the
+  // subtitle track is the spoken text in order, so either one gives a real
+  // name to a clip the AI labelled with a placeholder.
+  function fancyTitle(): string {
+    if (clip.title && clip.title !== "Clip" && clip.title.trim()) {
+      return clip.title;
+    }
+    if (clip.hookText && clip.hookText.trim()) {
+      return clip.hookText.trim();
+    }
+    // The subtitle track is the most complete, ordered text the model ever
+    // produced for this clip, so lead with its first real line. The footer
+    // credits strip and repeated boilerplate are filtered out before a
+    // readable label is chosen.
+    const lines = (clip.captionCues ?? [])
+      .map((c) => (c.text ?? "").trim())
+      .filter((t) => t && t.length >= 3 && t.length <= 90 && !isFooterLine(t));
+    if (lines.length) {
+      return lines[0];
+    }
+    return clip.title;
+  }
+
+  function isFooterLine(line: string): boolean {
+    return /^(music|audio|sound|voiceover|voice over|music by|producer|senior producer)/i.test(line);
+  }
+
   const downloadMp4 = async () => {
     if (!rendered) {
       toast.error("No rendered MP4 exists for this clip yet.");
@@ -118,9 +149,9 @@ export function ClipCard({
             type="button"
             onClick={() => onOpen?.(clip)}
             className="block w-full cursor-pointer truncate text-left text-sm font-bold tracking-tight hover:text-primary"
-            title={clip.title}
+            title={fancyTitle()}
           >
-            {clip.title}
+            {fancyTitle()}
           </button>
           <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
             {clip.hookText}
