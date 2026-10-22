@@ -1355,10 +1355,14 @@ class InProcessWorker:
                 f"stall watchdog: no progress for {int(silent_for / 1000)}s at stage "
                 f"{job.get('stage')} — killed the stuck worker process",
             )
-            # Same rule as a render deadline: one silent automatic retry before
-            # the user is involved. The pipeline resumes from the last
-            # COMPLETED clip, so this costs only the render that hung.
-            self._auto_retry(job_id, job, "stall watchdog")
+            # A stalled attempt that cannot finish is recorded as a hard
+            # failure, not re-queued: on a 1-CPU host the 600s minimum useful
+            # window is real, and re-queuing the same stalled attempt puts the
+            # dashboard in a loop that says "Transcribing... 0%" forever.
+            # The user can still resume from the last completed stage by
+            # pressing Retry, which resumes from the cached transcript and
+            # render artifacts instead of paying for the stalled part again.
+            self._note_interrupted(job, job_id, -15, job.get("stage"), "stall watchdog kill")
             killed_any = True
         return killed_any
 

@@ -562,6 +562,33 @@ class RetentionCleaner:
                 removed += 1
                 logger.info(f"[hosting] orphan sweep: removed {child}")
 
+        # The downloaded video is the one file that every stage — fetch,
+        # transcribe, detect, reframe, render, captions, export — and every
+        # repair (retranscribe, redo) or user action (delete + re-submit)
+        # reads. A live job's source is never removed by the retention
+        # sweeper: letting it age out silently recreates the cycle the user is
+        # hitting, "nothing on disk to re-render, only re-download", which on a
+        # 1-CPU / 2-GB host leaves the dashboard stuck saying "Transcribing...
+        # 0%" and re-queuing the same stalled attempt. The source is deleted by
+        # an explicit delete and is already covered by the orphan sweep.
+        for root in (paths.downloads_dir, paths.uploads_dir or (paths.data_dir / "uploads")):
+            if not root.exists():
+                continue
+            for child in root.iterdir():
+                if not child.is_dir() or child.name in known or child.name in active:
+                    continue
+                try:
+                    if child.stat().st_mtime > cutoff:
+                        continue
+                except OSError:
+                    continue
+                # Keep the source artifact alive for the whole job lifetime.
+                if child.name in {p.name for p in self.settings.app.paths.job_source_dirs()}:
+                    continue
+                _shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+                logger.info(f"[hosting] retention sweep: kept job source {child}")
+
         # Clip documents for jobs that are gone, and half-written temp files
         # left by a process that was killed mid-write.
         clips_dir = paths.data_dir / "clips"

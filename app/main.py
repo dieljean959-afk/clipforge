@@ -1975,9 +1975,16 @@ def retranscribe_job(job_id: str) -> dict:
         raise HTTPException(400, "this batch has no clips")
 
     # "transcribe" and everything after it: detect, reframe, captions, export.
-    # "fetch" stays done, so the video is not downloaded a second time.
+    # "fetch" stays done, so the downloaded video is not re-fetched.
     ws = StageWorkspace(settings.app.paths.data_dir, job_id)
-    ws.clear_from("transcribe")
+    # Remove only the words/cues/captions the repaired run must re-derive.
+    # The extracted audio cache that transcribe and the render stages both
+    # read is NOT part of this clear: on a 1-CPU / 2-GB host the 600s minimum
+    # useful window is real, and deleting the scratch before the re-queued
+    # attempt can finish turns a stalled attempt into an infinite re-queue
+    # loop that leaves the dashboard showing "Transcribing... 0%". The source
+    # video is never removed by a repair — that is a user delete.
+    ws.clear_from("transcribe", leave_scratch_audio=True)
     for clip in store.list_clips(job_id):
         clip["renderState"] = "pending"
         store.write_clip(clip)

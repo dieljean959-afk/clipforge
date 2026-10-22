@@ -131,19 +131,41 @@ class StageWorkspace:
         except Exception:
             return {}
 
-    def clear(self, stage: str) -> None:
-        """Drop a stage and everything after it (used by redetect)."""
+    def clear(self, stage: str, *, leave_scratch_audio: bool = False) -> None:
+        """Drop a stage and everything after it.
+
+        `leave_scratch_audio` keeps the extracted 16kHz mono WAV cache that
+        transcribe and the render stages both read. A repair that clears from
+        transcribe must keep it: on a single shared 1-CPU / 2-GB slot the
+        silence budget is measured from cached transcription, and deleting the
+        scratch before the re-queued attempt can finish turns a stalled attempt
+        into an infinite re-queue loop on the health dashboard.
+        """
         d = self.root / stage
         if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-            logger.info(f"[stages] cleared stage {stage}")
+            if leave_scratch_audio and stage == "transcribe":
+                # Keep the one extracted-audio cache both the transcribe and
+                # render stages read. This is the job's scratch output directly
+                # after its own re-transcribe, so it is deleted by the normal
+                # upstream cleanup once the new clips exist.
+                pass
+            else:
+                shutil.rmtree(d, ignore_errors=True)
+                logger.info(f"[stages] cleared stage {stage}")
 
-    def clear_from(self, stage: str) -> None:
-        """Clear `stage` and all downstream stages."""
+    def clear_from(self, stage: str, *, leave_scratch_audio: bool = False) -> None:
+        """Clear `stage` and all downstream stages.
+
+        `leave_scratch_audio` keeps the extracted 16kHz mono WAV cache that
+        transcribe and the render stages both read. A repair that clears from
+        transcribe must keep it: the host is a single shared 1-CPU / 2-GB slot,
+        and deleting the scratch before the re-queued attempt can finish is what
+        made the dashboard show "Transcribing... 0%" forever.
+        """
         if stage not in STAGES:
             return
         for s in STAGES[STAGES.index(stage):]:
-            self.clear(s)
+            self.clear(s, leave_scratch_audio=leave_scratch_audio)
 
     def first_incomplete(self) -> str | None:
         for s in STAGES:
