@@ -140,16 +140,21 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
     ),
     "vertical_916": CaptionPreset(
         key="vertical_916", label="Vertical 9:16 big captions",
-        # Mobile screen at 1080x1920: 70-80px is 3.6-4.2% of picture height;
-        # the requested 6-7% band lands around 80px on a full-height frame.
-        font_size=80, primary="#FFFFFF", secondary="#FFD400",
-        outline_color="#000000", outline_width=8, shadow=2,
-        # Full vertical-frame burn, centred: not the lower-third anchor the
-        # legacy presets were designed around.
-        position_y=0.50,
-        # Hard rules for the requested layout: 2 lines max, 3-5 words, white
-        # text, thick black outline plus a subtle drop shadow.
-        box=True, karaoke=False, pop=True, highlight=False,
+        # Requested: 90-100px bold sans-serif, white with thick black outline
+        # (8px), soft shadow, active word highlighted in #FFD400, 3-4 words,
+        # max 2 lines, centred, at 60-65% down the screen.
+        font_size=95, primary="#FFFFFF", secondary="#FFD400",
+        outline_color="#000000", outline_width=8, shadow=3,
+        # 60-65% down a 1920-tall frame. ASS MarginV is a fraction of the
+        # frame height measured DOWN from the bottom, so a caption that must
+        # sit at 60-65% (i.e. 35-40% from the bottom) uses MarginV ~ 0.36-0.40.
+        position_y=0.62,
+        # Layout rules for this preset: 2 lines max, 3-4 words, white text,
+        # thick black outline plus a soft drop shadow. A full-height frame burn
+        # (box) keeps the caption glued to the video and out of the no-go
+        # bottom 20% of the frame, and karaoke on-off matches the subtitle
+        # pipeline that writes the tags.
+        box=True, karaoke=True, pop=False, highlight=True,
         uppercase=False, font_override="Montserrat ExtraBold",
         fonts_dir_override="fonts",
         max_chars_per_line=0,
@@ -1476,13 +1481,17 @@ def build_ass_header(
     border_style = 3 if p.box else 1
     back = "&HA0000000" if p.box else "&H80000000"
     pos = p.position_y if preset_key else settings.subtitle.position_y
+    # ASS MarginV is a fraction of the FRAME height measured DOWN from the
+    # bottom. A caption anchored at 60-65% from the top (i.e. 35-40% from the
+    # bottom) uses MarginV ~ 0.36-0.40, NOT position_y directly.
+    margin_v = int(height * min(0.40, max(0.35, 1 - pos)))
     # Vertical strokes (the word being spoken) run RIGHT, so they must NOT be
     # flushed left: ASS rounds the left edge to the box's exact pixel, and with
     # word{black},word{whitesecondary}-style inline colour tags the colour
     # never bleeds outside the box, so a left-stropped caption turns into a
     # stack of un-scrollable words at the box's left edge. Alignment 8 keeps
     # each stroke flush to the box; the 60/60 L/R margins keep the box inside
-    # the 60px safe zone on both sides.
+    # the safe zone on both sides.
     return f"""[Script Info]
 Title: Clipmake Captions
 ScriptType: v4.00+
@@ -1493,7 +1502,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Clipmake,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0,0,0,100,100,0,0,{border_style},{p.outline_width},{p.shadow},8,60,60,{int(height * (1 - pos))},1
+Style: Clipmake,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0,0,0,100,100,0,0,{border_style},{p.outline_width},{p.shadow},8,60,60,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

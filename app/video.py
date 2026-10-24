@@ -797,18 +797,18 @@ def build_output_chain(
 ) -> str:
     """The crop → scale → crop → setsar filter chain every render shares.
 
-    Extracted (and unit-tested in tools/preview_layout_test.py) because this is
-    where a vertical-video bug hides. Two rules make the output a true 9:16
-    frame rather than something that merely *looks* like one in the editor:
+    The caller's 1080x1920 target is a VERTICAL frame, so it first SCALES the
+    horizontal source UP (smearing it to cover the whole frame) and then
+    CROPS the CENTRE to 9:16. This is the opposite of the legacy 'scale-down
+    + pad' chain, which left black bars above and below a letterboxed subject.
 
-    * `force_original_aspect_ratio=increase` then an exact `crop` — never
-      `decrease` + `pad`. Padding is what puts black bars in a clip that is
-      supposed to be full-bleed.
-    * `setsar=1`. Without it the output inherits the SOURCE's sample aspect
-      ratio, and any non-square-pixel source (anamorphic downloads always are,
-      phone footage often is) yields a stream whose pixels are not square. The
-      player then letterboxes that inside an already-9:16 box — black bars the
-      render never drew. Pinning SAR makes 1080x1920 mean what it says.
+    * The first `scale` uses `force_original_aspect_ratio=increase`, which
+      scatters source pixels beyond the target box and then `crop` trims the
+      overflow. No pad/no bars — the frame is 100% filled by stretched pixels.
+    * The `crop` is the CENTRE window, so the subject stays framed, not
+      nudged to one edge.
+    * `setsar=1` pins the sample aspect ratio to square pixels so the player
+      can't letterbox the already-full-bleed stream.
     """
     chain: list[str] = []
     if crop_windows:
@@ -825,7 +825,10 @@ def build_output_chain(
             src_w, src_h, fps, crop_x, crop_y, w0, h0, crop_windows,
         ))
     else:
-        chain.append(f"crop={crop_w}:{src_h}:(in_w-{crop_w})/2:0")
+        # Crop away the source's excess height before we ever scale to the
+        # target frame, so the whole thing stays full-bleed.
+        crop_y = max(0, (src_h - crop_w * 1920 // 1080) // 2)
+        chain.append(f"crop={crop_w}:{crop_w * 1920 // 1080}:{src_w / 2 - crop_w / 2}:{crop_y}")
     chain.append(f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase")
     chain.append(f"crop={out_w}:{out_h}")
     chain.append("setsar=1")
