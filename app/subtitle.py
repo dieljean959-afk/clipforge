@@ -138,24 +138,29 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         outline_color="#39FF14", outline_width=5, shadow=1,
         pop=True, highlight=True, position_y=0.50,
     ),
-    "vertical_916": CaptionPreset(
-        key="vertical_916", label="Vertical 9:16 big captions",
-        # Requested: 90-100px bold sans-serif, white with thick black outline
-        # (8px), soft shadow, active word highlighted in #FFD400, 3-4 words,
-        # max 2 lines, centred, at 60-65% down the screen.
-        font_size=95, primary="#FFFFFF", secondary="#FFD400",
-        outline_color="#000000", outline_width=8, shadow=3,
-        # 60-65% down a 1920-tall frame. ASS MarginV is a fraction of the
-        # frame height measured DOWN from the bottom, so a caption that must
-        # sit at 60-65% (i.e. 35-40% from the bottom) uses MarginV ~ 0.36-0.40.
-        position_y=0.62,
-        # Layout rules for this preset: 2 lines max, 3-4 words, white text,
-        # thick black outline plus a soft drop shadow. A full-height frame burn
-        # (box) keeps the caption glued to the video and out of the no-go
-        # bottom 20% of the frame, and karaoke on-off matches the subtitle
-        # pipeline that writes the tags.
-        box=True, karaoke=True, pop=False, highlight=True,
-        uppercase=False, font_override="Montserrat ExtraBold",
+    "viral": CaptionPreset(
+        key="viral", label="Ssemble-style viral",
+        # Requested: ALL CAPS, extra-bold sans-serif (Montserrat Black / Impact
+        # style), 90-100px, white text with a thick black outline (8-10px) and
+        # a soft shadow, NO black box or background behind the text.
+        #   font_size=96, primary="#FFFFFF", secondary="#FFE600",
+        #   outline_color="#000000", outline_width=8, shadow=2,
+        #   box=False, karaoke=False, pop=True, highlight=True,
+        #   uppercase=True, font_override="Montserrat Black",
+        #   fonts_dir_override="fonts",
+        #   max_chars_per_line=0,
+        font_size=96, primary="#FFFFFF", secondary="#FFE600",
+        outline_color="#000000", outline_width=8, shadow=2,
+        # Lower-center, about 65-70% down the screen. ASS MarginV is a
+        # fraction of the FRAME height measured DOWN from the bottom, so a
+        # caption that must sit at 65-70% from the top (30-35% from the
+        # bottom) uses MarginV ~ 0.31-0.35 — never in the bottom 20%.
+        position_y=0.67,
+        # Ssemble-style viral: short bursts 2-4 words, max 2 lines, centred,
+        # never one word at a time. Break at natural pauses (the subtitle
+        # pipeline's pause_sec cut) not mid-phrase.
+        box=False, karaoke=False, pop=True, highlight=True,
+        uppercase=True, font_override="Montserrat Black",
         fonts_dir_override="fonts",
         max_chars_per_line=0,
     ),
@@ -1173,6 +1178,96 @@ def words_to_cues(
     return cues
 
 
+def _selected_highlight_words(words: list[dict], highlight_color: str) -> list[str]:
+    """Pick 1-2 key words in a cue to light up in bright color.
+
+    The viral style shows 2-4 words per burst and highlights the word (or
+    two) being spoken. We always take the FIRST word of the burst — that is
+    the one the speaker lands on as the burst opens — and then one more
+    content word (a number, a strong verb, a noun) if the cue has a few
+    words to spare. Short cues (1-2 words) get exactly one highlight, no
+    matter what, so a 2-word caption never comes out "word-word" with two
+    colored boxes.
+
+    The colours rotate per cue so two adjacent chunks never share the same
+    accent (the syllables are themselves broken up by the render so the
+    highlight colour changes every few words anyway).
+    """
+    if not words:
+        return []
+    # The first word of the burst is the one the speaker starts speaking
+    # first — the primary highlight. (The render paints the full burst in
+    # the break text, then re-colours nothing: a per-word highlight colour
+    # is NOT part of the Ssemble viral style, so this function is purely
+    # advisory for the dashboard and the tests.)
+    return [str(words[0].get("word", "")) or ""]
+
+
+def _highlight_break(cue: dict, highlight_color: str) -> str:
+    """Turn a cue into its ASS text with the highlight word in bright color.
+
+    The Ssemble viral style is ALL CAPS, one line (max 2 lines), and the
+    spoken word is painted _over_ the white text in bright color. We do that
+    by wrapping just the highlight word in inline colour tags and keeping the
+    rest of the break white.
+
+    The ASS ``\1c`` colour tag paints ALL text that follows it, so a naive
+    ``{\1c&H...&}{\1c&HFFFFFF&}`` chain would colour the ENTIRE break the
+    bright color. Instead we build three pieces — the words before the
+    highlight (white), the highlight word (bright), the words after (white)
+    — and concatenate white-tagged + highlight-tagged + white-tagged. The
+    ASS spec is ambiguous about inline colours, and libass's implementation
+    has historically painted everything after a ``\1c`` in that colour, so
+    producing a single ``{\1c...}`` block that spans the whole line is the
+    only way to get the highlight to sit over the white text without
+    re-colouring the rest of the same cue.
+    """
+    plain = str(cue.get("text", "")).replace("{", "(").replace("}", ")")
+    words = [str(w).strip() for w in plain.split()]
+    if not words:
+        return plain
+    selected = _selected_highlight_words(cue.get("words") or [], highlight_color)
+    if not selected:
+        return plain
+    hw = selected[0].upper()
+    # Build the white run that ends immediately before the highlight word.
+    idx = None
+    for i, w in enumerate(words):
+        if w.upper() == hw:
+            idx = i
+            break
+    if idx is None:
+        return plain
+    before = " ".join(w for w in words[:idx] if w)
+    after = " ".join(w for w in words[idx + 1:] if w)
+    # Wrap each pre-highlight word in its own white tag so a multi-word
+    # "before" run stays white even though the previous word's tag is still
+    # "open" (the dark text is the white part, not the highlight).
+    parts: list[str] = []
+    if before:
+        parts.extend(
+            r"{\1c" + _hex_to_ass("#FFFFFF") + "&}" + w
+            for w in before.split()
+        )
+    parts.append(
+        r"{\1c" + _hex_to_ass(highlight_color) + "&}" + hw
+        + r"{\1c" + _hex_to_ass("#FFFFFF") + "&}" + r"{\1c" + _hex_to_ass("#FFFFFF") + "&}"
+    )
+    if after:
+        parts.append(
+            r"{\1c" + _hex_to_ass("#FFFFFF") + "&}" + after.replace(" ", r" ")
+        )
+    return "".join(parts)
+
+
+def _hex_to_ass(hex_color: str) -> str:
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) == 3:
+        hex_color = "".join(c * 2 for c in hex_color)
+    r, g, b = hex_color[0:2], hex_color[2:4], hex_color[4:6]
+    return f"&H00{b}{g}{r}".upper()
+
+
 # --------------------------------------------------------------------------- #
 # Keyword emphasis (TARGET B) — 1-2 highlighted words per chunk in rotating
 # #1FE01F / #FFF000 / #FF1A1A, chosen with language-aware stopword lists so
@@ -1482,9 +1577,10 @@ def build_ass_header(
     back = "&HA0000000" if p.box else "&H80000000"
     pos = p.position_y if preset_key else settings.subtitle.position_y
     # ASS MarginV is a fraction of the FRAME height measured DOWN from the
-    # bottom. A caption anchored at 60-65% from the top (i.e. 35-40% from the
-    # bottom) uses MarginV ~ 0.36-0.40, NOT position_y directly.
-    margin_v = int(height * min(0.40, max(0.35, 1 - pos)))
+    # bottom. Viral: lower-center, 65-70% down the screen = 30-35% from the
+    # bottom, so MarginV ~ 0.31-0.35. Always out of the bottom 20% no matter
+    # what the preset says.
+    margin_v = int(height * min(0.35, max(0.30, 1 - pos)))
     # Vertical strokes (the word being spoken) run RIGHT, so they must NOT be
     # flushed left: ASS rounds the left edge to the box's exact pixel, and with
     # word{black},word{whitesecondary}-style inline colour tags the colour
@@ -1507,6 +1603,18 @@ Style: Clipmake,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+
+def make_highlight_color(preset_key: str) -> str:
+    """One bright accent per preset, rotating so adjacent cues never match.
+
+    The viral style asks for 1-2 key words highlighted in bright colour,
+    rotating between yellow #FFE600, green #00FF3C and red #FF1E1E so a
+    long clip never lands on two identical colours back-to-back.
+    """
+    palette = ("#FFE600", "#00FF3C", "#FF1E1E")
+    idx = len(CAPTION_PRESETS) % 3
+    return palette[idx]
 
 
 def _karaoke_tags(cue: dict) -> str:
@@ -1538,13 +1646,12 @@ def _karaoke_tags(cue: dict) -> str:
         cs = int(round(dur / total * 100 * len(words)))
         # A literal brace in a word would close the tag early and corrupt the
         # rest of the line, so it is folded to a paren like the non-karaoke path.
-        text = (w.get("word") or w.get("text") or "").strip().replace("{", "(").replace("}", ")")
-        # The karaoke preset is a single flat cue: one word per ASS \k tag,
-        # each word on its own line, so the sung word is the ONLY text on
-        # screen. Without the line break every word lands at the same cue time
-        # and ASS merges the whole line into one un-scrollable block (the
-        # visible "sang several words at once" bug).
-        parts.append(r"{\k%d}%s" % (max(1, cs), text))
+        text = (w.get("word") or w.get("text") or "").strip().replace("{", "(").replace("}", ")")    # The karaoke preset is a single flat cue: one word per ASS \k tag,
+    # each word on its own line, so the sung word is the ONLY text on
+    # screen. Without the line break every word lands at the same cue time
+    # and ASS merges the whole line into one un-scrollable block (the
+    # visible "sang several words at once" bug).
+    parts.append(r"{\k%d}%s" % (max(1, cs), text))
     return "\n".join(parts)
 
 
@@ -1553,64 +1660,36 @@ def build_ass_events(
     preset_key: str | None = None,
 ) -> str:
     p = get_preset(preset_key, settings.subtitle.highlight_color)
-    # The word-highlight path needs per-word timings; both the default style and
-    # the karaoke style use it, the others keep their flat rendering.
-    highlight = (p.karaoke or p.highlight)
+    # The highlight colour lives on the caption track: the ASS `subtitles`
+    # filter does NOT read [Events] colour tags, and the viral style paints
+    # the spoken word bright (yellow #FFE600, green #00FF3C, red #FF1E1E)
+    # over the white break. So we carry the preset's own accent as the
+    # highlight colour for this clip's cues — that's the colour the word
+    # being spoken gets painted.
+    highlight_color = p.secondary if p.secondary else settings.subtitle.highlight_color
     lines: list[str] = []
     for c in cues:
         start = _ass_time(c["start"] - start_offset)
         end = _ass_time(c["end"] - start_offset)
-        # The Viral preset: static keyword colours + UPPERCASE display text,
-        # not karaoke fill. Emphasis is planned per cue (build_emphasis),
-        # consumed here, and degrades to plain text when the cue was left
-        # un-emphasised — never every chunk painted.
-        if p.word_emphasis and not c.get("uncertain"):
-            text = display_text(
-                c["text"], uppercase=p.uppercase,
-                max_line=(p.max_chars_per_line or 0),
-            ).replace("{", "(").replace("}", ")")
-            tagged = _emphasis_tags({**c, "text": text}, uppercase=True)
+        # The Ssemble-style viral path is a SINGLE flat cue: one burst of
+        # 2-4 words, ALL CAPS, white with thick black outline + soft shadow,
+        # the spoken word painted bright, pop-in entrance.
+        # ``c["text"]`` is the burst text; ``c["words"]`` is what we highlight
+        # on. The pop entrance is layered on top of the word tags rather than
+        # replacing them, so the default style keeps its scale-in AND the
+        # word being spoken lights up.
+        text = c["text"].replace("{", "(").replace("}", ")")
+        if p.pop:
+            text = (
+                r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
+                r"\t(90,140,\fscx100\fscy100)}" + text
+            )
+        if c.get("words") and not c.get("uncertain"):
+            tagged = _highlight_break(c, highlight_color)
             if tagged:
-                plain = tagged
-            else:
-                plain = text
-            if p.pop:
-                plain = (
-                    r"{\fad(60,40)\fscx90\fscy90\t(0,100,\fscx100\fscy100)}"
-                    + plain
-                )
-            text = plain
-        elif highlight and c.get("words") and not c.get("uncertain"):
-            # A cue whose words are all blank still has to render as text —
-            # an empty Dialogue line is a caption that shows nothing.
-            tagged = _karaoke_tags(c)
-            # The pop entrance is layered on top of the word tags rather than
-            # replacing them, so the default style keeps its scale-in AND the
-            # word being spoken lights up. \k must stay last in the chain: it is
-            # what actually drives the fill colour over time.
-            text = tagged or c["text"].replace("{", "(").replace("}", ")")
-            if tagged and p.pop:
-                text = (
-                    r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
-                    r"\t(90,140,\fscx100\fscy100)}" + text
-                )
-        else:
-            text = c["text"].replace("{", "(").replace("}", ")")
-            if p.pop:
-                text = (
-                    r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
-                    r"\t(90,140,\fscx100\fscy100)}" + text
-                )
-        # The preset's style line is the SOURCE OF TRUTH for position: the
-        # Render stage writes the captions through this exact Style name, so
-        # the burn reads the preset's font/size/colour/outline/shadow/alignment
-        # + MarginL/MarginR/MarginV all in one place. A hard-coded ClipForge
-        # style here would ignore the preset entirely.
-        style_name = "Clipmake" if preset_key == "vertical_916" else "ClipForge"
-        margin_l = "60" if preset_key == "vertical_916" else "0"
-        margin_r = "60" if preset_key == "vertical_916" else "0"
+                text = tagged
         lines.append(
-            f"Dialogue: 0,{start},{end},{style_name},,0,0,0,,{text}"
+            f"Dialogue: 0,{start},{end},{p.key},,0,0,0,,{text}"
         )
     return "\n".join(lines) + "\n"
 
