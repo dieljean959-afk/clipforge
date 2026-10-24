@@ -1601,7 +1601,17 @@ def build_ass_events(
                     r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
                     r"\t(90,140,\fscx100\fscy100)}" + text
                 )
-        lines.append(f"Dialogue: 0,{start},{end},ClipForge,,0,0,0,,{text}")
+        # The preset's style line is the SOURCE OF TRUTH for position: the
+        # Render stage writes the captions through this exact Style name, so
+        # the burn reads the preset's font/size/colour/outline/shadow/alignment
+        # + MarginL/MarginR/MarginV all in one place. A hard-coded ClipForge
+        # style here would ignore the preset entirely.
+        style_name = "Clipmake" if preset_key == "vertical_916" else "ClipForge"
+        margin_l = "60" if preset_key == "vertical_916" else "0"
+        margin_r = "60" if preset_key == "vertical_916" else "0"
+        lines.append(
+            f"Dialogue: 0,{start},{end},{style_name},,0,0,0,,{text}"
+        )
     return "\n".join(lines) + "\n"
 
 
