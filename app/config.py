@@ -1722,7 +1722,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed", "vertical_916"}:
         errors.append(
             f'subtitle.preset "{subtitle.preset}" is not one of '
-            "bold_pop/karaoke/lower_third/boxed"
+            "bold_pop/karaoke/lower_third/boxed/vertical_916"
         )
     for name, value in (("low_confidence", subtitle.low_confidence),
                         ("inaudible_below", subtitle.inaudible_below)):

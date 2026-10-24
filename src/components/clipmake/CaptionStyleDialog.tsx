@@ -102,6 +102,9 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
   const pinned = preview?.overrides ?? {};
   const selected = draft?.presetKey ?? current?.presetKey ?? "vertical_916";
 
+  // Preset keys in the order they should appear in the UI. The labels below
+  // are known locally so the dialog can render the selector without importing
+  // the backend package that also ships the CaptionPreset class.
   const CAPTION_PRESETS_ORDERED = [
     "viral",
     "vertical_916",
@@ -113,16 +116,24 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
 
   type CaptionPresetKey = (typeof CAPTION_PRESETS_ORDERED)[number];
 
+  const CAPTION_PRESET_LABELS: Record<string, string> = {
+    viral: "Ssemble-style viral",
+    vertical_916: "Vertical 9:16 big captions",
+    bold_pop: "Bold pop (default)",
+    karaoke: "Karaoke fill",
+    lower_third: "Clean lower-third",
+    boxed: "Boxed",
+  };
+
   function presetLabel(key: string | undefined): string {
-    return (CAPTION_PRESETS as Record<string, CaptionPreset>)[key ?? ""]?.label ?? "Caption style";
+    if (!key) return "Caption style";
+    return CAPTION_PRESET_LABELS[key] ?? "Caption style";
   }
 
-  function getPresets(): CaptionPreset[] {
-    return Object.entries(CAPTION_PRESETS).map(([key, preset]) => ({
-      key,
-      label: preset.label,
-    }));
-  }
+  const presetOptions = CAPTION_PRESETS_ORDERED.map((key) => ({
+    key,
+    label: CAPTION_PRESET_LABELS[key] ?? "Caption style",
+  }));
 
   return (
     <Dialog
@@ -280,7 +291,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                 and the colour the word you are speaking lights up.
               </p>
               <div className="flex flex-wrap gap-2">
-                {getPresets().map((presetOption) => {
+                {presetOptions.map((presetOption) => {
                   const isSelected = selected === presetOption.key;
                   return (
                     <button

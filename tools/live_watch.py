@@ -154,7 +154,7 @@ def verify(job_id: str | None) -> Probe:
     keys = {p.get("key") for p in presets} if isinstance(presets, list) else set()
     p.record("presets", "GET /api/caption-presets", code == 200, f"HTTP {code}")
     p.record("presets", "all four presets are offered",
-             keys == {"bold_pop", "karaoke", "lower_third", "boxed"}, ", ".join(sorted(keys)))
+             keys == {"bold_pop", "karaoke", "lower_third", "boxed", "vertical_916"}, ", ".join(sorted(keys)))
     code, raw, _ = p.post("/api/jobs", {
         "sourceType": "url", "source": "https://youtu.be/O0yDqRwmMSE", "captionPreset": "neon",
     })

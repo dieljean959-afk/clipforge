@@ -154,22 +154,7 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         fonts_dir_override="fonts",
         max_chars_per_line=0,
     ),
-    "vertical_916": CaptionPreset(
-        key="vertical_916", label="Vertical 9:16 big captions",
-        # Mobile screen at 1080x1920: 72-80px is 3.7-4.2% of picture height;
-        # the requested 6-7% band lands around 80px on a full-height frame.
-        font_size=80, primary="#FFFFFF", secondary="#FFD400",
-        outline_color="#000000", outline_width=8, shadow=2,
-        # Full vertical-frame burn: centered text, not the lower-third anchor
-        # the legacy presets were designed around.
-        position_y=0.50,
-        # Hard rules for the requested layout: 2 lines max, 3-5 words, white
-        # text, thick black outline plus a subtle drop shadow.
-        box=True, karaoke=False, pop=True, highlight=False,
-        uppercase=False, font_override="Montserrat ExtraBold",
-        fonts_dir_override="fonts",
-        max_chars_per_line=0,
-    ),
+
     "karaoke": CaptionPreset(
         key="karaoke", label="Karaoke fill",
         font_size=64, primary="#FFFFFF", secondary="#39FF14",
