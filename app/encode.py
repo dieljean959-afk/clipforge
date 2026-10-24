@@ -745,6 +745,7 @@ def render_clip(
         f",scale={out_w}:{out_h}:force_original_aspect_ratio=increase"
         f",crop={out_w}:{out_h},setsar=1"
     )
+
     if cues:
         static_graph = static_graph + "," + ass_arg
 
