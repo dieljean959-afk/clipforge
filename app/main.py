@@ -488,7 +488,7 @@ class CreateJobIn(BaseModel):
     minClipSec: int | None = Field(default=None, ge=5, le=180)
     maxClipSec: int | None = Field(default=None, ge=10, le=180)
     maxClips: int | None = Field(default=None, ge=1, le=clipcount.HARD_CEILING)
-    captionPreset: str | None = Field(default=None, pattern="^(bold_pop|karaoke|lower_third|boxed)$")
+    captionPreset: str | None = Field(default=None, pattern="^(bold_pop|karaoke|lower_third|boxed|vertical_916)$")
     language: str = Field(default="auto", pattern="^(auto|en|es)$")
 
 

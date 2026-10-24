@@ -1719,7 +1719,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         strip_stutters=bool(s.get("strip_stutters", True)),
         highlight_color=_hex_or_blank(s.get("highlight_color", ""), "subtitle.highlight_color", errors),
     )
-    if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed"}:
+    if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed", "vertical_916"}:
         errors.append(
             f'subtitle.preset "{subtitle.preset}" is not one of '
             "bold_pop/karaoke/lower_third/boxed"

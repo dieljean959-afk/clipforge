@@ -29,6 +29,8 @@ export interface CaptionStyleDto {
   pause_sec: number;
   /** "" means the preset's own accent colour. */
   highlight_color: string;
+  /** Which caption look preset this overrides resolve to. */
+  presetKey?: string;
   /** Which of these are pinned here rather than inherited from config.toml. */
   overrides: Record<string, number | string>;
   limits: Record<string, { min: number; max: number; step: number }>;

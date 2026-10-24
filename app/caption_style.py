@@ -32,6 +32,7 @@ from app.config import Paths, Settings
 #: also the rounding grid, so a saved 0.33 s pause comes back as 0.35 s rather
 #: than as a number the slider cannot display.
 TUNABLES: dict[str, tuple[float, float, float]] = {
+    "font_size": (32, 160, 4),
     "words_per_cue": (1, 4, 1),
     "words_per_cue_max": (1, 6, 1),
     "pause_sec": (0.0, 1.5, 0.05),

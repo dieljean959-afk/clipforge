@@ -13,10 +13,6 @@ import {
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { api, type CaptionStyleDto, type CaptionStyleUpdate } from "@/lib/api";
-import { cn } from "@/lib/utils";
-
-/** Swatches first so the common choice is one tap, the picker is the escape hatch. */
-const SWATCHES = ["#39FF14", "#FFD400", "#FF5C39", "#FF2E88", "#4DA3FF", "#FFFFFF"];
 
 /** Enough words to show the rhythm the settings produce, and nothing more. */
 const SAMPLE = "we get a hook".split(" ");
@@ -32,12 +28,12 @@ function burst(sample: string[], target: number, cap: number): string[][] {
 /**
  * Caption rhythm and highlight colour, without opening config.toml.
  *
- * These three values are what a person judging a clip actually wants to try
- * several of, and they used to need a file edit on a server to change. Saving
- * does not re-encode anything — the captions are burned into the clip's
+ * These are the only knobs the dashboard exposes, and they are the ones a
+ * person judging a clip actually wants to try several of: how long a burst is,
+ * how much silence ends it, and what colour the word being spoken lights up.
+ * Saving does not re-encode anything — the captions are burned into the clip's
  * pixels — so the dialog says so plainly and points at the button that does
- * apply it ("Re-render captions"). The server re-reads the saved values when a
- * render starts, so no restart is involved and the running batch is untouched.
+ * apply it.
  */
 export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
   const [open, setOpen] = useState(false);
@@ -104,6 +100,29 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
   const preview = draft ?? current;
   const accent = preview?.highlight_color || "#39FF14";
   const pinned = preview?.overrides ?? {};
+  const selected = draft?.presetKey ?? current?.presetKey ?? "vertical_916";
+
+  const CAPTION_PRESETS_ORDERED = [
+    "viral",
+    "vertical_916",
+    "bold_pop",
+    "karaoke",
+    "lower_third",
+    "boxed",
+  ] as const;
+
+  type CaptionPresetKey = (typeof CAPTION_PRESETS_ORDERED)[number];
+
+  function presetLabel(key: string | undefined): string {
+    return (CAPTION_PRESETS as Record<string, CaptionPreset>)[key ?? ""]?.label ?? "Caption style";
+  }
+
+  function getPresets(): CaptionPreset[] {
+    return Object.entries(CAPTION_PRESETS).map(([key, preset]) => ({
+      key,
+      label: preset.label,
+    }));
+  }
 
   return (
     <Dialog
@@ -220,18 +239,17 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
               pinned={pinned.highlight_color !== undefined}
             >
               <div className="flex flex-wrap items-center gap-2">
-                {SWATCHES.map((hex) => (
+                {["#39FF14", "#FFD400", "#FF5C39", "#FF2E88", "#4DA3FF", "#FFFFFF"].map((hex) => (
                   <button
                     key={hex}
                     type="button"
                     aria-label={`Highlight colour ${hex}`}
                     onClick={() => setDraft({ ...preview, highlight_color: hex })}
-                    className={cn(
-                      "size-7 cursor-pointer rounded-full border-2 transition",
+                    className={
                       preview.highlight_color === hex
-                        ? "border-foreground scale-110"
-                        : "border-border/60 hover:border-foreground/60",
-                    )}
+                        ? "size-7 cursor-pointer rounded-full border-2 border-foreground scale-110"
+                        : "size-7 cursor-pointer rounded-full border-2 border-border/60 hover:border-foreground/60"
+                    }
                     style={{ backgroundColor: hex }}
                   />
                 ))}
@@ -254,6 +272,35 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                 )}
               </div>
             </Field>
+
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Caption style</Label>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                The look of every clip in this batch — size, outline, position,
+                and the colour the word you are speaking lights up.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {getPresets().map((presetOption) => {
+                  const isSelected = selected === presetOption.key;
+                  return (
+                    <button
+                      key={presetOption.key}
+                      type="button"
+                      aria-label={`Use ${presetOption.label}`}
+                      onClick={() => setDraft({ ...preview, presetKey: presetOption.key })}
+                      className={
+                        isSelected
+                          ? "flex items-center gap-2 rounded-lg border border-foreground/30 bg-accent/40 px-3 py-1.5 text-xs font-medium text-foreground"
+                          : "flex items-center gap-2 rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:border-foreground/40 hover:text-foreground"
+                      }
+                    >
+                      <Captions className="size-3.5" />
+                      {presetOption.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
             <p className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
               Captions are burned into each clip when it renders. Saving changes the next
