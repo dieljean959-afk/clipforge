@@ -1476,6 +1476,13 @@ def build_ass_header(
     border_style = 3 if p.box else 1
     back = "&HA0000000" if p.box else "&H80000000"
     pos = p.position_y if preset_key else settings.subtitle.position_y
+    # Vertical strokes (the word being spoken) run RIGHT, so they must NOT be
+    # flushed left: ASS rounds the left edge to the box's exact pixel, and with
+    # word{black},word{whitesecondary}-style inline colour tags the colour
+    # never bleeds outside the box, so a left-stropped caption turns into a
+    # stack of un-scrollable words at the box's left edge. Alignment 8 keeps
+    # each stroke flush to the box; the 60/60 L/R margins keep the box inside
+    # the 60px safe zone on both sides.
     return f"""[Script Info]
 Title: Clipmake Captions
 ScriptType: v4.00+
@@ -1486,7 +1493,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Clipmake,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0,0,0,100,100,0,0,{border_style},{p.outline_width},{p.shadow},2,60,60,{int(height * (1 - pos))},1
+Style: Clipmake,{font},{p.font_size},{primary},{secondary},{outline},{back},-1,0,0,0,100,100,0,0,{border_style},{p.outline_width},{p.shadow},8,60,60,{int(height * (1 - pos))},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1523,10 +1530,13 @@ def _karaoke_tags(cue: dict) -> str:
         # A literal brace in a word would close the tag early and corrupt the
         # rest of the line, so it is folded to a paren like the non-karaoke path.
         text = (w.get("word") or w.get("text") or "").strip().replace("{", "(").replace("}", ")")
+        # The karaoke preset is a single flat cue: one word per ASS \k tag,
+        # each word on its own line, so the sung word is the ONLY text on
+        # screen. Without the line break every word lands at the same cue time
+        # and ASS merges the whole line into one un-scrollable block (the
+        # visible "sang several words at once" bug).
         parts.append(r"{\k%d}%s" % (max(1, cs), text))
-    # The separator is a real space, not a tag: ASS renders "{}" as nothing, so
-    # without it the words are welded together on screen.
-    return " ".join(parts)
+    return "\n".join(parts)
 
 
 def build_ass_events(
