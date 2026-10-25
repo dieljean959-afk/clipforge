@@ -1682,23 +1682,22 @@ def build_ass_events(
 ) -> str:
     p = get_preset(preset_key, settings.subtitle.highlight_color)
     # The highlight colour lives on the caption track: the ASS `subtitles`
-    # filter does NOT read [Events] colour tags, and the viral style paints
-    # the spoken word bright (yellow #FFE600, green #00FF3C, red #FF1E1E)
-    # over the white break. So we carry the preset's own accent as the
-    # highlight colour for this clip's cues — that's the colour the word
-    # being spoken gets painted.
+    # filter does NOT read [Events] colour tags, so we carry the preset's
+    # own accent as the highlight colour for this clip's cues — that's the
+    # colour the word being spoken gets painted.
     highlight_color = p.secondary if p.secondary else settings.subtitle.highlight_color
     lines: list[str] = []
     for c in cues:
         start = _ass_time(c["start"] - start_offset)
         end = _ass_time(c["end"] - start_offset)
-        # The Ssemble-style viral path is a SINGLE flat cue: one burst of
-        # 2-4 words, ALL CAPS, white with thick black outline + soft shadow,
-        # the spoken word painted bright, pop-in entrance.
-        # ``c["text"]`` is the burst text; ``c["words"]`` is what we highlight
-        # on. The pop entrance is layered on top of the word tags rather than
-        # replacing them, so the default style keeps its scale-in AND the
-        # word being spoken lights up.
+        # The Ssemble-style viral path must be ONE flat, SINGLE-cue STRIP per
+        # burst. Each cue is a compact 2-4 word burst (single Dialogue line,
+        # no per-word \k tags, no multiple lines crammed into the events file),
+        # ALL CAPS, white with a thick black outline and soft shadow tied to
+        # the style. The word being spoken is painted bright by wrapping just
+        # that word in the inline colour tag and leaving the rest plain white
+        # — this is what the Ssemble look does, and it is what keeps the
+        # subtitle read-able instead of a jumbled word-by-word stack.
         text = c["text"].replace("{", "(").replace("}", ")")
         if p.pop:
             text = (
@@ -1706,9 +1705,7 @@ def build_ass_events(
                 r"\t(90,140,\fscx100\fscy100)}" + text
             )
         if c.get("words") and not c.get("uncertain"):
-            tagged = _highlight_break(c, highlight_color)
-            if tagged:
-                text = tagged
+            text = _highlight_break(c, highlight_color)
         lines.append(
             f"Dialogue: 0,{start},{end},{p.key},,0,0,0,,{text}"
         )
