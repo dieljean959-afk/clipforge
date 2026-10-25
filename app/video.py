@@ -709,24 +709,6 @@ def crop_pan_filter(
     expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])}" + ")" * len(parts)
     return f"crop={crop_w}:{crop_h}:{expr}:0"
 
-# ---------------------------------------------------------------------------
-# compat wrapper: the encode-stage helper used to call crop_pan_filter with 5
-# positional args (src_w, src_h, fps, crop_x, crop_y). Keep a safe shim so a
-# stale caller does not TypeError the whole render. New call sites use the full
-# 8-arg signature above.
-# ---------------------------------------------------------------------------
-def crop_pan_filter_5(
-    src_w: int,
-    src_h: int,
-    fps: float,
-    crop_x: int,
-    crop_y: int,
-) -> str:
-    """Legacy 5-arg crop — centered crop of the full source height."""
-    w = min(int(src_h * (1080 / 1920)), src_w) if src_w and src_h else src_w or 1080
-    h = src_h or 1920
-    return f"crop={w}:{h}:(in_w-{w})/2:0"
-
 def _crop_windows(
     crop_x: int,
     crop_y: int,
