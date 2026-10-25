@@ -1712,7 +1712,7 @@ def build_ass_events(
                 r"\t(90,140,\fscx100\fscy100)}" + text
             )
         if c.get("words") and not c.get("uncertain"):
-            text = _highlight_break(c, highlight_color)
+            text = _build_viral_cue(c, highlight_color)
         lines.append(
             f"Dialogue: 0,{start},{end},{p.key},,0,0,0,,{text}"
         )
