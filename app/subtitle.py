@@ -1605,10 +1605,13 @@ def build_ass_header(
     back = "&HA0000000" if p.box else "&H80000000"
     pos = p.position_y if preset_key else settings.subtitle.position_y
     # ASS MarginV is a fraction of the FRAME height measured DOWN from the
-    # bottom. Viral: lower-center, 65-70% down the screen = 30-35% from the
-    # bottom, so MarginV ~ 0.31-0.35. Always out of the bottom 20% no matter
-    # what the preset says.
-    margin_v = int(height * min(0.35, max(0.30, 1 - pos)))
+    # bottom. The subtitle pipeline feeds 1.0 - position_y (i.e. 0.22 for the
+    # config default 0.78), which ASS reads as 22% from the BOTTOM — the very
+    # bottom 20%, exactly where the clip's TikTok buttons and username sit,
+    # so the strip lands low. Anchor the caption HIGHER (60-65% down = 35-40%
+    # from the bottom), i.e. MarginV ~ 0.36-0.40, and clamp it so it can never
+    # be pushed into the bottom 20% again no matter what the config says.
+    margin_v = int(height * min(0.40, max(0.36, 1 - pos)))
     # Vertical strokes (the word being spoken) run RIGHT, so they must NOT be
     # flushed left: ASS rounds the left edge to the box's exact pixel, and with
     # word{black},word{whitesecondary}-style inline colour tags the colour
