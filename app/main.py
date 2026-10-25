@@ -2185,7 +2185,6 @@ def clip_video(clip_id: str) -> FileResponse:
     # the final clip does. The backend returns a 720x1280 video that the UI
     # scales into the phone card — the *framing* is identical to the real clip.
     from app import video as _video
-    from app import reframe as _reframe
 
     src = p
     cut = {
