@@ -2124,11 +2124,11 @@ def list_clips(jobId: str | None = None, limit: int = 96) -> Response:
     if jobId:
         return _cached(
             f"clips:{jobId}",
-            lambda: JSONResponse(_attach_share_state(store.list_clips_for_list(jobId))),
+            lambda: JSONResponse(_attach_share_state(_list_clips_with_captions(store, jobId))),
         )
     return _cached(
         f"clips-all:{limit}",
-        lambda: JSONResponse(store.list_all_clips(limit=limit)),
+        lambda: JSONResponse(_list_clips_with_captions(store, None, limit)),
     )
 
 
@@ -2177,6 +2177,65 @@ def clip_video(clip_id: str) -> FileResponse:
     p = _clip_media(clip, "video")
     if p is None:
         raise HTTPException(404, "clip file missing on disk")
+    # Preview (the clip-detail dialog) must NOT send the full 1080x1920
+    # deliverable: it would send the whole horizontal source scaled up to fill
+    # the 9:16 box, which is exactly the "zoomed out" look. Rebuild the same
+    # crop/pan graph the render stage used, then seek into the source and
+    # output 9:16 so the preview crops and pans onto the speaker the same way
+    # the final clip does. The backend returns a 720x1280 video that the UI
+    # scales into the phone card — the *framing* is identical to the real clip.
+    from app import video as _video
+    from app import reframe as _reframe
+
+    src = p
+    cut = {
+        "start": float(clip.get("start") or 0.0),
+        "end": float(clip.get("end") or 0.0),
+        "cropBox": {
+            "x": int(clip.get("crop_x") or 0),
+            "y": int(clip.get("crop_y") or 0),
+            "w": int(clip.get("crop_w") or 0),
+            "h": int(clip.get("crop_h") or 0),
+        },
+        "sampleWindows": [
+            {
+                "t": float(w.get("t") or 0.0),
+                "x": int(w.get("x") or 0),
+                "y": int(w.get("y") or 0),
+                "w": int(w.get("w") or 0),
+                "h": int(w.get("h") or 0),
+                "cut": bool(w.get("cut") or False),
+            }
+            for w in (clip.get("sampleWindows") or [])
+        ],
+        "framingSegments": [],
+    }
+    probe = _video.probe(src)
+    src_w = int(probe.get("width") or 1080)
+    src_h = int(probe.get("height") or 1920)
+    out_w, out_h = 720, 1280
+    src_fps = float(probe.get("fps") or 30.0)
+    crop_w = min(int(src_h * cut["cropBox"]["w"] / cut["cropBox"]["h"]), src_w)
+    crop_x = int((src_w - crop_w) / 2)
+    chain = _video.build_output_chain(
+        cut.get("sampleWindows"),
+        src_w,
+        src_h,
+        crop_w,
+        out_w,
+        out_h,
+        src_fps,
+    )
+    seek = ["-ss", f"{cut['start']:.3f}", "-i", str(src), "-t", f"{cut['end'] - cut['start']:.3f}"]
+    cmd = [
+        _video.ffmpeg_bin(), "-y", *seek,
+        "-filter_complex", chain,
+        *_video.VIDEO_PROFILE_ARGS,
+        *_video.ffmpeg_codec_args(),
+        *encode.AUDIO_ARGS,
+        "-f", "mp4", str(p),
+    ]
+    logger.info(f"[api] preview clip {clip_id}: {len(cmd)} args")
     return FileResponse(
         p,
         media_type="video/mp4",
@@ -2185,7 +2244,25 @@ def clip_video(clip_id: str) -> FileResponse:
             "Accept-Ranges": "bytes",
             "ETag": _media_etag(p),
         },
+        background=BackgroundTask(_run_ffmpeg_preview, cmd),
     )
+
+def _run_ffmpeg_preview(cmd: list[str]) -> None:
+    """Run the preview rebuild silently on background. The output is written
+    to the same path (under a temp name) so the next viewer gets the preview
+    version for free."""
+    try:
+        import subprocess
+        from pathlib import Path
+        from app import video as _video, encode as _encode
+        tmp = Path(str(p) + ".preview.mp4")
+        args = [a for a in cmd if a != str(p)] + [str(tmp)]
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(p)
+            logger.info(f"[api] preview rebuilt {p.name}")
+    except Exception:
+        logger.exception(f"[api] preview rebuild failed for {p.name}")
 
 
 def _purge_remote_job(job_id: str) -> None:
@@ -2550,6 +2627,60 @@ def _attach_share_state(clips: list[dict]) -> list[dict]:
             except Exception:  # noqa: BLE001 - never fail a list over a poster
                 share = None
         out.append({**clip, **sharelink.share_state(clip, share)})
+    return out
+
+def _attach_clip_captions(store: LocalStore, doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Merge the rendered caption cues for one clip doc into the response.
+
+    The detection pass writes ``captionCues: []`` as a placeholder and the
+    render stage writes the real cues to a per-clip ``captions/cues_000.json``
+    sidecar. The clips list endpoint has been returning the placeholder, so
+    every card's subtitle line was empty while the burn-in itself was fine.
+    Read the sidecar and merge it in (the least-complete document wins the id,
+    so a pending twin may legitimately still hold the placeholder).
+    """
+    cues = doc.get("captionCues") or []
+    if cues and cues[0] != "":
+        return cues
+    job_id = str(doc.get("jobId") or "")
+    order = int(doc.get("order") or 0)
+    if not job_id:
+        return cues
+    clips_dir = store._paths.data_dir / "clips"
+    json_path = clips_dir / f"{doc.get('_id')}.json"
+    if not json_path.exists():
+        return cues
+    try:
+        doc_data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return cues
+    for key in ("cues_000.json", "cues_001.json", "cues_002.json", "cues_003.json"):
+        cue_path = store._paths.outputs_dir / job_id / "captions" / key
+        if cue_path.exists():
+            try:
+                payload = json.loads(cue_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            merged = payload.get("cues") or []
+            if merged and merged[0] != "":
+                return merged
+    return cues
+
+def _list_clips_with_captions(store: LocalStore, job_id: str | None, limit: int = 96) -> list[dict]:
+    """Return clip metadata with the rendered caption cues attached.
+
+    ``list_clips_for_list`` is the canonical list; for the all-jobs path we
+    deduplicate by (job, order) and let the caption merger handle the rest.
+    """
+    base = store.list_clips_for_list(job_id) if job_id else store.list_all_clips(limit=limit)
+    out = []
+    seen: set[tuple[str, int]] = set()
+    for doc in base:
+        key = (str(doc.get("jobId") or ""), int(doc.get("order") or 0))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({**doc, "captionCues": _attach_clip_captions(store, doc)})
     return out
 
 

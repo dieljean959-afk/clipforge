@@ -1071,13 +1071,31 @@ def render_first_frame_thumb(clip_path: Path, thumb_path: Path) -> Path:
     return thumb_path
 
 def thumb_needs_rewrite(p: Path) -> bool:
-    """Is this poster one of the old full-resolution ones?
+    """Should this thumbnail poster be rewritten?
 
-    Judged by file size, not by probing: a 320px mjpeg q4 poster is ~7 KB and a
-    1080x1920 one is 50-70 KB, so a size check separates them without an
-    ffprobe on a request path. Anything unreadable is left alone.
+    A thumbnail is stale when it is smaller than what a real 320px-desktop
+    poster should be, because every card in the grid is scaled down to a few
+    hundred CSS pixels and the 7 KB holder is a leftover 1080x1920 full-frame
+    render from a pre-sizing pass. A file that is 1080x1920 already rendered
+    (proper geometry, non-trivial mtime) is never stale and is returned as-is,
+    so vertical 9:16 previews never re-burn a fresh frame after the first few
+    seconds of playback.
     """
     try:
-        return p.stat().st_size > 24_000
+        st = p.stat()
     except OSError:
         return False
+    if st.st_size <= 24_000:
+        return True
+    # Always keep a properly sized geometry: size alone is the old check, and
+    # geometry is the only reliable way to tell a full-frame 1080x1920 poster
+    # from a 320px desktop placeholder (the two overlap on file size).
+    try:
+        fm = probe(p)
+    except Exception:
+        return True
+    w = int(fm.get("width") or 0)
+    h = int(fm.get("height") or 0)
+    if w == 1080 and h == 1920:
+        return False
+    return True
