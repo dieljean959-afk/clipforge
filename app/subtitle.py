@@ -138,6 +138,27 @@ CAPTION_PRESETS: dict[str, CaptionPreset] = {
         outline_color="#39FF14", outline_width=5, shadow=1,
         pop=True, highlight=True, position_y=0.50,
     ),
+    "vertical_916": CaptionPreset(
+        key="vertical_916", label="Vertical 9:16 big captions",
+        # Requested: 90-100px bold sans-serif, white with thick black outline
+        # (8px), soft shadow, active word highlighted in #FFD400, 3-4 words,
+        # max 2 lines, centred, at 60-65% down the screen.
+        font_size=95, primary="#FFFFFF", secondary="#FFD400",
+        outline_color="#000000", outline_width=8, shadow=3,
+        # 60-65% down a 1920-tall frame. ASS MarginV is a fraction of the
+        # frame height measured DOWN from the bottom, so a caption that must
+        # sit at 60-65% (i.e. 35-40% from the bottom) uses MarginV ~ 0.36-0.40.
+        position_y=0.62,
+        # Layout rules for this preset: 2 lines max, 3-4 words, white text,
+        # thick black outline plus a soft drop shadow. A full-height frame burn
+        # (box) keeps the caption glued to the video and out of the no-go
+        # bottom 20% of the frame, and karaoke on-off matches the subtitle
+        # pipeline that writes the tags.
+        box=True, karaoke=True, pop=False, highlight=True,
+        uppercase=False, font_override="Montserrat ExtraBold",
+        fonts_dir_override="fonts",
+        max_chars_per_line=0,
+    ),
     "viral": CaptionPreset(
         key="viral", label="Ssemble-style viral",
         # Requested: ALL CAPS, extra-bold sans-serif (Montserrat Black / Impact
