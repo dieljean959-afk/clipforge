@@ -1199,94 +1199,101 @@ def words_to_cues(
     return cues
 
 
-def _selected_highlight_words(words: list[dict], highlight_color: str) -> list[str]:
-    """Pick 1-2 key words in a cue to light up in bright color.
-
-    The viral style shows 2-4 words per burst and highlights the word (or
-    two) being spoken. We always take the FIRST word of the burst — that is
-    the one the speaker lands on as the burst opens — and then one more
-    content word (a number, a strong verb, a noun) if the cue has a few
-    words to spare. Short cues (1-2 words) get exactly one highlight, no
-    matter what, so a 2-word caption never comes out "word-word" with two
-    colored boxes.
-
-    The colours rotate per cue so two adjacent chunks never share the same
-    accent (the syllables are themselves broken up by the render so the
-    highlight colour changes every few words anyway).
-    """
-    if not words:
-        return []
-    # The first word of the burst is the one the speaker starts speaking
-    # first — the primary highlight. (The render paints the full burst in
-    # the break text, then re-colours nothing: a per-word highlight colour
-    # is NOT part of the Ssemble viral style, so this function is purely
-    # advisory for the dashboard and the tests.)
-    return [str(words[0].get("word", "")) or ""]
-
-
-def _highlight_break(cue: dict, highlight_color: str) -> str:
-    """Turn a cue into its ASS text with the highlight word in bright color.
-
-    The Ssemble viral style is ALL CAPS, one line (max 2 lines), and the
-    spoken word is painted _over_ the white text in bright color. We do that
-    by wrapping just the highlight word in inline colour tags and keeping the
-    rest of the break white.
-
-    The ASS ``\1c`` colour tag paints ALL text that follows it, so a naive
-    ``{\1c&H...&}{\1c&HFFFFFF&}`` chain would colour the ENTIRE break the
-    bright color. Instead we build three pieces — the words before the
-    highlight (white), the highlight word (bright), the words after (white)
-    — and concatenate white-tagged + highlight-tagged + white-tagged. The
-    ASS spec is ambiguous about inline colours, and libass's implementation
-    has historically painted everything after a ``\1c`` in that colour, so
-    producing a single ``{\1c...}`` block that spans the whole line is the
-    only way to get the highlight to sit over the white text without
-    re-colouring the rest of the same cue.
-    """
-    plain = str(cue.get("text", "")).replace("{", "(").replace("}", ")")
-    words = [str(w).strip() for w in plain.split()]
-    if not words:
-        return plain
-    selected = _selected_highlight_words(cue.get("words") or [], highlight_color)
-    if not selected:
-        return plain
-    hw = selected[0].upper()
-    # Build the white run that ends immediately before the highlight word.
-    idx = None
-    for i, w in enumerate(words):
-        if w.upper() == hw:
-            idx = i
-            break
-    if idx is None:
-        return plain
-    before = " ".join(w for w in words[:idx] if w)
-    after = " ".join(w for w in words[idx + 1:] if w)
-    # Wrap each pre-highlight word in its own white tag so a multi-word
-    # "before" run stays white even though the previous word's tag is still
-    # "open" (the dark text is the white part, not the highlight).
-    parts: list[str] = []
-    if before:
-        parts.extend(
-            r"{\1c" + _hex_to_ass("#FFFFFF") + "&}" + w
-            for w in before.split()
-        )
-    parts.append(
-        r"{\1c" + _hex_to_ass(highlight_color) + "&}" + hw
-        + r"{\1c" + _hex_to_ass("#FFFFFF") + "&}" + r"{\1c" + _hex_to_ass("#FFFFFF") + "&}"
-    )
-    if after:
-        parts.append(
-            r"{\1c" + _hex_to_ass("#FFFFFF") + "&}" + after.replace(" ", r" ")
-        )
-    return "".join(parts)
-
-
 def _hex_to_ass(hex_color: str) -> str:
     hex_color = hex_color.lstrip("#")
     if len(hex_color) == 3:
         hex_color = "".join(c * 2 for c in hex_color)
     r, g, b = hex_color[0:2], hex_color[2:4], hex_color[4:6]
     return f"&H00{b}{g}{r}".upper()
+
+
+# ---------------------------------------------------------------------------
+# ASS inline-colour escape
+#
+# ASS ``{\1c&H...&}`` colours ALL text that follows the tag until the next
+# colour tag. A naive ``{\1c&H...&}{\1c&HFFFFFF&}`` chain therefore paints
+# the ENTIRE rest of the line the bright color, and a multi-line cue built
+# from a naive chain flattens into one un-scrollable block with its words
+# merged. We keep every colour tag closed on the SAME word, so each word
+# paints exactly itself.
+# ---------------------------------------------------------------------------
+def _colour_word(word: str, color: str) -> str:
+    """Wrap a single word in inline colour tags, closed on the same word."""
+    return (
+        r"{\1c" + _hex_to_ass(color) + "&}" + word
+        + r"{\1c" + _hex_to_ass("#FFFFFF") + "&}" + r"{\1c" + _hex_to_ass("#FFFFFF") + "&}"
+    )
+
+
+def _build_viral_cue(cue: dict, highlight_color: str) -> str:
+    """Build ONE clean ASS cue line for the viral preset's spoken word.
+
+    Result: a single ASS Dialogue line whose text is the whole burst, with
+    the SPOKEN word wrapped in the bright inline colour and every other
+    word left plain white. No colour-chain spanning the entire line, so the
+    subtitle stays readable (one word per line, flat, centred) instead of a
+    merged colour block at the bottom of the frame.
+    """
+    plain = str(cue.get("text", "")).replace("{", "(").replace("}", ")")
+    words = [str(w).strip() for w in plain.split()]
+    if not words:
+        return plain
+    # The word being spoken is the first word of the cue (the subtitle
+    # pipeline already ordered cues by start time, and the burst's FIRST
+    # word is the one the speaker lands on as the burst opens).
+    spoken = words[0].upper()
+    # Mark the spoken word so _colour_word can find it.
+    spoken_idx = None
+    for i, w in enumerate(words):
+        if w.upper() == spoken:
+            spoken_idx = i
+            break
+    if spoken_idx is None:
+        return plain
+    parts: list[str] = []
+    for i, w in enumerate(words):
+        if i == spoken_idx:
+            parts.append(_colour_word(w, highlight_color))
+        else:
+            parts.append(_colour_word(w, "#FFFFFF"))
+    return "".join(parts)
+
+
+def build_ass_events(
+    cues: list[dict], settings: Settings, start_offset: float = 0.0,
+    preset_key: str | None = None,
+) -> str:
+    p = get_preset(preset_key, settings.subtitle.highlight_color)
+    # The highlight colour lives on the caption track: the ASS `subtitles`
+    # filter does NOT read [Events] colour tags, so we carry the preset's
+    # own accent as the highlight colour for this clip's cues — that's the
+    # colour the word being spoken gets painted.
+    highlight_color = p.secondary if p.secondary else settings.subtitle.highlight_color
+    lines: list[str] = []
+    for c in cues:
+        start = _ass_time(c["start"] - start_offset)
+        end = _ass_time(c["end"] - start_offset)
+        # The viral preset is word-by-word. Each word gets its own ASS cue
+        # (and therefore its own ASS events line), so the spoken word stays
+        # on screen exactly as long as it was spoken and never stacks on top
+        # of the next word. The whole burst is one flat, centred, max-2-line
+        # white strip with a thick black outline and soft shadow.
+        # ``c["text"]`` is the burst text; ``c["words"]`` is what we paint on.
+        text = c["text"].replace("{", "(").replace("}", ")")
+        if p.pop:
+            text = (
+                r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
+                r"\t(90,140,\fscx100\fscy100)}" + text
+            )
+        # The spoken word is painted bright in sync with the audio. Because
+        # each word is its own flat cue, this colour never bleeds onto the
+        # next word — no more bottom-of-frame merge mess.
+        if p.highlight and c.get("words"):
+            text = _build_viral_cue(c, highlight_color)
+        lines.append(
+            f"Dialogue: 0,{start},{end},{p.key},,0,0,0,,{text}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- #
