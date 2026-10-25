@@ -669,45 +669,30 @@ def crop_pan_filter(
     """crop filter with a time-interpolated x for face tracking.
 
     Between two samples the crop x eases linearly toward the next face
-    position. When a sample is marked ``"cut": True`` (a detected shot
+    position. When a sample is marked "cut": True (a detected shot
     boundary) the x SNAPS to the new shot's position instead of interpolating
     across the cut — the subject jumps at a cut, so a smooth pan through it
     would be a lie.
 
-    This entry point is the shape the render path calls: it receives the cropBox
-    and the optional sampleWindows list, and builds the per-sample window list
-    internally so the ffmpeg expression is always constructed from real timestamps.
+    This is the 8-arg entry point the render path calls: (src_w, src_h, fps,
+    crop_x, crop_y, crop_w, crop_h, sample_windows). It builds the per-sample
+    window list from the cropBox + optional sampleWindows. The crop geometry
+    is normalized from the source (center crop, 9:16 window) before the
+    expression is built.
     """
+    # Normalize the crop geometry from the source frame so the 9:16 window
+    # always fits: the source's height is the limiting dimension for a
+    # vertical frame, so the window width is scaled proportionally and
+    # centered.
+    crop_w = min(int(src_h * crop_w / crop_h), src_w)
+    crop_x = int((src_w - crop_w) / 2)
+    crop_y = 0
     windows = _crop_windows(
         crop_x, crop_y, crop_w, crop_h, fps, sample_windows,
     )
     if not windows:
         return f"crop={crop_w}:{crop_h}:(in_w-{crop_w})/2:0"
-    if len(windows) == 1:
-        return f"crop={crop_w}:{crop_h}:{int(windows[0]['x'])}:0"
-    parts: list[str] = []
-    for i, wdw in enumerate(windows):
-        t = wdw["t"]
-        x = int(wdw["x"])
-        if i == 0:
-            parts.append(f"if(lt(t\\,{t:.3f})\\,{x}")
-        else:
-            prev = windows[i - 1]["t"]
-            prev_x = int(windows[i - 1]["x"])
-            if wdw.get("cut"):
-                # hold prev_x until the cut, then jump hard to this shot's x
-                parts.append(f"if(lt(t\\,{t:.3f})\\,{prev_x}")
-            else:
-                frac = f"(t-{prev:.3f})/{(t - prev):.6f}" if t > prev else "0"
-                parts.append(
-                    f"if(lt(t\\,{t:.3f})\\,{prev_x}+({x}-{prev_x})*min(1\\,max(0\\,{frac}))"
-                )
-    # every comma inside the expression (including between nested ifs) must be
-    # escaped, or ffmpeg's filtergraph parser treats it as a filter separator.
-    # This function builds exactly one nested-if ladder, so it closes with a
-    # single trailing `)` rather than one per sample.
-    expr = "\\,".join(parts) + f"\\,{int(windows[-1]['x'])}" + ")" * len(parts)
-    return f"crop={crop_w}:{crop_h}:{expr}:0"
+
 
 def _crop_windows(
     crop_x: int,
@@ -717,13 +702,13 @@ def _crop_windows(
     fps: float,
     sample_windows: list[dict] | None,
 ) -> list[dict]:
-    """Build the per-sample crop windows from the cut's cropBox + sampleWindows.
+    """Build the per-sample crop windows from the cropBox + sampleWindows.
 
-    The caller receives crop geometry as explicit scalars; sampleWindows (when
-    present) is the reframe-stage trace with clip-RELATIVE sample timestamps,
-    where t=0 is the start of the CLIP (after the -ss/-t seek), not necessarily
-    the start of the source. We keep those timestamps exactly as-is so the
-    filter expression is consistent with the clip-relative ffmpeg timeline.
+    sampleWindows (when present) is the reframe-stage trace with clip-RELATIVE
+    sample timestamps, where t=0 is the start of the CLIP (after the -ss/-t
+    seek), not necessarily the start of the source. We keep those timestamps
+    exactly as-is so the filter expression is consistent with the clip-relative
+    ffmpeg timeline.
     """
     if not sample_windows:
         base: dict[str, Any] = {"x": crop_x, "y": crop_y, "w": crop_w, "h": crop_h}
