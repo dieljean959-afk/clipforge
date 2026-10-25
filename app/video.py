@@ -693,6 +693,16 @@ def crop_pan_filter(
     if not windows:
         return f"crop={crop_w}:{crop_h}:(in_w-{crop_w})/2:0"
 
+    # Multiple sample windows: join each window's filter pair and drop the
+    # final "crop=0:0" the old code produced after the last sample.
+    parts = []
+    for i, w in enumerate(windows):
+        parts.append(
+            f"crop={w['w']}:{w['h']}:({w['x']}):({w['y']}),"
+            f"scale={w['w']}:{w['h']}:force_original_aspect_ratio=increase"
+        )
+    return ",".join(parts)
+
 
 def _crop_windows(
     crop_x: int,
@@ -948,7 +958,7 @@ def render_clip(
     elif ass_path is not None:
         cmd = [
             ffmpeg_bin(), "-y", *seek,
-            "-vf", f"{vf},subtitles={ass_escaped}",
+            "-filter_complex", f"{vf},subtitles={ass_escaped}",
             *codec_args,
             *AUDIO_ARGS,
             *browser_safe_args(enc.encoder),
@@ -958,7 +968,7 @@ def render_clip(
     else:
         cmd = [
             ffmpeg_bin(), "-y", *seek,
-            "-vf", vf,
+            "-filter_complex", vf,
             *codec_args,
             *AUDIO_ARGS,
             *browser_safe_args(enc.encoder),
