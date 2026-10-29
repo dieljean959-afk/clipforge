@@ -217,12 +217,11 @@ export function useHealth(intervalMs = 5000) {
   const [stale, setStale] = useState<string | null>(null);
   // tried = first probe completed (ok or failed). Derived from state, never a
   // ref read during render.
-  const [tried, setTried] = useState(false);
-  // Read inside the async callback only (never during render) to decide
-  // whether a failure is fatal or transient.
-  const haveData = useRef(false);
-  /** Failed probes since the last success — the banner only shows at 3. */
-  const failures = useRef(0);
+  const [tried, setTried] = useState(false);    // Read inside the async callback only (never during render) to decide
+    // whether a failure is fatal or transient.
+    const haveData = useRef(false);
+    // Failed probes since the last success — the banner only shows at 3.
+    const failures = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
