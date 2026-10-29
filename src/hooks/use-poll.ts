@@ -95,32 +95,30 @@ export function useJobs(intervalMs = 2000) {
   const refresh = useCallback(async () => {
     try {
       const page = await api.listJobs(limit);
-      setJobs(
+      setJobs((prev) => {
         // The backend's normal list is capped to the newest page, so a finished
         // batch that the reader has already scrolled past can look like it
         // vanished and came back again between polls. Keep anything that was
         // already on screen if the server did not explicitly send it again,
         // rather than blinking it out of existence for a page that has not
         // changed.
-        (prev) => {
-          if (!prev) return page.jobs;
-          const known = new Set(prev.map((j) => j._id));
-          const fresh = new Map(page.jobs.map((j) => [j._id, j]));
-          const merged = prev.map((j) => fresh.get(j._id) ?? j);
-          for (const j of page.jobs) {
-            if (!known.has(j._id)) merged.push(j);
-          }
-          merged.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
-          return merged;
-        }(jobs),
-      );
+        if (!prev) return page.jobs;
+        const known = new Set(prev.map((j) => j._id));
+        const fresh = new Map(page.jobs.map((j) => [j._id, j]));
+        const merged = prev.map((j) => fresh.get(j._id) ?? j);
+        for (const j of page.jobs) {
+          if (!known.has(j._id)) merged.push(j);
+        }
+        merged.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+        return merged;
+      });
       setTotal(page.total);
       setHasMore(page.nextBefore !== null);
       applySuccess();
     } catch (err) {
       applyFailure(err);
     }
-  }, [applyFailure, applySuccess, limit, jobs]);
+  }, [applyFailure, applySuccess, limit]);
 
   // One more page. Not a conditional hook, so it is an explicit call from the
   // scroll sentinel AND from the button — either one works.
