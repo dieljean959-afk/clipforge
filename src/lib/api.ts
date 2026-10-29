@@ -173,6 +173,7 @@ export interface ClipDto {
   mediaHeight?: number | null;
   mediaDurationSec?: number | null;
   mediaError?: string | null;
+  fps?: number | null;
   renderState: "pending" | "running" | "done" | "failed";
   renderMs?: number | null;
   translationTracks?: { lang: string; source?: boolean; cached?: boolean; error?: string; files?: Record<string, string> }[] | null;
