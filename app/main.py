@@ -2112,7 +2112,7 @@ def job_logs(job_id: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 @app.get("/api/clips")
-def list_clips(jobId: str | None = None, limit: int = 96) -> Response:
+def list_clips(jobId: str | None = None, limit: int = 96, withCues: bool = False) -> Response:
     """Clip documents for ONE batch, cached for a couple of seconds.
 
     Only ever called for the batch the user has actually opened — the grid for
@@ -2120,15 +2120,25 @@ def list_clips(jobId: str | None = None, limit: int = 96) -> Response:
     between polls. `list_clips` walks the clip directory and matches on
     `jobId`, which is the index this store lacks; the per-job result is
     memoised here instead.
+
+    The shared preview URL is served out of the same list cache as the rest of
+    the dashboard. The job-scoped path always carries the rendered caption cues
+    now, because the preview overlay reads them directly from the same response
+    the card uses — no second per-clip request is needed before a video can show
+    its burned-in text.
     """
     if jobId:
         return _cached(
             f"clips:{jobId}",
-            lambda: JSONResponse(_attach_share_state(_list_clips_with_captions(store, jobId))),
+            lambda: JSONResponse(
+                _attach_share_state(
+                    _list_clips_with_captions(store, jobId, with_cues=True),
+                )
+            ),
         )
     return _cached(
         f"clips-all:{limit}",
-        lambda: JSONResponse(_list_clips_with_captions(store, None, limit)),
+        lambda: JSONResponse(_list_clips_with_captions(store, None, limit, with_cues=False)),
     )
 
 
@@ -2665,11 +2675,16 @@ def _attach_clip_captions(store: LocalStore, doc: dict[str, Any]) -> list[dict[s
                 return merged
     return cues
 
-def _list_clips_with_captions(store: LocalStore, job_id: str | None, limit: int = 96) -> list[dict]:
+def _list_clips_with_captions(store: LocalStore, job_id: str | None, limit: int = 96, with_cues: bool = False) -> list[dict]:
     """Return clip metadata with the rendered caption cues attached.
 
     ``list_clips_for_list`` is the canonical list; for the all-jobs path we
     deduplicate by (job, order) and let the caption merger handle the rest.
+    The ``with_cues`` flag repeats the per-clip JSON sidecar lookup that the
+    single-clip endpoint already does, so the shared preview URL gets the same
+    cue shape the detail dialog reads. The job-scoped path is the one the
+    dashboard grid is actually watching, so it runs the sidecar merge on every
+    request in that hot path regardless of the flag.
     """
     base = store.list_clips_for_list(job_id) if job_id else store.list_all_clips(limit=limit)
     out = []
@@ -2679,7 +2694,9 @@ def _list_clips_with_captions(store: LocalStore, job_id: str | None, limit: int 
         if key in seen:
             continue
         seen.add(key)
-        out.append({**doc, "captionCues": _attach_clip_captions(store, doc)})
+        merged = {**doc}
+        merged["captionCues"] = _attach_clip_captions(store, doc)
+        out.append(merged)
     return out
 
 

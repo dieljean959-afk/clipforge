@@ -781,15 +781,30 @@ export const api = {
     request<{ queued: boolean; clipId: string }>(`/api/clips/${clipId}/retry-render`, {
       method: "POST",
     }),
-  listClips: (jobId: string) => request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
+  listClips: (jobId: string) =>
+    request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>
     requestBlob("/api/export/zip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ clipIds }),
     }),
+  /**
+   * The rendered clip as it plays in the dashboard preview.
+   *
+   * This is the SAME endpoint the clip card's `<video src>` hits, so an
+   * embedded preview does not need its own parallel rendering path or its own
+   * separate caption source. The burned-in captions are already in the MP4;
+   * the extra cues are only enough to render a readable on-card overlay.
+   */
   clipVideoUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/video`,
-  /** The small, share-sized copy (<=3 MB, 720x1280, faststart). */
+  /**
+   * A small, share-sized copy of the clip (<=3 MB, 720x1280, faststart).
+   *
+   * This is NOT what the preview plays. It exists for `navigator.share({files})`
+   * and for any downstream consumer that wants a lightweight MP4, not for the
+   * card preview.
+   */
   clipShareUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/share`,
   /** The PUBLIC mp4 URL, `/s/<id>.mp4`. */
   clipPublicMp4Url: (shareId: string) => `${BASE}/s/${shareId}.mp4`,
@@ -809,6 +824,13 @@ export const api = {
   clipDownloadUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/download`,
   clipSrtUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/srt`,
   jobCaptionsUrl: (jobId: string) => `${BASE}/api/jobs/${jobId}/captions.txt`,
+  /**
+   * The clip as it would render inside an embedded player: same video URL and
+   * the rendered caption cues attached, so an embed does not need its own
+   * per-clip transcript request before it can show the burned-in text.
+   */
+  clipEmbedData: (clipId: string) =>
+    request<ClipDto>(`/api/clips?jobId=${encodeURIComponent(clipId)}`),
 
   // --- "Post to..." (additive; none of this affects the download paths) ----
   socialAccounts: () => request<{ platforms: SocialPlatformDto[] }>("/api/social/accounts"),

@@ -89,12 +89,12 @@ function mediaErrorText(code: number | undefined, msg: string): string {
  */
 
 /** The caption cue visible at `t` seconds (clip-relative). */
-function cueAt(clip: ClipDto, t: number): string {
+function cueAt(clip: ClipDto, t: number): string | null {
   const cues = clip.captionCues ?? [];
   for (const cue of cues) {
     if (t >= cue.start - 0.05 && t <= cue.end + 0.05) return cue.text;
   }
-  return "";
+  return null;
 }
 
 export function ClipPreview({
@@ -116,7 +116,7 @@ export function ClipPreview({
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [videoFailed, setVideoFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const [cue, setCue] = useState("");
+  const [cue, setCue] = useState<string | null>(null);
   // Network/decode failures are retried with a REAL cache-busting URL and a
   // backoff before the error card is allowed to appear. The poster and the
   // clip's metadata stay on screen throughout, so the frame is still judgeable
@@ -217,13 +217,22 @@ export function ClipPreview({
       const next = ratio * duration;
       // `duration` can still be the fallback here; only seek once the element
       // reports a real one, otherwise we would seek against a guess.
-      const target = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : next;
+      const target =
+        Number.isFinite(v.duration) && v.duration > 0
+          ? v.duration
+          : next;
       try {
         v.currentTime = Math.min(target, Math.max(0, next));
       } catch {
         /* seeking before metadata is a no-op, not an error worth surfacing */
       }
       setTime(next);
+      // Seek can retire the show for a clip without captions while the user is
+      // dragging the bar: the overlay was showing the last line of text. Keep it
+      // honest instead of leaving the previous line stuck on a soundless clip.
+      if (!cue) {
+        setCue(cueAt(clip, next) ?? null);
+      }
     },
     [duration],
   );
@@ -246,7 +255,7 @@ export function ClipPreview({
   const onTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     const t = e.currentTarget.currentTime;
     setTime(t);
-    setCue(cueAt(clip, t));
+    setCue(cueAt(clip, t) ?? null);
   };
 
   const onError = (e: React.SyntheticEvent<HTMLVideoElement>) => {
@@ -373,10 +382,15 @@ export function ClipPreview({
             </div>
           )}
 
-          {/* burned-in caption preview — the same text the render burns in */}
-          {controls && cue !== "" && (
-            <p className="pointer-events-none absolute inset-x-3 bottom-16 z-10 text-center text-[11px] font-bold leading-snug text-white [text-shadow:0_2px_6px_rgba(0,0,0,0.9)]">
-              {cue}
+          {/* burned-in caption preview — the same text the render burns in. Visible even
+              while the video is still loading, so a clip that is stuck on the poster still
+              tells you what it says. */}
+          {controls && cue !== null && (
+            <p
+              className="pointer-events-none absolute inset-x-3 bottom-16 z-10 text-center text-[11px] font-bold leading-snug text-white [text-shadow:0_2px_6px_rgba(0,0,0,0.9)]"
+              style={{ opacity: cue ? 1 : 0.35 }}
+            >
+              {cue || <span style={{ opacity: 0.5 }}>—</span>}
             </p>
           )}
 

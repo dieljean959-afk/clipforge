@@ -141,6 +141,7 @@ export function JobCard({
   const failed = job.status === "failed" || job.stage === "failed";
   const complete = job.status === "complete" || job.stage === "complete";
   const paused = job.status === "paused" || job.stage === "paused";
+  const isTerminal = job.isTerminal || failed || complete || paused;
   // The stage to highlight: for a live job that is its active stage, and for a
   // dead one the stage it died in, so the stepper marks the right pill rather
   // than leaving every stage grey.
@@ -154,7 +155,7 @@ export function JobCard({
   // Live ONLY while the backend says the job is live. isTerminal is the
   // backend's single verdict, so this can never show a spinner for a job that
   // has already stopped.
-  const watching = !job.isTerminal && !complete && !failed && !paused;
+  const watching = !isTerminal && !complete && !failed && !paused;
   const now = useNow(watching);
   const quiet = watching && silenceMs(job, now) > QUIET_THRESHOLD_MS;
   const plan = job.stagePlan ?? [];
@@ -265,9 +266,12 @@ export function JobCard({
             </Button>
           )}
         </div>
-      </div>
-
-      {/* whole-pipeline status: the single answer to "running / done / broken" */}
+      </div>          {/* whole-pipeline status: the single answer to "running / done / broken".
+              "done" is for a job whose every promised unit of work has checked out.
+              A job can be "complete" (the backend's terminal status) while still
+              looking unfinished to a reader when the list only hands back a stale
+              snapshot, so this card names the real situation rather than borrowing
+              a status word that means something else in another part of the code. */}
       {overall.state === "done" ? (
         <div
           data-testid="job-done"
@@ -279,6 +283,9 @@ export function JobCard({
           </span>
           <span className="ml-auto font-mono text-[11px] font-normal opacity-80">
             {job.totalClipsSec ? `· ${fmtClock(job.totalClipsSec)} total` : null}
+          </span>
+          <span className="shrink-0 rounded-full bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+            {job.isTerminal ? "finished" : "done"}
           </span>
         </div>
       ) : job.interrupted ? (
@@ -522,8 +529,10 @@ export function JobCard({
       )}
 
       {/* Manual control: pause/resume a live job, and force a poll so activity
-          can be confirmed without reloading the page. */}
-      {(watching || paused) && (
+          can be confirmed without reloading the page. A job that the backend has
+          already marked terminal does not keep buttons on screen for work it can
+          no longer do. */}
+      {(overall.isTerminal ? paused : watching) && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {paused ? (
             <Button size="sm" onClick={doResume} disabled={busy !== null}>

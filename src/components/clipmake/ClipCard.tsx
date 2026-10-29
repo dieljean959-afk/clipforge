@@ -47,6 +47,7 @@ export function ClipCard({
 
   const rendered = clip.renderState === "done" && clip.videoPath !== null;
   const failed = clip.renderState === "failed";
+  const playable = rendered && clip.mediaBytes !== undefined && clip.mediaBytes !== null && clip.mediaBytes > 0;
   const hasTimestamps = Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end > clip.start;
 
   // A stock "Clip" title is a symptom of the AI having nothing to work from
@@ -141,6 +142,18 @@ export function ClipCard({
               render failed
             </span>
           )}
+          {rendered && !playable && (
+            <span className="flex items-center gap-1 rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+              <Film className="size-3" />
+              render exists, not playable
+            </span>
+          )}
+          {rendered && !playable && (
+            <span className="flex items-center gap-1 rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+              <Film className="size-3" />
+              render exists, not playable
+            </span>
+          )}
         </div>
       </div>
       <div className="flex flex-1 flex-col gap-2 px-3 pb-3">
@@ -203,8 +216,8 @@ export function ClipCard({
             size="sm"
             variant="outline"
             className="h-7 cursor-pointer gap-1.5 text-xs"
-            disabled={downloading || !rendered}
-            title={rendered ? "Download the rendered MP4" : "No rendered MP4 yet"}
+            disabled={downloading || !playable}
+            title={playable ? "Download the rendered MP4" : "No playable MP4 yet"}
             onClick={() => void downloadMp4()}
           >
             {downloading ? (
@@ -218,8 +231,8 @@ export function ClipCard({
             size="sm"
             variant="outline"
             className="h-7 cursor-pointer gap-1.5 text-xs"
-            disabled={!rendered}
-            title={rendered ? "Download the rendered MP4" : "No rendered MP4 yet"}
+            disabled={!playable}
+            title={playable ? "Download the rendered MP4" : "No playable MP4 yet"}
             onClick={() => {
               buildClipSrt(clip);
               toast.success("SRT downloaded.");
@@ -244,6 +257,11 @@ export function ClipCard({
               <RefreshCw className="size-3.5" />
               Retry render
             </Button>
+          )}
+          {rendered && !playable && (
+            <span className="mt-1 block text-[11px] text-amber-300/90">
+              Rendered file is there, but this card cannot play or download it yet.
+            </span>
           )}
         </div>
         {/* "Share..." gets its OWN row. Social is strictly additive: it can
