@@ -106,7 +106,9 @@ export function ClipPreview({
   className?: string;
   autoPlay?: boolean;
 }) {
-  const videoUrl = clip.videoPath ? api.clipVideoUrl(clip._id) : null;
+  const videoUrl = clip.videoPath
+    ? api.clipVideoUrl(clip._id, clip.mediaBytes)
+    : null;
   const thumbUrl = clip.thumbPath ? api.clipThumbUrl(clip._id) : null;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
