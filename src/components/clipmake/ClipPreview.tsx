@@ -107,7 +107,7 @@ export function ClipPreview({
   autoPlay?: boolean;
 }) {
   const videoUrl = clip.videoPath
-    ? api.clipVideoUrl(clip._id, clip.mediaBytes)
+    ? api.clipVideoUrl(clip._id, clip.mediaBytes ?? undefined)
     : null;
   const thumbUrl = clip.thumbPath ? api.clipThumbUrl(clip._id) : null;
   const videoRef = useRef<HTMLVideoElement | null>(null);
