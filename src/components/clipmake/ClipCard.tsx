@@ -48,8 +48,16 @@ export function ClipCard({
 
   const rendered = clip.renderState === "done" && clip.videoPath !== null;
   const failed = clip.renderState === "failed";
-  const playable = rendered && clip.mediaBytes !== undefined && clip.mediaBytes !== null && clip.mediaBytes > 0;
+  const hasMedia = clip.mediaBytes != null && Number.isFinite(clip.mediaBytes) && clip.mediaBytes > 0;
+  const playable = rendered && hasMedia;
   const hasTimestamps = Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end > clip.start;
+  const fpsChip = clip.fps != null && clip.fps > 0;
+  const captionPreview =
+    hasTimestamps &&
+    Array.isArray(clip.captionCues) &&
+    clip.captionCues.some(
+      (c) => Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start,
+    );
 
   // A stock "Clip" title is a symptom of the AI having nothing to work from
   // — a one-shot failure where the backend had no hook_text, no transcript
@@ -118,6 +126,16 @@ export function ClipCard({
             <BandIcon className="size-3" />
             {clip.score}
           </span>
+          <span
+            className={cn(
+              "flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
+              clip.fps != null && clip.fps > 0
+                ? "border-primary/40 bg-primary/10 text-primary"
+                : "border-border bg-muted text-muted-foreground",
+            )}
+          >
+            {clip.fps != null && clip.fps > 0 ? `${clip.fps.toFixed(clip.fps < 10 ? 1 : 0)} fps` : "no fps"}
+          </span>
           {/* honest render-state chip — no fake "ready" look for metadata-only clips */}
           {failed && (
             <span className="flex items-center gap-1 rounded-full border border-destructive/50 bg-destructive/15 px-2 py-0.5 text-[10px] font-bold text-destructive">
@@ -143,13 +161,7 @@ export function ClipCard({
               render failed
             </span>
           )}
-          {rendered && !playable && (
-            <span className="flex items-center gap-1 rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
-              <Film className="size-3" />
-              render exists, not playable
-            </span>
-          )}
-          {rendered && !playable && (
+          {rendered && hasMedia && !playable && (
             <span className="flex items-center gap-1 rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
               <Film className="size-3" />
               render exists, not playable
@@ -176,8 +188,9 @@ export function ClipCard({
             ? `${fmtDuration(clip.start)} → ${fmtDuration(clip.end)} · ${fmtDuration(clip.end - clip.start)}`
             : "— → — · —"}
           · 9:16 1080×1920
-          {clip.mediaBytes !== undefined && clip.mediaBytes !== null &&
-            ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`}
+          {clip.mediaBytes != null && Number.isFinite(clip.mediaBytes) && clip.mediaBytes > 0
+            ? ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`
+            : ``}
           {failed && clip.mediaError && (
             ` · ${String(clip.mediaError).slice(0, 60)}`
           )}
@@ -213,34 +226,38 @@ export function ClipCard({
             <Copy className="size-3.5" />
             Copy caption
           </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 cursor-pointer gap-1.5 text-xs"
-            disabled={downloading || !playable}
-            title={playable ? "Download the rendered MP4" : "No playable MP4 yet"}
-            onClick={() => void downloadMp4()}
-          >
-            {downloading ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Download className="size-3.5" />
-            )}
-            MP4
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 cursor-pointer gap-1.5 text-xs"
-            disabled={!playable}
-            title={playable ? "Download the rendered MP4" : "No playable MP4 yet"}
-            onClick={() => {
-              buildClipSrt(clip);
-              toast.success("SRT downloaded.");
-            }}
-          >
-            .srt
-          </Button>
+          {rendered && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 cursor-pointer gap-1.5 text-xs"
+              disabled={downloading || !playable}
+              title={playable ? "Download the rendered MP4" : "No playable MP4 yet"}
+              onClick={() => void downloadMp4()}
+            >
+              {downloading ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
+              )}
+              MP4
+            </Button>
+          )}
+          {rendered && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 cursor-pointer gap-1.5 text-xs"
+              disabled={!playable}
+              title={playable ? "Download the rendered MP4" : "No playable MP4 yet"}
+              onClick={() => {
+                buildClipSrt(clip);
+                toast.success("SRT downloaded.");
+              }}
+            >
+              .srt
+            </Button>
+          )}
           {failed && (
             <Button
               size="sm"
@@ -259,15 +276,13 @@ export function ClipCard({
               Retry render
             </Button>
           )}
-          {rendered && !playable && (
+          {rendered && hasMedia && !playable && (
             <span className="mt-1 block text-[11px] text-amber-300/90">
-              Rendered file is there, but this card cannot play or download it yet.
+              Rendered file is there, but this card cannot play it yet.
             </span>
           )}
         </div>
-        {/* "Share..." gets its OWN row. Social is strictly additive: it can
-            never take space from, reorder or hide the download above. */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex items-center gap-1.5">
           <ShareButton clip={clip} rendered={rendered} />
           <XQuickButton clip={clip} />
           <PostMenu clip={clip} rendered={rendered} />
