@@ -141,7 +141,7 @@ export function JobCard({
   const failed = job.status === "failed" || job.stage === "failed";
   const complete = job.status === "complete" || job.stage === "complete";
   const paused = job.status === "paused" || job.stage === "paused";
-  const isTerminal = job.isTerminal || failed || complete || paused;
+  const isTerminal = job.isTerminal || failed || complete || paused || overall.isTerminal;
   // The stage to highlight: for a live job that is its active stage, and for a
   // dead one the stage it died in, so the stepper marks the right pill rather
   // than leaving every stage grey.
@@ -254,7 +254,7 @@ export function JobCard({
           {complete && (
             <ConfirmDeleteJob job={job} onDeleted={() => onDeleted?.()} />
           )}
-          {failed && (
+          {failed && job.error === undefined ? (
             <Button
               size="sm"
               variant="outline"
@@ -264,7 +264,7 @@ export function JobCard({
               <RotateCcw className="size-3.5" />
               Retry
             </Button>
-          )}
+          ) : null}
         </div>
       </div>          {/* whole-pipeline status: the single answer to "running / done / broken".
               "done" is for a job whose every promised unit of work has checked out.
@@ -285,7 +285,7 @@ export function JobCard({
             {job.totalClipsSec ? `· ${fmtClock(job.totalClipsSec)} total` : null}
           </span>
           <span className="shrink-0 rounded-full bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-            {job.isTerminal ? "finished" : "done"}
+            finished
           </span>
         </div>
       ) : job.interrupted ? (
@@ -532,7 +532,7 @@ export function JobCard({
           can be confirmed without reloading the page. A job that the backend has
           already marked terminal does not keep buttons on screen for work it can
           no longer do. */}
-      {(overall.isTerminal ? paused : watching) && (
+      {(overall.isTerminal ? paused : !complete && !failed && !paused) && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {paused ? (
             <Button size="sm" onClick={doResume} disabled={busy !== null}>
