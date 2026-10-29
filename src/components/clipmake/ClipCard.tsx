@@ -4,6 +4,7 @@ import {
   Copy,
   Download,
   EarOff,
+  Film,
   Flame,
   Loader2,
   RefreshCw,

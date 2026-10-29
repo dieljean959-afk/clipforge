@@ -75,6 +75,8 @@ export interface OverallStatus {
   percent: number;
   /** Plain-language headline, e.g. "Stage 3 of 4 — AI clip detection". */
   label: string;
+  /** Whether the job has reached a terminal state (done/failed/paused). */
+  isTerminal: boolean;
 }
 
 /**
@@ -101,6 +103,7 @@ export function overallStatus(job: JobDoc): OverallStatus {
       total,
       percent: 100,
       label: "Done — clips ready",
+      isTerminal: true,
     };
   }
   if (status === "failed") {
@@ -118,6 +121,7 @@ export function overallStatus(job: JobDoc): OverallStatus {
       total,
       percent: 0,
       label: where ? `Failed during ${where}` : "Failed",
+      isTerminal: true,
     };
   }
   if (status === "paused") {
@@ -134,6 +138,7 @@ export function overallStatus(job: JobDoc): OverallStatus {
         : job.pausedStage
           ? `Paused at ${STAGE_LABELS[job.pausedStage as ClipStage] ?? job.pausedStage}`
           : "Paused by user",
+      isTerminal: true,
     };
   }
   if (status === "queued") {
@@ -143,6 +148,7 @@ export function overallStatus(job: JobDoc): OverallStatus {
       total,
       percent: 0,
       label: "Queued — waiting for a worker",
+      isTerminal: false,
     };
   }
   const live = job.activeStage ?? job.stage;
@@ -154,9 +160,9 @@ export function overallStatus(job: JobDoc): OverallStatus {
     state: "running",
     stageNumber,
     total,
-    percent: Math.min(99, percent),
-    label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[live as ClipStage] ?? live}`,
-  };
+    percent: Math.min(99, percent),      label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[live as ClipStage] ?? live}`,
+      isTerminal: false,
+    };
 }
 
 // ---------------------------------------------------------------------------
