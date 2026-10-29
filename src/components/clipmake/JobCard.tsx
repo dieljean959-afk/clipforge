@@ -141,6 +141,7 @@ export function JobCard({
   const failed = job.status === "failed" || job.stage === "failed";
   const complete = job.status === "complete" || job.stage === "complete";
   const paused = job.status === "paused" || job.stage === "paused";
+  const overall = overallStatus(job);
   const isTerminal = job.isTerminal || failed || complete || paused || overall.isTerminal;
   // The stage to highlight: for a live job that is its active stage, and for a
   // dead one the stage it died in, so the stepper marks the right pill rather
@@ -149,7 +150,6 @@ export function JobCard({
     | (typeof STAGES)[number]
     | undefined;
   const activeIdx = stepStage ? STAGES.indexOf(stepStage) : -1;
-  const overall = overallStatus(job);
   const stalled = useStalled(job, serverStallSec * 1000 * STALL_WARN_FRACTION);
   const [busy, setBusy] = useState<null | "pause" | "resume" | "check">(null);
   // Live ONLY while the backend says the job is live. isTerminal is the
