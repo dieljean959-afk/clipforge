@@ -1058,6 +1058,51 @@ def _fast_health() -> dict:
     }
 
 
+@app.exception_handler(Exception)
+async def _health_route_safeguard(request: Request, exc: Exception) -> JSONResponse:
+    """A final backstop for /api/health.
+
+    The route itself is already defensive, so this handler is only a safety net
+    for the rare case where an unexpected exception escapes the route code path
+    (for example from a dependency, middleware or Starlette internals). Without
+    it, a single stray exception on the health route can turn into a non-2xx
+    response and make Render/operators think the service is down.
+
+    We only widen the response for the health check itself; everything else keeps
+    its normal error handling.
+    """
+    if request.url.path == "/api/health":
+        return JSONResponse(
+            {
+                "ok": True,
+                "degraded": ["healthCheckError"],
+                "fast": True,
+                "version": "1.1.0",
+                "uptimeSec": int(time.time() - _PROCESS_STARTED),
+                "warmup": dict(warmup),
+                "detection": _safe("detection", detection_status, probe=False),
+                "worker": {"deferred": True},
+                "limits": {
+                    "maxSourceMin": settings.hosted.max_source_min,
+                    "retentionHours": settings.hosted.retention_hours,
+                },
+                "dispatch": (
+                    {"enabled": True, "workerUrl": settings.hosted.worker_url, "remote": None}
+                    if settings.hosted.worker_url
+                    else {"enabled": False}
+                ),
+                "pid": os.getpid(),
+                "supervised": system_state.supervisor_alive(),
+                "loopLagMs": system_state.loop_lag_ms(),
+                "restarts": system_state.restart_count(),
+                "hint": "Add ?deep=1 for the full diagnostic payload.",
+                "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            },
+            status_code=200,
+        )
+    # Not our route; do not swallow the error.
+    raise exc
+
 @app.get("/api/health")
 def health(deep: bool = False) -> dict:
     """Liveness + status for the dashboard.

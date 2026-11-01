@@ -1372,8 +1372,24 @@ class ConfigError(Exception):
 
 
 def _load_toml(path: Path) -> dict:
+    """Read a TOML file used by the app.
+
+    This helper is used for ``config.toml`` at boot. On a hosted container the
+    file is normally copied in by the Dockerfile, but we treat a missing file as
+    a degraded-but-serving condition instead of a hard boot failure: a platform
+    build whose copy step is accidentally weakened by an ignore rule should still
+    be able to start and answer health checks, not exit non-zero with no port
+    open.
+
+    An invalid TOML file is still fatal: that is a real configuration bug worth
+    surfacing loudly, not something to paper over.
+    """
     if not path.exists():
-        raise ConfigError(f"config file not found: {path}")
+        logger.warning(
+            "[config] config file not found: %s — starting with defaults",
+            path,
+        )
+        return {}
     try:
         with path.open("rb") as fh:
             return tomllib.load(fh)

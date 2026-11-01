@@ -86,3 +86,9 @@ token.txt
 worker-config.json
 env-secret-list.md
 worker-token.txt
+
+# The hosted app reads config.toml at boot. Do not exclude it: a missing copy
+# makes load_config start degraded, which is fine, but excluding it here and
+# then forgetting the Dockerfile COPY is the kind of change that turns a healthy
+# build into a confusing boot failure.
+# config.toml is intentionally shipped by the Docker web CMD, not ignored here.
