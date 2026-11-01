@@ -668,6 +668,11 @@ S3_CREDENTIAL_VARS: tuple[str, ...] = (
     "CLIPFORGE_S3_SECRET_KEY",
 )
 
+#: Download-worker token persistence. Stored in a server-only file outside any
+#: public/build/zip tree, with 0600 permissions, so the dashboard can persist
+#: WORKER_URL + WORKER_TOKEN across restarts without touching env or logs.
+DOWNLOAD_WORKER_TOKEN_FILE = ROOT / "data" / "download-worker-token.json"
+
 #: Non-secret store settings. Saved alongside the credentials so a bucket is
 #: described in one place, but kept out of S3_CREDENTIAL_VARS because deleting
 #: the credentials should not silently reset the operator's chosen prefix.
@@ -1239,6 +1244,11 @@ class DownloadConfig:
     #: requests from a datacenter IP (YouTube's "Sign in to confirm you're not
     #: a bot" is the common one). Empty means no cookie file.
     cookies_file: str = ""
+    #: HTTP/SOCKS proxy used for yt-dlp metadata AND media download.
+    #: Set YTDLP_PROXY at runtime or persist in config.toml.
+    proxy: str = ""
+    #: Comma-separated secondary proxies rotated per attempt (optional).
+    proxy_list: str = ""
 
 
 @dataclass
@@ -1485,11 +1495,27 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     errors: list[str] = []
 
     app = raw.get("app", {})
-    host = str(app.get("host", "127.0.0.1"))
+    # Render and the managed preview inject PORT and expect a public bind.
+    # The server must listen on 0.0.0.0, never on 127.0.0.1, because the
+    # platform probes and the same-host proxy reach it by IP, not loopback.
+    # config.toml app.host is only a bare-metal default and must never override
+    # an explicit env value.
+    host = (
+        (os.getenv("CLIPFORGE_HOST") or "").strip()
+        or (os.getenv("HOST") or "").strip()
+        or "0.0.0.0"
+    )
+    # PORT is the platform-assigned listen port. CLIPFORGE_PORT is a legacy
+    # alias some local scripts set. config.toml app.port is only a fallback for
+    # bare-metal runs and must not win over the platform port.
     try:
-        port = int(app.get("port", 8000))
+        port = int(
+            (os.getenv("PORT") or "").strip()
+            or (os.getenv("CLIPFORGE_PORT") or "").strip()
+            or app.get("port", 8000)
+        )
     except (TypeError, ValueError):
-        errors.append("app.port must be an integer")
+        errors.append("app.port must be a whole number")
         port = 8000
     if not (1 <= port <= 65535):
         errors.append(f"app.port {port} is out of range (1-65535)")
@@ -1775,6 +1801,8 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         cookies_file=str(
             os.getenv("YT_DLP_COOKIES_FILE", d.get("cookies_file", "") or "")
         ).strip(),
+        proxy=(os.getenv("YTDLP_PROXY") or d.get("proxy", "") or "").strip(),
+        proxy_list=(os.getenv("YTDLP_PROXY_LIST") or d.get("proxy_list", "") or "").strip(),
     )
 
     h = raw.get("hosted", {})
@@ -1918,6 +1946,23 @@ def boot_banner(settings: Settings) -> None:
             f"[boot] AI detection offline — add {env_name} in the Keys/API keys tab "
             "(or .env), then hit Re-check on the dashboard"
         )
+    # Key HYGIENE, not key presence: the active-provider line above only answers
+    # "is there a key", so a superseded or placeholder DeepSeek key still printed
+    # a clean banner and then failed every detection with a 401. Runs for the
+    # DeepSeek key regardless of which provider is active, because rotating it is
+    # the step most likely to leave the phone-side app calling a revoked key.
+    try:
+        from app import keyaudit  # local import: config loads before app.main
+
+        audit = keyaudit.audit_live()
+        if audit["ok"]:
+            print(f"[boot] DeepSeek key audit: OK ({audit['state']}, {audit['masked']})")
+        else:
+            print(f"[boot] WARNING: DeepSeek key audit: {audit['state'].upper()} — {audit['warning']}")
+        if audit.get("note"):
+            print(f"[boot] DeepSeek key audit note: {audit['note']}")
+    except Exception as exc:  # noqa: BLE001 - an audit must never fail the boot
+        print(f"[boot] DeepSeek key audit skipped: {type(exc).__name__}: {exc}")
     env_files = _load_env_files(ROOT)
     print(f"[boot] env files loaded: {', '.join(env_files) if env_files else 'none found'}")
     from app import asr as asr_mod  # local import: avoids an import cycle at boot

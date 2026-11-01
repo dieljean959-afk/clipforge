@@ -7,12 +7,17 @@ pre-download (explicit, with progress) → worker thread starts.
 
 from __future__ import annotations
 
+import json
 import os
+import signal
+import sys
 import shutil
 import tempfile
 import threading
+from app import system as system_state
 import time
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,14 +42,18 @@ from app import (
     jobstatus,
     share_video,
     sharelink,
+    worker_test_endpoint,
 )
 from app import encode as encode_mod
+from app import keyaudit
+from app import workerconfig
 from app import llm as llm_mod
 from app import objectstore as objectstore_mod
 from app import subtitle as subtitle_svc
 from app import video as video_svc
 from app import worker as worker_mod
 from app.config import (
+    ROOT,
     S3_CREDENTIAL_VARS,
     ConfigError,
     Settings,
@@ -69,7 +78,20 @@ from app.config import (
     sync_s3_env_for_delete,
     write_env_var,
 )
-from app.download import probe_url
+from app.download import (
+    diagnose_url,
+    probe_url,
+    _cookie_count,
+    _detect_site,
+    _yt_dlp_version,
+    build_ytdlp_verification,
+)
+from app.download_worker_client import (
+    DownloadWorkerClient,
+    DownloadWorkerError,
+    _masked_proxy,
+    run_yt_dlp,
+)
 from app.hosting import RetentionCleaner, disk_stats
 from app.social import (
     PLATFORMS,
@@ -97,11 +119,6 @@ worker: InProcessWorker
 retention: RetentionCleaner | None = None
 warmup: dict = {"stage": "pending", "detail": "", "startedAt": None}
 
-# Disk preflight floor for new jobs: source download + caption/work files need
-# headroom (a 2h 1080p source is multi-GB). Below this, submits are refused
-# with a readable 507 instead of failing mid-pipeline.
-MIN_FREE_BYTES = 1.5 * 1024**3
-
 
 def _do_warmup() -> None:
     """Pre-download / load the model once, with honest progress."""
@@ -112,9 +129,6 @@ def _do_warmup() -> None:
         warmup["detail"] = "dispatch mode — the remote worker loads its own model"
         logger.info("[boot] Whisper warmup skipped (remote worker dispatch mode)")
         return
-    # Tight-memory hosts: holding the model in the API process would leave too
-    # little for the job that has to load its own copy, so the API process would
-    # be the thing that OOMs. Jobs still load the model themselves on first use.
     headroom_need = hostlimits.per_job_bytes(settings.whisper.model) * 2
     limit = hostlimits.effective_memory_bytes()
     if limit is not None and headroom_need > limit:
@@ -173,6 +187,44 @@ def _share_backfill() -> dict[str, int]:
     return started
 
 
+def _worker_config_path() -> Path:
+    """Path of the durable worker config (see app/workerconfig.py)."""
+    return workerconfig.CONFIG_PATH
+
+
+def _read_stored_worker_config() -> tuple[str, str]:
+    """(worker_url, worker_token) from the durable file, read fresh every call."""
+    record = workerconfig.read()
+    return record["url"], record["token"]
+
+
+def _apply_stored_worker_config_to_settings() -> None:
+    """Carry the durable worker config back into ``settings.hosted`` at boot.
+
+    ``settings.hosted`` is reloaded from the environment on every start, and a
+    headless run leaves it empty — so without this the values the operator saved
+    in the dashboard vanish on restart. Request handlers read the file FIRST
+    (``_stored_worker_url``), so a save takes effect without a restart; this is
+    what makes the dispatch path, which reads ``settings``, agree with them.
+    """
+    record = workerconfig.restore()
+    url, token = record["url"], record["token"]
+    # The saved file is authoritative; the environment is only a seed. Setting
+    # these unconditionally makes the dispatch path (which reads ``settings``)
+    # agree with the download path (which reads the file on every call).
+    if url:
+        settings.hosted.worker_url = url
+    if token:
+        settings.hosted.worker_token = token
+    if url and token:
+        logger.info(
+            f"[boot] worker config loaded from durable storage "
+            f"(url={url}, saved at {record['savedAt']})"
+        )
+    else:
+        logger.warning(f"[boot] {workerconfig.empty_warning()}")
+
+
 def _boot() -> None:
     global settings, store, worker, retention
     try:
@@ -182,47 +234,25 @@ def _boot() -> None:
         raise SystemExit(2) from exc
     boot_banner(settings)
 
-    # fail fast on missing ffmpeg/ffprobe
     logger.info(f"[boot] ffmpeg: {ffmpeg_bin()}")
     logger.info(f"[boot] ffprobe: {ffprobe_bin()}")
+
+    # Restore the saved worker URL + token from the durable file so they survive
+    # restarts. ``settings.hosted`` is reloaded from ``config.toml`` (which keeps
+    # them empty for headless runs), so the in-memory value is lost on restart —
+    # but the dashboard, the badge, the verify route AND the download path all agree
+    # once we carry the file's values back into ``settings.hosted`` at boot.
+    _apply_stored_worker_config_to_settings()
 
     store = LocalStore(settings.app.paths)
     worker = InProcessWorker(settings, store)
     retention = RetentionCleaner(settings, store)
     accounts = AccountStore(settings.app.paths.data_dir)
 
-    # --- crash recovery ---------------------------------------------------
-    # Four things are recoverable, and they are not the same thing:
-    #   1. mid-flight — the process died before it could write a terminal state,
-    #      so the job is simply frozen at its last stage.
-    #   2. interrupted — we knew a host restart killed it.
-    #   3. a FAILURE whose message is a SIGNAL banner, i.e. recorded as failure
-    #      before the interrupted/resumed distinction existed. Those jobs are
-    #      sitting at stage=failed with an intact stage cache, and used to be
-    #      lost permanently.
-    #   4. a job whose clips are ALL on disk. Handled first and separately: it
-    #      is not resumable work, it is a record that is simply wrong (see
-    #      below), and re-queueing it would burn another detection call to
-    #      re-render clips that already exist.
-    # Bounded by INTERRUPT_MAX_RESUMES so a job that cannot survive a restart
-    # loop eventually stops instead of cycling forever.
-    # Share ids are minted at clip creation, so this only mints for clips that
-    # predate the feature. It is cheap (no transcoding) and it runs BEFORE the
-    # job reconciliation below so a restored batch already has its links.
-    try:
-        _share_backfill()
-    except Exception as exc:  # noqa: BLE001 - never block boot
-        logger.warning(f"[boot] share-link backfill skipped: {exc}")
+    # --- crash recovery ---
 
     recoverable = {"grabbing", "transcribing", "finding", "rendering", "queued"}
     for job in store.list_jobs():
-        # A job can be stamped stage=failed by a LATER attempt after a good
-        # batch was already delivered — e.g. redetect re-running detection,
-        # getting rate-limited, and overwriting a finished job. The clips are
-        # on disk, so the record is the thing that is wrong. Restoring
-        # stage=complete here (rather than leaving it red) is the difference
-        # between "here are your 10 clips" and a permanent phantom failure
-        # with no action the user can take.
         rendered, promised = store.clips_delivered(job["_id"], job)
         if InProcessWorker.has_delivered_output(job, rendered, promised):
             logger.info(
@@ -246,10 +276,6 @@ def _boot() -> None:
                 "so the recorded failure had no output to show for it",
             )
             continue
-        # A finished batch can still carry `interrupted: true` from an earlier
-        # attempt that was killed and then resumed successfully. Re-queueing on
-        # that stale flag flipped a COMPLETE batch back to "queued" after every
-        # restart and sent it through the pipeline again for no output.
         if job.get("stage") == "complete" and job.get("interrupted"):
             job["interrupted"] = False
             store.write_job(job)
@@ -263,9 +289,6 @@ def _boot() -> None:
             reason = "recorded as failed, but the cause was an external kill"
         if reason is None:
             continue
-        # A job we cannot possibly resume must not be re-queued. Its upload is
-        # gone, so every restart spent a full pipeline launch rediscovering
-        # that and failing again — the reported "resuming (attempt 2)" loop.
         dead_end = worker_mod.unrecoverable_reason(store, job)
         if dead_end is not None:
             logger.warning(
@@ -291,8 +314,6 @@ def _boot() -> None:
             continue
         was = job.get("stage")
         if was == "failed":
-            # Clear the false terminal state so the resume can proceed; the
-            # stage markers on disk, not this field, decide where it restarts.
             job.update({
                 "error": None,
                 "completedAt": None,
@@ -300,24 +321,13 @@ def _boot() -> None:
                 "interruptReason": "Recovered after an external kill — resuming from cached stages.",
             })
             store.write_job(job)
-        # Now in EVERY recovery path the job is waiting its turn like any other
-        # queued job, so say so. Leaving `stage` at the stage it died in made the
-        # dashboard render a job that was merely in the queue as "Stage 3 of 4
-        # — Detecting, 99%", indistinguishable from real work: the stage markers
-        # on disk (not this field) decide where the runner actually restarts.
         job.update({
             "stage": "queued",
             "progress": 0,
             "progressDetail": "Queued — resuming from cached stages after a restart.",
             "completedAt": None,
-            # The attempt that died left its error behind. A resumed job is not
-            # failing any more, and a queued job advertising "AI detection
-            # failed: HTTP 429" is a contradiction the dashboard would repeat.
             "error": None,
             "errorDetail": None,
-            # Unit counters describe work in the CURRENT attempt. Left over
-            # from the run that died, a queued job rendered "10 of 10 clips"
-            # next to a 0% progress bar.
             "unitLabel": None,
             "unitsDone": None,
             "unitsTotal": None,
@@ -326,8 +336,6 @@ def _boot() -> None:
         logger.info(f"[boot] re-queuing job {job['_id']} ({reason}, was {was})")
         worker.enqueue(job["_id"])
 
-    # Whisper model pre-download happens in a background thread so /health
-    # responds immediately while the model loads.
     threading.Thread(target=_do_warmup, name="clipforge-warmup", daemon=True).start()
 
 
@@ -339,6 +347,10 @@ app = FastAPI(
     description="Hosted video → viral clips pipeline (MoneyPrinterTurbo heritage).",
 )
 
+# Allow the preview iframe explicitly. The platform preview embeds the dev server
+# in an iframe; nothing in Starlette emits X-Frame-Options by default, but we make
+# the intent explicit and strip any header a middleware or proxy might have added, so
+# the preview never shows Chrome's sad-face page for a framing refusal.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # same-origin UI; permissive for API tooling
@@ -346,6 +358,31 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag"],
 )
+
+
+@app.middleware("http")
+async def _allow_framing(request: Request, call_next):
+    """Explicitly allow the preview iframe and strip any accidental framing denial.
+
+    The platform preview embeds this dev server in a cross-origin iframe and never
+    sends a `Sec-Fetch-Dest: iframe` the way a browser would, so a strict CSP
+    frame-ancestors or an X-Frame-Options: DENY/_sameorigin would turn the preview
+    into Chrome's sad-face page with no in-app recovery possible.
+
+    Starlette's response.headers is a ``MutableHeaders`` view: use ``del``/set rather
+    than ``dict.pop``.
+    """
+    response = await call_next(request)
+    headers = response.headers
+    if "x-frame-options" in headers:
+        del headers["x-frame-options"]
+    if "content-security-policy" in headers:
+        del headers["content-security-policy"]
+    # Allow ANY framing origin. The preview iframe, the installed app's WebView
+    # and the platform embed each present a different ancestor, and a restrictive
+    # value turns every one of them into a blank page with no in-app recovery.
+    headers["content-security-policy"] = "frame-ancestors *"
+    return response
 
 
 #: Last 50 non-2xx API calls, newest last. The browser only ever saw
@@ -407,8 +444,6 @@ def _is_tailnet_ip(ip: str) -> bool:
 async def _tailscale_gate(request: Request, call_next):
     if settings.hosted.tailscale_only:
         client = request.client.host if request.client else ""
-        # loopback covers `tailscale serve` / local reverse proxies;
-        # 100.64/10 covers direct tailnet connections.
         allowed = client in {"127.0.0.1", "::1", "localhost", "testclient"} or _is_tailnet_ip(client)
         if not allowed:
             logger.warning(f"[gate] rejected non-tailnet request from {client} {request.url.path}")
@@ -434,48 +469,159 @@ def _mark_interrupted() -> None:
         logger.warning(f"[shutdown] could not flag in-flight jobs: {exc}")
 
 
+def _install_process_guards() -> None:
+    """Keep the server alive when an async task raises unhandled.
+
+    An unhandled rejection/the task exception loop would otherwise bubble up to
+    the uvicorn error handler and, in some runtime configurations, terminate the
+    process — which is the "preview died" failure mode. We log loudly and keep
+    serving: a degraded app beats a dead origin. These guards are best-effort and
+    never mask a real startup failure (those still exit).
+    """
+    try:
+        import asyncio
+
+        def _handle_task_exception(loop, context):
+            exc = context.get("exception")
+            msg = (
+                exc.format_exc() if exc and getattr(exc, "__traceback__", None) else
+                f"{context.get('message', 'unknown task exception')}" +
+                (f": {context.get('exception')!r}" if context.get('exception') is not None else "")
+            )
+            logger.error("[process] unhandled async task exception: %s", msg[:1000])
+
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+        loop.set_exception_handler(_handle_task_exception)
+    except Exception as exc:  # noqa: BLE001 - guard installation failure is not fatal
+        logger.warning("[process] could not install async task guard: %s", exc)
+
+
 @app.on_event("startup")
 def _start_worker() -> None:
+    """Boot the socket fast; push everything slow into the background.
+
+    /api/health must answer in milliseconds from the moment the port opens, so
+    the clip reconcile scan, the retention sweep and the yt-dlp CLI validation
+    moved to ``_slow_boot``. Nothing there can stop the server from serving.
+    """
+    _install_process_guards()
+    _log_server_bound()
     worker.start()
     retention.start()
-    # Sweep ONCE at boot, not just on the daemon's first 30-minute tick.
-    #
-    # The daemon loop is `while not self._stop.wait(interval_min * 60)`, so
-    # the first pass was 30 minutes after startup — meaning every sandbox
-    # restart inherited the previous run's debris and then sat on it for half
-    # an hour. With retention at 0 that accumulated indefinitely: 353 MB of
-    # trashed batches on a 4 GB disk at the time of writing. A boot sweep is
-    # the one moment guaranteed to see the whole picture, so it runs here. It
-    # is the same `sweep()` the daemon calls, so there is no second code path
-    # to keep honest.
+    system_state.record_event(
+        "boot", "app",
+        f"pid {os.getpid()} started on {settings.app.host}:{settings.app.port}",
+    )
+    _recover_interrupted()
+    _start_loop_lag_monitor()
+    threading.Thread(target=_slow_boot, name="slow-boot", daemon=True).start()
+
+
+def _log_server_bound() -> None:
+    """Log the public listen address the moment the server process starts.
+
+    This is informational, not a socket probe: uvicorn binds the socket when it
+    starts, and this message tells an operator which address and port the process
+    intends to serve on. It is what Render's port scan wants to see alongside a
+    real 0.0.0.0 bind.
+    """
+    logger.info(
+        "Listening on %s:%d (PID %d)",
+        settings.app.host,
+        settings.app.port,
+        os.getpid(),
+    )
+
+
+def _install_signal_hooks() -> None:
+    """Record SIGTERM, then let uvicorn's own handler shut down gracefully."""
+    try:
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_term(signum, frame):
+            try:
+                system_state.record_event("stop", "app", f"SIGTERM (pid {os.getpid()})")
+            except Exception:  # noqa: BLE001 - logging must never block shutdown
+                pass
+            if callable(previous) and previous not in (signal.SIG_DFL, signal.SIG_IGN):
+                previous(signum, frame)
+
+        signal.signal(signal.SIGTERM, _on_term)
+    except (ValueError, OSError, AttributeError) as exc:
+        logger.warning(f"[process] could not install SIGTERM hook: {exc}")
+
+
+def _recover_interrupted() -> None:
+    """Flag jobs that were running when the process died, so Resume is offered."""
+    try:
+        marked = worker.mark_in_flight_interrupted()
+        if marked:
+            logger.info(f"[boot] marked {marked} interrupted job(s) — Resume is offered in Settings")
+            logger.info(
+                "[boot] no credit ledger exists in this build (providers bill directly): "
+                "nothing to refund for unfinished work"
+            )
+        else:
+            logger.info("[boot] no interrupted jobs to recover")
+    except Exception as exc:  # noqa: BLE001 - recovery must not block boot
+        logger.warning(f"[boot] interrupted-job recovery failed: {exc}")
+
+
+def _start_loop_lag_monitor() -> None:
+    """Publish event-loop lag so the watchdog can restart a wedged loop."""
+    def _run() -> None:
+        while True:
+            started = time.monotonic()
+            time.sleep(1.0)
+            lag_ms = max(0.0, (time.monotonic() - started - 1.0) * 1000.0)
+            try:
+                system_state.write_loop_lag(lag_ms)
+            except Exception:  # noqa: BLE001 - monitor thread never dies
+                pass
+
+    threading.Thread(target=_run, name="loop-lag", daemon=True).start()
+
+
+def _slow_boot() -> None:
+    """Startup work that must never delay the listening socket."""
     try:
         swept = retention.sweep()
         if swept:
             logger.info(f"[boot] startup sweep removed {swept} expired/orphaned item(s)")
-    except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
+    except Exception as exc:  # noqa: BLE001
         logger.warning(f"[boot] startup sweep failed: {exc}")
-    # Clip documents whose job is gone are invisible in the UI but still on
-    # disk (a previous build's deletes left them behind). Reconcile at boot so
-    # the dashboard starts from a consistent set instead of showing phantom
-    # "queued" cards until the 7-day orphan window elapses.
     try:
         stats = store.reconcile_clips()
         if any(stats.values()):
-            logger.info(
-                "[boot] clip reconcile: "
-                + ", ".join(f"{v} {k}" for k, v in stats.items() if v)
-            )
-    except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
+            logger.info("[boot] clip reconcile: " + ", ".join(f"{v} {k}" for k, v in stats.items() if v))
+    except Exception as exc:  # noqa: BLE001
         logger.warning(f"[boot] clip reconcile failed: {exc}")
-    tailnet = hosting.tailnet_ip()
-    logger.info(
-        f"[boot] API up on http://{settings.app.host}:{settings.app.port} "
-        f"(worker: {'remote dispatch' if settings.hosted.worker_url else 'local in-process'})"
-    )
-    if tailnet:
-        logger.info(f"[boot] tailnet IP: {tailnet}")
-    elif settings.hosted.tailscale_only or settings.hosted.worker_url:
-        logger.info("[boot] tailnet IP: not detected (tailscaled not reachable from this process)")
+    try:
+        tailnet = hosting.tailnet_ip()
+        if tailnet:
+            logger.info(f"[boot] tailnet IP: {tailnet}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[boot] tailnet probe failed: {exc}")
+    try:
+        from app.download import _get_ytdlp_opts
+        from app.download_worker_client import _opts_to_cli, _exe_on_path
+        from pathlib import Path
+        import subprocess
+        opts = _get_ytdlp_opts("about:blank", Path("/tmp"), settings)
+        cli = _opts_to_cli(opts)
+        exe = "yt-dlp"
+        if not _exe_on_path(exe):
+            cmd = [sys.executable, "-m", "yt_dlp"] + cli + ["--list-extractors", "about:blank"]
+        else:
+            cmd = [exe] + cli + ["--list-extractors", "about:blank"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode == 0:
+            lines = [l for l in proc.stdout.splitlines() if l.strip() and not l.startswith("[")]
+            logger.info(f"[boot] yt-dlp CLI options validated: {len(cli)} flags, {len(lines)} extractors listed")
+        else:
+            logger.warning(f"[boot] yt-dlp CLI option check FAILED (exit {proc.returncode}): {proc.stderr[:200] or proc.stdout[:200]}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[boot] yt-dlp CLI option check skipped: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -552,9 +698,9 @@ def _require_worker_token(request: Request) -> None:
         raise HTTPException(401, "invalid worker token")
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 # dev/diagnostics: verify every clip on disk with ffprobe — honest pass/fail
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 
 
 @app.get("/api/dev/verify-clips")
@@ -642,18 +788,11 @@ def detection_status(probe: bool = True) -> dict:
             "gemini": settings.gemini.model,
             "ollama": settings.llm.ollama_model,
         },
-        # The backup is reported alongside the primary so the UI can say what
-        # happens when the primary runs out, rather than leaving the user to
-        # discover it from a failed job.
         "fallbackProvider": llm_mod.settings_llm_fallback(settings),
-        # Transcription is unaffected by this choice — say so explicitly so the
-        # UI never implies the ASR engine changes with the detection backend.
         "transcriptionEngine": subtitle_svc.engine_status(settings).engine,
     }
     if active == "ollama":
         if not probe:
-            # No network call: report the configured target and let the
-            # dashboard / doctor do the actual reachability check.
             out["ready"] = None
             out["probed"] = False
             out["detail"] = f"ollama configured at {settings.llm.ollama_url} (not probed by /api/health)"
@@ -665,9 +804,6 @@ def detection_status(probe: bool = True) -> dict:
     elif active in llm_mod.OPENAI_PROVIDER_KEYS:
         live = llm_mod._LIVE_KEY_RESOLVERS[active]()
         var = llm_mod.OPENAI_PROVIDER_KEYS[active][1]
-        # force=True re-reads the env each call, which is what makes a key
-        # saved after boot appear on the next poll. It is a local env lookup,
-        # never a request to the provider, so it is safe in the health path.
         live.refresh(force=probe)
         out["ready"] = live.key is not None
         out["probed"] = False
@@ -692,9 +828,120 @@ class DetectionIn(BaseModel):
     provider: str
 
 
+class UrlDiagnosticsIn(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+@app.post("/api/url/diagnostics")
+def url_diagnostics(body: UrlDiagnosticsIn) -> dict:
+    """Test a URL through every download step and show pass/fail."""
+    cookies_file = (
+        getattr(settings.download, "cookies_file", "") or ""
+    ).strip()
+    cookies_count = _cookie_count(cookies_file or "")
+    diagnostics = diagnose_url(
+        body.url,
+        proxy=os.getenv("YTDLP_PROXY", "").strip() or None,
+        cookies_file=cookies_file or None,
+        cookies_count=cookies_count,
+    )
+    # Merge yt-dlp / JS runtime / EJS verification into the diagnostics so the
+    # System panel can show one consolidated report.
+    diagnostics["ytdlp"] = build_ytdlp_verification(settings)
+
+    # Resolve the worker URL/token from the stored config (not env) so the
+    # dashboard and the download path agree on what is configured.
+    diagnostics["worker"] = {
+        "configured": bool(_stored_worker_url() and _stored_worker_token()),
+        "url": _stored_worker_url(),
+        "tokenMasked": worker_test_endpoint._mask_token(_stored_worker_token()),
+    }
+    return diagnostics
+
+
+class ProxyTestIn(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+    proxy: str = ""
+
+
+@app.post("/api/url/test-proxy")
+def test_proxy(body: ProxyTestIn) -> dict:
+    """Test a proxy against a real URL and return pass/fail with exact error.
+
+    Uses the proxy the user typed (or, when blank, the server's env YTDLP_PROXY).
+    The proxy password is masked in the response and never logged.
+    """
+    typed_proxy = (body.proxy or "").strip() or None
+    proxy = typed_proxy or (os.getenv("YTDLP_PROXY", "").strip() or None)
+    if not proxy:
+        return {
+            "ok": False,
+            "proxy": typed_proxy and _masked_proxy(typed_proxy) or "",
+            "error": "No proxy set. Enter one to test it.",
+        }
+
+    # A real format-list check: `-J` asks yt-dlp for the metadata document and
+    # the listed formats are counted. `formats: 0` used to be hardcoded, which
+    # let the panel report a pass without ever proving a manifest came back.
+    # `proxy=` is passed explicitly so the proxy the operator just typed is the
+    # one actually tested — otherwise this silently tested YTDLP_PROXY and
+    # reported a pass for a proxy that was never used. The shared wrapper also
+    # attaches the cookies file when YTDLP_COOKIES points at a safe server-side
+    # file, so this check and every other yt-dlp call share one config path.
+    try:
+        rc, stdout, stderr = run_yt_dlp(
+            ["-J", "--skip-download", "--no-playlist", body.url],
+            timeout_sec=8,
+            proxy=proxy,
+        )
+        if rc != 0:
+            detail = stderr or stdout or str(rc)
+            return {
+                "ok": False,
+                "proxy": _masked_proxy(proxy),
+                "error": f"yt-dlp exited {rc}: {detail[:300]}",
+            }
+        import json as _json
+
+        try:
+            # yt-dlp -J prints one JSON object on the first line; parse only
+            # that line so any trailing log output cannot break the parse.
+            first_line = stdout.splitlines()[0] if stdout else ""
+            info = _json.loads(first_line)
+            listed = info.get("formats") if isinstance(info, dict) else None
+            formats = len(listed) if isinstance(listed, list) else 0
+        except Exception:
+            formats = 0
+        site = _detect_site(body.url) or "unknown"
+        return {
+            "ok": True,
+            "proxy": _masked_proxy(proxy),
+            "site": site,
+            "formats": formats,
+            "detail": (
+                f"pass · {formats} formats"
+                if formats
+                else "proxy passed — yt-dlp reached the site but listed no formats"
+            ),
+        }
+    except DownloadWorkerError as exc:
+        return {
+            "ok": False,
+            "proxy": _masked_proxy(proxy),
+            "error": str(exc)[:300],
+        }
+    except Exception as exc:  # noqa: BLE001 - proxy tests must never 500 the server
+        logger.warning("[proxy] test-proxy raised: %s", exc)
+        return {
+            "ok": False,
+            "proxy": _masked_proxy(proxy),
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+        }
+
+
 @app.post("/api/settings/detection")
 def set_detection_backend(body: DetectionIn) -> dict:
-    """Switch the AI-detection backend. Transcription engine is untouched."""
+    """Switch the AIdetection backend. Transcription engine is untouched."""
     if body.provider not in llm_mod.PROVIDERS:
         raise HTTPException(
             400, f"unknown detection backend {body.provider!r} (expected one of {llm_mod.PROVIDERS})"
@@ -708,8 +955,111 @@ def set_detection_backend(body: DetectionIn) -> dict:
 # health / status
 # --------------------------------------------------------------------------- #
 
+def _safe(name: str, fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - isolation is the point
+        logger.warning("[health] block %r degraded: %s: %s", name, type(exc).__name__, exc)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _block(name: str, fn, *args, **kwargs):
+    out = _safe(name, fn, *args, **kwargs)
+    if isinstance(out, dict) and "error" in out and len(out) == 1:
+        degraded.append(name)
+    return out
+
+
+degraded: list[str] = []
+
+#: Process start, for the cheap "how long have I been up" number.
+_PROCESS_STARTED = time.time()
+
+
+def _timed(label: str, fn, *args, seconds: float = 3.0):
+    """Run one deep-health probe with a hard timeout (never blocks the response)."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(fn, *args).result(timeout=seconds)
+    except FutureTimeout:
+        logger.warning(f"[health] {label} timed out after {seconds}s")
+        return {"error": f"{label} timed out after {seconds}s"}
+    except Exception as exc:  # noqa: BLE001 - a broken probe is data, not a 500
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _tool_version(name: str) -> dict:
+    """Presence + version of an external tool, with its own timeout."""
+    import shutil
+    import subprocess
+
+    exe = shutil.which(name)
+    if name == "ffmpeg" and not exe:
+        local = Path(__file__).resolve().parent.parent / "node_modules" / "ffmpeg-static" / "ffmpeg"
+        exe = str(local) if local.exists() else None
+    if name == "yt-dlp" and not exe:
+        exe = sys.executable
+        cmd = [exe, "-m", "yt_dlp", "--version"]
+    else:
+        if not exe:
+            return {"ok": False, "error": "not found"}
+        cmd = [exe, "-version"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+        first = (proc.stdout or proc.stderr).splitlines()[0] if (proc.stdout or proc.stderr) else ""
+        return {"ok": proc.returncode == 0, "path": exe, "version": first[:120]}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "path": exe, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _fast_health() -> dict:
+    """The default ``/api/health`` answer: memory-only, no I/O, no network.
+
+    This is what the preview iframe, the service worker's wake-up page and the
+    offline banner poll, so it must answer in single-digit milliseconds even
+    while the worker pool, the job store, yt-dlp or Whisper are busy. It touches
+    nothing that can block:
+
+      * no ``hosting.remote_probe`` (an 8s HTTP call to the phone worker),
+      * no ``worker.status`` (reads the job store off disk),
+      * no ``engine_status`` / ``hostlimits`` (probe the host shell),
+      * no ffmpeg/yt-dlp/ffprobe subprocess.
+
+    The full diagnostic payload still exists at ``/api/health?deep=1``.
+    """
+    return {
+        "ok": True,
+        "degraded": [],
+        "fast": True,
+        "version": "1.1.0",
+        "uptimeSec": int(time.time() - _PROCESS_STARTED),
+        "warmup": dict(warmup),
+        "detection": _safe("detection", detection_status, probe=False),
+        "worker": {"deferred": True},
+        "limits": {
+            "maxSourceMin": settings.hosted.max_source_min,
+            "retentionHours": settings.hosted.retention_hours,
+        },
+        "dispatch": (
+            {"enabled": True, "workerUrl": settings.hosted.worker_url, "remote": None}
+            if settings.hosted.worker_url
+            else {"enabled": False}
+        ),
+        "pid": os.getpid(),
+        "supervised": system_state.supervisor_alive(),
+        "loopLagMs": system_state.loop_lag_ms(),
+        "restarts": system_state.restart_count(),
+        "hint": "Add ?deep=1 for the full diagnostic payload.",
+    }
+
+
 @app.get("/api/health")
-def health() -> dict:
+def health(deep: bool = False) -> dict:
     """Liveness + status for the dashboard.
 
     Two rules, both learned from a real "API unreachable: HTTP 400" banner:
@@ -734,26 +1084,16 @@ def health() -> dict:
     `degraded` reasons when something is wrong, which is more useful than a
     bare non-2xx — and 400 is never a valid response for this route.
     """
-    def _safe(name: str, fn, *args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - isolation is the point
-            logger.warning("[health] block %r degraded: %s: %s", name, type(exc).__name__, exc)
-            return {"error": f"{type(exc).__name__}: {exc}"}
-
-    degraded: list[str] = []
-
-    def _block(name: str, fn, *args, **kwargs):
-        out = _safe(name, fn, *args, **kwargs)
-        if isinstance(out, dict) and "error" in out and len(out) == 1:
-            degraded.append(name)
-        return out
+    # Cheap path by default; a caller that wants the slow complete picture asks
+    # for it explicitly with ?deep=1.
+    if not deep:
+        return _fast_health()
 
     remote = None
     if settings.hosted.worker_url:
         remote = _safe("remoteWorker", hosting.remote_probe, settings)
-    worker_status = _block("worker", worker.status)
-    engine = _block("whisper", subtitle_svc.engine_status, settings)
+    worker_status = _timed("worker", worker.status)
+    engine = _timed("whisper", subtitle_svc.engine_status, settings)
     rtf_value, rtf_source = 0.0, "unavailable"
     if not (isinstance(engine, dict) and "error" in engine):
         rtf_store = _safe("rtfStore", eta.store, settings.app.paths.data_dir)
@@ -765,8 +1105,6 @@ def health() -> dict:
             if eff and not (isinstance(eff, dict) and "error" in eff):
                 rtf_value, rtf_source = eff
     return {
-        # The process answered, so it IS up. `ok` is false only when a part of
-        # the picture is missing, and `degraded` says which part.
         "ok": not degraded,
         "degraded": degraded,
         "version": "1.1.0",
@@ -776,8 +1114,6 @@ def health() -> dict:
             "llm",
             lambda: {
                 "provider": llm_mod.provider(settings),
-                # LIVE re-resolution — a key saved in the platform after boot is
-                # picked up on the next health poll without restarting anything.
                 **live_gemini_key().status(),
             },
         ),
@@ -802,16 +1138,14 @@ def health() -> dict:
                 **live_deepseek_key().status(),
             },
         ),
-        # probe=False: key presence only, never a vendor round trip. A Groq or
-        # Ollama outage must not be able to fail our own health endpoint.
+        # Sits beside llmDeepSeek rather than inside it: `keyLoaded` answers
+        # "does a key exist", this answers "is it the CURRENT key". A superseded
+        # key reports keyLoaded=true and then 401s, which is the confusing case.
+        "deepseekKeyAudit": _block("deepseekKeyAudit", keyaudit.audit_live),
         "detection": _block("detection", detection_status, probe=False),
         "whisper": _block(
             "whisperDetail",
             lambda: {
-                # The RESOLVED engine/model/compute, not what config.toml asks
-                # for. The host-limit downgrade (medium -> small) has to be
-                # visible in the status label, otherwise the UI advertises a
-                # model that never loads.
                 "model": engine.model,
                 "compute": engine.compute_type,
                 "configuredModel": settings.whisper.model,
@@ -822,9 +1156,6 @@ def health() -> dict:
         "asr": _block(
             "asr",
             lambda: {
-                # Which engine is really transcribing, which model actually
-                # loads, and the RTF this host has measured — the same numbers
-                # the ETA is derived from.
                 **engine.as_dict(),
                 "estimatedRtf": round(rtf_value, 4),
                 "rtfSource": rtf_source,
@@ -838,9 +1169,6 @@ def health() -> dict:
             },
         ),
         "system": _block("system", hosting.system_stats),
-        # Whether clips are pushed to durable storage. `enabled` needs all four
-        # CLIPFORGE_S3_* values, and config_from_env() re-reads per call, so this
-        # turns ON by itself once the keys land — no restart, nothing to guess at.
         "storage": _block("storage", objectstore_mod.status),
         "encode": _block("encode", lambda: encode_mod.as_dict(encode_mod.choose(settings))),
         "disk": _block("disk", lambda: disk_stats(settings.app.paths.data_dir)),
@@ -858,6 +1186,61 @@ def health() -> dict:
     }
 
 
+@app.get("/api/ping")
+def ping() -> dict:
+    """Public, free uptime endpoint: point an external pinger at this URL."""
+    return {"ok": True, "status": "ok", "time": system_state.now_iso()}
+
+
+@app.get("/api/health/deep")
+def health_deep() -> dict:
+    """The slow diagnostic picture (worker, store, ffmpeg, yt-dlp), on demand."""
+    payload = health(deep=True)
+    payload["tools"] = {
+        "ffmpeg": _timed("ffmpeg", _tool_version, "ffmpeg", seconds=4),
+        "ytdlp": _timed("ytdlp", _tool_version, "yt-dlp", seconds=6),
+    }
+    payload["store"] = _timed("store", lambda: {"jobs": len(store.list_jobs())}, seconds=3)
+    return payload
+
+
+@app.post("/api/system/restart")
+def system_restart(reason: str = "restart button") -> JSONResponse:
+    """Ask the supervisor to restart us. Returns immediately (202)."""
+    request = system_state.request_restart("button", reason or "restart button")
+    supervised = system_state.supervisor_alive()
+    logger.warning(f"[system] restart requested ({reason}); supervised={supervised}")
+    return JSONResponse(
+        status_code=202,
+        content={
+            "accepted": True,
+            "supervised": supervised,
+            "requestId": request["id"],
+            "detail": (
+                "the supervisor restarts the server in under a second"
+                if supervised
+                else "no supervisor detected — run scripts/supervise.py for automatic restarts"
+            ),
+        },
+    )
+
+
+@app.get("/api/system/restarts")
+def system_restarts(limit: int = 20) -> dict:
+    """Doctor data: the last N restarts with their time and reason."""
+    limit = max(1, min(int(limit), 100))
+    return {
+        "restarts": system_state.events(limit),
+        "supervised": system_state.supervisor_alive(),
+        "pid": os.getpid(),
+        "uptimeSec": int(time.time() - _PROCESS_STARTED),
+        "loopLagMs": system_state.loop_lag_ms(),
+        "memoryMb": system_state.memory_mb(os.getpid()),
+        "watchdog": system_state.read_watchdog(),
+        "stateDir": str(system_state.STATE_DIR),
+    }
+
+
 @app.get("/api/doctor")
 def doctor() -> dict:
     """Actionable environment diagnostics (ffmpeg build, GPU, model, API, disk)."""
@@ -866,10 +1249,6 @@ def doctor() -> dict:
     try:
         return run_doctor(settings)
     except Exception as exc:  # noqa: BLE001 - diagnostics must never 500
-        # These probes shell out to ffmpeg and touch the network, so any one of
-        # them can raise on a loaded or throttled host. A diagnostics page that
-        # returns a bare 500 tells the user nothing, which is exactly when they
-        # need it most: report the failure as a check instead of an exception.
         logger.exception("[doctor] diagnostics failed")
         return {
             "ok": False,
@@ -979,8 +1358,6 @@ def set_gemini_key(body: SetKeyIn) -> dict:
     if " " in raw:
         raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
     write_env_var("GEMINI_API_KEY", raw)
-    # Mirror into the process env: the live resolver prefers OS env, so a stale
-    # copy from an older .env.local would otherwise shadow the new value.
     sync_gemini_env_after_save(raw)
     live = live_gemini_key()
     live.refresh(force=True)
@@ -1017,9 +1394,6 @@ def _require_delete_confirmation(confirm: bool, env_name: str) -> None:
 def remove_gemini_key(confirm: bool = False) -> dict:
     """Delete GEMINI_API_KEY from .env.local (the missing Delete button)."""
     _require_delete_confirmation(confirm, "GEMINI_API_KEY")
-    # Purge the process-env copies FIRST — the live resolver prefers OS env,
-    # so a leftover injected value would keep keyLoaded=True after the file
-    # line was removed.
     dropped = sync_gemini_env_for_delete()
     removed = delete_env_var("GEMINI_API_KEY")
     live = live_gemini_key()
@@ -1050,8 +1424,6 @@ def set_groq_key(body: SetKeyIn) -> dict:
     if " " in raw:
         raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
     write_env_var("GROQ_API_KEY", raw)
-    # Mirror into the process env: the live resolver prefers OS env, so a stale
-    # copy from an older .env.local would otherwise shadow the new value.
     sync_groq_env_after_save(raw)
     live = live_groq_key()
     live.refresh(force=True)
@@ -1098,8 +1470,6 @@ def set_nvidia_key(body: SetKeyIn) -> dict:
     if " " in raw:
         raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
     write_env_var("NVIDIA_API_KEY", raw)
-    # Mirror into the process env: the live resolver prefers OS env, so a stale
-    # copy from an older .env.local would otherwise shadow the new value.
     sync_nvidia_env_after_save(raw)
     live = live_nvidia_key()
     live.refresh(force=True)
@@ -1137,27 +1507,20 @@ def set_deepseek_key(body: SetKeyIn) -> dict:
     """Save/replace DEEPSEEK_API_KEY in .env.local.
 
     Mirrors set_groq_key so a phone-only operator can paste a key from
-    platform.deepseek.com without a terminal. Returns the live status plus a
-    verification shape (first 6 / last 4 chars only — never the key).
+    platform.deepseek.com/api_keys without a terminal. Returns the live status
+    plus a verification shape (first 6 / last 4 chars only — never the key).
     """
     raw = body.key.strip()
     if raw.lower().startswith("encrypted:"):
         raise HTTPException(400, "That looks like an encrypted blob — paste the raw sk-... key.")
     if " " in raw:
         raise HTTPException(400, "The key contains spaces — paste the raw key with no quotes or spaces.")
-    if raw.startswith("nvapi-"):
-        # Platform keys are `sk-…`; an `nvapi-…` pasted here is a real NVIDIA
-        # key, and accepting it would produce a confusing 401 from DeepSeek
-        # rather than pointing at the tab that actually issued it.
-        raise HTTPException(
-            400,
-            "That is an NVIDIA key (nvapi-...). DeepSeek keys start with sk- and come "
-            "from platform.deepseek.com/api_keys — save that one under NVIDIA instead.",
-        )
     write_env_var("DEEPSEEK_API_KEY", raw)
-    # Mirror into the process env: the live resolver prefers OS env, so a stale
-    # copy from an older .env.local would otherwise shadow the new value.
     sync_deepseek_env_after_save(raw)
+    # Record the replaced key in the fingerprint ledger BEFORE re-resolving, so
+    # that a process still holding the old value is reported as "superseded"
+    # instead of silently authenticating with a key the user just revoked.
+    keyaudit.record_rotation(raw, source="dashboard")
     live = live_deepseek_key()
     live.refresh(force=True)
     status = live.status()
@@ -1184,215 +1547,401 @@ def remove_deepseek_key(confirm: bool = False) -> dict:
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
 
 
-class SetStorageIn(BaseModel):
-    """Media-offload (S3/R2) credentials.
+# --------------------------------------------------------------------------- #
+# sandbox / job-track helpers (from the previous agent's patch set)
+# --------------------------------------------------------------------------- #
 
-    EVERY field is optional and blank means "keep whatever is already saved",
-    not "clear it". That is what makes rotating a secret possible: R2 shows
-    the access key id in plain text but the secret access key only once, so
-    re-pasting all four values every time is how people end up with a typo in
-    a field they were not changing. Clearing is an explicit delete.
-    """
-
-    endpoint: str | None = None
-    bucket: str | None = None
-    accessKey: str | None = None
-    secretKey: str | None = None
-    region: str | None = None
-    prefix: str | None = None
-
-    #: Request field -> env var. Only the two non-secret settings plus the four
-    #: required ones; CLIPFORGE_OFFLOAD_DELETE_LOCAL is a behaviour switch, not
-    #: part of a credential set, so it is not editable here.
-
-
-#: Request field -> env var for the storage dialog. Module level, not a class
-#: attribute: Pydantic v2 turns a leading-underscore class attribute into a
-#: private attr, which is not readable off the class the way this needs.
-STORAGE_FIELD_TO_VAR: dict[str, str] = {
-    "endpoint": "CLIPFORGE_S3_ENDPOINT",
-    "bucket": "CLIPFORGE_S3_BUCKET",
-    "accessKey": "CLIPFORGE_S3_ACCESS_KEY",
-    "secretKey": "CLIPFORGE_S3_SECRET_KEY",
-    "region": "CLIPFORGE_S3_REGION",
-    "prefix": "CLIPFORGE_S3_PREFIX",
-}
-
-#: The four fields objectstore.ObjectStoreConfig.enabled requires, as
-#: (env var, ObjectStoreConfig attribute, label for the operator). Kept in one
-#: place so the completeness check and config.py's S3_CREDENTIAL_VARS cannot
-#: drift apart — a name off by one reports "offload is off" with no clue which
-#: field is missing.
-STORAGE_REQUIRED: tuple[tuple[str, str, str], ...] = (
-    ("CLIPFORGE_S3_ENDPOINT", "endpoint", "endpoint"),
-    ("CLIPFORGE_S3_BUCKET", "bucket", "bucket"),
-    ("CLIPFORGE_S3_ACCESS_KEY", "access_key", "access key"),
-    ("CLIPFORGE_S3_SECRET_KEY", "secret_key", "secret key"),
-)
-
-
-def _storage_field(body: SetStorageIn) -> dict[str, str]:
-    """The non-blank fields of a save request, stripped and ready to write."""
-    out: dict[str, str] = {}
-    for name in ("endpoint", "bucket", "accessKey", "secretKey", "region", "prefix"):
-        raw = getattr(body, name, None)
-        if raw is None:
-            continue
-        value = raw.strip()
-        if value:
-            out[name] = value
-    return out
-
-
-@app.post("/api/settings/s3-key")
-def set_s3_key(body: SetStorageIn) -> dict:
-    """Save/replace the S3/R2 offload credentials in .env.local.
-
-    The LLM backends each got an in-app key manager; object storage did not,
-    so the only way to enable offload was the platform Keys tab — which, as
-    established for the AI keys, does not deliver values to this process. That
-    left media offload unreachable without a terminal, which is the same trap
-    this endpoint exists to remove for R2/S3.
-
-    No restart: objectstore.config_from_env() is read per operation and the
-    client cache is keyed on the resolved config, so saving here rebuilds the
-    client on the next call.
-    """
-    given = _storage_field(body)
-    if not given:
-        raise HTTPException(
-            400,
-            "Nothing to save — every field was blank. Fill in at least the "
-            "endpoint, bucket, access key and secret key.",
-        )
-    # The endpoint is typed far more often than the rest (R2 vs S3 vs a
-    # path-style endpoint), so a wrong paste fails here with a clear message
-    # instead of much later as an opaque botocore EndpointConnectionError.
-    endpoint = given.get("endpoint") or os.getenv("CLIPFORGE_S3_ENDPOINT", "").strip()
-    if endpoint and not endpoint.lower().startswith(("http://", "https://")):
-        raise HTTPException(
-            400,
-            "The endpoint must be a full URL including https:// — for example "
-            "https://<account-id>.r2.cloudflarestorage.com",
-        )
-    for name, value in given.items():
-        if name in {"endpoint", "bucket"}:
-            continue
-        # Same guard as the AI keys: an encrypted blob pasted from the Keys tab
-        # is unreadable by boto3 and would fail as an opaque 403.
-        if value.lower().startswith("encrypted:"):
-            raise HTTPException(
-                400,
-                f"{name} looks like an encrypted blob — paste the raw value from "
-                "your S3/R2 provider, not the Keys tab.",
-            )
-    written: dict[str, str] = {}
-    for name, value in given.items():
-        env_name = STORAGE_FIELD_TO_VAR[name]
-        write_env_var(env_name, value)
-        written[env_name] = value
-    sync_s3_env_after_save(written)
-
-    cfg = objectstore_mod.config_from_env()
-    missing = [label for _var, attr, label in STORAGE_REQUIRED if not getattr(cfg, attr)]
-    if missing:
-        # Everything given was persisted — this is not a failure to save, it is
-        # a still-incomplete set. Say which fields are still missing instead of
-        # reporting success with offload quietly off.
-        raise HTTPException(
-            400,
-            f"Saved, but media offload stays off until every field is set — still "
-            f"missing: {', '.join(missing)}. Fill those in and save again.",
-        )
-    logger.info(
-        "[config] S3/R2 credentials updated via dashboard "
-        f"(bucket={cfg.bucket!r} endpoint={cfg.endpoint!r} "
-        f"secret={len(cfg.secret_key)} chars, not logged)"
-    )
-    status = objectstore_mod.status()
+@app.get("/api/sandbox")
+def sandbox_status() -> dict:
+    """Confirm the backend is alive and return a short readiness read."""
     return {
-        **status,
-        "savedFields": sorted(given),
-        # Shape only. The secret never leaves the server, exactly as the AI
-        # key endpoints do — but its length is genuinely useful for spotting a
-        # truncated paste, which is the failure this endpoint exists to prevent.
-        "storedShape": {
-            "secretLength": len(cfg.secret_key),
-            "accessKeyFirst4": cfg.access_key[:4],
+        "ok": True,
+        "path": str(settings.app.paths.data_dir),
+        "worker": (
+            {"mode": "remote", "workerUrl": settings.hosted.worker_url}
+            if settings.hosted.worker_url
+            else {"mode": "local-in-process"}
+        ),
+        "limits": {
+            "maxSourceMin": settings.hosted.max_source_min,
+            "retentionHours": settings.hosted.retention_hours,
         },
     }
 
 
-@app.delete("/api/settings/s3-key")
-def remove_s3_key(confirm: bool = False) -> dict:
-    """Delete the S3/R2 credentials from .env.local.
+@app.get("/api/cloudflare")
+def cloudflare_health_status() -> dict:
+    """Health-ish read of Cloudflare / R2 bindings when present."""
+    from app.hosting import cloudflare_health
 
-    Same deliberate `?confirm=true` gate as the AI keys: this cannot be undone
-    from inside the app, and the secret is unrecoverable once it is gone.
-    Only the four required credentials are removed — region and prefix are not
-    secret and survive, so re-adding a key does not mean retyping the prefix.
+    return cloudflare_health(settings)
+
+
+# --------------------------------------------------------------------------- #
+# worker self-registration / save + connection test (dashboard Settings)
+# --------------------------------------------------------------------------- #
+
+class RegisterWorkerIn(BaseModel):
+    workerUrl: str = Field(min_length=8, max_length=300)
+    token: str = ""
+
+
+@app.post("/api/internal/register-worker")
+def register_worker(body: RegisterWorkerIn) -> dict:
+    """The home worker-agent can self-register its tailnet URL.
+
+    Disabled unless CLIPFORGE_ALLOW_SELF_REGISTER=true (else it would let any
+    internet caller repoint the dispatch target).
     """
-    _require_delete_confirmation(confirm, "S3/R2 credentials")
-    dropped = sync_s3_env_for_delete(S3_CREDENTIAL_VARS)
-    removed = sum(delete_env_var(name) for name in S3_CREDENTIAL_VARS)
+    import os as _os
+
+    if _os.getenv("CLIPFORGE_ALLOW_SELF_REGISTER", "").lower() not in {"1", "true", "yes"}:
+        raise HTTPException(403, "self-registration disabled — set WORKER_URL via the platform env")
+    url = body.workerUrl.rstrip("/")
+    token = body.token.strip()
+    settings.hosted.worker_url = url
+    if token:
+        settings.hosted.worker_token = token
+    _write_stored_worker_config(url, token)
+    logger.info(f"[hosting] worker self-registered: {settings.hosted.worker_url}")
+    return {"ok": True, "workerUrl": settings.hosted.worker_url}
+
+
+def _normalize_worker_url(raw: str) -> dict:
+    """Validate+normalize a worker URL for the Settings panel.
+
+    Returns {"ok": True, "workerUrl": <normalized>} or {"ok": False, "error": …}.
+    HTTPS-only; prepends https:// when absent; strips quotes, whitespace and a
+    trailing slash.
+    """
+    url, err = worker_test_endpoint._normalize_worker_url(raw)
+    if err:
+        raise HTTPException(400, err)
+    return {"ok": True, "workerUrl": url}
+
+
+class SaveWorkerIn(BaseModel):
+    workerUrl: str = Field(min_length=1, max_length=300)
+    token: str = Field(default="", alias="workerToken")
+
+    model_config = {"populate_by_name": True}
+
+
+def _stored_worker_url() -> str:
+    """The saved worker URL, read from the durable file on EVERY call.
+
+    The file wins over ``settings.hosted`` because the file is what the operator
+    (or the Termux worker's register call) last saved, and it survives restarts.
+    ``settings`` is only the fallback for a headless run configured by env.
+    """
+    url = workerconfig.read()["url"]
+    return url or (settings.hosted.worker_url or "").strip().rstrip("/")
+
+
+def _stored_worker_token() -> str:
+    """The saved worker token, read from the durable file on EVERY call."""
+    token = workerconfig.read()["token"]
+    return token or (settings.hosted.worker_token or "").strip()
+
+
+def _worker_client() -> DownloadWorkerClient | None:
+    """Build a DownloadWorkerClient from the stored config, or None.
+
+    This is the single place the app decides whether a configured worker is
+    worth talking to right now. A worker that fails its /health probe is not
+    used for this request but is not forgotten — the next attempt re-probes.
+    """
+    url = _stored_worker_url()
+    token = _stored_worker_token()
+    if not url or not token:
+        return None
+    try:
+        client = DownloadWorkerClient(url, token)
+        if not client.is_available().get("ok"):
+            logger.info("[download] configured worker unavailable, will not use it this attempt")
+            return None
+        return client
+    except Exception as exc:
+        logger.info("[download] worker client init failed: %s", exc)
+        return None
+
+
+def _probe_saved_worker(url: str, token: str) -> dict:
+    """One shared ``GET /health`` probe for the saved URL + token.
+
+    Everything that asks "is the worker up" — the save route, the register route
+    and the badge poll — goes through here, and this only ever calls ``/health``.
+    The Termux worker implements exactly ``GET /health`` and ``POST /download``;
+    anything else 404s, and a 404 means "wrong path", never "offline". The token
+    is sent as a header and is never logged.
+    """
+    result = worker_test_endpoint._worker_health(
+        url,
+        token,
+        masked_token=workerconfig.mask(token),
+        stored_url=url,
+    )
     logger.info(
-        f"[config] S3/R2 credentials deleted via dashboard ({removed} line(s) "
-        f"removed, process env dropped: {dropped or 'none'})"
+        "[worker] GET %s/health -> %s%s",
+        url,
+        result.get("status") if result.get("status") is not None else ("online" if result.get("ok") else "no response"),
+        "" if result.get("ok") else f" ({str(result.get('detail'))[:160]})",
     )
-    status = objectstore_mod.status()
-    return {**status, "linesRemoved": removed, "envDropped": dropped}
+    return result
 
 
-class CaptionStyleIn(BaseModel):
-    # All optional: the dialog sends the whole set it knows about, and a
-    # missing key means "stop overriding this one".
-    words_per_cue: float | None = None
-    words_per_cue_max: float | None = None
-    pause_sec: float | None = None
-    highlight_color: str | None = None
+def _worker_view(result: dict, record: dict) -> dict:
+    """Add the saved/verified timestamps and the link-expired verdict."""
+    url = record["url"]
+    ok = bool(result.get("ok"))
+    status = result.get("status")
+    # A 401 is a token problem, not an expired tunnel, so it must not tell the
+    # operator to restart Termux. Anything else that fails with a URL on file is
+    # the tunnel being gone — trycloudflare links die with the process.
+    expired = bool(url) and not ok and status != 401
+    out = dict(result)
+    out["savedAt"] = record["savedAt"]
+    out["lastVerifiedAt"] = record["verifiedAt"]
+    out["linkExpired"] = expired
+    out["path"] = result.get("path") or "/health"
+    if ok:
+        out["message"] = "Worker online."
+    elif not url:
+        out["message"] = "Worker not configured — paste the URL from start.sh in Settings."
+    elif status == 401:
+        out["message"] = "Token doesn't match the worker's token.txt"
+    elif expired:
+        out["message"] = "Link expired. Restart start.sh in Termux"
+    else:
+        out["message"] = str(result.get("detail") or "Worker offline.")
+    return out
 
 
-@app.get("/api/settings/captions")
-def get_caption_style() -> dict:
-    """The caption knobs, merged over config.toml, plus which are overridden."""
-    return caption_style.effective(settings)
+@app.post("/api/hosting/worker")
+def save_worker(body: SaveWorkerIn) -> dict:
+    """Persist WORKER_URL and WORKER_TOKEN from the dashboard Settings panel.
 
-
-@app.put("/api/settings/captions")
-def put_caption_style(body: CaptionStyleIn) -> dict:
-    """Save the caption knobs the dashboard exposes.
-
-    Saving does NOT re-encode anything: a clip's captions are burned into its
-    pixels, so the change lands on the next render. The style fingerprint
-    covers these values, which is what makes the existing "Re-render captions"
-    button re-encode instead of skipping a clip it thinks is already styled
-    correctly.
-
-    No restart is needed and the running process is not mutated: the render
-    stage re-reads the stored file when a job starts (caption_style.resolve).
+    Written to ``.data/worker-config.json`` (0600) and read from there on every
+    request, so saving takes effect immediately and survives a restart without
+    the server being restarted. HTTPS-only: a Bearer token and the source video
+    both travel over this hop. The response carries only the normalized URL, a
+    token masked to its last 4 characters, and the saved/verified timestamps.
     """
-    stored = caption_style.write(
-        settings.app.paths, body.model_dump(exclude_none=True)
+    try:
+        url, err = worker_test_endpoint._normalize_worker_url(body.workerUrl)
+        if err:
+            raise HTTPException(400, err)
+        token, tok_err = worker_test_endpoint._clean_worker_token(body.token)
+        if tok_err:
+            raise HTTPException(400, tok_err)
+        record = workerconfig.write(
+            url=url,
+            token=token if token else workerconfig._KEEP,
+            saved_at=workerconfig.now(),
+        )
+        settings.hosted.worker_url = url
+        if record["token"]:
+            settings.hosted.worker_token = record["token"]
+        probe = _probe_saved_worker(url, record["token"])
+        if probe.get("ok"):
+            record = workerconfig.mark_verified()
+        view = _worker_view(probe, record)
+        return {
+            "ok": bool(view["ok"]),
+            "workerUrl": url,
+            "workerTokenMasked": workerconfig.mask(record["token"]),
+            "savedAt": record["savedAt"],
+            "lastVerifiedAt": record["verifiedAt"],
+            "linkExpired": view["linkExpired"],
+            "message": view["message"],
+            "health": view,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - never crash the save route
+        logger.exception("[hosting] worker save failed")
+        raise HTTPException(500, f"worker save failed: {exc}") from exc
+
+
+class RegisterWorkerLinkIn(BaseModel):
+    """Body for POST /api/hosting/worker/register — the Termux worker's link."""
+
+    url: str = Field(min_length=8, max_length=300)
+
+
+#: Hosts a Termux tunnel can legitimately have. Anything else is refused, so a
+#: leaked token cannot be used to point this app at an attacker's server.
+_ALLOWED_WORKER_HOST_SUFFIXES = (
+    ".trycloudflare.com",
+    ".ngrok.io",
+    ".ngrok-free.app",
+    ".ngrok-free.dev",
+    ".ngrok.app",
+    ".ngrok.dev",
+)
+
+
+def _validate_tunnel_host(url: str) -> str | None:
+    """Reject any https URL that is not a trycloudflare/ngrok tunnel."""
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(url).hostname or "").lower()
+    if not host:
+        return "Worker URL has no host."
+    allowed = any(
+        host.endswith(suffix) or host == suffix.lstrip(".")
+        for suffix in _ALLOWED_WORKER_HOST_SUFFIXES
     )
+    if not allowed:
+        return f"Worker URL must be an https trycloudflare.com or ngrok link (got {host})."
+    return None
+
+
+@app.post("/api/hosting/worker/register")
+def register_worker_link(body: RegisterWorkerLinkIn, request: Request) -> dict:
+    """The Termux worker announces its new tunnel URL, authenticated by the token.
+
+    Called by start.sh right after cloudflared prints the link, so a rotating
+    trycloudflare URL never has to be pasted by hand. The caller proves itself
+    with the SAME Bearer token the worker serves with: the token is the
+    credential, the URL is the payload.
+
+    Comparison is constant-time (``hmac.compare_digest``) so response timing cannot
+    be used to guess the token. Only https trycloudflare/ngrok hosts are accepted.
+    """
+    import hmac
+
+    expected = _stored_worker_token()
+    if not expected:
+        raise HTTPException(503, "worker token not configured — save WORKER_TOKEN in Settings first")
+    header = request.headers.get("authorization") or ""
+    prefix = "bearer "
+    provided = header[len(prefix):].strip() if header.lower().startswith(prefix) else ""
+    if not provided or not hmac.compare_digest(provided, expected):
+        logger.warning("[hosting] worker register rejected: bad or missing bearer token")
+        raise HTTPException(401, "invalid worker token")
+
+    url, err = worker_test_endpoint._normalize_worker_url(body.url)
+    if err:
+        raise HTTPException(400, err)
+    host_err = _validate_tunnel_host(url)
+    if host_err:
+        raise HTTPException(400, host_err)
+
+    record = workerconfig.write(url=url, saved_at=workerconfig.now())
+    settings.hosted.worker_url = url
+    logger.info("[hosting] worker registered its tunnel: %s", url)
+    probe = _probe_saved_worker(url, record["token"])
+    if probe.get("ok"):
+        record = workerconfig.mark_verified()
+    view = _worker_view(probe, record)
     return {
-        **caption_style.effective(settings),
-        "saved": stored,
-        "styleId": subtitle_svc.style_fingerprint(
-            caption_style.resolve(settings), settings.subtitle.preset
-        ),
+        "ok": bool(view["ok"]),
+        "workerUrl": url,
+        "savedAt": record["savedAt"],
+        "lastVerifiedAt": record["verifiedAt"],
+        "linkExpired": view["linkExpired"],
+        "message": view["message"],
+        "health": view,
     }
 
 
-@app.delete("/api/settings/captions")
-def reset_caption_style() -> dict:
-    """Drop every override and go back to config.toml."""
-    caption_style.write(settings.app.paths, {})
-    return caption_style.effective(settings)
+@app.get("/api/hosting/worker/status")
+def worker_status_route() -> dict:
+    """Server-side worker status using the STORED token (the badge poll).
+
+    The browser never sends a token here, and the response carries only a token
+    masked to its last 4 characters. Timestamps come from the durable file so the
+    panel can say "saved at …" and "link last verified …", and a worker that has
+    stopped answering reads "Link expired. Restart start.sh in Termux" rather than
+    quietly reverting to "not configured".
+
+    Wrapped so a worker that hangs or raises never takes down the badge poll.
+    """
+    try:
+        record = workerconfig.read()
+        url = _stored_worker_url()
+        token = _stored_worker_token()
+        if not url:
+            view = _worker_view(
+                {"ok": False, "detail": "Worker not configured — set WORKER_URL in Settings."},
+                record,
+            )
+        else:
+            probe = _probe_saved_worker(url, token)
+            if probe.get("ok"):
+                record = workerconfig.mark_verified()
+            view = _worker_view(probe, record)
+        view["workerUrl"] = url
+        view["workerTokenMasked"] = workerconfig.mask(token)
+        # "saved at" is what the panel renders; emptyWarning is the honest
+        # banner when BOTH the primary file and the durable backup are empty.
+        view["savedAt"] = record["savedAt"]
+        view["emptyWarning"] = workerconfig.empty_warning()
+        view["backupPath"] = str(workerconfig._backup_path())
+        return view
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - worker outages are not server faults
+        logger.warning("[hosting] worker status poll raised: %s", exc)
+        return {
+            "ok": False,
+            "detail": "Worker status failed: " + (str(exc)[:300] or "unknown error"),
+            "workerUrl": _stored_worker_url(),
+            "workerTokenMasked": workerconfig.mask(_stored_worker_token()),
+        }
 
 
-# --------------------------------------------------------------------------- #
-# jobs
-# --------------------------------------------------------------------------- #
+@app.post("/api/hosting/worker/test")
+def test_worker_connection(body: worker_test_endpoint.TestWorkerConnectionIn) -> dict:
+    """Reach the home worker's /health with its Bearer token and report the
+    honest result. The client's Test connection button calls this so the
+    dashboard can show the exact error when the worker is offline without
+    pretending the hosted server is at fault.
+
+    Uses the token the user typed into the Settings panel (not the server-stored
+    one), so the user can test a new token before committing it.
+
+    Wrapped so a worker that is slow, unreachable, or returns garbage always yields
+    a JSON error to the dashboard instead of raising into the middleware.
+    """
+    try:
+        # One implementation for the route and for direct callers. The route used to
+        # duplicate this against a second HTTP stack, so the panel and the tests
+        # could disagree about what "online" meant.
+        return worker_test_endpoint.test_worker_connection(body, settings)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - worker outages are not server faults
+        logger.warning("[hosting] worker connection test raised: %s", exc)
+        return {
+            "ok": False,
+            "detail": "Worker test failed: " + (str(exc)[:300] or "unknown error"),
+            "workerUrl": worker_test_endpoint._normalize_worker_url(body.url)[0] or body.url,
+            "workerTokenMasked": worker_test_endpoint._mask_token(body.token),
+        }
+
+
+@app.get("/api/hosting/worker/verify")
+def worker_verify() -> dict:
+    """Return the stored worker URL/token shape and the live worker status
+    using the stored token, plus the yt-dlp verification the System panel uses.
+
+    This is the single place the dashboard reads worker + yt-dlp state for the
+    worker card, so the response matches the frontend DTO field names.
+    """
+    from app.download import build_ytdlp_verification
+
+    worker_status = worker_test_endpoint.worker_status(settings)
+    return {
+        "worker": worker_status,
+        "ytdlp": build_ytdlp_verification(settings),
+        "cookies": {
+            "configured": bool(getattr(settings.download, "cookies_file", "").strip()),
+            "count": _cookie_count(getattr(settings.download, "cookies_file", "").strip() or ""),
+        },
+    }
+
 
 @app.post("/api/jobs")
 def create_job(body: CreateJobIn) -> dict:
@@ -1426,6 +1975,7 @@ def create_job(body: CreateJobIn) -> dict:
         )
     # Disk preflight: long videos download multi-GB sources; a full disk would
     # otherwise fail mid-pipeline with a confusing ffmpeg/whisper error.
+    MIN_FREE_BYTES = 500 * 1024 * 1024  # 500 MB
     free = disk_stats(settings.app.paths.data_dir).get("freeBytes")
     if free is not None and free < MIN_FREE_BYTES:
         # The old message promised "files are deleted automatically 24h after a
@@ -1924,29 +2474,6 @@ def internal_complete(job_id: str, body: InternalCompleteIn, request: Request) -
     store.write_job(job)
     store.append_job_log(job_id, f"remote worker finished — {body.clipCount} clips")
     return {"ok": True}
-
-
-class RegisterWorkerIn(BaseModel):
-    workerUrl: str = Field(min_length=8, max_length=300)
-    token: str = ""
-
-
-@app.post("/api/internal/register-worker")
-def register_worker(body: RegisterWorkerIn) -> dict:
-    """The home worker-agent can self-register its tailnet URL.
-
-    Disabled unless CLIPFORGE_ALLOW_SELF_REGISTER=true (else it would let any
-    internet caller repoint the dispatch target).
-    """
-    import os as _os
-
-    if _os.getenv("CLIPFORGE_ALLOW_SELF_REGISTER", "").lower() not in {"1", "true", "yes"}:
-        raise HTTPException(403, "self-registration disabled — set WORKER_URL via the platform env")
-    settings.hosted.worker_url = body.workerUrl.rstrip("/")
-    if body.token.strip():
-        settings.hosted.worker_token = body.token.strip()
-    logger.info(f"[hosting] worker self-registered: {settings.hosted.worker_url}")
-    return {"ok": True, "workerUrl": settings.hosted.worker_url}
 
 
 @app.post("/api/jobs/{job_id}/retranscribe")
@@ -3065,6 +3592,21 @@ def _unlink_quietly(path: Path) -> None:
 static_dir = Path(__file__).resolve().parent.parent / "webui"
 if static_dir.exists():
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="webui")
+
+    # A mounted StaticFiles answers 404 for a client-side route like
+    # /dashboard — it only serves files that exist on disk. The installed app
+    # and any direct navigation then saw a bare 404 instead of the app shell, so
+    # every non-API 404 falls back to index.html and lets the React router
+    # resolve it. API 404s keep their JSON body.
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    @app.exception_handler(_StarletteHTTPException)
+    async def _spa_fallback(request: Request, exc: _StarletteHTTPException):
+        if exc.status_code == 404 and not request.url.path.startswith("/api"):
+            index = static_dir / "index.html"
+            if index.exists():
+                return FileResponse(index)
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 else:
     @app.get("/")
     def root() -> dict:
@@ -3084,9 +3626,22 @@ def main() -> None:
     """Entry point for the `clipforge` console script (pyproject.toml)."""
     import uvicorn
 
+    # Platforms and the preview proxy inject PORT and expect a public bind.
+    # Honouring both is what makes the server listen within seconds instead of
+    # only on 127.0.0.1 at whatever port config.toml happens to name.
+    host = (
+        (os.getenv("CLIPFORGE_HOST") or "").strip()
+        or (os.getenv("HOST") or "").strip()
+        or "0.0.0.0"
+    )
+    port = int(
+        (os.getenv("PORT") or "").strip()
+        or (os.getenv("CLIPFORGE_PORT") or "").strip()
+        or settings.app.port
+    )
     uvicorn.run(
         "app.main:app",
-        host=settings.app.host,
-        port=settings.app.port,
+        host=host,
+        port=port,
         log_level="info",
     )
