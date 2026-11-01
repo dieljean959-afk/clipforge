@@ -1,15 +1,29 @@
 # environment / secrets
 .env
 .env.local
+.env.keys
+token.txt
+.dotenv
+.env.production
+.env.staging
+DOTENV_PRIVATE_KEY_
 
 # node
 node_modules
 dist
 
+# web worker build output (frontend only)
+freebuff-sites-build/
+
+# deployed worker bundle
+worker/dist
+
 # local pipeline state (never commit your videos or clips)
 downloads/
 outputs/
 data/
+# durable, watcher-safe runtime config (worker URL/token, etc.) — never commit
+.data/
 webui/
 
 # python
@@ -19,3 +33,73 @@ __pycache__/
 
 # stale generated folder from the removed Convex layer
 src/convex/_generated
+
+# Never commit YouTube/browser session cookies or dev logs
+cookies.txt
+*.log
+
+# temporary / pid / temp
+*.pid
+*.temp
+*.mbtree.temp
+
+# test artifacts and temp outputs
+tests/
+tmp/
+
+# cache dirs
+.pytest_cache/
+.cache/
+.vite-cache/
+node_modules/.cache
+
+# stale backup folders from failed pipeline attempts (do not ship)
+*-backup/
+
+# mobile build
+android/
+
+# debug / diagnostic files (never ship)
+import_err*.txt
+yt-dlp-help.txt
+
+# tool scripts and test suites are not part of the deploy
+tools/
+
+# frontend source is bundled into webui/ by the Dockerfile web stage;
+# the raw TypeScript/React tree is not needed at runtime.
+src/
+
+# Convex was removed — keep generated artifacts out
+convex/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# vly / experimental UI tool — not part of the backend
+vly-toolbar-readonly.tsx
+vite-plugin-clipforge-backend.ts
+vite-plugin-clipforge-backend.js
+
+# media and uploaded/generated content (never ship)
+*.mp4
+*.mp3
+*.wav
+*.backup
+.env.keys
+
+# worker runtime config
+worker-config.json
+worker/keys
+worker/.env
+worker/config.local.json
+
+
+# safety: env-secret-list.md may be regenerated; keep out of git
+env-secret-list.md
+
+# safety: worker token file
+worker-token.txt
