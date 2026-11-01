@@ -82,3 +82,7 @@ vite-plugin-clipforge-backend.js
 .github
 .DS_Store
 Thumbs.db
+token.txt
+worker-config.json
+env-secret-list.md
+worker-token.txt
