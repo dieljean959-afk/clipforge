@@ -52,6 +52,6 @@ VOLUME ["/app/data", "/app/downloads", "/app/outputs"]
 EXPOSE 10000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:10000/api/health || exit 1
+    CMD /bin/sh -c "exec curl -fsS http://127.0.0.1:${PORT:-10000}/api/health || exit 1"
 
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD ["clipforge"]
