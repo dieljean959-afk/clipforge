@@ -1,0 +1,84 @@
+# Keep secrets, dependencies and generated media out of the build context.
+# Environment, secrets, tokens
+.env
+.env.local
+.env.keys
+.dotenv
+.env.production
+.env.staging
+DOTENV_PRIVATE_KEY_
+
+# node_modules / venv / build deps
+node_modules
+.venv
+
+# frontend source (bundled by Docker web stage into ./webui)
+src/
+
+# web worker / asset output (frontend only)
+freebuff-sites-build/
+dist
+
+# runtime state and media — persist as volumes, not in the image
+.data
+data
+downloads
+outputs
+webui
+
+# python caches
+__pycache__
+*.pyc
+.pytest_cache
+
+# cookies, logs, pids, temp, debug
+cookies.txt
+*.log
+*.pid
+*.temp
+*.mbtree.temp
+import_err*.txt
+yt-dlp-help.txt
+
+# cache dirs
+.cache
+.vite-cache
+isolate
+
+# backup folders
+*-backup
+.perf-backup
+.pipeline-backup
+.qa-backup
+.rel2-backup
+.reliability-backup
+
+# mobile / android
+android
+
+# media files
+*.mp4
+*.mp3
+*.wav
+*.backup
+
+# test and tmp
+tests
+tmp
+
+# tools / test suites / experimental
+tools/
+
+# removed Convex artifacts
+convex/
+
+# vly / experimental ui tool
+vly-toolbar-readonly.tsx
+vite-plugin-clipforge-backend.ts
+vite-plugin-clipforge-backend.js
+
+# build metadata
+.git
+.github
+.DS_Store
+Thumbs.db
