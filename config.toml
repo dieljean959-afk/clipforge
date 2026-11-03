@@ -427,9 +427,12 @@ strip_stutters = true
 position_y = 0.78
 # Pop/scale animation on each word group.
 pop_animation = true
-# Default caption style preset: bold_pop | karaoke | lower_third | boxed
+# Default caption style preset.
+# Animated (word-by-word, popped active word, 9:16 safe area):
+#   bold_yellow | clean_white | green_karaoke | neon | box_highlight
+# Classic cue-level looks: bold_pop | karaoke | lower_third | boxed | viral
 # (per-job override: pick a style on the dashboard form)
-preset = "bold_pop"
+preset = "bold_yellow"
 # --- unclear speech -------------------------------------------------------
 # Whisper reports its own confidence per word. A caption cue whose MEAN
 # confidence falls below `low_confidence` is rendered as "[muttering]" instead

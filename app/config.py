@@ -1719,10 +1719,17 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         strip_stutters=bool(s.get("strip_stutters", True)),
         highlight_color=_hex_or_blank(s.get("highlight_color", ""), "subtitle.highlight_color", errors),
     )
-    if subtitle.preset not in {"bold_pop", "karaoke", "lower_third", "boxed", "vertical_916"}:
+    # Keep this in step with subtitle.CAPTION_PRESETS: the animated styles are
+    # new preset KEYS, so a config naming one is valid and must not be rejected
+    # at boot (a rejected preset takes the whole server down, not one render).
+    _known_presets = (
+        "bold_pop", "karaoke", "lower_third", "boxed", "vertical_916", "viral",
+        "bold_yellow", "clean_white", "green_karaoke", "neon", "box_highlight",
+    )
+    if subtitle.preset not in set(_known_presets):
         errors.append(
             f'subtitle.preset "{subtitle.preset}" is not one of '
-            "bold_pop/karaoke/lower_third/boxed/vertical_916"
+            + "/".join(_known_presets)
         )
     for name, value in (("low_confidence", subtitle.low_confidence),
                         ("inaudible_below", subtitle.inaudible_below)):

@@ -25,7 +25,9 @@ export function NewJobForm({
   const [sandboxState, setSandboxState] = useState<"idle" | "starting" | "failed">("idle");
   const [sandboxMessage, setSandboxMessage] = useState<string | null>(null);
   const [presets, setPresets] = useState<CaptionPresetDto[]>([]);
-  const [preset, setPreset] = useState("bold_pop");
+  // Animated word-by-word captions are the default look; the picker still
+  // exposes every classic style the backend reports.
+  const [preset, setPreset] = useState("bold_yellow");
   const [clipCap, setClipCap] = useState<number | undefined>(undefined);
   const [language, setLanguage] = useState<LanguageChoice>("auto");
   const fileInputRef = useRef<HTMLInputElement>(null);

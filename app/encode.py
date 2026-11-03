@@ -623,6 +623,8 @@ def render_clip(
     # subtitles filter AFTER the crop/pan graph. Clips keep captions even
     # when played on platforms that never read sidecar SRTs.
     ass_path: Path | None = None
+    #: Timed emoji PNGs (animated styles only) — empty for every other preset.
+    emoji: list[dict] = []
     if cues:
         from app import subtitle as _subtitle
 
@@ -661,6 +663,14 @@ def render_clip(
             )
             filtergraph = filtergraph + "," + "subtitles=" + hook_esc
 
+        # Timed emoji for the animated styles (empty list otherwise). Computed
+        # from the same cues as the .ass, so an emoji appears on the word it
+        # belongs to and for exactly that chunk's duration.
+        from app import captions_animated as _animated
+
+        if _subtitle.get_preset(preset_key or "bold_pop").emoji:
+            emoji = _animated.emoji_overlays(cues, preset_key)
+
     # Encode to a temp file and only then replace the destination. A render
     # that is killed mid-write (host restart, stall watchdog, a re-render
     # overlapping the previous one) used to leave a PARTIALLY WRITTEN MP4 at
@@ -677,6 +687,42 @@ def render_clip(
     # re-invocations use the same seek semantics, so the output geometry and
     # captions are unchanged.
     def _build(graph: str, enc: Any) -> list[str]:
+        # Emoji: an animated style can attach a Twemoji PNG to a chunk's key
+        # word. PNGs cannot be drawn by libass, so each one becomes a looped
+        # input and an overlay windowed with enable=between(). Only styles that
+        # ask for emoji take this path; everything else keeps the plain -vf
+        # chain, and the static-crop fallback renders without emoji rather than
+        # failing the clip over decoration.
+        if emoji:
+            chain = [f"[0:v]{graph}[cv0]"]
+            extra: list[str] = []
+            for idx, item in enumerate(emoji, start=1):
+                extra += ["-loop", "1", "-t", f"{clip_seconds:.3f}", "-i", item["path"]]
+                chain.append(f"[{idx}:v]scale=150:-1,format=rgba[em{idx}]")
+                chain.append(
+                    f"[cv{idx - 1}][em{idx}]overlay=x=(W-w)/2:y=H*0.60:"
+                    f"enable='between(t,{item['start']:.3f},{item['end']:.3f})'[cv{idx}]"
+                )
+            return [
+                ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                *enc.hw_accel_args(),
+                "-ss", f"{start:.3f}",
+                "-i", str(src),
+                *extra,
+                *enc.threads_args(),
+                "-filter_complex", ";".join(chain),
+                *enc.ffmpeg_codec_args(),
+                "-map", f"[cv{len(emoji)}]",
+                "-map", "0:a:0?",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-ar", "44100",
+                # MUST sit next to the output. `-t` placed before another `-i`
+                # is read as that INPUT's duration, which left the looped emoji
+                # input unbounded and the render running forever.
+                "-t", f"{clip_seconds:.3f}",
+                str(tmp_dest),
+            ]
         return [
             ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             *enc.hw_accel_args(),

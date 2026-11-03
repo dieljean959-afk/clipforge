@@ -25,7 +25,7 @@ export function CaptionLanguageToggle({
   const [sandboxState, setSandboxState] = useState<"idle" | "starting" | "failed">("idle");
   const [sandboxMessage, setSandboxMessage] = useState<string | null>(null);
   const [presets, setPresets] = useState<CaptionPresetDto[]>([]);
-  const [preset, setPreset] = useState("bold_pop");
+  const [preset, setPreset] = useState("bold_yellow");
   const [clipCap, setClipCap] = useState<number | undefined>(undefined);
   const [language, setLanguage] = useState<LanguageChoice>("auto");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -188,7 +188,12 @@ export function CaptionLanguageToggle({
             {(presets.length > 0
               ? presets
               : [
-                  { key: "bold_pop", label: "Bold pop (default)" },
+                  { key: "bold_yellow", label: "Animated · Bold Yellow" },
+                  { key: "clean_white", label: "Animated · Clean White" },
+                  { key: "green_karaoke", label: "Animated · Green Karaoke" },
+                  { key: "neon", label: "Animated · Neon Glow" },
+                  { key: "box_highlight", label: "Animated · Box Highlight" },
+                  { key: "bold_pop", label: "Bold pop (classic)" },
                   { key: "karaoke", label: "Karaoke fill" },
                   { key: "lower_third", label: "Clean lower-third" },
                   { key: "boxed", label: "Boxed" },
