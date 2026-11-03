@@ -26,7 +26,6 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
 
 from app import (
     caption_style,
@@ -38,12 +37,13 @@ from app import (
     share_video,
     sharelink,
 )
-from app import encode as encode_mod
-from app import llm as llm_mod
-from app import objectstore as objectstore_mod
-from app import subtitle as subtitle_svc
-from app import video as video_svc
-from app import worker as worker_mod
+
+try:
+    from starlette.background import BackgroundTask
+except Exception:
+    BackgroundTask = None
+
+
 from app.config import (
     S3_CREDENTIAL_VARS,
     ConfigError,
@@ -86,6 +86,13 @@ from app.social import post_video as social_post
 from app.stages import StageWorkspace, remove_workspace
 from app.store import LocalStore
 from app.worker import InProcessWorker
+
+import app.encode as encode_mod
+import app.llm as llm_mod
+import app.objectstore as objectstore_mod
+import app.subtitle as subtitle_svc
+import app.video as video_svc
+import app.worker as worker_mod
 
 # --------------------------------------------------------------------------- #
 # boot
@@ -2183,10 +2190,12 @@ def clip_video(clip_id: str) -> FileResponse:
     """
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
-        raise HTTPException(404, "rendered video not available for this clip")        p = _clip_media(clip, "video")
+        raise HTTPException(404, "rendered video not available for this clip")
+    p = _clip_media(clip, "video")
     if p is None:
         raise HTTPException(404, "clip file missing on disk")
     from app import video as _video
+
 
     src = p
     cut = {
@@ -2204,10 +2213,13 @@ def clip_video(clip_id: str) -> FileResponse:
                 "x": int(w.get("x") or 0),
                 "y": int(w.get("y") or 0),
                 "w": int(w.get("w") or 0),
+          "h": int(w.get("h") or 0),
                 "h": int(w.get("h") or 0),
                 "cut": bool(w.get("cut") or False),
             }
             for w in (clip.get("sampleWindows") or [])
+        ],
+    }
         ],
         "framingSegments": [],
     }
@@ -2243,18 +2255,16 @@ def clip_video(clip_id: str) -> FileResponse:
         headers={
             "Cache-Control": MEDIA_CACHE_CONTROL,
             "Accept-Ranges": "bytes",
-            "ETag": _media_etag(p),
-            "X-Clip-Frame": "real-master-seen-first",
+            "ETag": _media_etag(p),                        "X-Clip-Frame": "real-master-seen-first",
         },
-        background=BackgroundTask(_run_ffmpeg_preview, cmd),
+        background=BackgroundTask(_preview_background_task, cmd) if BackgroundTask else None,
     )
     if clip.get("mediaDurationSec") and float(clip["mediaDurationSec"]) >= 0.5:
         res.headers["X-Clip-Frame"] = "preview-rebuild-cached" if _preview_needs_rebuild(clip) else "real-master-used"
     return res
-    if clip.get("mediaDurationSec") and float(clip["mediaDurationSec"]) >= 0.5:
-        res.headers["X-Clip-Frame"] = "preview-rebuild-cached" if _preview_needs_rebuild(clip) else "real-master-used"
-    return res
-    return resdef _preview_needs_rebuild(clip: dict) -> bool:
+
+
+def _preview_needs_rebuild(clip: dict) -> bool:
     """Is the on-disk master still the raw render, not yet the 720x1280 preview?
 
     The /video route serves the stored master first and rebuilds the preview on
@@ -2265,7 +2275,7 @@ def clip_video(clip_id: str) -> FileResponse:
     if p is None:
         return True
     try:
-        probe = video.probe(str(p))
+        probe = video_svc.probe(str(p))
         w = int(probe.get("width") or 0)
         h = int(probe.get("height") or 0)
         return (w, h) != (720, 1280)
@@ -2273,24 +2283,33 @@ def clip_video(clip_id: str) -> FileResponse:
         return True
 
 
-def _run_ffmpeg_preview(cmd: list[str]) -> None:
+def _preview_background_task(cmd: list[str]) -> None:
     """Run the preview rebuild silently on background. The output is written
     to the same path (under a temp name) so the next viewer gets the preview
     version for free."""
+    tmp_path: Path | None = None
     try:
-        import subprocess
+        import subprocess as _subprocess
 
         from pathlib import Path
-        from app import video as _video, encode as _encode
-        tmp = Path(str(p) + ".preview.mp4")
-        args = [a for a in cmd if a != str(p)] + [str(tmp)]
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        src_path: str | None = None
+        for a in cmd:
+            if isinstance(a, str) and a.lower().endswith(".mp4") and "preview" not in a.lower():
+                src_path = a
+                break
+        if src_path is None:
+            return
+        tmp = Path(str(src_path) + ".preview.mp4")
+        tmp_path = tmp
+        args = [a for a in cmd if a != src_path] + [str(tmp)]
+        proc = _subprocess.run(args, capture_output=True, text=True, timeout=120)
 
         if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
-            tmp.replace(p)
-            logger.info(f"[api] preview rebuilt {p.name}")
+            tmp.replace(src_path)
+            logger.info(f"[api] preview rebuilt {Path(src_path).name}")
     except Exception:
-        logger.exception(f"[api] preview rebuild failed for {p.name}")
+        logger.exception(f"[api] preview rebuild failed for {Path(tmp_path or 'unknown').name}")
+
 
 
 
