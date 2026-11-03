@@ -12,40 +12,78 @@ LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "ja", "ko", "zh",
 USED_LANGS = {"en", "es"}
 
 
-def guess_language(transcript: Any) -> str | None:
-    """Cheap, honest language guess from the transcript's own words.
+#: High-frequency Spanish function words. Deliberately EXCLUDES tokens that
+#: are also normal English words (a, no, me, mi, e, o, da, di, es? no — "es"
+#: is not English) so a single loanword cannot tip the score.
+_ES_FUNCTION = frozenset("""
+    al algo alguien aqui asi aunque bien bueno cada como con contra cual cuando
+    de del desde donde dos el ella ellas ellos en entre era eran eres esa esas
+    ese eso esos esta estaba estado estan estar estas este esto estos estoy fue
+    fueron fui ha habia han hasta hay he hemos la las le les lo los mas mientras
+    mucho muy nada ni nos nosotros nuestra nuestro nuevo otro para pero poco por
+    porque que quien se sea segun ser si sido siempre sin sobre solo son su sus
+    tambien tan tanto te tiene tienen todo todos tu tus un una uno unos usted
+    ustedes va vale vamos ver y ya yo
+""".split())
 
-    Used ONLY for the caption planner (stopword selection). Prefer an explicit
-    job language hint when the caller has one; this heuristic answers the
-    "auto" case. Spanish markers: ¿ ¡ á é í ó ú ñ plus high-frequency Spanish
-    function words; a score of both marks the majority.
+#: Same idea for English. "para" and "pero" are NOT included even though they
+#: look Spanish-adjacent; they are the words that carry Spanish sentences.
+_EN_FUNCTION = frozenset("""
+    about after again all also am an and any are as at back be because been
+    before being but by can could did do does doing done down each even every
+    few for from get got had has have he her here him his how if in into is it
+    its just know like long made make many may might more most much my never new
+    not now of off on once one only or other our out over own really right said
+    same say see she should since so some still such take than that the their
+    them then there these they thing think this those through time to too two up
+    us very want was way we well went were what when where which while who why
+    will with would year yes you your
+""".split())
+
+#: A winner needs this share of the function words AND this multiple of the
+#: loser. Below it the evidence is genuinely mixed ("my abuela always said
+#: mira, para adelante"), and guessing there is what mislabels a clip.
+_LANG_MIN_SHARE = 0.30
+_LANG_MIN_MARGIN = 1.6
+
+
+def detect_language(words: list[str]) -> str | None:
+    """English or Spanish, from the words themselves. None when mixed.
+
+    Scores the share of high-frequency function words in each language (plus a
+    small bonus for Spanish-only characters, which survive ASR even when the
+    accents themselves are dropped). Requires BOTH a minimum share and a clear
+    margin, because the previous version called "my abuela always said mira,
+    para adelante" Spanish: three Spanish tokens beat zero recognised English
+    ones and the code read that as a Spanish video with English audio.
+
+    Returning None is a real answer — the caller falls back to the engine's own
+    detected language, which is better evidence than a coin flip.
     """
+    toks = [str(w).lower().strip(".,!?;:\"'()[]¿¡…—") for w in words]
+    toks = [t for t in toks if t]
+    if len(toks) < 3:
+        return None
+    n = len(toks)
+    es_share = sum(1 for t in toks if t in _ES_FUNCTION) / n
+    en_share = sum(1 for t in toks if t in _EN_FUNCTION) / n
+    marks = sum(str(w).count(c) for w in words for c in "¿¡áéíóúñü")
+    if marks:
+        # Accents/unused-in-English letters are language evidence on their own.
+        es_share += min(0.15, marks / n * 0.5)
+    if es_share >= _LANG_MIN_SHARE and es_share >= en_share * _LANG_MIN_MARGIN:
+        return "es"
+    if en_share >= _LANG_MIN_SHARE and en_share >= es_share * _LANG_MIN_MARGIN:
+        return "en"
+    return None
+
+
+def guess_language(transcript: Any) -> str | None:
+    """Language of a whole transcript, from its words (None when unclear)."""
     words = getattr(transcript, "words", None)
     if not words:
         return None
-    text = " ".join(str(getattr(w, "word", "")) for w in words)
-    es_marks = sum(text.count(c) for c in "¿¡áéíóúñü")
-    es_words = sum(
-        1 for t in text.split()
-        if t.lower().strip(".,!?;:\"¿¡()") in {
-            "que", "de", "el", "la", "los", "las", "una", "uno", "con", "por",
-            "para", "pero", "muy", "esto", "esta", "eso", "aquí", "hay", "más",
-        }
-    )
-    en_words = sum(
-        1 for t in text.split()
-        if t.lower().strip(".,!?;:\"()") in {
-            "the", "and", "is", "that", "this", "you", "with", "for", "was",
-            "are", "have", "they", "what", "like", "just", "know", "going",
-        }
-    )
-    es_score = es_marks * 2 + es_words
-    en_score = en_words
-    if es_score > en_score * 2:
-        return "es"
-    if en_score > es_score * 2:
-        return "en"
-    return "es" if es_score > en_score else ("en" if en_score else None)
+    return detect_language([str(getattr(w, "word", "")) for w in words])
 
 
 def normalize_codes(codes: list[str]) -> list[str]:
@@ -65,6 +103,7 @@ def build_cues(
     *,
     language: str | None = None,
     style: str = "viral",
+    allow_clip_override: bool = True,
 ) -> list[dict[str, Any]]:
     """Assemble caption cues for ONE rendered clip from a transcript + cut window.
 
@@ -114,6 +153,15 @@ def build_cues(
         }
         for w in inside
     ]
+    # Per-clip language. A video is rarely one language end to end: an English
+    # interview with a Spanish-speaking guest, or a Spanish podcast quoting an
+    # English clip. The job-level language is only a prior — when THIS clip's
+    # own words are confidently the other language, the caption planner (and
+    # the SRT it labels) follows the words in front of it.
+    if allow_clip_override:
+        clip_lang = detect_language([str(d.get("word") or "") for d in as_dicts])
+        if clip_lang and clip_lang != lang:
+            lang = clip_lang
     as_dicts, _merged_contr = _subtitle.merge_broken_contractions(as_dicts)
     as_dicts, _merged_nums = _subtitle.merge_number_runs(as_dicts, lang)
     kept, _removed = _subtitle.strip_fillers(as_dicts)

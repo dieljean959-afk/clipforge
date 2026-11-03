@@ -1469,6 +1469,11 @@ class Pipeline:
                 transcript, cut, self.settings,
                 language=caption_language,
                 style=style_key,
+                # An explicit ENG/ESP pick wins for the whole job. On "auto",
+                # each clip may overrule the job-level guess with its own
+                # words — that is the case where one clip of an English video
+                # is a Spanish speaker.
+                allow_clip_override=(job_language == "auto"),
             )
             # Persist the cue list per clip so the export stage can burn the
             # same cues into the frames without holding the transcript in
