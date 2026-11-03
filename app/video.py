@@ -271,7 +271,7 @@ def retry_clip_render(clip_id: str) -> dict:
         {
             "videoPath": meta["videoPath"],
             "thumbPath": str(thumb_path),
-            "mediaBytes": meta["bytes"],
+            "mediaBytes": meta.get("bytes") or int(dest.stat().st_size),
             "mediaWidth": meta["width"],
             "mediaHeight": meta["height"],
             "mediaDurationSec": round(float(meta["duration"]), 3),
