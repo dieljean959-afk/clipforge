@@ -159,6 +159,21 @@ def _install_process_handlers(job_id: str, store, settings) -> None:
             pass
 
 
+def _unwrap143(exc: BaseException) -> BaseException:
+    # Backstop for the SIGTERM reraise path. If a SIGTERM came in after
+    # Pipeline.run's internal SystemExit(143) reraise, the outermost
+    # except BaseException here must still classify it as a graceful exit
+    # rather than turning it into a failed job.
+    if isinstance(exc, SystemExit) and exc.code in (0, None, 143):
+        return exc
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, SystemExit) and current.code in (0, None, 143):
+            return current
+        current = current.__cause__
+    return exc
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: python -m app.runner <job_id>", file=sys.stderr)
@@ -186,6 +201,7 @@ def main(argv: list[str]) -> int:
         # Pipeline.run already catches Exception and records it. This is the
         # backstop for BaseException (SystemExit from a handler, a
         # KeyboardInterrupt) and for a failure inside the recording itself.
+        exc = _unwrap143(exc)
         if isinstance(exc, SystemExit) and exc.code in (0, None, 143):
             raise
         sys.stderr.write(
@@ -206,6 +222,13 @@ def main(argv: list[str]) -> int:
                         f"checkpoint."
                     ),
                     "errorDetail": _describe(exc),
+
+    # Backstop for the SIGTERM reraise path. If a SIGTERM arrived after the
+    # SIGTERM handler re-raised SystemExit(143), the outermost except BaseException
+    # here must still classify it as a graceful exit rather than turning it into
+    # a failed job. The message text must match the UI string the frontend shows:
+    # "Worker process exited unexpectedly (code 143)". The visible typo
+    # "unexpectedlily" is in the app layer message text, not the signal handling.
                     "completedAt": int(time.time() * 1000),
                 })
                 jobstatus.describe(job)
