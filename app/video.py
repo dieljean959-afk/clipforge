@@ -275,6 +275,7 @@ def retry_clip_render(clip_id: str) -> dict:
             "mediaWidth": meta["width"],
             "mediaHeight": meta["height"],
             "mediaDurationSec": round(float(meta["duration"]), 3),
+            "fps": meta.get("fps", 30.0),
             "renderState": "done",
             "jobId": job_id,
         },

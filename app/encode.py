@@ -794,6 +794,8 @@ def render_clip(
 
     if on_log:
         on_log(f"Rendered clip {cut.get('order', '?')} -> {dest.name} ({dest.stat().st_size} bytes)")
+
+    probed = _video.probe(str(dest))
     return {
         "clipOrder": int(cut.get("order", 0)),
         "start": round(start, 3),
@@ -803,6 +805,9716 @@ def render_clip(
         "height": int(meta["height"]),
         "bytes": int(dest.stat().st_size),
         "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
+        "encoder": choice.encoder or "libx264",
+        "encoderLabel": choice.label,
+        "hardwareEncoded": bool(choice.hardware),
+        "preset": choice.preset,
+        "ffmpegCommand": " ".join(cmd),
+        "ffmpegStderr": (proc.stderr or "").strip(),
+    }
+
+    probed = _video.probe(str(dest))
+    return {
+        "clipOrder": int(cut.get("order", 0)),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "durationSec": round(float(meta["duration"]), 3),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+        "bytes": int(dest.stat().st_size),
+        "videoPath": str(dest),
+        "fps": float(probed.get("fps", 30.0)),
         "encoder": choice.encoder or "libx264",
         "encoderLabel": choice.label,
         "hardwareEncoded": bool(choice.hardware),
