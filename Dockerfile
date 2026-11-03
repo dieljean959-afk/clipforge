@@ -23,7 +23,7 @@ ENV PYTHONUNBUFFERED=1 \
 # curl is used by the Docker HEALTHCHECK (Render also runs its own probes).
 # nodejs is required by yt-dlp's JS post-processing for heavily nested sites.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl nodejs ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ffprobe curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -52,6 +52,6 @@ EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD /bin/sh -c "exec curl -fsS http://127.0.0.1:${PORT:-10000}/api/health || exit 1"
 
-# Start the server. $PORT is set by Render (default 10000), $CLIPFORGE_HOST defaults
-# to 0.0.0.0. This is the exact command Render should run.
+# Start the server. $PORT is set by Render (default 10000). The CMD below binds
+# 0.0.0.0:$PORT so Render's port probe can reach the API immediately.
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --log-level info"]

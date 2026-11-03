@@ -264,12 +264,55 @@ def _boot() -> None:
     store = LocalStore(settings.app.paths)
     worker = InProcessWorker(settings, store)
     probe = None
-    ffmpeg_required = None
+    ffmpeg_required = _probe_ffmpeg_at_boot()
 
     _install_process_guards()
     _log_server_bound()
     _start_worker()
 
+
+
+
+def _probe_ffmpeg_at_boot() -> dict:
+    """Probe ffmpeg readiness once at boot.
+
+    Returns a dict wired into ``/api/health`` so a missing or broken ffmpeg is
+    visible immediately. The probe is tiny (``ffmpeg -version``, 5s timeout), so
+    a missing binary does NOT stop the socket or ``/api/health`` from answering.
+    """
+    import subprocess as _sp
+
+    try:
+        _ffmpeg_bin = ffmpeg_bin()
+    except ConfigError as exc:
+        logger.error(
+            "[boot] ffmpeg probe failed at startup: %s. The image must ship a real ffmpeg binary or set FFMPEG_PATH/FFPROBE_PATH, otherwise the server cannot render clips.",
+            exc,
+        )
+        return {"ffmpeg": None, "ffprobe": None, "ready": False, "version": None, "error": str(exc)}
+
+    try:
+        _ffprobe_bin = ffprobe_bin()
+    except ConfigError as exc:
+        logger.warning("[boot] ffprobe probe failed at startup: %s (rendering can still work without ffprobe)", exc)
+        _ffprobe_bin = None
+
+    try:
+        _proc = _sp.run([_ffmpeg_bin, "-version"], capture_output=True, text=True, timeout=5)
+        _first_line = ((_proc.stdout or _proc.stderr).splitlines()[0] if (_proc.stdout or _proc.stderr) else "")
+        if _proc.returncode == 0:
+            logger.info("[boot] ffmpeg ready: %s (%s)", _ffmpeg_bin, _first_line)
+            return {"ffmpeg": _ffmpeg_bin, "ffprobe": _ffprobe_bin, "ready": True, "version": _first_line, "error": None}
+        logger.warning(
+            "[boot] ffmpeg present at %s but -version exited %s: %s - the API still serves, but video jobs will fail",
+            _ffmpeg_bin,
+            _proc.returncode,
+            _first_line or "(no output)",
+        )
+        return {"ffmpeg": _ffmpeg_bin, "ffprobe": _ffprobe_bin, "ready": False, "version": _first_line or None, "error": f"ffmpeg -version exited {_proc.returncode}"}
+    except Exception as exc:
+        logger.error("[boot] ffmpeg probe raised at startup (%s): %s", type(exc).__name__, exc)
+        return {"ffmpeg": _ffmpeg_bin, "ffprobe": _ffprobe_bin, "ready": False, "version": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _install_process_guards() -> None:
@@ -793,9 +836,14 @@ def _fast_health() -> dict:
 
     The full diagnostic payload still exists at ``/api/health?deep=1``.
     """
+    global ffmpeg_required
+    ffmpeg = ffmpeg_required if isinstance(ffmpeg_required, dict) else {}
+    degraded: list[str] = []
+    if ffmpeg and not ffmpeg.get("ready"):
+        degraded.append("ffmpeg")
     return {
         "ok": True,
-        "degraded": [],
+        "degraded": degraded,
         "fast": True,
         "version": "1.1.0",
         "uptimeSec": int(time.time() - _PROCESS_STARTED),
@@ -812,6 +860,8 @@ def _fast_health() -> dict:
             else {"enabled": False}
         ),
         "pid": os.getpid(),
+        "ffmpeg": ffmpeg.get("ffmpeg") if isinstance(ffmpeg, dict) else None,
+        "ffmpeg_ready": bool(ffmpeg.get("ready")),
         "supervised": system_state.supervisor_alive(),
         "loopLagMs": system_state.loop_lag_ms(),
         "restarts": system_state.restart_count(),
