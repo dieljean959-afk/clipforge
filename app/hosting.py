@@ -133,6 +133,18 @@ _static_cache: tuple[float, int] | None = None
 _tree_cache_lock = threading.Lock()
 
 
+def invalidate_disk_cache() -> None:
+    """Forget the measured tree sizes because a delete just changed them.
+
+    /api/health is polled every few seconds and the reader expects "free" to
+    move the moment a batch is removed. The tree measurement is cached for a
+    minute, so without this the card kept showing the pre-delete number and a
+    Clean up looked like it freed nothing.
+    """
+    with _tree_cache_lock:
+        _tree_cache.clear()
+
+
 def _cached_measure(key: str, roots: tuple[Path, ...], ttl: float) -> int:
     """Measure `roots`, reusing the last answer while it is still fresh."""
     now = time.monotonic()

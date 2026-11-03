@@ -100,7 +100,7 @@ export default function Dashboard() {
       ? selectedJobId
       : (doneJobs[0]?._id ?? null);
   const selectedJob = doneJobs.find((j) => j._id === effectiveJobId) ?? null;
-  const { clips, loaded: clipsLoaded } = useClips(effectiveJobId, 2000);
+  const { clips, loaded: clipsLoaded, error: clipsError } = useClips(effectiveJobId, 2000);
   // The worker's real silence budget. A stall banner that quotes a number
   // invented in the frontend will drift from the server the moment
   // CLIPMAKE_STALL_TIMEOUT_SEC is set, so the card reads it from health.
@@ -638,7 +638,11 @@ export default function Dashboard() {
                 </div>
               )}
               {clips.length === 0 &&
-                (clipsLoaded ? (
+                (clipsError ? (
+                  <p className="mt-3 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    Clips failed to load: {clipsError}
+                  </p>
+                ) : clipsLoaded ? (
                   <p className="mt-3 text-sm text-muted-foreground">
                     This batch has no clips yet.
                   </p>

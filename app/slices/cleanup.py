@@ -1,40 +1,18 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
-from typing import Any
 
 
 def unlink_model_dirs(data_dir: Path, job_id: str) -> None:
-    """Drop cached model/layer artifacts tied to a deleted job.
+    """Drop job-scoped model/layer caches when a batch is deleted.
 
-    The disk meter is currently only measuring tree bytes on the data/output
-    volumes. Until the meter is wired to count model/layer caches, deleting a
-    batch that owns model slots leaves the reported free space unchanged, which
-    looks like a stale number after a Clean up.
+    The disk meter sums the data/output tree, so a delete only shows up as
+    freed space once these per-job caches are gone too — otherwise the
+    dashboard keeps reporting the same "free" number after a Clean up.
 
-    This is intentionally narrow: it only prunes directories that are clearly
-    job-scoped, and it ignores anything shared or ambiguous.
+    Deliberately narrow: only directories named exactly after the job id are
+    touched, so shared caches are never removed.
     """
-    for root in (data_dir / "models", data_dir / "layers"):
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            continue
-        candidate = root / job_id
-        try:
-            if candidate.exists() and candidate.is_dir():
-                for child in candidate.iterdir():
-                    if child.is_symlink():
-                        continue
-                    _chmod_loose(child, dir_umask=0o777)
-                candidate.rmdir()
-        except OSError:
-            continue
-
-
-def _chmod_loose(path: Path, *, dir_umask: int) -> None:
-    """Best-effort permission loosening before a recursive unlink."""
-    try:
-        path.chmod(dir_umask)
-    except OSError:
-        pass
+    for name in ("models", "layers"):
+        shutil.rmtree(data_dir / name / job_id, ignore_errors=True)

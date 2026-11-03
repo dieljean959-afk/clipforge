@@ -163,18 +163,25 @@ export function useJobs(intervalMs = 2000) {
 export function useClips(jobId: string | null, intervalMs = 2000) {
   const [clips, setClips] = useState<ClipDto[]>([]);
   const [loaded, setLoaded] = useState(false);
+  // A failed list request used to become "loaded, zero clips", which the
+  // dashboard rendered as "This batch has no clips yet" — a server 500 looked
+  // exactly like a batch that never rendered. Keep the message instead.
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (jobId === null) {
       setClips([]);
+      setError(null);
       setLoaded(true);
       return;
     }
     try {
       const data = await api.listClips(jobId);
       setClips(data);
+      setError(null);
       setLoaded(true);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load clips");
       setLoaded(true);
     }
   }, [jobId]);
@@ -195,10 +202,11 @@ export function useClips(jobId: string | null, intervalMs = 2000) {
   if (seenJobId !== jobId) {
     setSeenJobId(jobId);
     setClips([]);
+    setError(null);
     setLoaded(false);
   }
 
-  return { clips, loaded, refresh };
+  return { clips, loaded, error, refresh };
 }
 
 export function useHealth(intervalMs = 5000) {

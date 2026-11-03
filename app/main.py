@@ -7,6 +7,7 @@ pre-download (explicit, with progress) → worker thread starts.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -70,6 +71,7 @@ from app.config import (
     write_env_var,
 )
 from app.download import probe_url
+from app import hosting as hosting_mod  # noqa: F401 - reused by delete paths
 from app.hosting import RetentionCleaner, disk_stats
 from app.social import (
     PLATFORMS,
@@ -83,6 +85,7 @@ from app.social import (
 )
 from app.social import base as social_base
 from app.social import post_video as social_post
+from app.slices.cleanup import unlink_model_dirs
 from app.stages import StageWorkspace, remove_workspace
 from app.store import LocalStore
 from app.worker import InProcessWorker
@@ -715,6 +718,40 @@ def set_detection_backend(body: DetectionIn) -> dict:
 # health / status
 # --------------------------------------------------------------------------- #
 
+def _tool_version(binary: str, flag: str = "-version") -> str | None:
+    """First line of `<binary> -version`, or None when it cannot run.
+
+    The status card claims which tools the pipeline will actually use, so the
+    number has to come from the binary on PATH — not from a constant. ffmpeg
+    4.4 prints its version and still exits 1 on some builds, so the exit code
+    is not treated as failure when stdout has text.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [binary, flag], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (proc.stdout or "") + (proc.stderr or "")
+    line = out.strip().splitlines()[0] if out.strip() else ""
+    return line or None
+
+
+def _ytdlp_version() -> str | None:
+    try:
+        import yt_dlp
+    except Exception:
+        return None
+    # `yt_dlp.version` is a MODULE, so `getattr(yt_dlp, "version")` is not a
+    # string — the module's `__version__` is.
+    text = getattr(getattr(yt_dlp, "version", None), "__version__", None)
+    if not isinstance(text, str):
+        text = getattr(yt_dlp, "__version__", None)
+    return text if isinstance(text, str) else None
+
+
 @app.get("/api/health")
 def health() -> dict:
     """Liveness + status for the dashboard.
@@ -851,6 +888,19 @@ def health() -> dict:
         "storage": _block("storage", objectstore_mod.status),
         "encode": _block("encode", lambda: encode_mod.as_dict(encode_mod.choose(settings))),
         "disk": _block("disk", lambda: disk_stats(settings.app.paths.data_dir)),
+        # The status card reports the pipeline's real toolchain and where it
+        # writes. Versions are read from the binaries on PATH per poll, so a
+        # rebuilt sandbox shows up without redeploying the frontend.
+        "tools": _block(
+            "tools",
+            lambda: {
+                "ffmpeg": _tool_version(ffmpeg_bin()),
+                "ffprobe": _tool_version(ffprobe_bin()),
+                "ytdlp": _ytdlp_version(),
+                "mediaDir": str(settings.app.paths.outputs_dir),
+                "downloadsDir": str(settings.app.paths.downloads_dir),
+            },
+        ),
         "tailnetIp": hosting.tailnet_ip(),
         "limits": {
             "maxSourceMin": settings.hosted.max_source_min,
@@ -1734,6 +1784,7 @@ def delete_job(job_id: str, keepSource: bool = False) -> dict:
     # without this a manual delete only freed a few KB of JSON and the disk
     # stayed full — the retention sweeper already does exactly this.
     remove_workspace(settings.app.paths.data_dir, job_id)
+    unlink_model_dirs(settings.app.paths.data_dir, job_id)
     if keepSource:
         # Remove only the per-stage workspace + outputs, keep the source file.
         # `remove_workspace` already covered data/work/<id>; the source lives
@@ -1745,6 +1796,7 @@ def delete_job(job_id: str, keepSource: bool = False) -> dict:
             settings.app.paths.outputs_dir / job_id,
         ):
             shutil.rmtree(d, ignore_errors=True)
+    hosting_mod.invalidate_disk_cache()
     _purge_remote_job(job_id)
     return {"deleted": True, "cancelled": cancelled, "keptSource": keepSource}
 
@@ -1792,10 +1844,12 @@ def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
             missing.append(job_id)
             continue
         remove_workspace(settings.app.paths.data_dir, job_id)
+        unlink_model_dirs(settings.app.paths.data_dir, job_id)
         for d in settings.app.paths.job_source_dirs(job_id) + (
             settings.app.paths.outputs_dir / job_id,
         ):
             shutil.rmtree(d, ignore_errors=True)
+        hosting_mod.invalidate_disk_cache()
         _purge_remote_job(job_id)
         deleted.append(job_id)
     logger.info(
@@ -2194,9 +2248,6 @@ def clip_video(clip_id: str) -> FileResponse:
     p = _clip_media(clip, "video")
     if p is None:
         raise HTTPException(404, "clip file missing on disk")
-    from app import video as _video
-
-
     src = p
     cut = {
         "start": float(clip.get("start") or 0.0),
@@ -2213,102 +2264,22 @@ def clip_video(clip_id: str) -> FileResponse:
                 "x": int(w.get("x") or 0),
                 "y": int(w.get("y") or 0),
                 "w": int(w.get("w") or 0),
-          "h": int(w.get("h") or 0),
                 "h": int(w.get("h") or 0),
                 "cut": bool(w.get("cut") or False),
             }
             for w in (clip.get("sampleWindows") or [])
         ],
     }
-        ],
-        "framingSegments": [],
-    }
-    probe = _video.probe(src)
-    src_w = int(probe.get("width") or 1080)
-    src_h = int(probe.get("height") or 1920)
-    out_w, out_h = 720, 1280
-    src_fps = float(probe.get("fps") or 30.0)
-    crop_w = min(int(src_h * cut["cropBox"]["w"] / cut["cropBox"]["h"]), src_w)
-    crop_x = int((src_w - crop_w) / 2)
-    chain = _video.build_output_chain(
-        cut.get("sampleWindows"),
-        src_w,
-        src_h,
-        crop_w,
-        out_w,
-        out_h,
-        src_fps,
-    )
-    seek = ["-ss", f"{cut['start']:.3f}", "-i", str(src), "-t", f"{cut['end'] - cut['start']:.3f}"]
-    cmd = [
-        _video.ffmpeg_bin(), "-y", *seek,
-        "-filter_complex", chain,
-        *_video.VIDEO_PROFILE_ARGS,
-        *_video.ffmpeg_codec_args(),
-        *encode.AUDIO_ARGS,
-        "-f", "mp4", str(p),
-    ]
-    logger.info(f"[api] preview clip {clip_id}: {len(cmd)} args")
-    res = FileResponse(
+    return FileResponse(
         p,
         media_type="video/mp4",
         headers={
             "Cache-Control": MEDIA_CACHE_CONTROL,
             "Accept-Ranges": "bytes",
-            "ETag": _media_etag(p),                        "X-Clip-Frame": "real-master-seen-first",
+            "Content-Disposition": f'inline; filename="{p.name}"',
+            "ETag": _media_etag(p),
         },
-        background=BackgroundTask(_preview_background_task, cmd) if BackgroundTask else None,
     )
-    if clip.get("mediaDurationSec") and float(clip["mediaDurationSec"]) >= 0.5:
-        res.headers["X-Clip-Frame"] = "preview-rebuild-cached" if _preview_needs_rebuild(clip) else "real-master-used"
-    return res
-
-
-def _preview_needs_rebuild(clip: dict) -> bool:
-    """Is the on-disk master still the raw render, not yet the 720x1280 preview?
-
-    The /video route serves the stored master first and rebuilds the preview on
-    a background thread. We only need a snapshot-fast judgment here: if the file
-    already has the preview's crop/pan chain baked in, skip the rebuild.
-    """
-    p = _clip_media(clip, "video")
-    if p is None:
-        return True
-    try:
-        probe = video_svc.probe(str(p))
-        w = int(probe.get("width") or 0)
-        h = int(probe.get("height") or 0)
-        return (w, h) != (720, 1280)
-    except Exception:
-        return True
-
-
-def _preview_background_task(cmd: list[str]) -> None:
-    """Run the preview rebuild silently on background. The output is written
-    to the same path (under a temp name) so the next viewer gets the preview
-    version for free."""
-    tmp_path: Path | None = None
-    try:
-        import subprocess as _subprocess
-
-        from pathlib import Path
-        src_path: str | None = None
-        for a in cmd:
-            if isinstance(a, str) and a.lower().endswith(".mp4") and "preview" not in a.lower():
-                src_path = a
-                break
-        if src_path is None:
-            return
-        tmp = Path(str(src_path) + ".preview.mp4")
-        tmp_path = tmp
-        args = [a for a in cmd if a != src_path] + [str(tmp)]
-        proc = _subprocess.run(args, capture_output=True, text=True, timeout=120)
-
-        if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
-            tmp.replace(src_path)
-            logger.info(f"[api] preview rebuilt {Path(src_path).name}")
-    except Exception:
-        logger.exception(f"[api] preview rebuild failed for {Path(tmp_path or 'unknown').name}")
 
 
 

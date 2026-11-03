@@ -282,6 +282,18 @@ export interface HealthDto {
     totalBytes?: number | null;
     path?: string | null;
   } | null;
+  /**
+   * The real toolchain, read from the binaries on PATH per poll, plus the
+   * folder rendered clips land in. Nulls mean "could not run it", which the
+   * status card shows instead of pretending a version.
+   */
+  tools?: {
+    ffmpeg?: string | null;
+    ffprobe?: string | null;
+    ytdlp?: string | null;
+    mediaDir?: string | null;
+    downloadsDir?: string | null;
+  } | null;
   tailnetIp?: string | null;
   limits?: { maxSourceMin?: number; retentionHours?: number } | null;
   /** Durable media offload (S3/R2) state, present once /api/health answers. */

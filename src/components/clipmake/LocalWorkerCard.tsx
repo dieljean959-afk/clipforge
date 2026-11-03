@@ -14,6 +14,7 @@ import {
   Cpu,
   Eye,
   EyeOff,
+  Film,
   HardDrive,
   KeyRound,
   Loader2,
@@ -23,6 +24,7 @@ import {
   ServerCog,
   ShieldCheck,
   Sparkles,
+  Terminal,
   Trash2,
   TriangleAlert,
 } from "lucide-react";
@@ -189,6 +191,13 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   // keeps the reading honest instead of implying the 4 GB sandbox is full.
   const diskPath = health?.disk?.path ?? null;
   const diskLow = diskFree !== null && diskFree < 1.5 * 1024 ** 3;
+
+  // The real pipeline toolchain, read from the binaries on PATH by the server,
+  // plus the folder rendered clips actually land in.
+  const tools = health?.tools ?? null;
+  const ytdlpVersion = tools?.ytdlp ?? null;
+  const ffmpegVersion = tools?.ffmpeg ?? null;
+  const mediaDir = tools?.mediaDir ?? null;
 
   const dispatch = health?.dispatch;
   const remoteOnline =
@@ -512,6 +521,19 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 {diskLow && <TriangleAlert className="size-3" />}
                 Disk {fmtBytes(diskFree)} free
                 {diskTotal !== null ? ` / ${fmtBytes(diskTotal)}` : ""}
+              </StatLine>
+            )}
+            {/* Which downloader and encoder actually run, and where the clips
+                land. A version shown here is the version that just ran, so a
+                broken ffmpeg build is visible before the next batch fails. */}
+            <StatLine icon={Terminal} className="font-mono text-[10px]">
+              {ytdlpVersion ? `yt-dlp ${ytdlpVersion}` : "yt-dlp unavailable"}
+              {" · "}
+              {ffmpegVersion ? ffmpegVersion.split(" ").slice(0, 3).join(" ") : "ffmpeg unavailable"}
+            </StatLine>
+            {mediaDir && (
+              <StatLine icon={Film} className="font-mono text-[10px]" title="Where rendered clips are written">
+                media {mediaDir}
               </StatLine>
             )}
             {dispatch?.enabled === true && (
