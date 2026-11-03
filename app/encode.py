@@ -629,9 +629,22 @@ def render_clip(
         from app import subtitle as _subtitle
 
         ass_path = dest.with_suffix(".ass")
+        # Where the caption sits is a LAYOUT question, not a taste one. A FIT
+        # clip shows the source at frame width in a band in the middle of the
+        # 9:16 frame, so a bottom-margin caption lands in the blur UNDER the
+        # video. Anchor it to the foreground's own lower edge instead, computed
+        # from the real source aspect (16:9 -> 608 px tall, bottom at 1264).
+        # Mixed fit/fill clips keep the safe-area margin: the foreground moves
+        # mid-clip, so a single anchor would be wrong for part of it.
+        anchor_y: int | None = None
+        if has_fit and not fills:
+            from app import captions_animated as _anim
+
+            anchor_y = _anim.foreground_bottom(width, height, out_w, out_h)
         _subtitle.write_ass(
             cues, settings, ass_path, out_w, out_h,
             preset_key=preset_key or "bold_pop",
+            anchor_y=anchor_y,
         )
 
         # Escape for ffmpeg's filter parser: backslash, colon and quote are
@@ -699,8 +712,15 @@ def render_clip(
             for idx, item in enumerate(emoji, start=1):
                 extra += ["-loop", "1", "-t", f"{clip_seconds:.3f}", "-i", item["path"]]
                 chain.append(f"[{idx}:v]scale=150:-1,format=rgba[em{idx}]")
+                # Emoji sits ABOVE the caption. The caption moved up to the
+                # foreground's lower edge, so a fixed fraction of H would now
+                # land on top of the text — anchor the emoji to the same
+                # value when one exists.
+                emoji_y = (
+                    f"{max(0, int(anchor_y) - 300)}" if anchor_y is not None else "H*0.60"
+                )
                 chain.append(
-                    f"[cv{idx - 1}][em{idx}]overlay=x=(W-w)/2:y=H*0.60:"
+                    f"[cv{idx - 1}][em{idx}]overlay=x=(W-w)/2:y={emoji_y}:"
                     f"enable='between(t,{item['start']:.3f},{item['end']:.3f})'[cv{idx}]"
                 )
             return [

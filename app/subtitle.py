@@ -1750,7 +1750,8 @@ def _karaoke_tags(cue: dict) -> str:
 
 def build_ass_events(
     cues: list[dict], settings: Settings, start_offset: float = 0.0,
-    preset_key: str | None = None,
+    preset_key: str | None = None, anchor_y: int | None = None,
+    frame_w: int = 1080,
 ) -> str:
     p = get_preset(preset_key, settings.subtitle.highlight_color)
     # The highlight colour lives on the caption track: the ASS `subtitles`
@@ -1778,6 +1779,11 @@ def build_ass_events(
             )
         if c.get("words") and not c.get("uncertain"):
             text = _build_viral_cue(c, highlight_color)
+        # Same layout rule as the animated styles: on a FIT clip the caption
+        # belongs against the foreground video's lower edge, not down in the
+        # blurred band under it (where a bottom margin puts it).
+        if anchor_y is not None:
+            text = rf"{{\an2\pos({frame_w // 2},{int(anchor_y)})}}" + text
         lines.append(
             f"Dialogue: 0,{start},{end},{p.key},,0,0,0,,{text}"
         )
@@ -1849,6 +1855,7 @@ def write_ass(
     height: int,
     start_offset: float = 0.0,
     preset_key: str | None = None,
+    anchor_y: int | None = None,
 ) -> Path:
     """Write an .ass subtitle file; returns the path.
 
@@ -1862,10 +1869,11 @@ def write_ass(
         from app import captions_animated as _animated
 
         return _animated.write_ass(
-            cues, preset.animated, path, width, height, start_offset=start_offset
+            cues, preset.animated, path, width, height,
+            start_offset=start_offset, anchor_y=anchor_y,
         )
     content = build_ass_header(settings, width, height, preset_key) + build_ass_events(
-        cues, settings, start_offset, preset_key
+        cues, settings, start_offset, preset_key, anchor_y=anchor_y, frame_w=width
     )
     path.write_text(content, encoding="utf-8")
     return path

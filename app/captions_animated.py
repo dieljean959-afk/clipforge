@@ -183,6 +183,37 @@ def get_style(key: str | None) -> AnimatedStyle:
     return STYLES.get(str(key or ""), STYLES[DEFAULT_STYLE])
 
 
+def foreground_bottom(
+    src_w: int,
+    src_h: int,
+    frame_w: int = 1080,
+    frame_h: int = 1920,
+    inset: int = 24,
+) -> int | None:
+    """Y of the caption baseline at the bottom edge of the FIT foreground.
+
+    A FIT clip scales the source to fill the frame's WIDTH and centres it
+    vertically over a blurred copy of itself. So the sharp video occupies a
+    band in the middle of the frame, and `frame_h - band` is all blur. A
+    caption placed by bottom margin lands in that blur, BELOW the video — it
+    reads as a separate graphic rather than something the speaker is saying.
+
+    Measured from the real numbers, never hardcoded: a 16:9 source gives
+    fg_h = 608, fg_top = 656, fg_bottom = 1264, so the baseline sits at 1240.
+    """
+    frame_w = int(frame_w)
+    frame_h = int(frame_h)
+    fg_h = int(round(frame_w * float(src_h) / float(src_w) / 2.0) * 2)
+    fg_h = min(fg_h, frame_h)
+    # A source that already fills the frame (portrait) has no blurred band to
+    # avoid: anchoring to its bottom edge would park the text under TikTok's
+    # own UI, so that case keeps the safe-area margin instead (None).
+    if fg_h > frame_h * 0.85:
+        return None
+    fg_top = int(round((frame_h - fg_h) / 2.0))
+    return fg_top + fg_h - int(inset)
+
+
 # --------------------------------------------------------------------------- #
 # ASS primitives
 # --------------------------------------------------------------------------- #
@@ -422,7 +453,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def build_events(
-    cues: list[dict], style_key: str | None = None, start_offset: float = 0.0
+    cues: list[dict],
+    style_key: str | None = None,
+    start_offset: float = 0.0,
+    anchor_y: int | None = None,
+    frame_w: int = 1080,
 ) -> str:
     """One Dialogue line per spoken WORD, re-drawing its 2-4 word chunk.
 
@@ -502,6 +537,12 @@ def build_events(
                         rendered.append(rf"{{\1c{fill}}}" + text)
 
                 body = _join(rendered, break_at)
+                # Explicit placement instead of a bottom margin: \an2 anchors
+                # the block's BOTTOM at (centre, anchor_y), so the text sits
+                # against the foreground video's lower edge and never drifts
+                # into the blurred band below it.
+                if anchor_y is not None:
+                    body = rf"{{\an2\pos({frame_w // 2},{int(anchor_y)})}}" + body
                 if i == 0:
                     # Chunk entrance: fade + scale in over ENTRANCE_MS.
                     body = (
@@ -521,9 +562,12 @@ def build_ass(
     width: int,
     height: int,
     start_offset: float = 0.0,
+    anchor_y: int | None = None,
 ) -> str:
     style = get_style(style_key)
-    return build_header(style, width, height) + build_events(cues, style_key, start_offset)
+    return build_header(style, width, height) + build_events(
+        cues, style_key, start_offset, anchor_y=anchor_y, frame_w=width
+    )
 
 
 def write_ass(
@@ -533,6 +577,10 @@ def write_ass(
     width: int,
     height: int,
     start_offset: float = 0.0,
+    anchor_y: int | None = None,
 ) -> Path:
-    path.write_text(build_ass(cues, style_key, width, height, start_offset), encoding="utf-8")
+    path.write_text(
+        build_ass(cues, style_key, width, height, start_offset, anchor_y=anchor_y),
+        encoding="utf-8",
+    )
     return path
