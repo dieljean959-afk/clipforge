@@ -797,9 +797,9 @@ export const api = {
    * embedded preview does not need its own parallel rendering path or its own
    * separate caption source. The burned-in captions are already in the MP4;
    * the extra cues are only enough to render a readable on-card overlay.
-   */
-  clipVideoUrl: (clipId: string, sizeHint?: number) => {
-    const url = `${BASE}/api/clips/${clipId}/video`;      if (sizeHint && sizeHint > 0 && Number.isFinite(sizeHint)) {
+   */  clipVideoUrl: (clipId: string, sizeHint?: number) => {
+    const url = `${BASE}/api/clips/${clipId}/video`;
+    if (sizeHint && sizeHint > 0 && Number.isFinite(sizeHint)) {
       return `${url}?s=${Math.round(sizeHint)}`;
     }
     return url;

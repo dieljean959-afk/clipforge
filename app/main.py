@@ -2183,17 +2183,9 @@ def clip_video(clip_id: str) -> FileResponse:
     """
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
-        raise HTTPException(404, "rendered video not available for this clip")
-    p = _clip_media(clip, "video")
+        raise HTTPException(404, "rendered video not available for this clip")        p = _clip_media(clip, "video")
     if p is None:
         raise HTTPException(404, "clip file missing on disk")
-    # Preview (the clip-detail dialog) must NOT send the full 1080x1920
-    # deliverable: it would send the whole horizontal source scaled up to fill
-    # the 9:16 box, which is exactly the "zoomed out" look. Rebuild the same
-    # crop/pan graph the render stage used, then seek into the source and
-    # output 9:16 so the preview crops and pans onto the speaker the same way
-    # the final clip does. The backend returns a 720x1280 video that the UI
-    # scales into the phone card — the *framing* is identical to the real clip.
     from app import video as _video
 
     src = p
@@ -2245,16 +2237,41 @@ def clip_video(clip_id: str) -> FileResponse:
         "-f", "mp4", str(p),
     ]
     logger.info(f"[api] preview clip {clip_id}: {len(cmd)} args")
-    return FileResponse(
+    res = FileResponse(
         p,
         media_type="video/mp4",
         headers={
             "Cache-Control": MEDIA_CACHE_CONTROL,
             "Accept-Ranges": "bytes",
             "ETag": _media_etag(p),
+            "X-Clip-Frame": "real-master-seen-first",
         },
         background=BackgroundTask(_run_ffmpeg_preview, cmd),
     )
+    if clip.get("mediaDurationSec") and float(clip["mediaDurationSec"]) >= 0.5:
+        res.headers["X-Clip-Frame"] = "preview-rebuild-cached" if _preview_needs_rebuild(clip) else "real-master-used"
+    return res
+    if clip.get("mediaDurationSec") and float(clip["mediaDurationSec"]) >= 0.5:
+        res.headers["X-Clip-Frame"] = "preview-rebuild-cached" if _preview_needs_rebuild(clip) else "real-master-used"
+    return res
+    return resdef _preview_needs_rebuild(clip: dict) -> bool:
+    """Is the on-disk master still the raw render, not yet the 720x1280 preview?
+
+    The /video route serves the stored master first and rebuilds the preview on
+    a background thread. We only need a snapshot-fast judgment here: if the file
+    already has the preview's crop/pan chain baked in, skip the rebuild.
+    """
+    p = _clip_media(clip, "video")
+    if p is None:
+        return True
+    try:
+        probe = video.probe(str(p))
+        w = int(probe.get("width") or 0)
+        h = int(probe.get("height") or 0)
+        return (w, h) != (720, 1280)
+    except Exception:
+        return True
+
 
 def _run_ffmpeg_preview(cmd: list[str]) -> None:
     """Run the preview rebuild silently on background. The output is written
@@ -2262,16 +2279,20 @@ def _run_ffmpeg_preview(cmd: list[str]) -> None:
     version for free."""
     try:
         import subprocess
+
         from pathlib import Path
         from app import video as _video, encode as _encode
         tmp = Path(str(p) + ".preview.mp4")
         args = [a for a in cmd if a != str(p)] + [str(tmp)]
         proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+
         if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
             tmp.replace(p)
             logger.info(f"[api] preview rebuilt {p.name}")
     except Exception:
         logger.exception(f"[api] preview rebuild failed for {p.name}")
+
+
 
 
 def _purge_remote_job(job_id: str) -> None:
