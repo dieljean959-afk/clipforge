@@ -47,6 +47,28 @@ def test_parse_tags_drops_off_whitelist_emoji():
     assert tags[0].confidence == 0.99     # the rest of the judgement survives
 
 
+def test_natural_emotion_word_keeps_the_model_s_emoji():
+    """A word outside the vocabulary must not silently cost the emoji.
+
+    deepseek-v4.1-flash answers "excitement"; before the synonym table that
+    became "neutral", which selection skips — the model's own decision thrown
+    away over a vocabulary mismatch.
+    """
+    reply = json.dumps([tag(0, "🔥", emotion="excitement")])
+    assert emoji.parse_tags(reply, 1)[0].emotion == "surprise"
+    tagged = [t.as_dict() for t in emoji.parse_tags(reply, 1)]
+    selected = emoji.select(tagged, [cue(0, 0.0)], density="medium")
+    assert [s["emoji"] for s in selected] == ["🔥"]
+
+
+def test_track_records_which_model_tagged_it():
+    """Provenance: the clip metadata names the backend, not null."""
+    settings = type("S", (), {})()
+    settings.llm = type("L", (), {"provider": "nvidia"})()
+    settings.nvidia = type("N", (), {"model": "deepseek-ai/deepseek-v4.1-flash"})()
+    assert emoji._model_name(settings) == "nvidia (deepseek-ai/deepseek-v4.1-flash)"
+
+
 def test_every_whitelisted_emoji_has_a_bundled_png():
     wl = emoji.load_whitelist()
     missing = [e.emoji for e in wl.entries.values() if not e.path.exists()]

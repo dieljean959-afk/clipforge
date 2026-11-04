@@ -51,6 +51,35 @@ EMOTIONS = (
     "disgust", "pride", "confusion", "neutral",
 )
 
+#: Natural-language emotion words models actually answer with, folded onto the
+#: vocabulary above. Without this an honest "excitement" is coerced to
+#: "neutral" and selection then DROPS the emoji the model asked for — the whole
+#: judgement lost to a vocabulary mismatch, with nothing in the log to show it.
+#: (Caught by the NVIDIA wire check: deepseek-v4.1-flash answered "excitement".)
+EMOTION_SYNONYMS = {
+    "excited": "surprise", "excitement": "surprise", "amazement": "surprise",
+    "amazed": "surprise", "awe": "surprise", "shock": "surprise",
+    "shocked": "surprise", "hype": "surprise", "hyped": "surprise",
+    "happy": "joy", "happiness": "joy", "delight": "joy", "hopeful": "joy",
+    "amused": "laughter", "amusement": "laughter", "funny": "laughter",
+    "humor": "laughter", "humour": "laughter",
+    "rage": "anger", "furious": "anger", "frustration": "anger",
+    "frustrated": "anger", "irritated": "anger",
+    "sad": "sadness", "grief": "sadness", "disappointed": "sadness",
+    "disappointment": "sadness", "heartbreak": "sadness",
+    "anxious": "fear", "anxiety": "fear", "nervous": "fear",
+    "worried": "fear", "worry": "fear", "tense": "fear",
+    "affection": "love", "adoration": "love", "grateful": "love",
+    "gratitude": "love", "tender": "love",
+    "annoyed": "disgust", "annoyance": "disgust", "cringe": "disgust",
+    "disgusted": "disgust", "contempt": "disgust",
+    "confident": "pride", "confidence": "pride", "proud": "pride",
+    "accomplishment": "pride", "achievement": "pride", "triumph": "pride",
+    "confused": "confusion", "puzzled": "confusion", "puzzlement": "confusion",
+    "curious": "confusion", "curiosity": "confusion", "conflicted": "confusion",
+    "calm": "neutral", "flat": "neutral", "neutral_": "neutral",
+}
+
 #: Emoji on this share of a clip's chunks, at most.
 DENSITY = {"low": 0.15, "medium": 0.35, "high": 0.60}
 
@@ -226,6 +255,7 @@ def parse_tags(reply: str, count: int) -> list[Tag]:
         if not 0 <= i < count:
             continue
         emotion = str(item.get("emotion") or "neutral").strip().lower()
+        emotion = EMOTION_SYNONYMS.get(emotion, emotion)
         if emotion not in EMOTIONS:
             emotion = "neutral"
         emoji = item.get("emoji")
@@ -330,12 +360,20 @@ def tag_chunks(
 
 
 def _model_name(settings: Any) -> str | None:
-    for name in ("llm", "detection"):
-        cfg = getattr(settings, name, None)
-        model = getattr(cfg, "model", None) if cfg is not None else None
-        if model:
-            return str(model)
-    return None
+    """Provider + model that tagged this clip, for the clip's provenance.
+
+    Read through app.llm's accessors: each hosted section ([deepseek], [nvidia],
+    [groq]) carries its own model name, and the old version looked for
+    `settings.llm.model` / `settings.detection.model` — neither exists, so every
+    track recorded `"model": null` and a track could not be traced back to the
+    backend that produced it.
+    """
+    try:
+        from app import llm as _llm
+
+        return str(_llm.provider_label(settings))
+    except Exception:  # noqa: BLE001 - provenance must never fail the stage
+        return None
 
 
 # --------------------------------------------------------------------------- #
