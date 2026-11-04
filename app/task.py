@@ -1068,13 +1068,12 @@ class Pipeline:
                     job_id,
                     "DOWNLOAD FAILED — yt-dlp debug:\n" + ydl_debug + "\n" + cfg_snapshot,
                 )
-                if on_log:
-                    on_log(
-                        "DOWNLOAD FAILED — yt-dlp debug:\n"
-                        + ydl_debug
-                        + "\n"
-                        + cfg_snapshot
-                    )
+                # No second `on_log(...)` call here: `on_log` is a parameter of
+                # download.download_url, not of this method, so referring to it
+                # raised NameError and REPLACED the real failure with
+                # "name 'on_log' is not defined" — the download error (YouTube's
+                # bot check) never reached the dashboard. The self._log above
+                # already records the same debug text.
                 raise
         video.verify_source(src)
         meta = video.probe(src)
