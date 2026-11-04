@@ -58,6 +58,28 @@ class LocalStore:
     def __init__(self, paths: Paths) -> None:
         self._paths = paths
         self._lock = threading.RLock()
+
+    # Cross-process file lock. The per-job runner is a separate process, and a
+    # resumed job can hit the same job document from two processes at once, so
+    # this must be a real OS advisory lock (fcntl.flock) rather than a thread
+    # lock. A thread lock only serialises threads inside one process.
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Advisory exclusive lock around a read-modify-write of `path`."""
+        if fcntl is None:  # pragma: no cover - non-POSIX
+            yield
+            return
+        lock_path = path.with_name(path.name + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
         self._paths.data_dir.mkdir(parents=True, exist_ok=True)
         self._paths.outputs_dir.mkdir(parents=True, exist_ok=True)
         self._paths.downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -181,12 +203,12 @@ class LocalStore:
         return self._paths.data_dir / "jobs" / f"{job_id}.json"
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Persist or overwrite a job document (single-process caller only).
+        """Persist or overwrite a job document (process-safe).
 
-        Callers that are also touched by the per-job runner must hold the
-        advisory file lock before calling this (see ``_file_lock``); this
-        method is process-safe but assumes the caller is the only writer in
-        its process.
+        The runner is a child process, so a thread lock cannot guard this:
+        this takes an OS advisory lock around the read-ModifyWrite and writes
+        the document atomically (tmp+rename) so two processes touching the
+        same job can never overwrite each other.
         """
         jid = self.job_id(job)
         path = self._job_path(jid)

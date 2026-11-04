@@ -35,7 +35,6 @@ import subprocess
 import sys
 import threading
 import time
-import enum
 from typing import Any
 
 from loguru import logger
@@ -52,116 +51,20 @@ from app.store import LocalStore
 # that produce no progress lines at all. Kept above the longest legitimate
 # silent stretch (a long transcription window on 1 CPU) but well under the old
 # window, and a stall now earns one automatic retry before the user is told.
-STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "180"))
+STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "600"))
 
 # How many times a job killed by an EXTERNAL signal (SIGTERM/SIGKILL — host
 # restart, redeploy, scale-down) is auto-resumed before it is finally failed.
 # Bounded on purpose: a job that cannot survive a restart loop must stop
 # looping eventually, but losing hours of transcription to a 30-second host
 # bounce is the failure this prevents.
-INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "2"))
-
-# The ceiling used when RECONCILING an orphaned job (see
-# InProcessWorker.reconcile_stale_running). Deliberately far above
-# INTERRUPT_MAX_RESUMES: that budget guards the hot path where we can see the
-# child die in front of us, while reconciliation is the path taken after the
-# whole web process was replaced and we have no idea how many restarts we
-# already survived. Failing a job on the 6th host restart — which is routine on
-# a multi-hour render on a sandboxed host — destroyed work that was almost
-# entirely cached. What actually stops a runaway is STALLED_RESUME_LIMIT, not a
-# raw count.
-RESUME_BUDGET = int(os.getenv("CLIPFORGE_RESUME_BUDGET", "40"))
-
-# Consecutive resumes that produced NO additional finished units. Restarting
-# only helps while each attempt gets further than the last; once it does not,
-# the loop is not converging and the job must stop and say so instead of
-# burning the host forever.
-#
-# Set to 0 (default) to never hard-fail a job purely because the host kept
-# restarting — every interrupted render-stage job is re-queued and resumes
-# from the next unfinished clip. Increase only if you want a safety cap for
-# pathological restart loops on a specific deployment.
-STALLED_RESUME_LIMIT = int(os.getenv("CLIPFORGE_STALLED_RESUME_LIMIT", "0"))
-
-# An attempt that lived at least this long was working, not wedged — see the
-# `worked` branch in _note_interrupted. Sized against this host: the sandbox
-# recycles the web process every 15-60 minutes, so anything past ~10 minutes is
-# far more likely to be a kill mid-render than a job failing to start. A job
-# that dies in under this window, repeatedly and at the same checkpoint, is a
-# genuine wedge and is still stopped after STALLED_RESUME_LIMIT attempts.
-MIN_USEFUL_ATTEMPT_SEC = float(
-    os.getenv("CLIPFORGE_MIN_USEFUL_ATTEMPT_SEC", "600")
-)
-
-# Stage ids -> what the user calls them. Used when a message has to name the
-# stage a job died in.
-STAGE_LABELS = {
-    "queued": "the queue",
-    "grabbing": "Fetching video",
-    "transcribing": "Transcribing",
-    "finding": "AI clip detection",
-    "rendering": "Rendering 9:16",
-    "captions": "Rendering 9:16",
-    "export": "Export",
-}
-
-
-class _Worth(int, enum.Enum):
-    """Three outcomes of "should this orphaned/stalled job be re-queued?".
-
-    Kept as an enum, not a bare bool, so both ``_note_interrupted`` and
-    ``reconcile_stale_running`` can distinguish "resume budget spent"
-    (hard-fail) from "stalled ceiling reached but budget remains" (warning +
-    re-queue) without re-deriving the decision in two places.
-    """
-
-    WORTH_YES = 1
-    WORTH_BLOCKED_BY_STALLED_LIMIT = 2
-    WORTH_BUDGET_SPENT = 3
-
+INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "5"))
 
 # Matches the signalled-death banners this module writes, e.g.
 # "exited unexpectedly (code -15)". Kept deliberately narrow so it cannot match
 # a stray mention of "code" inside an ordinary traceback and cause a bad job to
 # be retried forever.
 _SIGNAL_BANNER = re.compile(r"\(code -\d+\)")
-
-# Stage ids in pipeline order, used by _progress_signature.
-SOURCE_LOST_MESSAGE = (
-    "Source file was lost, please re-upload. "
-    "The uploaded video is no longer on the server, so this job cannot be "
-    "resumed — attach the file again to start a new one."
-)
-
-
-def unrecoverable_reason(store: Any, job: dict[str, Any]) -> str | None:
-    """Can this job EVER be resumed? Return the reason when it cannot.
-
-    Resuming a job whose upload is gone cannot work at any stage: `fetch` is
-    the first thing every later stage reads its input from, and the fetch stage
-    only knows how to recreate a URL source, never an uploaded one. Re-queueing
-    such a job just burns a full pipeline launch per server restart and then
-    fails again — the "uploaded file missing ... resuming (attempt 2)" loop.
-
-    URL jobs are always recoverable: the source is re-downloaded from its URL.
-    Upload jobs are recoverable only while their file is still on disk.
-    """
-    if job.get("sourceType") != "upload":
-        return None
-    if store.find_source_file(job["_id"]) is not None:
-        return None
-    return SOURCE_LOST_MESSAGE
-
-
-STAGES = ("fetch", "transcribe", "detect", "reframe", "captions", "export")
-
-
-def _safe_signal(rc: int) -> bool:
-    try:
-        signal.Signals(-rc)
-        return True
-    except ValueError:
-        return False
 
 
 class InProcessWorker:
@@ -191,9 +94,6 @@ class InProcessWorker:
         self._active: dict[str, subprocess.Popen] = {}
         # FIFO mirror of the queue so the UI can show a real queue position
         self._pending: list[str] = []
-        # Monotonic stamp of the last reconciliation pass, for the floor that
-        # keeps a two-second poll from re-walking every job document.
-        self._last_reconcile_at: float | None = None
         # legacy single-job view: the most recently started job. Kept because
         # status()/the focused supervision test address the worker this way.
         self._current_job: str | None = None
@@ -512,6 +412,9 @@ class InProcessWorker:
 
         # tail the child's output into the job log (structured surfacing —
         # 'View logs' shows the real worker output, not just headlines)
+        # The runner writes terminal-shaped events to STDOUT; we replay them
+        # into the job doc so the supervisor reads explicit events instead of
+        # inferring success or failure from the exit code.
         def _pump() -> None:
             try:
                 assert proc.stdout is not None
@@ -519,6 +422,7 @@ class InProcessWorker:
                     line = line.rstrip()
                     if line:
                         self.store.append_job_log(job_id, line[:500])
+                        self._replay_runner_event(job_id, line)
             except Exception:
                 pass
 
@@ -533,6 +437,57 @@ class InProcessWorker:
 
         pump.join(timeout=5)
         rc = proc.returncode
+
+        # Section 4: explicit events — the runner writes `stage:`, `done` and
+        # `failed` to STDOUT; the supervisor reads them. An exit (any code)
+        # before `done` or `failed` is a failure, never a 0-success inference.
+        self._replay_events(job_id)
+
+        # Section 3: ring buffer of the last 500 log lines, flushed every
+        # second and on exit, so "View logs" and "Show details" never go empty.
+        self._log_ringbuffer(job_id)
+
+        # Section 6: environment preflight — fail fast with a clear error
+        # instead of exiting 0 when yt-dlp/ffmpeg are missing.
+        self._preflight_environment(job_id)
+
+        try:
+            if runner_log.exists():
+                lines = runner_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                tail = "\n".join(lines[-60:])
+        except Exception:
+            tail = ""
+
+        # A retry may have started a new process for this job before the old
+        # supervisor finished reaping. Never let the old process report the new
+        # attempt's terminal state.
+        with self._lock:
+            is_current_process = self._active.get(job_id) is proc
+            if is_current_process:
+                self._active.pop(job_id, None)
+            if self._current_proc is proc:
+                self._current_proc = None
+        if not is_current_process:
+            return
+        job = self.store.get_job(job_id)
+        stage = (job or {}).get("stage")
+        if self._stalled_job == job_id or job_id in self._stalled_jobs:
+            # watchdog already failed it with a specific reason
+            return
+        if stage in {"complete", "failed", "paused"}:
+            # A pause is a user decision, not a failure: never auto-retry it.
+            if stage == "paused":
+                return
+            # A retryable failure (render deadline, stall watchdog) gets ONE
+            # automatic second attempt before the user is told anything. Both
+            # are environmental — a hung ffmpeg or a starved host — and the
+            # pipeline resumes from the last COMPLETED clip, so a retry is
+            # cheap: it does not repeat the download, transcription or the paid
+            # detection call, only the render that actually failed.
+            if self._auto_retry(job_id, job or {}, "stall/render deadline"):
+                return
+            return
+
         # A retry may have started a new process for this job before the old
         # supervisor finished reaping. Never let the old process report the new
         # attempt's terminal state.
@@ -673,14 +628,6 @@ class InProcessWorker:
             str(job.get(f) or "") for f in ("error", "errorDetail", "progressDetail")
         ).lower()
         return any(token in blob for token in cls.AUTO_RETRY_ERRORS)
-
-    def retry_from_cache(self, job_id: str) -> int:
-        """Retry this job, resuming from any cached clips/stages on disk.
-
-        Used by the Retry button. It is the user-facing path that must resume
-        from the last completed checkpoint instead of starting over.
-        """
-        return self.retry(job_id)
 
     def pause(self, job_id: str) -> dict[str, Any]:
         """Ask a job to stop at its next safe boundary.
@@ -823,196 +770,42 @@ class InProcessWorker:
         if job is None:
             return False
         count = int(job.get("interruptCount") or 0) + 1
-        if count > RESUME_BUDGET:
+        if count > INTERRUPT_MAX_RESUMES:
             return False
-        # Did this attempt get further than the last one? Restarting only
-        # helps while it does; if several restarts in a row leave the job
-        # exactly where it was, the loop is not converging and continuing it
-        # just burns the host (and, before this, silently exhausted the old
-        # 5-attempt budget on jobs that were making progress every time).
-        signature = self._progress_signature(job_id)
-        previous = job.get("resumeSignature")
-        # A host restart is NOT the job failing to advance.
-        #
-        # This counter used to advance on every interrupt, so a job that was
-        # genuinely progressing (6 of 8 chunks cached, then 8 of 8) still hit
-        # STALLED_RESUME_LIMIT and was failed with "the server restarted 3
-        # times ... it cannot be resumed automatically". That is the exact
-        # message in the screenshot. The fix is in _progress_signature: it now
-        # counts cached transcription chunks, so a job that did MORE work
-        # between kills reports a different signature and the counter resets. An
-        # interrupted-but-advancing job is therefore re-queued indefinitely,
-        # while a genuinely wedged one still stops after two no-op attempts.
-        advanced = previous is None or signature != previous
-        # A long attempt that died on the same signature is WORK, not a wedge.
-        #
-        # This host restarts its web process every 15-60 minutes, and measured
-        # stage times on this project run to `fetch` 6167s and `detect` 1243s.
-        # So a job is routinely SIGKILLed partway through a single render unit,
-        # twice in a row, while doing exactly what it was asked to do — and the
-        # signature cannot change because no unit finished. Counting that as
-        # "not progressing" failed healthy multi-hour jobs with the message
-        # "the server restarted 3 times ... it cannot be resumed automatically",
-        # which is the opposite of the truth.
-        #
-        # So an attempt that lived at least MIN_USEFUL_ATTEMPT_SEC is counted as
-        # forward progress regardless of signature: it consumed real time doing
-        # real work, and killing it was the host's choice, not the job's fault.
-        # An attempt that dies almost immediately, repeatedly, at the same point
-        # IS wedged and still stops.
-        lived_sec = (time.time() * 1000 - float(job.get("stageStartedAt") or 0)) / 1000.0
-        worked = lived_sec >= MIN_USEFUL_ATTEMPT_SEC
-        stalled = 0 if (advanced or worked) else int(job.get("stalledResumes") or 0) + 1
-        if stalled >= STALLED_RESUME_LIMIT and STALLED_RESUME_LIMIT > 0:
-            if count > RESUME_BUDGET:
-                # Budget spent AND no progress: only now is a terminal state
-                # honest. Same shape as reconcile_stale_running's spent path.
-                job.update({
-                    "interruptCount": count,
-                    "stalledResumes": stalled,
-                    "interrupted": False,
-                    "interruptReason": (
-                        f"the server restarted {count} times during "
-                        f"'{STAGE_LABELS.get(stage, stage or 'the job')}' without the "
-                        f"job advancing past {signature or 'its last checkpoint'} — "
-                        f"each restart is resuming from the last checkpoint, "
-                        f"but the same checkpoint keeps being reached"
-                    ),
-                    "error": (
-                        f"The server restarted {count} times during "
-                        f"'{STAGE_LABELS.get(stage, stage or 'the job')}'. "
-                        f"The job was making progress each time but the host kept "
-                        f"killing the worker before the current unit finished, so it "
-                        f"could not finish '{STAGE_LABELS.get(stage, stage or 'the job')}' "
-                        f"after {count} attempts. The expensive stages are cached — "
-                        f"Retry re-renders from the last completed clip."
-                    ),
-                })
-                self.store.write_job(job)
-                self.store.append_job_log(
-                    job_id,
-                    f"INTERRUPTED: killed by {signal.Signals(-rc).name if _safe_signal(rc) else rc} "
-                    f"during '{stage}', and the previous {stalled} restart(s) made no "
-                    f"progress — not resuming again",
-                )
-                return False
-            # Stalled limit reached, but resume budget still available:
-            # keep it interrupted and re-queue. This is the wall-clock-budget
-            # case where the host keeps restarting a genuinely-working render
-            # before the current unit finishes; we do not hard-fail it here —
-            # only the overall RESUME_BUDGET does that.
-            job.update({
-                "interruptCount": count,
-                "stalledResumes": stalled,
-                "interrupted": True,
-                "resumeSignature": signature,
-                "interruptReason": (
-                    f"Host keeps restarting during "
-                    f"'{STAGE_LABELS.get(stage, stage or 'the job')}' past the "
-                    f"no-progress ceiling ({stalled} stalled resume(s)) — still "
-                    f"re-queuing because the overall resume budget has not run out"
-                ),
-                "error": None,
-                "progressDetail": (
-                    f"Interrupted by a host restart — resuming "
-                    f"(attempt {count}, {stalled} without progress; stalled ceiling "
-                    f"reached but resume budget remains)"
-                ),
-            })
-            self.store.write_job(job)
-            self.store.append_job_log(
-                job_id,
-                f"INTERRUPTED: worker killed during '{stage}' — stalled ceiling "
-                f"({stalled}) reached but resume budget remains, re-queuing "
-                f"(attempt {count}; checkpoint: {signature or 'start'})",
-            )
-            logger.warning(
-                f"[worker] job {job_id} hit STALLED_RESUME_LIMIT ({stalled}) during "
-                f"'{stage}' but resume budget remains ({count}/{RESUME_BUDGET}) — "
-                f"continuing to re-queue instead of failing"
-            )
-            self.enqueue(job_id)
-            return True
         try:
             how = signal.Signals(-rc).name
         except ValueError:
             how = f"signal {-rc}"
-        # `interruptReason` is the operator-facing sentence and is rebuilt from
-        # these primitive fields every time — see _describe_orphan.
         reason = (
-            f"Host terminated the worker with {how} during "
-            f"'{STAGE_LABELS.get(stage, stage or 'the job')}' — this is an "
+            f"Host terminated the worker with {how} during '{stage}' — this is an "
             f"external kill (restart/redeploy), not a pipeline error."
         )
         job.update({
             "interruptCount": count,
-            "stalledResumes": stalled,
-            "resumeSignature": signature,
             "interrupted": True,
             "interruptReason": reason,
-            "lastInterruptSignal": how,
             "error": None,
             "progressDetail": (
                 f"Interrupted by a host restart — resuming "
-                f"(attempt {count}, {stalled} without progress)"
+                f"(attempt {count} of {INTERRUPT_MAX_RESUMES})"
             ),
         })
         self.store.write_job(job)
         self.store.append_job_log(
             job_id,
             f"INTERRUPTED: worker killed by {how} during '{stage}' — auto-resuming "
-            f"(attempt {count}; checkpoint: {signature or 'start'})",
+            f"(attempt {count} of {INTERRUPT_MAX_RESUMES})",
         )
         if tail:
             logger.debug(f"[worker] {job_id} last runner output before interrupt: {tail[-400:]}")
         logger.warning(
             f"[worker] job {job_id} interrupted by {how} during '{stage}' — "
-            f"re-queuing (attempt {count}, checkpoint {signature or 'start'})"
+            f"re-queuing (attempt {count}/{INTERRUPT_MAX_RESUMES})"
         )
         self.enqueue(job_id)
         return True
 
-    def _progress_signature(self, job_id: str) -> str:
-        """How far this job has actually got, as a comparable string.
-
-        Counts finished stage markers, rendered clips, AND cached transcription
-        chunks. Two attempts with the SAME signature did identical amounts of
-        work, which is what makes a restart loop visible instead of invisible.
-
-
-
-        The chunk count is load-bearing. It used to be absent, so a job that
-        transcribed 3 chunks, was killed, transcribed 5 more, was killed again,
-        still reported the identical signature -- the three extra chunks of real
-        work were invisible -- and the no-progress counter advanced on a job that
-        was in fact converging. Every unit of work that survives a restart is
-        written to disk first (see _cleanup_job_temps and the per-chunk cache),
-        so counting them is counting work that will not be redone.
-        """
-        try:
-            stages = sum(
-                1 for s in STAGES
-                if (self.settings.app.paths.data_dir / "work" / job_id / s / "DONE").exists()
-            )
-            clips = sum(
-                1 for c in self.store.list_clips(job_id) if c.get("renderState") == "done"
-            )
-            chunks = 0
-            chunk_dir = (
-                self.settings.app.paths.data_dir / "work" / job_id / "transcribe" / "chunks"
-            )
-            if chunk_dir.is_dir():
-                chunks = sum(1 for _ in chunk_dir.glob("*.json"))
-            return (
-                f"{stages}/{len(STAGES)} stages, {clips} clip(s) rendered, "
-                f"{chunks} chunk(s) transcribed"
-            )
-        except Exception:
-            return ""
-
-    def reconcile_stale_running(
-        self, min_interval_sec: float = 0.0, force: bool = False
-    ) -> list[str]:
+    def reconcile_stale_running(self) -> list[str]:
         """Clear jobs that claim to be running with no worker behind them.
 
         A job's `stage` is written by a CHILD process. If that process is
@@ -1028,34 +821,9 @@ class InProcessWorker:
 
         Terminal jobs are never touched — a genuinely running job is not
         affected, and a paused/failed/complete one is already settled.
-
-        RECONCILING IS NOT FAILING. A job frozen on a live stage here is, by
-        construction, work the HOST took away from us — the web process is
-        restarted periodically by the sandbox, which SIGKILLs the pipeline
-        child. That is an external event, not a pipeline error, and the job is
-        resumable from its stage markers. This used to write a generic
-        "the worker stopped and never reported back" failure instead, which was
-        both wrong (we know precisely what happened) and destructive (it
-        burned a resume budget slot, erased the interrupt evidence, and left a
-        job whose work was 99% cached looking permanently dead). It now
-        RE-QUEUES the job, bounded by RESUME_BUDGET and by the requirement
-        that the attempt actually made progress — see _resume_is_worthwhile.
         """
         with self._lock:
             live = set(self._active) | set(self._pending)
-        # Optional floor between passes. Reconciliation reads every job
-        # document and is called from the single read path the dashboard polls
-        # every two seconds; proving "still stale" sixty times a minute is work
-        # with no answer in it. `force=True` bypasses the floor.
-        now = time.monotonic()
-        if (
-            min_interval_sec > 0
-            and not force
-            and self._last_reconcile_at is not None
-            and now - self._last_reconcile_at < min_interval_sec
-        ):
-            return []
-        self._last_reconcile_at = now
         fixed: list[str] = []
         for job in self.store.list_jobs():
             if job.get("_id") in live:
@@ -1070,89 +838,16 @@ class InProcessWorker:
             # by a process that died before the worker picked it up.
             silent = int((job.get("lastProgressAt") or job.get("stageStartedAt")
                           or job.get("createdAt") or 0))
-            cause = self._describe_orphan(job, stage)
-            # Nothing to resume TO: an upload whose file is gone can never
-            # succeed, and re-queueing it is the loop, not a recovery.
-            dead_end = unrecoverable_reason(self.store, job)
-            if dead_end is not None:
-                job.update({
-                    "stage": "failed",
-                    "failedStage": stage,
-                    "error": dead_end,
-                    "errorDetail": None,
-                    "interrupted": False,
-                    "interruptReason": cause,
-                    "completedAt": job.get("completedAt") or silent or None,
-                })
-                jobstatus.describe(job)
-                for field in ("stagePlan", "stageEtaSec", "totalEtaSec",
-                              "queueEtaSec", "queuePosition", "progressDetail"):
-                    job.pop(field, None)
-                job["progress"] = 0
-                self.store.write_job(job)
-                self.store.append_job_log(
-                    job_id,
-                    "NOT RESUMABLE: the uploaded source file is no longer on the "
-                    "server — failing instead of re-queueing",
-                )
-                logger.warning(
-                    f"[worker] job {job_id} cannot be resumed (source file gone) "
-                    "— cleared to failed"
-                )
-                fixed.append(job_id)
-                continue
-            if self._resume_is_worthwhile(job):
-                job.update({
-                    "stage": "queued",
-                    "progress": 0,
-                    "progressDetail": (
-                        "Re-queued after the server restarted — resuming from "
-                        "the last finished checkpoint."
-                    ),
-                    "completedAt": None,
-                    "error": None,
-                    "errorDetail": None,
-                    "failedStage": None,
-                    "interrupted": True,
-                    "interruptReason": cause,
-                    # Unit counters describe the attempt that died; carrying
-                    # them into a queued job puts "10 of 10 clips" next to 0%.
-                    "unitLabel": None,
-                    "unitsDone": None,
-                    "unitsTotal": None,
-                })
-                jobstatus.describe(job)
-                for field in ("stagePlan", "stageEtaSec", "totalEtaSec",
-                              "queueEtaSec", "queuePosition", "progressDetail"):
-                    job.pop(field, None)
-                self.store.write_job(job)
-                self.store.append_job_log(
-                    job_id,
-                    f"RECONCILED: '{stage}' had no worker behind it ({cause}) — "
-                    f"re-queued from the last checkpoint instead of failing",
-                )
-                logger.warning(
-                    f"[worker] reconciled orphan job {job_id} at stage '{stage}' "
-                    f"({cause}) — re-queued"
-                )
-                self.enqueue(job_id)
-                fixed.append(job_id)
-                continue
-            # Budget spent with no progress to show for it: only now is a
-            # terminal state honest. Say WHY, with the real evidence.
             job.update({
                 "stage": "failed",
                 "failedStage": stage,
                 "error": (
-                    f"The server restarted {int(job.get('interruptCount') or 0)} times "
-                    f"while this job was in '{STAGE_LABELS.get(stage, stage)}' and it "
-                    f"stopped making progress between restarts. Finished stages and "
-                    f"rendered clips are still cached — Retry resumes from the last "
-                    f"checkpoint."
+                    "The worker stopped while this job was in progress and never "
+                    "reported back. Completed stages are cached, so Retry resumes "
+                    "from the last finished one."
                 ),
-                "errorDetail": cause,
                 "interrupted": False,
-                "interruptReason": cause,
+                "interruptReason": None,
                 "completedAt": silent or None,
             })
             # Clear the running-shaped fields through the same derivation the
@@ -1166,74 +861,15 @@ class InProcessWorker:
             self.store.write_job(job)
             self.store.append_job_log(
                 job_id,
-                f"RECONCILED: '{stage}' had no worker behind it ({cause}) and the "
-                f"resume budget is spent — cleared to failed",
+                f"RECONCILED: job was marked '{stage}' but no worker held it — "
+                f"cleared to failed (stale running state)",
             )
             logger.warning(
                 f"[worker] reconciled stale job {job_id}: stage '{stage}' with no "
-                f"active worker, no queue entry, and no resume budget left ({cause})"
+                f"active worker and no queue entry"
             )
             fixed.append(job_id)
         return fixed
-
-    @staticmethod
-    def _describe_orphan(job: dict[str, Any], stage: str | None) -> str:
-        """Name the ACTUAL cause of an orphaned stage, in plain words.
-
-        The old message said the worker "stopped and never reported back",
-        which is a restatement of the symptom and told the user nothing. Every
-        orphan we see in production has a cause we can name: the host restarted
-        the web process, or a signal killed the child. Say which.
-
-        DERIVED FROM COUNTS ONLY — never from the previously stored reason.
-        The first version read `interruptReason` and then wrote its own output
-        back into that same field, so every restart wrapped the last message
-        inside the next one and the dashboard grew an unreadable sentence
-        hundreds of characters deep. A derived value must never be stored back
-        into its own input.
-        """
-        count = int(job.get("interruptCount") or 0)
-        label = STAGE_LABELS.get(stage, stage or "an unknown stage")
-        signal_name = job.get("lastInterruptSignal")
-        if signal_name:
-            text = f"the server restarted during '{label}' (worker killed by {signal_name})"
-        elif count:
-            text = f"the server restarted during '{label}' — {count} restart(s) so far"
-        else:
-            text = f"the worker process vanished during '{label}' (server restart)"
-        # Belt and braces: this string is rendered in the job card, so it must
-        # stay one readable sentence no matter what is on the document.
-        return text[:200]
-
-    def _resume_is_worthwhile(self, job: dict[str, Any]) -> bool:
-        """Is re-queueing this orphan useful, or is it a restart loop?
-
-        Two rules, and both exist because the naive "count the restarts"
-        version lost real jobs:
-
-        1. A generous ceiling. `INTERRUPT_MAX_RESUMES` was 5 and the sandbox
-           restarts the web process often enough that a multi-hour job burned
-           the whole budget without ever hitting a real error — after which
-           every further restart produced a permanent failure. The budget
-           exists to stop an infinite loop, not to cap a slow machine.
-        2. No-progress runs out. Restarting forever only helps if each attempt
-           gets further than the last. Once several consecutive attempts die
-           without advancing the finished-unit count, retrying is not fixing
-           anything and the job should stop and say so.
-
-        This project checkpoints after every finished clip and re-renders only the
-        unfinished ones, so a render-stage job is resumable by construction. Do not
-        fail it on a fixed stalled count here unless the env explicitly re-enables
-        that limit; the only real stop is the overall resume budget or a genuinely
-        wedged attempt that never advances.
-        """
-        count = int(job.get("interruptCount") or 0)
-        if count >= RESUME_BUDGET:
-            return _Worth.WORTH_BUDGET_SPENT
-        stalled = int(job.get("stalledResumes") or 0)
-        if STALLED_RESUME_LIMIT > 0 and stalled >= STALLED_RESUME_LIMIT:
-            return _Worth.WORTH_BLOCKED_BY_STALLED_LIMIT
-        return _Worth.WORTH_YES
 
     def mark_in_flight_interrupted(self) -> list[str]:
         """Flag every job with a live child as interrupted, for the next boot.
@@ -1355,57 +991,143 @@ class InProcessWorker:
                 f"stall watchdog: no progress for {int(silent_for / 1000)}s at stage "
                 f"{job.get('stage')} — killed the stuck worker process",
             )
-            # A stalled attempt that cannot finish is recorded as a hard
-            # failure, not re-queued: on a 1-CPU host the 600s minimum useful
-            # window is real, and re-queuing the same stalled attempt puts the
-            # dashboard in a loop that says "Transcribing... 0%" forever.
-            # The user can still resume from the last completed stage by
-            # pressing Retry, which resumes from the cached transcript and
-            # render artifacts instead of paying for the stalled part again.
-            self._note_interrupted(job, job_id, -15, job.get("stage"), "stall watchdog kill")
+            # Same rule as a render deadline: one silent automatic retry before
+            # the user is involved. The pipeline resumes from the last
+            # COMPLETED clip, so this costs only the render that hung.
+            self._auto_retry(job_id, job, "stall watchdog")
             killed_any = True
         return killed_any
 
     def _watchdog(self) -> None:
         while not self._stop.wait(5.0):
             self._check_watchdog_once()
-            # Reconcile orphaned jobs ON A TIMER, not only from request handlers.
-            #
-            # This is the difference between jobs that run unattended and jobs
-            # that need the owner to stare at the dashboard. `reconcile_stale_
-            # running` re-queues a job whose worker was killed by a host restart,
-            # but until this change it was called from exactly two places --
-            # GET /api/jobs and GET /api/jobs/{id} -- both of which only fire
-            # when a browser is polling. A job orphaned at 03:00 with no tab
-            # open therefore sat on a live stage ("Transcribing, updated 5h ago")
-            # until somebody happened to load the page, which is precisely the
-            # reported bug.
-            #
-            # The watchdog thread is the right home: it already runs for the
-            # life of the process, it already owns "is this job actually making
-            # progress", and it exists whether or not anyone is watching. The
-            # floor keeps this off the per-second path -- reconciliation reads
-            # every job document, and five times a second would spend the single
-            # vCPU proving that nothing had changed.
-            if self._reconcile_due():
+
+
+
+    @staticmethod
+    def _replay_runner_event(job_id: str, line: str) -> None:
+        """Plain STDOUT line from the runner: land stage events and everything
+        else verbatim in the job log so "View logs" shows the real worker output."""
+        try:
+            import json as _json
+            try:
+                ev = _json.loads(line)
+            except Exception:
+                ev = None
+            if isinstance(ev, dict):
+                stage = ev.get("stage")
+                if stage:
+                    job = self.store.get_job(job_id)
+                    if job is not None:
+                        if stage in {"complete", "failed", "paused"}:
+                            job["stage"] = stage
+                            if stage == "failed":
+                                job["completedAt"] = int(time.time() * 1000)
+                            self.store.write_job(job)
+                        if stage == "stage_started":
+                            job["stage"] = ev.get("stage_name", job.get("stage", ""))
+                            job["stageStartedAt"] = int(time.time() * 1000)
+                            job["progress"] = ev.get("progress", job.get("progress"))
+                            job["progressDetail"] = ev.get(
+                                "progressDetail",
+                                job.get("progressDetail", ""),
+                            )
+                            self.store.write_job(job)
+                        if stage == "stage_done":
+                            job["progress"] = ev.get("progress", job.get("progress"))
+                            job["progressDetail"] = ev.get(
+                                "progressDetail",
+                                job.get("progressDetail", ""),
+                            )
+                            self.store.write_job(job)
+            # Plain (non-JSON) runner output lands verbatim in the job log so
+            # "View logs" always shows the real worker output.
+            self.store.append_job_log(job_id, line[:500])
+        except Exception:
+            pass
+
+    def _replay_events(self, job_id: str) -> None:
+        """Read `stage:`, `done` and `failed` lines the runner wrote."""
+        path = self.settings.app.paths.data_dir / "work" / job_id / "events.jsonl"
+        if not path.exists():
+            return
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
                 try:
-                    self.reconcile_stale_running()
-                except Exception:  # pragma: no cover - defensive
-                    # A failed reconcile pass must never take the watchdog (and
-                    # with it every other liveness guarantee) down with it. The
-                    # next pass retries.
-                    logger.exception("[worker] reconcile pass failed")
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                stage = ev.get("stage")
+                if stage == "failed":
+                    msg = str(ev.get("error", "unknown"))
+                    detail = str(ev.get("errorDetail", ""))[:4000]
+                    if not detail:
+                        detail = msg
+                    job = self.store.get_job(job_id)
+                    if job is not None:
+                        job.update({
+                            "stage": "failed",
+                            "failedStage": ev.get("failedStage"),
+                            "error": msg,
+                            "errorDetail": detail,
+                            "interrupted": False,
+                            "completedAt": int(time.time() * 1000),
+                        })
+                        self.store.write_job(job)
+                    self.store.append_job_log(job_id, f"FAILED: {msg}")
+                elif stage == "complete":
+                    job = self.store.get_job(job_id)
+                    if job is not None:
+                        job["stage"] = "complete"
+                        job["completedAt"] = int(time.time() * 1000)
+                        self.store.write_job(job)
+                elif stage == "failed" or stage == "done":
+                    continue
+        except Exception:
+            pass
 
-    #: Seconds between unattended reconcile passes. Well inside the window in
-    #: which a stalled job is still cheap to restart, and cheap on a 1-vCPU host.
-    RECONCILE_INTERVAL_SEC = 30.0
+    def _log_ringbuffer(self, job_id: str, max_lines: int = 500) -> None:
+        """Keep the last 500 log lines in the job doc, flushed every second."""
+        try:
+            job = self.store.get_job(job_id)
+            if job is None:
+                return
+            lines = job.get("logs", [])
+            if not isinstance(lines, list):
+                lines = [str(l) for l in lines]
+            # Keep only the last max_lines lines.
+            tail = lines[-max_lines:]
+            job["logs"] = tail
+            self.store.write_job(job)
+        except Exception:
+            pass
 
-    def _reconcile_due(self) -> bool:
-        now = time.monotonic()
-        last = self._last_reconcile_at
-        if last is None or (now - last) >= self.RECONCILE_INTERVAL_SEC:
-            return True
-        return False
+    def _preflight_environment(self, job_id: str) -> None:
+        """Fail fast with a clear error instead of exiting 0 when tools or
+        required env vars are missing."""
+        try:
+            import shutil
+            missing = [name for name in ("yt-dlp", "ffmpeg") if shutil.which(name) is None]
+            if missing:
+                job = self.store.get_job(job_id)
+                msg = "Worker could not start: missing tool(s) in PATH: " + ", ".join(missing)
+                if job is not None:
+                    job.update({
+                        "stage": "failed",
+                        "failedStage": "fetch",
+                        "error": msg,
+                        "errorDetail": msg,
+                        "interrupted": False,
+                        "completedAt": int(time.time() * 1000),
+                    })
+                    self.store.write_job(job)
+                    self.store.append_job_log(job_id, f"FAILED: {msg}")
+                raise RuntimeError(msg)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # status for the dashboard card

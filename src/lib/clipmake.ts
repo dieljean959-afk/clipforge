@@ -332,6 +332,11 @@ export function sourceId(job: Pick<JobDoc, "source" | "isUpload">): string {
     }
   })();
   // Platform IDs are base64-ish and short; anything else is a path, not an ID.
+  // A URL that cannot be turned into a short video ID (a path, a platform
+  // short link, a URL with no recognisable id) must never be submitted: the
+  // fetch stage would just die inside yt-dlp with "Worker process exited
+  // unexpectedly (code 0)" and no stage started. Return "" so the caller can
+  // reject the URL before it is submitted.
   return /^[A-Za-z0-9_-]{6,20}$/.test(id) ? id : "";
 }
 

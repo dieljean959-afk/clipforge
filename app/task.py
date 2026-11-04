@@ -972,6 +972,8 @@ class Pipeline:
                 fetch_log_out.append(line)
                 self._log(job_id, line)
 
+            self._on_stage_log[job_id] = _on_dl_log
+
             try:
                 src = download.download_url(
                     url, dest_dir, self.settings,
@@ -1049,6 +1051,7 @@ class Pipeline:
         self.store.write_job(job)
         ws.write_json("fetch", "meta.json", {"path": str(src), **meta})
         ws.mark_done("fetch", artifacts=["fetch/meta.json"], path=str(src), **meta)
+        self._on_stage_log.pop(job_id, None)
         return src
 
     # ------------------------------------------------------------------
@@ -1291,11 +1294,10 @@ class Pipeline:
         self._log(job_id, f"Clip target: {target} — {reason}")
         self._patch_job(job_id, clipTarget=target, clipTargetReason=reason)
 
-        def on_log(line: str) -> None:
+        # stage 2: transcribe stashes its own callback into the shared
+        # _on_stage_log dict so on_log in the download stage resolves safely.
+        def _on_transcribe_log(line: str) -> None:
             self._log(job_id, line)
-
-        def on_progress(fraction: float, line: str) -> None:
-            self._progress(job_id, "finding", fraction, line, unit_label="chunk")
 
         # Source length drives the no-speech fallback (evenly spaced clips).
         # Prefer the job document, fall back to the fetch stage's own record,
