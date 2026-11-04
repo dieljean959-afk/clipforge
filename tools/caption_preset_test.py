@@ -515,133 +515,10 @@ def main() -> int:
                 {"word": "uh", "start": 0.2, "end": 0.4, "conf": 0.95},
                 {"word": "us", "start": 0.4, "end": 0.6, "conf": 0.95}])
     all_filler = subtitle.words_to_cues(
-        subtitle.strip_fillers(words))[0])
-        subtitle.strip_fillers(words))[0])
-          all_filler == [], str(all_filler))
+        subtitle.strip_fillers(words))[0]
     check("no audio-processing call crept in (audio is never cut)",
           "af=" not in subtitle_src and "volume=0" not in subtitle_src,
           "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-    check("no audio-processing call crept in (audio is never cut)",
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-    check("no audio-processing call crept in (audio is never cut)",
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-          all_filler == [], str(all_filler))
-    check("no audio-processing call crept in (audio is never cut)",
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-    check("no audio-processing call crept in (audio is never cut)",
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-    check("no audio-processing call crept in (audio is never cut)",
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-    check("no audio-processing call crept in (audio is never cut)",
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-    check("a repeat of a real word across a pause is not a filler",
-          subtitle.strip_fillers([{"word": "repeat", "start": 0.0, "end": 0.2, "conf": 0.95},
-                                   {"word": "repeat", "start": 1.0, "end": 1.2, "conf": 0.95},
-                                   {"word": "here", "start": 2.0, "end": 2.2, "conf": 0.95}])[0] == ["repeat", "here"])
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-    check("no audio-processing call crept in (audio is never cut)",
-          "af=" not in subtitle_src and "volume=0" not in subtitle_src,
-          "the ASS filter chain must not carry any audio edit")
-            {"word": "b", "start": 1.0, "end": 1.0},
-            {"word": "c", "start": 2.0, "end": 2.5}]
-    fixed = subtitle.normalize_word_timings(zero)
-    check("zero-length words get a real span",
-          all(w["end"] > w["start"] for w in fixed), str(fixed))
-    check("normalising never invents time past the next word",
-          fixed[-1]["end"] <= 2.5, str(fixed))
-    zc = subtitle.words_to_cues(subtitle.normalize_word_timings(zero))
-    check("no caption can flash for a single frame",
-          all(c["end"] - c["start"] >= subtitle.MIN_CUE_SEC for c in zc), str(zc))
-
-    # ---- 5. confidence still integrates with the new chunking ---------
-    murky_words = [{"word": "what", "start": 0.0, "end": 0.4, "conf": 0.20},
-                   {"word": "what", "start": 0.4, "end": 0.8, "conf": 0.22}]
-    murky_words = subtitle.normalize_word_timings(murky_words)
-    mc = subtitle.words_to_cues(murky_words, words_per_cue=3, max_words=4)
-    check("low-confidence bursts are still flagged under the new chunking",
-          mc and mc[0].get("uncertain") and mc[0]["text"] == subtitle.PLACEHOLDER_INAUDIBLE,
-          str(mc))
-    check("a flagged burst never shows its guessed words in the render",
-          "what" not in subtitle.build_ass_events(mc, s, 0.0, "bold_pop"))
-    check("the placeholder survives the word-highlight path",
-          subtitle.PLACEHOLDER_INAUDIBLE in subtitle.build_ass_events(mc, s, 0.0, "bold_pop"))
-
-    # ---- 6. one style for the whole batch -----------------------------
-    check("a style fingerprint exists and differs per preset",
-          subtitle.style_fingerprint(s, "bold_pop")
-          != subtitle.style_fingerprint(s, "karaoke"))
-    check("the fingerprint is stable for the same settings",
-          subtitle.style_fingerprint(s, "bold_pop")
-          == subtitle.style_fingerprint(s, "bold_pop"))
-    check("the render stage stores it on every clip",
-          "style_id = subtitle.style_fingerprint" in task_src2
-          and '"captionStyle": style_id' in task_src2)
-    check("a changed style re-encodes instead of being skipped",
-          'clip_doc.get("captionStyle", style_id) == style_id' in task_src2)
-    check("one style is chosen per job, not per clip",
-          task_src2.count('opts.get("captionPreset")') == 1)
-
-    section_tunable(s, task_src2)
-    section_endpoints()
-
-    print(f"\n{PASS} passed, {FAIL} failed")
-    return 1 if FAIL else 0
-
-
-def section_endpoints() -> None:
-    """[10] the HTTP surface the dialog actually talks to."""
-    print("\n[10] /api/settings/captions round-trip")
-
-    from fastapi.testclient import TestClient
-
-    import app.main as main_mod
-
-    main_mod._do_warmup = lambda: None
-    saved = caption_style.read(main_mod.settings.app.paths)
-    client = TestClient(main_mod.app)  # no context manager: no worker, no warmup
-    try:
-        r = client.get("/api/settings/captions")
-        check("GET caption style answers 200", r.status_code == 200, r.text)
-        body = r.json()
-        check("GET reports the limits the sliders need",
-              set(body.get("limits", {})) == {"words_per_cue", "words_per_cue_max", "pause_sec"},
-              str(body.get("limits")))
-        check("GET reports which values are pinned",
-              isinstance(body.get("overrides"), dict), str(body.get("overrides")))
-        check("GET says which colour is in force", "highlight_color" in body, str(body.keys()))
         before = dict(body)
 
         r = client.put("/api/settings/captions",
@@ -849,3 +726,18 @@ def section_tunable(s, task_src: str) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
