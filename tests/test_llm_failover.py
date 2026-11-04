@@ -1,105 +1,87 @@
-"""Unit tests for the DeepSeek key-missing failover accelerator.
+"""The DeepSeek failover accelerator in `_call_openai_chat`.
 
-A missing key is a typo in the key manager, not a quota or model outage, so the
-first attempt that fails with a 401/403 is retried on a configured, ready
-backup BEFORE the ladder is spent. A missing primary key is STILL a hard,
-loud misconfiguration and is never silently redirected.
+A DeepSeek key that is missing or unusable is a key-manager mistake, not a
+model outage. Rather than spend the whole DeepSeek ladder finding that out, the
+engine routes the chunk straight to the configured backup — and raises one
+clear `LlmNotConfigured` when there is no usable backup either.
+
+The key resolver reads the workspace's env files, so these tests patch
+`openai_api_key` rather than trying to unset a real saved key in `os.environ`.
+
+    python -m pytest tests/test_llm_failover.py -q
 """
 
 from __future__ import annotations
 
-import json
+import sys
 from pathlib import Path
 
-import pytest
-
-# Allow the suite to run from the project root or a checked-out tools dir.
-APP_ROOT = Path(__file__).resolve().parents[1]
-if str(APP_ROOT) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(APP_ROOT))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from app import llm as llm_mod  # noqa: E402
-from app.config import load_config  # noqa: E402
-from tools._failover_helpers import (
+from tools._failover_helpers import (  # noqa: E402
     _candidate,
-    _keys,
+    _ok,
     _reply,
     _settings,
     _Stub,
-)  # noqa: E402
+)
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
-    if ok:
-        print(f"  ok   {name}")
-    else:
-        print(f"  FAIL {name}" + (f" — {detail}" if detail else ""))
-        raise AssertionError(name)
+    print(f"  {'ok  ' if ok else 'FAIL'} {name}" + ("" if ok else f" — {detail}"))
+    assert ok, name
 
 
-def test_failover_accelerates_missing_key_to_ready_backup() -> None:
-    """A 401/403 from the absent key is retried on the configured backup."""
+def _keys_by_provider(monkeypatch, mapping: dict[str, str | None]) -> None:
+    """Answer `openai_api_key(which, settings)` from a fixed table."""
+    monkeypatch.setattr(llm_mod, "openai_api_key", lambda which, _s: mapping.get(which))
 
-    def _deepseek_handler(method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, object], dict[str, str]]:
-        if path.endswith("chat/completions"):
-            return (401, {"error": {"message": "Invalid API key"}}, {"Content-Type": "application/json"})
-        raise AssertionError(f"unexpected path {path!r}")
 
-    def _groq_handler(method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, object], dict[str, str]]:
-        if path.endswith("chat/completions"):
-            return (200, _reply([_candidate()]), {"Content-Type": "application/json"})
-        raise AssertionError(f"unexpected path {path!r}")
+def test_unusable_primary_is_served_by_the_ready_backup(monkeypatch) -> None:
+    """No DeepSeek key, a ready Groq backup: the backup answers the chunk."""
+    _keys_by_provider(monkeypatch, {"deepseek": None, "groq": "gsk_test_0123456789"})
+    with _Stub(_ok(_reply([_candidate()]))) as backup:
+        s = _settings()
+        s.groq.base_url = backup.base_url
+        s.llm.fallback_provider = "groq"
+        text = llm_mod.call_llm("transcript text", s)
+    check("the backup produced the clips", "clips" in text, text[:80])
+    check("the backup was actually called once", len(backup.requests) == 1,
+          str(len(backup.requests)))
+    check("...with the Groq key, not a DeepSeek one",
+          "gsk_test" in str(backup.requests[0].get("__auth")),
+          str(backup.requests[0].get("__auth"))[:40])
 
+
+def test_no_usable_provider_names_the_key_and_the_tab(monkeypatch) -> None:
+    """No DeepSeek key and no ready backup: one loud, actionable error."""
+    _keys_by_provider(monkeypatch, {"deepseek": None, "groq": None})
     s = _settings()
-    with _Stub(_deepseek_handler) as ds_stub, _Stub(_groq_handler) as groq_stub:
-        s.deepseek.base_url = ds_stub.base_url
-        s.groq.base_url = groq_stub.base_url
-        with _keys(None, "gsk_test_0123456789"):
-            text = llm_mod.call_llm("transcript text", s)
-    check("the backup actually finished the chunk", "clips" in text, text[:80])
-    check("the primary was called once for its 401", len(ds_stub.requests) == 1,
-          str(len(ds_stub.requests)))
-    check("the backup made the call", len(groq_stub.requests) == 1,
-          str(len(groq_stub.requests)))
+    s.llm.fallback_provider = ""
+    err = None
+    try:
+        llm_mod.call_llm("transcript text", s)
+    except llm_mod.LlmNotConfigured as exc:
+        err = str(exc)
+    check("it raises LlmNotConfigured", err is not None, "no exception")
+    check("the message names DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY" in (err or ""), str(err))
+    check("the message points at the Keys tab", "Keys" in (err or ""), str(err))
 
 
-def test_missing_primary_key_is_a_hard_error_and_never_fails_over() -> None:
-    """LlmNotConfigured stands; a ready backup is never silently used."""
-
-    def _handler(method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, object], dict[str, str]]:
-        raise AssertionError("backup should never be called")
-
-    s = _settings()
-    with _Stub(_handler) as stub, _Stub(_groq_handler) as groq_stub:
-        s.deepseek.base_url = stub.base_url
-        s.groq.base_url = groq_stub.base_url
-        with _keys(None, "gsk_test_0123456789"):
-            err = None
-            try:
-                llm_mod.call_llm("transcript text", s)
-            except llm_mod.LlmNotConfigured as exc:
-                err = str(exc)
-    check("the error names DEEPSEEK_API_KEY", err is not None and "DEEPSEEK_API_KEY" in err, str(err))
-    check("...and points at the Keys tab", err is not None and "Keys" in err, str(err))
-    check("...and the backup was never called", len(stub.requests) == 0, str(len(stub.requests)))
-
-
-def test_nothing_fails_over_when_the_primary_key_is_present() -> None:
-    """A valid primary key takes the normal ladder; the accelerator is skipped."""
-
-    seen: list[dict[str, object]] = []
-
-    def _handler(method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, object], dict[str, str]]:
-        seen.append({"method": method, "path": path, "body": body.decode("utf-8")})
-        return (200, _reply([_candidate()]), {"Content-Type": "application/json"})
-
-    s = _settings()
-    with _Stub(_handler) as stub:
-        s.deepseek.base_url = stub.base_url
-        s.groq.base_url = stub.base_url
-        with _keys("sk-test-0123456789", "gsk_test_0123456789"):
-            text = llm_mod.call_llm("transcript text", s)
-    check("the primary did the whole chunk", "clips" in text, text[:80])
-    check("only one request was made (accelerator skipped)", len(seen) == 1, str(len(seen)))
-    check("the request went to the deepseek path", "deepseek" in str(seen[0]),
-          str(seen[0]))
+def test_a_healthy_primary_takes_the_whole_chunk(monkeypatch) -> None:
+    """A working DeepSeek key must not be routed around."""
+    _keys_by_provider(monkeypatch, {"deepseek": "sk-test-0123456789", "groq": None})
+    with _Stub(_ok(_reply([_candidate()]))) as primary:
+        s = _settings()
+        s.deepseek.base_url = primary.base_url
+        s.llm.fallback_provider = "groq"
+        text = llm_mod.call_llm("transcript text", s)
+    check("the primary produced the clips", "clips" in text, text[:80])
+    check("exactly one request — no fallback was touched", len(primary.requests) == 1,
+          str(len(primary.requests)))
+    check("the request carried the DeepSeek key",
+          "sk-test" in str(primary.requests[0].get("__auth")),
+          str(primary.requests[0].get("__auth"))[:40])

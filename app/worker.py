@@ -66,6 +66,31 @@ INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "5"))
 # be retried forever.
 _SIGNAL_BANNER = re.compile(r"\(code -\d+\)")
 
+SOURCE_LOST_MESSAGE = (
+    "Source file was lost, please re-upload. "
+    "The uploaded video is no longer on the server, so this job cannot be "
+    "resumed — attach the file again to start a new one."
+)
+
+
+def unrecoverable_reason(store: Any, job: dict[str, Any]) -> str | None:
+    """Can this job EVER be resumed? Return the reason when it cannot.
+
+    Resuming a job whose upload is gone cannot work at any stage: `fetch` is
+    the first thing every later stage reads its input from, and the fetch stage
+    only knows how to recreate a URL source, never an uploaded one. Re-queueing
+    such a job just burns a full pipeline launch per server restart and then
+    fails again.
+
+    URL jobs are always recoverable: the source is re-downloaded from its URL.
+    Upload jobs are recoverable only while their file is still on disk.
+    """
+    if job.get("sourceType") != "upload":
+        return None
+    if store.find_source_file(job["_id"]) is not None:
+        return None
+    return SOURCE_LOST_MESSAGE
+
 
 class InProcessWorker:
     def __init__(self, settings: Settings, store: LocalStore) -> None:
@@ -101,6 +126,9 @@ class InProcessWorker:
         self._lock = threading.RLock()
         self._stalled_job: str | None = None  # last job the watchdog killed
         self._stalled_jobs: set[str] = set()
+        # monotonic time of the last reconciliation pass (see
+        # reconcile_stale_running's min_interval_sec throttle)
+        self._reconciled_at = 0.0
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -239,6 +267,18 @@ class InProcessWorker:
         # A retry is a genuinely fresh process; stage artifacts on disk let it
         # resume from the first incomplete stage (see app/stages.py).
         return self.enqueue(job_id)
+
+    def retry_from_cache(self, job_id: str) -> int:
+        """Retry a job, resuming from the last checkpointed stage.
+
+        Named separately from `retry` because that is the promise the API makes
+        to the button: finished clips are on disk, so a retry re-renders only
+        the unfinished ones instead of starting the pipeline over. The resume
+        itself is done by the stage workspace, not by a different queue call —
+        so this is the same enqueue with the contract spelled out at the call
+        site.
+        """
+        return self.retry(job_id)
 
     # ------------------------------------------------------------------
     # queue introspection (the "waiting behind N other jobs" indicator)
@@ -805,7 +845,9 @@ class InProcessWorker:
         self.enqueue(job_id)
         return True
 
-    def reconcile_stale_running(self) -> list[str]:
+    def reconcile_stale_running(
+        self, *, min_interval_sec: float = 0.0, force: bool = False
+    ) -> list[str]:
         """Clear jobs that claim to be running with no worker behind them.
 
         A job's `stage` is written by a CHILD process. If that process is
@@ -821,7 +863,22 @@ class InProcessWorker:
 
         Terminal jobs are never touched — a genuinely running job is not
         affected, and a paused/failed/complete one is already settled.
+
+        ``min_interval_sec`` skips the pass when the previous one is newer than
+        that, because the dashboard polls the list every couple of seconds and
+        the answer cannot change faster than the queue does. ``force=True``
+        always runs — the "Check now" path must be able to tell the truth on
+        demand.
         """
+        if not force and min_interval_sec > 0:
+            now = time.monotonic()
+            with self._lock:
+                if now - self._reconciled_at < min_interval_sec:
+                    return []
+                self._reconciled_at = now
+        else:
+            with self._lock:
+                self._reconciled_at = time.monotonic()
         with self._lock:
             live = set(self._active) | set(self._pending)
         fixed: list[str] = []
