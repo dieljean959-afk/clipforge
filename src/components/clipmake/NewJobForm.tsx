@@ -188,6 +188,7 @@ export function NewJobForm({
             {(presets.length > 0
               ? presets
               : [
+                  { key: "bold_stack", label: "Bold stack (reference look)" },
                   { key: "bold_pop", label: "Bold pop (default)" },
                   { key: "karaoke", label: "Karaoke fill" },
                   { key: "lower_third", label: "Clean lower-third" },

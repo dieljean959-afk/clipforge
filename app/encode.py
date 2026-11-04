@@ -640,10 +640,28 @@ def render_clip(
         if has_fit and not fills:
             from app import captions_animated as _anim
 
-            anchor_y = _anim.foreground_bottom(width, height, out_w, out_h)
+            # Use the CROPPED region's aspect, not the source's: the fit
+            # foreground is the crop box scaled to frame width. A 9:16 crop of a
+            # 16:9 source fills the frame (no blur band), while the raw source
+            # aspect claimed a 608 px band and parked the captions 186 px too
+            # high — inside the video instead of at its lower edge.
+            box = cut.get("cropBox") or {}
+            try:
+                bw, bh = float(box.get("w") or 0.0), float(box.get("h") or 0.0)
+            except (TypeError, ValueError):
+                bw, bh = 0.0, 0.0
+            anchor_y = _anim.foreground_bottom(
+                bw if bw > 0 and bh > 0 else width,
+                bh if bw > 0 and bh > 0 else height,
+                out_w,
+                out_h,
+            )
+        # The preset the JOB chose, not None: writing with None resolved every
+        # clip to the default look, so a bold-stack job burned the wrong style
+        # (and the wrong font dir) while the dashboard said otherwise.
         _subtitle.write_ass(
             cues, settings, ass_path, out_w, out_h,
-            preset_key=None,
+            preset_key=preset_key,
             anchor_y=anchor_y,
         )
 
@@ -652,7 +670,7 @@ def render_clip(
         esc = str(ass_path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
         # Per-preset fonts dir: the Viral look ships Montserrat inside app/fonts
         # (host has no system Montserrat), so libass must be pointed at it.
-        font_dir = _subtitle.ass_font_dir(settings, preset_key or "bold_pop")
+        font_dir = _subtitle.ass_font_dir(settings, preset_key)
         if font_dir:
             font_path = str(font_dir).replace(":", "\\:")
             ass_arg = "subtitles=" + esc + ":fontsdir=" + font_path

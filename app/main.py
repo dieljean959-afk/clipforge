@@ -505,7 +505,7 @@ class CreateJobIn(BaseModel):
         default=None,
         pattern=(
             "^(bold_pop|karaoke|lower_third|boxed|vertical_916|viral|"
-            "bold_yellow|clean_white|green_karaoke|neon|box_highlight)$"
+            "bold_yellow|clean_white|green_karaoke|neon|box_highlight|bold_stack)$"
         ),
     )
     language: str = Field(default="auto", pattern="^(auto|en|es)$")

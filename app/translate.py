@@ -169,26 +169,40 @@ def build_cues(
 
     preset = _subtitle.get_preset(style)
     max_chars = preset.max_chars_per_line or 18
+    # The bold-stack reference look is a 3-5 word burst broken on punctuation
+    # or a pause of 0.4 s, then split into two balanced lines at burn time (each
+    # line is its own ASS event, so the chunk itself is only word-grouped here).
+    stack = preset.key == "bold_stack"
     cues = _subtitle.words_to_cues(
         kept,
-        words_per_cue=2,
-        max_words=3,
+        words_per_cue=4 if stack else 2,
         max_chars=max_chars * 2,   # cue-level cap = 2 display lines
-        max_duration=2.2,
-        pause_sec=0.30,
+        max_duration=2.6 if stack else 2.2,
+        pause_sec=_subtitle.BOLD_STACK_PAUSE_BREAK if stack else 0.30,
     )
-    # end+80ms linger, clamped by the next cue's start — never overlaps.
-    for i, c in enumerate(cues):
-        nxt = cues[i + 1] if i + 1 < len(cues) else None
-        limit = (float(nxt.get("start") or 0.0) - 0.001) if nxt else None
-        shifted = float(c.get("end") or 0.0) + 0.08
-        c["end"] = min(shifted, limit) if limit is not None and limit > c["end"] else max(c["end"], min(shifted, limit) if limit is not None else shifted)
+    if stack:
+        # A lone word would leave the stack's second line empty — fold it into a
+        # neighbour while the 3-5 word / two-line budget still allows.
+        cues = _subtitle.merge_short_cues(cues)
+        # Shown from the first word's start to the last word's end, and held
+        # across a gap under 0.5 s so the two-line block never blinks between
+        # chunks that are simply close together (a real pause is left alone).
+        _subtitle.extend_cue_gaps(cues, _subtitle.BOLD_STACK_GAP_EXTEND)
+    else:
+        # end+80ms linger, clamped by the next cue's start — never overlaps.
+        for i, c in enumerate(cues):
+            nxt = cues[i + 1] if i + 1 < len(cues) else None
+            limit = (float(nxt.get("start") or 0.0) - 0.001) if nxt else None
+            shifted = float(c.get("end") or 0.0) + 0.08
+            c["end"] = min(shifted, limit) if limit is not None and limit > c["end"] else max(c["end"], min(shifted, limit) if limit is not None else shifted)
     _subtitle.build_emphasis(cues, language=lang)
-    # display text: only up to 2 lines per burst, wrapped on words
+    # display text: only up to 2 lines per burst, wrapped on words. The stack
+    # writer splits its own two lines into separate events, so it must NOT get
+    # an ASS line break baked into the cue text.
     for c in cues:
         c["text"] = _subtitle.display_text(
             c["text"], uppercase=preset.uppercase,
-            max_line=(preset.max_chars_per_line or 18),
+            max_line=0 if stack else (preset.max_chars_per_line or 18),
         )
     return cues
 

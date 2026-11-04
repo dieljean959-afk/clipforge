@@ -188,6 +188,7 @@ export function CaptionLanguageToggle({
             {(presets.length > 0
               ? presets
               : [
+                  { key: "bold_stack", label: "Bold stack (reference look)" },
                   { key: "bold_yellow", label: "Animated · Bold Yellow" },
                   { key: "clean_white", label: "Animated · Clean White" },
                   { key: "green_karaoke", label: "Animated · Green Karaoke" },

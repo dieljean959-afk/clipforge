@@ -29,6 +29,8 @@ export interface CaptionStyleDto {
   pause_sec: number;
   /** "" means the preset's own accent colour. */
   highlight_color: string;
+  /** Caption size as a multiple of the preset's own (0.8-1.4; bold_stack). */
+  size_scale?: number;
   /** Which caption look preset this overrides resolve to. */
   presetKey?: string;
   /** Which of these are pinned here rather than inherited from config.toml. */
@@ -40,7 +42,7 @@ export interface CaptionStyleDto {
 export type CaptionStyleUpdate = Partial<
   Pick<
     CaptionStyleDto,
-    "words_per_cue" | "words_per_cue_max" | "pause_sec" | "highlight_color"
+    "words_per_cue" | "words_per_cue_max" | "pause_sec" | "highlight_color" | "size_scale"
   >
 >;
 

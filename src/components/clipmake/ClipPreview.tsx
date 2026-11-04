@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
   Clapperboard,
@@ -95,6 +96,48 @@ function cueAt(clip: ClipDto, t: number): string | null {
     if (t >= cue.start - 0.05 && t <= cue.end + 0.05) return cue.text;
   }
   return null;
+}
+
+/** Bold-stack preview colours, in the same cycle the render burns in. */
+const STACK_COLOURS = ["#FFFF00", "#00FF00", "#FF0000"] as const;
+
+/**
+ * The bold-stack chunk visible at `t`: two balanced lines, one coloured.
+ *
+ * Mirrors the render's rules (see app/subtitle.py: split_stack_lines /
+ * build_bold_stack_events) so the overlay says what the MP4 will say: ALL
+ * CAPS, nearest-equal split, <= 3 words a line, colour cycling per chunk and
+ * alternating between line 1 and line 2. It cannot mirror the pixel size —
+ * the card is a scaled-down frame — so sizes come from CSS and the POSITIONS
+ * come from the same 1340 / 1426 of 1920 the .ass uses.
+ */
+function stackAt(
+  clip: ClipDto,
+  t: number,
+): { line1: string; line2: string; colour: string; firstIsColoured: boolean } | null {
+  const cues = clip.captionCues ?? [];
+  const idx = cues.findIndex((c) => t >= c.start - 0.05 && t <= c.end + 0.05);
+  if (idx < 0) return null;
+  const words = (cues[idx].text || "").toUpperCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  let bestI = words.length > 1 ? 1 : 0;
+  let best = Number.POSITIVE_INFINITY;
+  for (let i = 1; i < words.length; i += 1) {
+    const a = words.slice(0, i).join(" ");
+    const b = words.slice(i).join(" ");
+    const over = Math.max(0, a.length - 16) + Math.max(0, b.length - 16);
+    const score = over * 100 + Math.abs(a.length - b.length);
+    if (score < best) {
+      best = score;
+      bestI = i;
+    }
+  }
+  return {
+    line1: words.slice(0, bestI).join(" "),
+    line2: words.slice(bestI).join(" "),
+    colour: STACK_COLOURS[idx % STACK_COLOURS.length],
+    firstIsColoured: idx % 2 === 0,
+  };
 }
 
 export function ClipPreview({
@@ -384,16 +427,39 @@ export function ClipPreview({
             </div>
           )}
 
-          {/* burned-in caption preview — the same text the render burns in. Visible even
-              while the video is still loading, so a clip that is stuck on the poster still
-              tells you what it says. */}
+          {/* burned-in caption preview — the same TWO STACKED LINES the render
+              burns in, at the same 1340 / 1426 of 1920 positions (about 70 % of
+              the frame), one coloured and one white. Visible even while the
+              video is still loading, so a clip that is stuck on the poster
+              still tells you what it says. */}
           {controls && cue !== null && (
-            <p
-              className="pointer-events-none absolute inset-x-3 bottom-16 z-10 text-center text-[11px] font-bold leading-snug text-white [text-shadow:0_2px_6px_rgba(0,0,0,0.9)]"
-              style={{ opacity: cue ? 1 : 0.35 }}
-            >
-              {cue || <span style={{ opacity: 0.5 }}>—</span>}
-            </p>
+            <div className="pointer-events-none absolute inset-0 z-10">
+              {(() => {
+                const stack = stackAt(clip, time);
+                const lineStyle = (coloured: boolean, top: string): CSSProperties => ({
+                  top,
+                  color: coloured ? (stack?.colour ?? "#FFFF00") : "#FFFFFF",
+                  opacity: cue ? 1 : 0.35,
+                  WebkitTextStroke: "1.2px #000",
+                  paintOrder: "stroke fill",
+                  textShadow: "0 2px 5px rgba(0,0,0,0.6)",
+                });
+                const base =
+                  "absolute inset-x-0 -translate-y-full text-center text-[13px] font-extrabold uppercase leading-none tracking-tight";
+                return (
+                  <>
+                    <p className={base} style={lineStyle(stack?.firstIsColoured ?? true, "69.8%")}>
+                      {stack ? stack.line1 : cue}
+                    </p>
+                    {stack?.line2 ? (
+                      <p className={base} style={lineStyle(!stack.firstIsColoured, "74.3%")}>
+                        {stack.line2}
+                      </p>
+                    ) : null}
+                  </>
+                );
+              })()}
+            </div>
           )}
 
           {/* retrying banner — the frame stays, so a blip is not a dead card */}

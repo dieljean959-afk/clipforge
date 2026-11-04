@@ -1202,6 +1202,10 @@ class SubtitleConfig:
     strip_stutters: bool = True
     position_y: float = 0.78
     pop_animation: bool = True
+    # Size scale for the bold-stack look: the font size, the outline and the
+    # line pitch all multiply by this, so 1.10 is a 10 % larger caption that
+    # keeps the reference's cap-height-to-line-gap ratio. 0.80-1.40.
+    size_scale: float = 1.0
     # Default caption style preset: bold_pop | karaoke | lower_third | boxed
     preset: str = "bold_pop"
     # --- unclear speech ------------------------------------------------
@@ -1712,6 +1716,8 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         pause_sec=min(3.0, max(0.0, float(s.get("pause_sec", 0.30)))),
         position_y=min(0.95, max(0.3, float(s.get("position_y", 0.78)))),
         pop_animation=bool(s.get("pop_animation", True)),
+        # Clamped, not rejected: a slider saved at 1.42 must not break a boot.
+        size_scale=min(1.4, max(0.8, float(s.get("size_scale", 1.0)))),
         preset=str(s.get("preset", "bold_pop")),
         low_confidence=float(s.get("low_confidence", 0.45)),
         inaudible_below=float(s.get("inaudible_below", 0.30)),
@@ -1725,6 +1731,7 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
     _known_presets = (
         "bold_pop", "karaoke", "lower_third", "boxed", "vertical_916", "viral",
         "bold_yellow", "clean_white", "green_karaoke", "neon", "box_highlight",
+        "bold_stack",
     )
     if subtitle.preset not in set(_known_presets):
         errors.append(

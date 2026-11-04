@@ -36,6 +36,9 @@ TUNABLES: dict[str, tuple[float, float, float]] = {
     "words_per_cue": (1, 4, 1),
     "words_per_cue_max": (1, 6, 1),
     "pause_sec": (0.0, 1.5, 0.05),
+    # The bold-stack size knob: 80-140 % of the reference's 54 px / 86 px
+    # pitch. Font size, outline and line pitch all move by this one number.
+    "size_scale": (0.8, 1.4, 0.05),
 }
 
 COLOR_KEY = "highlight_color"
@@ -144,6 +147,7 @@ def effective(settings: Settings) -> dict[str, Any]:
         "words_per_cue": merged.words_per_cue,
         "words_per_cue_max": merged.words_per_cue_max,
         "pause_sec": round(merged.pause_sec, 2),
+        "size_scale": round(float(getattr(merged, "size_scale", 1.0)), 2),
         "highlight_color": merged.highlight_color,
         "overrides": overrides,
         "limits": {k: {"min": v[0], "max": v[1], "step": v[2]} for k, v in TUNABLES.items()},

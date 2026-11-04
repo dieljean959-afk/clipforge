@@ -95,6 +95,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
     (current.words_per_cue !== draft.words_per_cue ||
       current.words_per_cue_max !== draft.words_per_cue_max ||
       current.pause_sec !== draft.pause_sec ||
+      (current.size_scale ?? 1) !== (draft.size_scale ?? 1) ||
       current.highlight_color !== draft.highlight_color);
 
   const preview = draft ?? current;
@@ -106,6 +107,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
   // are known locally so the dialog can render the selector without importing
   // the backend package that also ships the CaptionPreset class.
   const CAPTION_PRESETS_ORDERED = [
+    "bold_stack",
     "viral",
     "vertical_916",
     "bold_pop",
@@ -117,6 +119,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
   type CaptionPresetKey = (typeof CAPTION_PRESETS_ORDERED)[number];
 
   const CAPTION_PRESET_LABELS: Record<string, string> = {
+    bold_stack: "Bold stack (reference look)",
     viral: "Ssemble-style viral",
     vertical_916: "Vertical 9:16 big captions",
     bold_pop: "Bold pop (default)",
@@ -244,6 +247,21 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
             </Field>
 
             <Field
+              label="Caption size"
+              hint="Scales the bold-stack text, its outline and the line gap together."
+              value={`${Math.round((preview.size_scale ?? 1) * 100)} %`}
+              pinned={pinned.size_scale !== undefined}
+            >
+              <Slider
+                min={preview.limits.size_scale?.min ?? 0.8}
+                max={preview.limits.size_scale?.max ?? 1.4}
+                step={preview.limits.size_scale?.step ?? 0.05}
+                value={[preview.size_scale ?? 1]}
+                onValueChange={([v]) => setDraft({ ...preview, size_scale: v })}
+              />
+            </Field>
+
+            <Field
               label="Highlight colour"
               hint="The word being spoken. Empty keeps the style's own colour."
               value={preview.highlight_color || "Style default"}
@@ -339,6 +357,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                     words_per_cue: draft?.words_per_cue,
                     words_per_cue_max: draft?.words_per_cue_max,
                     pause_sec: draft?.pause_sec,
+                    size_scale: draft?.size_scale,
                     highlight_color: draft?.highlight_color,
                   })
                 }
