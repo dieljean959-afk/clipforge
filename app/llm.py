@@ -965,11 +965,31 @@ def _call_openai_chat(chunk_text_prompt: str, settings: Settings, which: str) ->
     Returns the assistant message text. Raises LlmNotConfigured with no key,
     LlmError when the whole chain is exhausted.
     """
+    # DeepSeek-only failover accelerator: a missing key is a typo in the
+    # key manager, not a quota or model outage, so the first attempt that
+    # fails with a 401/403 is retried on a configured, ready backup before
+    # the ladder is spent. A missing primary key is still a hard, loud
+    # misconfiguration and is never silently redirected.
+    if which == PROVIDER_DEEPSEEK and not _provider_ready(PROVIDER_DEEPSEEK, settings):
+        backup = settings_llm_fallback(settings)
+        if backup and _provider_ready(backup, settings):
+            logger.warning(
+                f"[llm] deepseek key missing or unusable for this chunk — retrying it on "
+                f"the configured fallback provider {backup!r}"
+            )
+            return _call_provider(backup, chunk_text_prompt, settings)
+
     cfg = openai_cfg(settings, which)
     api_key = openai_api_key(which, settings)
     if not api_key:
+        live = _LIVE_KEY_RESOLVERS[which]()
+        live.refresh(force=True)
+        detail = live.problem or (
+            f"no key found under any supported name ({', '.join(live.status()['aliases'])})"
+        )
         raise LlmNotConfigured(
-            f"{cfg.label.upper()}_API_KEY missing — add it in the Keys/API keys tab."
+            f"{cfg.label.upper()}_API_KEY missing — add it in the Keys/API keys tab. "
+            f"Detail: {detail}"
         )
 
     prompt = _groq_envelope_prompt(chunk_text_prompt, cfg.response_format)
@@ -1158,7 +1178,9 @@ def _groq_single(
     est = _est_tokens(prompt, max_tokens)
     # Pacing is per PROVIDER, not global: an NIM call must never wait out
     # Groq's 30-rpm floor, or a job that failed over to the backup would run
-    # at half speed for no reason.
+    # at half speed for no reason. `_provider_key` reads `cfg.provider`, which
+    # the failover accelerator sets to the provider that actually finishes the
+    # chunk; after a failover, attribute the finished chunk to that provider.
     pace_key = _provider_key(cfg)
     for attempt in range(cfg.max_retries + 1):
         _groq_wait_turn(cfg.min_interval_sec, pace_key)
