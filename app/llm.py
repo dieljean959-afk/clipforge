@@ -39,6 +39,7 @@ of that job records which model actually answered.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import random
 import re
@@ -818,6 +819,13 @@ def _format_unsupported(detail: str) -> bool:
     return bool(_NO_RESPONSE_FORMAT.search(detail or ""))
 
 
+#: True for callers whose prompt is JSON but NOT the clip-detection schema
+#: (the emoji pass). Without this the ladder spends its retries sending a
+#: schema the reply can never satisfy — three rejected calls and two token
+#: waits before the plain rung, ~90 s for a single small batch.
+_PLAIN_JSON = contextvars.ContextVar("llm_plain_json", default=False)
+
+
 def _response_format_for(mode: str) -> dict[str, Any] | None:
     """The wire `response_format` for a configured mode name."""
     if mode == "json_object":
@@ -1017,10 +1025,15 @@ def _groq_attempt_chain(
     generation is fine — and `app.jsonfix` cleans up whatever comes back.
     """
     last_exc: _JsonRetry | None = None
+    plain_only = _PLAIN_JSON.get()
     for attempt in range(cfg.json_retries + 1):
         # temperature can only go DOWN from the configured base
         temp = max(0.0, min(cfg.temperature, cfg.json_retry_temperature))
-        if attempt >= cfg.json_retries:
+        if plain_only:
+            # A caller that is not detection asks for its own JSON shape, so
+            # the detection schema would be rejected every time.
+            mode, budget = "plain", cfg.max_tokens_ceiling
+        elif attempt >= cfg.json_retries:
             # Final rung: no response_format, largest budget.
             mode, budget = "plain", cfg.max_tokens_ceiling
         else:
@@ -1555,7 +1568,9 @@ def _groq_reply_text(data: dict[str, Any]) -> str:
     return str(message.get("content") or "")
 
 
-def call_llm(chunk_text_prompt: str, settings: Settings) -> str:
+def call_llm(
+    chunk_text_prompt: str, settings: Settings, *, plain_json: bool = False
+) -> str:
     """Dispatch one detection call, with optional provider failover.
 
     The primary is tried first. If it FAILS (quota spent, endpoint down, key
@@ -1572,20 +1587,24 @@ def call_llm(chunk_text_prompt: str, settings: Settings) -> str:
         nothing to fail over to, and the original error stands.)
       * `DetectionPaused`, which is a user action rather than a failure.
     """
-    active = provider(settings)
+    token = _PLAIN_JSON.set(bool(plain_json))
     try:
-        return _call_provider(active, chunk_text_prompt, settings)
-    except (LlmNotConfigured, DetectionPaused):
-        raise
-    except LlmError as exc:
-        backup = settings_llm_fallback(settings)
-        if not backup or not _provider_ready(backup, settings):
+        active = provider(settings)
+        try:
+            return _call_provider(active, chunk_text_prompt, settings)
+        except (LlmNotConfigured, DetectionPaused):
             raise
-        logger.warning(
-            f"[llm] {active} failed for this chunk ({exc}) — retrying it on the "
-            f"configured fallback provider {backup!r}"
-        )
-        return _call_provider(backup, chunk_text_prompt, settings)
+        except LlmError as exc:
+            backup = settings_llm_fallback(settings)
+            if not backup or not _provider_ready(backup, settings):
+                raise
+            logger.warning(
+                f"[llm] {active} failed for this chunk ({exc}) — retrying it on the "
+                f"configured fallback provider {backup!r}"
+            )
+            return _call_provider(backup, chunk_text_prompt, settings)
+    finally:
+        _PLAIN_JSON.reset(token)
 
 
 def _call_provider(which: str, chunk_text_prompt: str, settings: Settings) -> str:

@@ -30,6 +30,11 @@ export function NewJobForm({
   const [preset, setPreset] = useState("bold_yellow");
   const [clipCap, setClipCap] = useState<number | undefined>(undefined);
   const [language, setLanguage] = useState<LanguageChoice>("auto");
+  // Emoji per batch. Density is the share of chunks allowed to carry one; the
+  // selection rules still drop neutral/low-confidence chunks, so "high" is a
+  // ceiling rather than a promise.
+  const [emojiOn, setEmojiOn] = useState(true);
+  const [emojiDensity, setEmojiDensity] = useState<"low" | "medium" | "high">("medium");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -88,6 +93,7 @@ export function NewJobForm({
             waitForWorker: true,
             onUpdate: announceSandbox,
           },
+          { enabled: emojiOn, density: emojiDensity },
         );
       } else if (file !== null) {
         await api.uploadJobWithLanguage(
@@ -95,6 +101,7 @@ export function NewJobForm({
           preset,
           clipCap ?? undefined,
           language,
+          { enabled: emojiOn, density: emojiDensity },
         );
       }
 
@@ -261,6 +268,42 @@ export function NewJobForm({
           </span>
         </span>
       </label>
+
+      <div className="flex flex-col gap-2 rounded-md border border-input bg-card/50 px-3 py-2">
+        <label className="flex cursor-pointer items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span className="text-[11px] font-semibold uppercase tracking-wide">
+            Emoji per caption
+          </span>
+          <input
+            type="checkbox"
+            checked={emojiOn}
+            onChange={(e) => setEmojiOn(e.target.checked)}
+            className="size-4 cursor-pointer accent-[#39FF14]"
+          />
+        </label>
+        {emojiOn && (
+          <>
+            <div className="flex gap-2">
+              {(["low", "medium", "high"] as const).map((d) => (
+                <Button
+                  key={d}
+                  type="button"
+                  size="sm"
+                  variant={emojiDensity === d ? "default" : "outline"}
+                  onClick={() => setEmojiDensity(d)}
+                  className="flex-1 cursor-pointer capitalize"
+                >
+                  {d}
+                </Button>
+              ))}
+            </div>
+            <span className="text-[11px] leading-relaxed text-muted-foreground">
+              Only the strongest emotional beat per clip: neutral or unsure
+              chunks never get one.
+            </span>
+          </>
+        )}
+      </div>
 
       <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
         <input

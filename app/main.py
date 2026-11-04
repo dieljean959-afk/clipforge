@@ -509,6 +509,22 @@ class CreateJobIn(BaseModel):
         ),
     )
     language: str = Field(default="auto", pattern="^(auto|en|es)$")
+    # Emoji per batch: on/off and how dense. Omitted = the config defaults.
+    emojiEnabled: bool | None = None
+    emojiDensity: str | None = Field(default=None, pattern="^(low|medium|high)$")
+
+
+class EmojiEditIn(BaseModel):
+    """One chunk's emoji, edited by hand in the caption editor.
+
+    ``emoji`` is a whitelisted glyph to add/swap, or null to remove it. The
+    clip is re-rendered after the edit unless ``rerender`` is false (the UI
+    sends false while the user is still picking).
+    """
+
+    i: int = Field(ge=0)
+    emoji: str | None = None
+    rerender: bool = True
 
 
 class RequeueIn(BaseModel):
@@ -1523,6 +1539,10 @@ def create_job(body: CreateJobIn) -> dict:
         language=body.language,
         duration=duration,
     )
+    if body.emojiEnabled is not None:
+        job["emojiEnabled"] = bool(body.emojiEnabled)
+    if body.emojiDensity:
+        job["emojiDensity"] = body.emojiDensity
     job_id = job["_id"]
     store.append_job_log(job_id, f"job created ({body.sourceType}: {body.source[:80]})")
     store.write_job(job)
@@ -1538,6 +1558,8 @@ async def upload_job(
     maxClips: int | None = None,
     captionPreset: str | None = None,
     language: str = "auto",
+    emojiEnabled: bool | None = None,
+    emojiDensity: str | None = None,
 ) -> dict:
     """Manual upload: always works, no URL fetching involved.
 
@@ -1555,6 +1577,10 @@ async def upload_job(
         caption_preset=captionPreset,
         language=language,
     )
+    if emojiEnabled is not None:
+        job["emojiEnabled"] = bool(emojiEnabled)
+    if emojiDensity in ("low", "medium", "high"):
+        job["emojiDensity"] = emojiDensity
     job_id = job["_id"]
     store.write_job(job)
     dest_dir = store.job_source_dir_for_write(job_id)
@@ -2078,6 +2104,170 @@ def retranscribe_job(job_id: str) -> dict:
     )
     worker.enqueue(job_id)
     return {"queued": True, "resumesAt": ws.first_incomplete()}
+
+
+def _clip_emoji_track(store: LocalStore, clip: dict[str, Any]) -> dict[str, Any]:
+    """The stored emoji track for one clip (sidecar first, doc as the fallback)."""
+    job_id = str(clip.get("jobId") or "")
+    order = int(clip.get("order") or 0)
+    sidecar = (
+        store._paths.data_dir / "work" / job_id / "captions" / f"emoji_{order:03d}.json"
+    )
+    if sidecar.exists():
+        try:
+            return json.loads(sidecar.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "source": clip.get("emojiSource"),
+        "tags": clip.get("emojiTags") or [],
+        "selected": clip.get("emojiTrack") or [],
+    }
+
+
+def _write_clip_emoji_track(store: LocalStore, clip: dict[str, Any], track: dict[str, Any]) -> None:
+    job_id = str(clip.get("jobId") or "")
+    order = int(clip.get("order") or 0)
+    path = store._paths.data_dir / "work" / job_id / "captions" / f"emoji_{order:03d}.json"
+    if path.parent.exists():
+        path.write_text(json.dumps(track, ensure_ascii=False, indent=1), encoding="utf-8")
+    clip["emojiTrack"] = track.get("selected") or []
+    clip["emojiSource"] = track.get("source")
+    store.write_clip(clip)
+
+
+def _rerender_clip(store: LocalStore, clip_id: str) -> None:
+    """Re-encode ONE clip with the emoji track exactly as it now stands.
+
+    Runs on a daemon thread: a render is ~45 s, far past any sane HTTP
+    timeout. Failure is recorded on the clip doc, never swallowed.
+    """
+    from dataclasses import replace as _replace
+
+    from app import encode as _encode
+    from app import translate as _translate
+    from app.config import load_config as _load_config
+    from app.stages import StageWorkspace
+    from app.subtitle import Transcript, Word
+
+    clip = store.get_clip_doc(clip_id)
+    if not clip:
+        return
+    job_id = str(clip.get("jobId") or "")
+    order = int(clip.get("order") or 0)
+    try:
+        settings = _load_config()
+        job = store.get_job(job_id)
+        ws = StageWorkspace(settings.app.paths.data_dir, job_id)
+        cuts = ws.read_json("reframe", "cuts.json") or []
+        cut = next((c for c in cuts if int(c.get("order", -1)) == order), None)
+        if cut is None:
+            raise RuntimeError(f"no cut for clip order {order}")
+        cues = (ws.read_json("captions", f"cues_{order:03d}.json") or {}).get("cues") or []
+        if not cues:
+            raise RuntimeError("no caption cues stored for this clip")
+        track = _clip_emoji_track(store, clip)
+        src = settings.app.paths.outputs_dir.parent / "downloads" / job_id / "source.mp4"
+        if not src.exists():
+            candidate = settings.app.paths.data_dir / "downloads" / job_id / "source.mp4"
+            src = candidate if candidate.exists() else src
+        dest = settings.app.paths.outputs_dir / job_id / f"clip_{order:03d}.mp4"
+        store.write_clip(clip_id, {"renderState": "running", "mediaError": None}, job_id=job_id)
+        meta = _encode.render_clip(
+            src, cut, dest, settings, cues=cues,
+            preset_key=str(job.get("captionPreset") or settings.subtitle.preset or "bold_pop"),
+            emoji_selection=track.get("selected") or [],
+        )
+        store.write_clip(
+            clip_id,
+            {
+                "renderState": "done",
+                "mediaError": None,
+                "videoPath": meta["videoPath"],
+                "mediaBytes": meta["bytes"],
+                "mediaWidth": meta["width"],
+                "mediaHeight": meta["height"],
+                "mediaDurationSec": meta["durationSec"],
+                "renderMs": meta.get("renderMs"),
+            },
+            job_id=job_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface it on the clip, not in a log nobody reads
+        store.write_clip(
+            clip_id,
+            {"renderState": "failed", "mediaError": f"emoji re-render: {exc}"[:500]},
+            job_id=job_id or None,
+        )
+
+
+@app.post("/api/clips/{clip_id}/emoji")
+def edit_clip_emoji(clip_id: str, body: EmojiEditIn) -> dict:
+    """Add, swap or remove ONE chunk's emoji, then re-render that clip.
+
+    The judgement (emotion, intensity, confidence, reason) is kept from the
+    original tag: only the emoji changes, so the track still says why the
+    chunk was picked. A hand-added emoji is marked ``byHandle`` so the UI never
+    presents it as the model's choice.
+    """
+    from app import emoji as _emoji
+    from app.stages import StageWorkspace
+
+    clip = store.get_clip_doc(clip_id)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+    track = _clip_emoji_track(store, clip)
+    cues = (StageWorkspace(load_config().app.paths.data_dir, str(clip.get("jobId") or ""))
+            .read_json("captions", f"cues_{int(clip.get('order') or 0):03d}.json") or {}).get("cues") or []
+    if body.i >= len(cues):
+        raise HTTPException(400, f"chunk {body.i} does not exist ({len(cues)} chunks)")
+    if body.emoji is not None and not _emoji.is_allowed(body.emoji):
+        raise HTTPException(400, f"{body.emoji!r} is not in the emoji whitelist")
+
+    selected = [s for s in track.get("selected") or [] if int(s.get("i", -1)) != body.i]
+    if body.emoji is not None:
+        tag = next((t for t in track.get("tags") or [] if int(t.get("i", -1)) == body.i), {})
+        cue = cues[body.i]
+        start = float(cue.get("start") or 0.0)
+        span = min(_emoji.MAX_DURATION, max(_emoji.MIN_DURATION,
+                                           float(cue.get("end") or start) - start))
+        selected.append({
+            "i": body.i,
+            "emoji": body.emoji,
+            "emotion": tag.get("emotion") or "manual",
+            "intensity": tag.get("intensity"),
+            "confidence": tag.get("confidence"),
+            "reason": f"added by hand (model said: {tag.get('reason') or 'nothing'})",
+            "sensitive": bool(tag.get("sensitive")),
+            "start": round(start, 3),
+            "end": round(start + span, 3),
+            "cueText": str(cue.get("text") or ""),
+            "byHandle": True,
+        })
+    selected.sort(key=lambda s: float(s.get("start") or 0.0))
+    track["selected"] = selected
+    track["editedByHand"] = True
+    _write_clip_emoji_track(store, clip, track)
+    if body.rerender:
+        threading.Thread(
+            target=_rerender_clip, args=(store, clip_id),
+            name=f"emoji-rerender-{clip_id[:8]}", daemon=True,
+        ).start()
+    return {"emojiTrack": selected, "emojiSource": track.get("source"), "rerendering": body.rerender}
+
+
+@app.get("/api/emoji/whitelist")
+def emoji_whitelist() -> dict:
+    """The curated list the editor's picker offers (and the renderer accepts)."""
+    from app import emoji as _emoji
+
+    wl = _emoji.load_whitelist()
+    return {
+        "source": wl.source,
+        "emojis": [
+            {"emoji": e.emoji, "emotions": list(e.emotions), "keywords": list(e.keywords)}
+            for e in wl.entries.values()
+        ],
+    }
 
 
 @app.post("/api/jobs/{job_id}/rerender")

@@ -1206,6 +1206,15 @@ class SubtitleConfig:
     # line pitch all multiply by this, so 1.10 is a 10 % larger caption that
     # keeps the reference's cap-height-to-line-gap ratio. 0.80-1.40.
     size_scale: float = 1.0
+    # --- emoji ----------------------------------------------------------
+    # Context-aware emoji above the caption block. ON by default but very
+    # sparse (see emoji_density): an emoji on the wrong line is worse than none.
+    emoji_enabled: bool = True
+    # low | medium | high -> at most 15 / 35 / 60 % of chunks get an emoji.
+    emoji_density: str = "medium"
+    # Read the audio's loudness to raise intensity on shouted chunks. One
+    # ffmpeg pass per clip; off means the model's own intensity is used.
+    emoji_audio_cue: bool = True
     # Default caption style preset: bold_pop | karaoke | lower_third | boxed
     preset: str = "bold_pop"
     # --- unclear speech ------------------------------------------------
@@ -1718,6 +1727,13 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         pop_animation=bool(s.get("pop_animation", True)),
         # Clamped, not rejected: a slider saved at 1.42 must not break a boot.
         size_scale=min(1.4, max(0.8, float(s.get("size_scale", 1.0)))),
+        emoji_enabled=bool(s.get("emoji_enabled", True)),
+        emoji_density=(
+            str(s.get("emoji_density", "medium")).strip().lower()
+            if str(s.get("emoji_density", "medium")).strip().lower()
+            in ("low", "medium", "high") else "medium"
+        ),
+        emoji_audio_cue=bool(s.get("emoji_audio_cue", True)),
         preset=str(s.get("preset", "bold_pop")),
         low_confidence=float(s.get("low_confidence", 0.45)),
         inaudible_below=float(s.get("inaudible_below", 0.30)),

@@ -1464,6 +1464,11 @@ class Pipeline:
             self._log(job_id, f"caption language: {caption_language} (auto)")
 
         style_key = str(job.get("captionPreset") or self.settings.subtitle.preset or "bold_pop")
+        # Emoji: ON/OFF and density are per batch (job), falling back to config.
+        emoji_enabled = bool(job.get("emojiEnabled", self.settings.subtitle.emoji_enabled))
+        emoji_density = str(
+            job.get("emojiDensity") or self.settings.subtitle.emoji_density or "medium"
+        ).strip().lower()
         for i, cut in enumerate(cuts):
             cues = translate.build_cues(
                 transcript, cut, self.settings,
@@ -1482,6 +1487,38 @@ class Pipeline:
                 "captions", f"cues_{i:03d}.json",
                 {"cues": cues, "clipId": cut.get("clipId")},
             )
+            # Context-aware emoji, tagged from the whole clip's chunks in ONE
+            # batched LLM call and then filtered by the selection rules. Never
+            # fatal: a failure is recorded as "fallback: keywords" on the track
+            # and the clip still renders.
+            try:
+                from app import emoji as _emoji
+
+                track = _emoji.build_track(
+                    cues, self.settings,
+                    enabled=emoji_enabled,
+                    density=emoji_density,
+                    src=src,
+                    cut_start=float(cut.get("start") or 0.0),
+                    duration=float(cut.get("end") or 0.0) - float(cut.get("start") or 0.0),
+                    use_loudness=self.settings.subtitle.emoji_audio_cue,
+                )
+                ws.write_json("captions", f"emoji_{i:03d}.json", track)
+                picked = len(track.get("selected") or [])
+                self._log(
+                    job_id,
+                    f"emoji clip {i + 1}: {picked} of {len(cues)} chunks "
+                    f"({track.get('source')}, density={emoji_density})",
+                )
+                if track.get("clipId") is None:
+                    track["clipId"] = cut.get("clipId")
+            except Exception as exc:  # noqa: BLE001 - decoration must not fail a job
+                self._log(job_id, f"emoji tagging failed clip {i + 1}: {str(exc)[:200]}")
+                ws.write_json(
+                    "captions", f"emoji_{i:03d}.json",
+                    {"source": "fallback: keywords", "tags": [], "selected": [],
+                     "error": f"{type(exc).__name__}: {exc}"},
+                )
             self._write_caption_tracks(job_id, i, cues)
             self._progress(
                 job_id, "captions", (i + 1) / len(cuts),
@@ -1561,10 +1598,15 @@ class Pipeline:
             )
             with self._heartbeat(job_id, f"render clip {i + 1}"):
                 try:
+                    # The context-aware emoji chosen in the captions stage (an
+                    # LLM judgement, filtered by the selection rules). Missing
+                    # track = no emoji layer, never a guess at render time.
+                    emoji_track = ws.read_json("captions", f"emoji_{i:03d}.json") or {}
                     meta = encode.render_clip(
                         src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
                         cues=(ws.read_json("captions", f"cues_{i:03d}.json") or {}).get("cues") or [],
                         preset_key=job.get("captionPreset") or self.settings.subtitle.preset or "bold_pop",
+                        emoji_selection=emoji_track.get("selected") or [],
                         # The FIT/FILL choice per shot is carried from the
                         # reframe stage on each cut and logged here.
                         on_log=lambda line: self._log(job_id, line),
@@ -1602,6 +1644,12 @@ class Pipeline:
                         "mediaHeight": meta["height"],
                         "mediaDurationSec": meta["durationSec"],
                         "renderState": "done",
+                        # What the clip actually got, so the dashboard can show
+                        # each emoji with its reason, and say whether a model
+                        # chose it or the keyword fallback did.
+                        "emojiTrack": emoji_track.get("selected") or [],
+                        "emojiSource": emoji_track.get("source"),
+                        "emojiTags": emoji_track.get("tags") or [],
                         "renderMs": meta.get("renderMs"),
                         "encoder": meta.get("encoder"),
                         "encoderLabel": meta.get("encoderLabel"),

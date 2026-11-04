@@ -166,6 +166,12 @@ export interface ClipDto {
   }[];
   /** Cues replaced by a placeholder because the model was not confident. */
   uncertainCues?: number | null;
+  /** The emoji burned above each chunk (empty when none was chosen). */
+  emojiTrack?: CaptionEmojiDto[] | null;
+  /** "llm" when the model chose them, "fallback: keywords" when it did not. */
+  emojiSource?: string | null;
+  /** Every chunk's judgement, including the ones that got no emoji. */
+  emojiTags?: CaptionEmojiTagDto[] | null;
   silenceCuts?: { start: number; end: number }[] | null;
   aspect: string;
   videoPath: string | null;
@@ -185,6 +191,38 @@ export interface ClipDto {
   shareReady?: boolean;
   shareUrl?: string | null;
   sharePageUrl?: string | null;
+}
+
+/** One emoji burned onto a clip, with the judgement behind it. */
+export interface CaptionEmojiDto {
+  i: number;
+  emoji: string;
+  emotion?: string;
+  intensity?: number | null;
+  confidence?: number | null;
+  reason?: string;
+  start: number;
+  end: number;
+  cueText?: string;
+  /** True when a human picked it in the caption editor. */
+  byHandle?: boolean;
+}
+
+/** The model's per-chunk judgement (emoji may be null for a skipped chunk). */
+export interface CaptionEmojiTagDto {
+  i: number;
+  emotion: string;
+  intensity: number;
+  emoji: string | null;
+  reason: string;
+  confidence: number;
+  sensitive: boolean;
+  loudness_z?: number;
+}
+
+export interface EmojiWhitelistDto {
+  source: string;
+  emojis: { emoji: string; emotions: string[]; keywords: string[] }[];
 }
 
 export interface KeyStatusDto {
@@ -559,6 +597,7 @@ export const api = {
     sourceType: "url" | "upload" = "url",
     captionPreset?: string,
     maxClips?: number,
+    emoji?: { enabled: boolean; density: "low" | "medium" | "high" },
   ) =>
     request<{ jobId: string }>("/api/jobs", {
       method: "POST",
@@ -566,9 +605,13 @@ export const api = {
       // maxClips is omitted entirely for "auto" — the server scales the count
       // from the source length, and sending null/undefined would be read as an
       // explicit override of 0 by some clients.
-      body: JSON.stringify(
-        maxClips ? { sourceType, source, captionPreset, maxClips } : { sourceType, source, captionPreset },
-      ),
+      body: JSON.stringify({
+        sourceType,
+        source,
+        captionPreset,
+        ...(maxClips ? { maxClips } : {}),
+        ...(emoji ? { emojiEnabled: emoji.enabled, emojiDensity: emoji.density } : {}),
+      }),
     }),
   uploadJob: (file: File, captionPreset?: string, maxClips?: number) => {
     const fd = new FormData();
@@ -587,12 +630,13 @@ export const api = {
     maxClips?: number,
     language: CaptionLanguage = "auto",
     opts?: WaitForSandboxOptions,
+    emoji?: { enabled: boolean; density: "low" | "medium" | "high" },
   ) =>
     waitForSandbox(opts).then((ready) => {
       if (!ready.ok) {
         throw new Error(ready.error);
       }
-      return api.createJobWithLanguage(url.trim(), "url", captionPreset, maxClips, language);
+      return api.createJobWithLanguage(url.trim(), "url", captionPreset, maxClips, language, emoji);
     }),
   /** Language-aware upload job: sends the ENG/ESP choice as a `language` field. */
   uploadJobWithLanguage: (
@@ -600,12 +644,17 @@ export const api = {
     captionPreset?: string,
     maxClips?: number,
     language: CaptionLanguage = "auto",
+    emoji?: { enabled: boolean; density: "low" | "medium" | "high" },
   ) => {
     const fd = new FormData();
     fd.append("file", file);
     if (captionPreset) fd.append("captionPreset", captionPreset);
     if (maxClips) fd.append("maxClips", String(maxClips));
     fd.append("language", language);
+    if (emoji) {
+      fd.append("emojiEnabled", String(emoji.enabled));
+      fd.append("emojiDensity", emoji.density);
+    }
     return request<{ jobId: string; file: string; bytes: number }>("/api/jobs/upload", {
       method: "POST",
       body: fd,
@@ -769,15 +818,19 @@ export const api = {
     captionPreset?: string,
     maxClips?: number,
     language: CaptionLanguage = "auto",
+    emoji?: { enabled: boolean; density: "low" | "medium" | "high" },
   ) =>
     request<{ jobId: string }>("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(
-        maxClips
-          ? { sourceType, source, captionPreset, maxClips, language }
-          : { sourceType, source, captionPreset, language },
-      ),
+      body: JSON.stringify({
+        sourceType,
+        source,
+        captionPreset,
+        language,
+        ...(maxClips ? { maxClips } : {}),
+        ...(emoji ? { emojiEnabled: emoji.enabled, emojiDensity: emoji.density } : {}),
+      }),
     }),
   /** The caption knobs, merged over config.toml, plus which ones are pinned. */
   captionStyle: () => request<CaptionStyleDto>("/api/settings/captions"),
@@ -796,6 +849,23 @@ export const api = {
     request<{ queued: boolean; clipId: string }>(`/api/clips/${clipId}/retry-render`, {
       method: "POST",
     }),
+  /**
+   * Swap, add or remove ONE chunk's emoji, then re-render that clip.
+   *
+   * The server keeps the original judgement (emotion, reason, confidence) and
+   * marks a hand-picked emoji `byHandle`, so the editor never claims the model
+   * chose something a human typed in.
+   */
+  setClipEmoji: (clipId: string, i: number, emoji: string | null) =>
+    request<{ emojiTrack: CaptionEmojiDto[]; emojiSource?: string | null; rerendering: boolean }>(
+      `/api/clips/${clipId}/emoji`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ i, emoji }),
+      },
+    ),
+  emojiWhitelist: () => request<EmojiWhitelistDto>("/api/emoji/whitelist"),
   listClips: (jobId: string) =>
     request<ClipDto[]>(`/api/clips?jobId=${encodeURIComponent(jobId)}`),
   exportZip: (clipIds: string[]) =>

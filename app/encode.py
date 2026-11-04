@@ -471,6 +471,7 @@ def render_clip(
     *,
     cues: list[dict[str, Any]] | None = None,
     preset_key: str | None = None,
+    emoji_selection: list[dict[str, Any]] | None = None,
     on_log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Render one reframe cut into a 9:16 MP4.
@@ -623,39 +624,47 @@ def render_clip(
     # subtitles filter AFTER the crop/pan graph. Clips keep captions even
     # when played on platforms that never read sidecar SRTs.
     ass_path: Path | None = None
-    #: Timed emoji PNGs (animated styles only) — empty for every other preset.
+    #: Where the caption sits is a LAYOUT question, not a taste one. A FIT
+    #: clip shows the source at frame width in a band in the middle of the
+    #: 9:16 frame, so a bottom-margin caption lands in the blur UNDER the
+    #: video. Anchor it to the foreground's own lower edge instead, computed
+    #: from the real crop aspect. Mixed fit/fill clips keep the safe-area
+    #: margin: the foreground moves mid-clip, so one anchor would be wrong for
+    #: part of it. Computed BEFORE the caption block because the emoji layer
+    #: hangs off the same anchor.
+    anchor_y: int | None = None
+    if has_fit and not fills:
+        from app import captions_animated as _anim
+
+        box = cut.get("cropBox") or {}
+        try:
+            bw, bh = float(box.get("w") or 0.0), float(box.get("h") or 0.0)
+        except (TypeError, ValueError):
+            bw, bh = 0.0, 0.0
+        anchor_y = _anim.foreground_bottom(
+            bw if bw > 0 and bh > 0 else width,
+            bh if bw > 0 and bh > 0 else height,
+            out_w,
+            out_h,
+        )
+
+    #: Timed emoji PNGs. Two sources: the caller's context-aware selection
+    #: (any preset) and, for the animated styles only, the keyword overlays the
+    #: style itself ships. Either way they are PNG overlays — libass cannot
+    #: draw colour emoji.
     emoji: list[dict] = []
+    if emoji_selection:
+        from app import emoji as _emoji
+
+        emoji = _emoji.overlays_for_render(
+            emoji_selection, settings,
+            frame_w=out_w, frame_h=out_h, anchor_y=anchor_y,
+            preset_key=preset_key,
+        )
     if cues:
         from app import subtitle as _subtitle
 
         ass_path = dest.with_suffix(".ass")
-        # Where the caption sits is a LAYOUT question, not a taste one. A FIT
-        # clip shows the source at frame width in a band in the middle of the
-        # 9:16 frame, so a bottom-margin caption lands in the blur UNDER the
-        # video. Anchor it to the foreground's own lower edge instead, computed
-        # from the real source aspect (16:9 -> 608 px tall, bottom at 1264).
-        # Mixed fit/fill clips keep the safe-area margin: the foreground moves
-        # mid-clip, so a single anchor would be wrong for part of it.
-        anchor_y: int | None = None
-        if has_fit and not fills:
-            from app import captions_animated as _anim
-
-            # Use the CROPPED region's aspect, not the source's: the fit
-            # foreground is the crop box scaled to frame width. A 9:16 crop of a
-            # 16:9 source fills the frame (no blur band), while the raw source
-            # aspect claimed a 608 px band and parked the captions 186 px too
-            # high — inside the video instead of at its lower edge.
-            box = cut.get("cropBox") or {}
-            try:
-                bw, bh = float(box.get("w") or 0.0), float(box.get("h") or 0.0)
-            except (TypeError, ValueError):
-                bw, bh = 0.0, 0.0
-            anchor_y = _anim.foreground_bottom(
-                bw if bw > 0 and bh > 0 else width,
-                bh if bw > 0 and bh > 0 else height,
-                out_w,
-                out_h,
-            )
         # The preset the JOB chose, not None: writing with None resolved every
         # clip to the default look, so a bold-stack job burned the wrong style
         # (and the wrong font dir) while the dashboard said otherwise.
@@ -688,12 +697,10 @@ def render_clip(
     # Emoji layer (animated styles only) is emitted above the caption as timed
     # PNG overlays — it is the only second layer the render is allowed to
     # produce, and it carries the same SafeArea/insets as the text below.
-    emoji = []
-    if cues:
-        # Timed emoji for the animated styles. Computed from the same cues as
-        # the .ass, so an emoji appears on the word it belongs to and for
-        # exactly that chunk's duration. The style is empty for every other
-        # preset, so this runs only for the five animated looks.
+    if not emoji and cues:
+        # Keyword emoji for the animated styles only, and only when the caller
+        # did not already supply a context-aware selection — two emoji layers
+        # on one chunk is exactly the decoration this feature avoids.
         from app import captions_animated as _animated
 
         if _subtitle.get_preset(preset_key or "bold_pop").emoji:
@@ -726,17 +733,32 @@ def render_clip(
             extra: list[str] = []
             for idx, item in enumerate(emoji, start=1):
                 extra += ["-loop", "1", "-t", f"{clip_seconds:.3f}", "-i", item["path"]]
-                chain.append(f"[{idx}:v]scale=150:-1,format=rgba[em{idx}]")
-                # Emoji sits ABOVE the caption. The caption moved up to the
-                # foreground's lower edge, so a fixed fraction of H would now
-                # land on top of the text — anchor the emoji to the same
-                # value when one exists.
-                emoji_y = (
-                    f"{max(0, int(anchor_y) - 300)}" if anchor_y is not None else "H*0.60"
+                size = int(item.get("size") or 150)
+                # Pop in: 0.62 -> 1.15 over 180 ms, settle back to 1.0 by 300 ms
+                # (the reference's springy emoji beat), then a 120 ms fade out
+                # at the end of the chunk's window. The scale factor is a
+                # function of the frame's own timestamp, which is what makes
+                # this a real animation and not three static sizes.
+                s0 = float(item["start"])
+                s1 = float(item["end"])
+                pop = (
+                    f"if(lt(t,{s0:.3f}),0.62,"
+                    f"if(lt(t,{s0 + 0.18:.3f}),0.62+2.944*(t-{s0:.3f}),"
+                    f"if(lt(t,{s0 + 0.30:.3f}),1.15-1.25*(t-{s0 + 0.18:.3f}),1.0)))"
                 )
                 chain.append(
-                    f"[cv{idx - 1}][em{idx}]overlay=x=(W-w)/2:y={emoji_y}:"
-                    f"enable='between(t,{item['start']:.3f},{item['end']:.3f})'[cv{idx}]"
+                    f"[{idx}:v]format=rgba,"
+                    f"scale=w='{size}*{pop}':h='{size}*{pop}':eval=frame,"
+                    f"fade=t=out:st={max(0.0, s1 - 0.12):.3f}:d=0.12:alpha=1[em{idx}]"
+                )
+                # Above the caption block, never on it. `x`/`y` come from
+                # emoji.emoji_geometry(), which derives them from the caption's
+                # own computed top edge, so the two layers cannot drift apart.
+                emoji_x = int(item.get("x") or (out_w - size) // 2)
+                emoji_y = int(item.get("y") or 0)
+                chain.append(
+                    f"[cv{idx - 1}][em{idx}]overlay=x={emoji_x}:y={emoji_y}:"
+                    f"enable='between(t,{s0:.3f},{s1:.3f})'[cv{idx}]"
                 )
             return [
                 ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",

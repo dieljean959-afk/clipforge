@@ -144,10 +144,13 @@ export function ClipPreview({
   clip,
   className,
   autoPlay = false,
+  onEmojiSaved,
 }: {
   clip: ClipDto;
   className?: string;
   autoPlay?: boolean;
+  /** Called after an emoji edit so the parent can refresh the clip list. */
+  onEmojiSaved?: (clipId: string) => void;
 }) {
   const videoUrl = clip.videoPath
     ? api.clipVideoUrl(clip._id, clip.mediaBytes ?? undefined)
@@ -567,6 +570,7 @@ export function ClipPreview({
           poster={thumbUrl}
           duration={duration}
           onClose={() => setExpanded(false)}
+          onEmojiSaved={onEmojiSaved}
         />
       )}
     </>
@@ -586,12 +590,14 @@ function ClipLightbox({
   poster,
   duration,
   onClose,
+  onEmojiSaved,
 }: {
   clip: ClipDto;
   src: string | null;
   poster: string | null;
   duration: number | null;
   onClose: () => void;
+  onEmojiSaved?: (clipId: string) => void;
 }) {
   const ref = useRef<HTMLVideoElement | null>(null);
   const [t, setT] = useState(0);
@@ -611,6 +617,13 @@ function ClipLightbox({
   const cues = clip.captionCues ?? [];
   const activeIndex = cues.findIndex(
     (c) => t >= c.start - 0.05 && t <= c.end + 0.05,
+  );
+  // Emoji: the burned track and the model's judgements, keyed by chunk index so
+  // the list can show WHY a chunk got one — and let the user change it.
+  const emojiByIndex = new Map((clip.emojiTrack ?? []).map((e) => [e.i, e] as const));
+  const tagsByIndex = new Map((clip.emojiTags ?? []).map((e) => [e.i, e] as const));
+  const activeEmoji = (clip.emojiTrack ?? []).find(
+    (e) => t >= e.start - 0.02 && t <= e.end + 0.02,
   );
 
   // Portalled to <body> on purpose. `position: fixed` is only viewport-relative
@@ -642,7 +655,7 @@ function ClipLightbox({
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-1 items-center justify-center px-2 pb-2">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center px-2 pb-2">
         <video
           ref={ref}
           src={src}
@@ -662,6 +675,19 @@ function ClipLightbox({
           className="block max-h-full w-full max-w-[min(100%,56vh)] object-contain"
           style={{ display: "block" }}
         />
+        {/* The emoji the render burns in, at the render's own position: centred,
+            one 24 px gap above the caption block (58.4 % of the frame height),
+            about 7.8 % of the frame tall. It appears and leaves on the same
+            cue the MP4 does, so what you watch here is what you get. */}
+        {activeEmoji && (
+          <span
+            aria-label={`Emoji: ${activeEmoji.emoji}`}
+            className="pointer-events-none absolute left-1/2 -translate-x-1/2 select-none drop-shadow-[0_4px_10px_rgba(0,0,0,0.55)]"
+            style={{ top: "58.4%", fontSize: "7.8vh", lineHeight: 1 }}
+          >
+            {activeEmoji.emoji}
+          </span>
+        )}
       </div>
 
       {cues.length > 0 && (
@@ -681,7 +707,14 @@ function ClipLightbox({
                 <span className="shrink-0 font-mono text-[10px] text-white/40">
                   {fmtClock(cue.start)}
                 </span>
-                <span className="min-w-0">{cue.text}</span>
+                <span className="min-w-0 flex-1">{cue.text}</span>
+                <EmojiEditor
+                  clip={clip}
+                  index={i}
+                  tag={tagsByIndex.get(i)}
+                  chosen={emojiByIndex.get(i)}
+                  onSaved={onEmojiSaved}
+                />
               </li>
             ))}
           </ol>
@@ -703,5 +736,124 @@ function ClipLightbox({
       </div>
     </div>,
     document.body,
+  );
+}
+/**
+ * One chunk's emoji: what it is, why it was chosen, and the controls to swap
+ * it, remove it, or add one where the model said nothing.
+ *
+ * The whitelist comes from the backend (the same list the renderer accepts), so
+ * the picker can never offer an emoji that would be rejected or that has no
+ * bundled PNG. A hand-picked emoji is labelled "by hand" on the chip.
+ */
+function EmojiEditor({
+  clip,
+  index,
+  tag,
+  chosen,
+  onSaved,
+}: {
+  clip: ClipDto;
+  index: number;
+  tag?: { emoji: string | null; emotion: string; reason: string; confidence: number; sensitive: boolean };
+  chosen?: { emoji: string; reason?: string; byHandle?: boolean };
+  onSaved?: (clipId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [choices, setChoices] = useState<string[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open || choices !== null) return;
+    let live = true;
+    api
+      .emojiWhitelist()
+      .then((wl) => {
+        if (live) setChoices(wl.emojis.map((e) => e.emoji));
+      })
+      .catch((exc) => {
+        if (live) setError(String(exc).slice(0, 120));
+      });
+    return () => {
+      live = false;
+    };
+  }, [open, choices]);
+
+  const apply = async (emoji: string | null) => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.setClipEmoji(clip._id, index, emoji);
+      setOpen(false);
+      onSaved?.(clip._id);
+    } catch (exc) {
+      setError(String(exc).slice(0, 120));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={
+          chosen
+            ? `${tag?.emotion ?? chosen.emoji} · ${chosen.reason ?? ""}`
+            : `No emoji${tag ? ` · ${tag.emotion} (${Math.round((tag.confidence ?? 0) * 100)}% sure)` : ""}`
+        }
+        className={cn(
+          "flex items-center gap-1 rounded border px-1 py-0.5 text-[12px] leading-none transition",
+          chosen
+            ? "border-white/25 bg-white/10 text-white"
+            : "border-white/10 text-white/40 hover:border-white/30 hover:text-white/70",
+        )}
+      >
+        <span>{chosen ? chosen.emoji : "+"}</span>
+        {chosen?.byHandle ? <span className="text-[8px] uppercase">hand</span> : null}
+      </button>
+      {open && (
+        <span className="absolute right-0 z-50 mt-1 block w-56 rounded-md border border-white/15 bg-[#141418] p-2 shadow-xl">
+          {error ? (
+            <span className="block text-[10px] text-red-400">{error}</span>
+          ) : choices === null ? (
+            <span className="block text-[10px] text-white/50">Loading whitelist…</span>
+          ) : (
+            <span className="grid max-h-40 grid-cols-8 gap-0.5 overflow-y-auto">
+              {choices.map((e) => (
+                <button
+                  key={e}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void apply(e)}
+                  className="cursor-pointer rounded p-0.5 text-[15px] leading-none hover:bg-white/15"
+                >
+                  {e}
+                </button>
+              ))}
+            </span>
+          )}
+          <span className="mt-1 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void apply(null)}
+              className="cursor-pointer text-[10px] text-white/60 underline hover:text-white"
+            >
+              Remove emoji
+            </button>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="cursor-pointer text-[10px] text-white/40 hover:text-white/80"
+            >
+              Close
+            </button>
+          </span>
+        </span>
+      )}
+    </span>
   );
 }
