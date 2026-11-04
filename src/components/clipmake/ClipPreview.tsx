@@ -443,19 +443,40 @@ export function ClipPreview({
                   top,
                   color: coloured ? (stack?.colour ?? "#FFFF00") : "#FFFFFF",
                   opacity: cue ? 1 : 0.35,
-                  WebkitTextStroke: "1.2px #000",
-                  paintOrder: "stroke fill",
-                  textShadow: "0 2px 5px rgba(0,0,0,0.6)",
                 });
+                // Geometry from the clip's OWN resolved caption settings (the
+                // same object resolveCaptionSettings handed the renderer):
+                // positionY is the block's centre as a fraction of 1920, pitch
+                // is the line gap in frame pixels. No second set of numbers.
+                const cap = clip.captionSettings ?? null;
+                const pitchPct = ((cap?.pitch ?? 86) / 1920) * 100;
+                const centrePct = (cap?.positionY ?? 0.7205) * 100;
+                const sizePx = Math.max(9, Math.min(24, (cap?.fontSize ?? 54) * 0.24));
+                const strokePx = Math.max(0.6, Math.min(2.4, (cap?.outline ?? 6) * 0.2));
                 const base =
-                  "absolute inset-x-0 -translate-y-full text-center text-[13px] font-extrabold uppercase leading-none tracking-tight";
+                  "absolute inset-x-0 -translate-y-full text-center font-extrabold leading-none tracking-tight";
+                const shape: CSSProperties = {
+                  fontSize: `${sizePx}px`,
+                  textTransform: (cap?.uppercase ?? true) ? "uppercase" : undefined,
+                  WebkitTextStroke: `${strokePx}px #000`,
+                  paintOrder: "stroke fill",
+                  textShadow: (cap?.box ?? false)
+                    ? "0 0 0 4px rgba(0,0,0,0.75)"
+                    : "0 2px 5px rgba(0,0,0,0.6)",
+                };
                 return (
                   <>
-                    <p className={base} style={lineStyle(stack?.firstIsColoured ?? true, "69.8%")}>
+                    <p
+                      className={base}
+                      style={{ ...shape, ...lineStyle(stack?.firstIsColoured ?? true, `${(centrePct - pitchPct / 2).toFixed(2)}%`) }}
+                    >
                       {stack ? stack.line1 : cue}
                     </p>
-                    {stack?.line2 ? (
-                      <p className={base} style={lineStyle(!stack.firstIsColoured, "74.3%")}>
+                    {(cap?.lines ?? 2) === 2 && stack?.line2 ? (
+                      <p
+                        className={base}
+                        style={{ ...shape, ...lineStyle(!stack.firstIsColoured, `${(centrePct + pitchPct / 2).toFixed(2)}%`) }}
+                      >
                         {stack.line2}
                       </p>
                     ) : null}

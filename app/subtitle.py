@@ -83,50 +83,6 @@ MAX_DECODE_SEC = CHUNK_SEC
 # stays the signature ClipForge look (bold pop).
 # --------------------------------------------------------------------------- #
 
-@dataclass(frozen=True)
-class CaptionPreset:
-    key: str
-    label: str
-    font_size: int
-    primary: str          # main text color (#RRGGBB)
-    secondary: str        # accent (karaoke fill / pop color)
-    outline_color: str
-    outline_width: int
-    shadow: int
-    box: bool = False     # opaque box behind text (ASS BorderStyle=3)
-    karaoke: bool = False # word-by-word fill (ASS \k) instead of cue-level pop
-    pop: bool = False     # scale-pop animation per cue
-    # Progressive word-by-word highlight. Same ASS mechanism as `karaoke` (the
-    # sung part takes SecondaryColour) but the default style also keeps its
-    # scale-pop entrance, which is the look Opus-style captions ship with:
-    # short bursts, the word being spoken lit up as it is spoken.
-    highlight: bool = False
-    position_y: float = 0.78
-    # Per-chunk 1-2 keyword emphasis with rotating accent colours (see
-    # EMPHASIS_COLORS below). Not every cue gets a highlight; the choice
-    # and the colours are decided by the emphasis planner, not by the ASS
-    # writer.
-    word_emphasis: bool = False
-    # Display text in UPPERCASE. Spanish accents and inverted punctuation
-    # survive uppercasing because it is done with str.upper() — Unicode
-    # aware ("é".upper() -> "É", "¿" stays "¿", "ñ" -> "Ñ").
-    uppercase: bool = False
-    # Per-preset font override: some looks are font-specific (the
-    # Ssemble-style preset is a Montserrat ExtraBold look; the others keep
-    # the configured family). ``None`` inherits [subtitle] font.
-    font_override: str | None = None
-    fonts_dir_override: str | None = None
-    max_chars_per_line: int = 0  # 0 = no per-line cap (words wrap naturally)
-    #: Key into app.captions_animated.STYLES. When set, the clip is burned with
-    #: the word-by-word animated generator instead of the cue-level writer:
-    #: every word is a timed unit, the spoken word pops 100 -> 115 %, and the
-    #: chunk entrance fades/scales in over 110 ms.
-    animated: str | None = None
-    #: Attach a Twemoji PNG above the caption for key words (animated styles
-    #: only; the render adds a second ffmpeg input per emoji window).
-    emoji: bool = False
-
-
 EMPHASIS_COLORS: tuple[str, ...] = ("#1FE01F", "#FFF000", "#FF1A1A")
 
 
@@ -186,171 +142,17 @@ SIZE_SCALE_DEFAULT = 1.0
 SIZE_SCALE_STEP = 0.05
 
 
-CAPTION_PRESETS: dict[str, CaptionPreset] = {
-    "viral": CaptionPreset(
-        key="viral", label="Ssemble-style viral",
-        font_size=70, primary="#FFFFFF", secondary="#1FE01F",
-        outline_color="#0A0A0A", outline_width=7, shadow=1,
-        font_override="Montserrat ExtraBold",
-        fonts_dir_override="fonts",
-        pop=True, word_emphasis=True, position_y=0.71,
-        uppercase=True, max_chars_per_line=18,
-    ),
-    "bold_pop": CaptionPreset(
-        key="bold_pop", label="Bold pop (default)",
-        font_size=68, primary="#FFFFFF", secondary="#39FF14",
-        outline_color="#39FF14", outline_width=5, shadow=1,
-        pop=True, highlight=True, position_y=0.50,
-    ),
-    "vertical_916": CaptionPreset(
-        key="vertical_916", label="Vertical 9:16 big captions",
-        # Requested: 90-100px bold sans-serif, white with thick black outline
-        # (8px), soft shadow, active word highlighted in #FFD400, 3-4 words,
-        # max 2 lines, centred, at 60-65% down the screen.
-        font_size=95, primary="#FFFFFF", secondary="#FFD400",
-        outline_color="#000000", outline_width=8, shadow=3,
-        # 60-65% down a 1920-tall frame. ASS MarginV is a fraction of the
-        # frame height measured DOWN from the bottom, so a caption that must
-        # sit at 60-65% (i.e. 35-40% from the bottom) uses MarginV ~ 0.36-0.40.
-        position_y=0.62,
-        # Layout rules for this preset: 2 lines max, 3-4 words, white text,
-        # thick black outline plus a soft drop shadow. A full-height frame burn
-        # (box) keeps the caption glued to the video and out of the no-go
-        # bottom 20% of the frame, and karaoke on-off matches the subtitle
-        # pipeline that writes the tags.
-        box=True, karaoke=True, pop=False, highlight=True,
-        uppercase=False, font_override="Montserrat ExtraBold",
-        fonts_dir_override="fonts",
-        max_chars_per_line=0,
-    ),
-    "viral": CaptionPreset(
-        key="viral", label="Ssemble-style viral",
-        # Requested: ALL CAPS, extra-bold sans-serif (Montserrat Black / Impact
-        # style), 90-100px, white text with a thick black outline (8-10px) and
-        # a soft shadow, NO black box or background behind the text.
-        #   font_size=96, primary="#FFFFFF", secondary="#FFE600",
-        #   outline_color="#000000", outline_width=8, shadow=2,
-        #   box=False, karaoke=False, pop=True, highlight=True,
-        #   uppercase=True, font_override="Montserrat Black",
-        #   fonts_dir_override="fonts",
-        #   max_chars_per_line=0,
-        font_size=96, primary="#FFFFFF", secondary="#FFE600",
-        outline_color="#000000", outline_width=8, shadow=2,
-        # Lower-center, about 65-70% down the screen. ASS MarginV is a
-        # fraction of the FRAME height measured DOWN from the bottom, so a
-        # caption that must sit at 65-70% from the top (30-35% from the
-        # bottom) uses MarginV ~ 0.31-0.35 — never in the bottom 20%.
-        position_y=0.67,
-        # Ssemble-style viral: short bursts 2-4 words, max 2 lines, centred,
-        # never one word at a time. Break at natural pauses (the subtitle
-        # pipeline's pause_sec cut) not mid-phrase.
-        box=False, karaoke=False, pop=True, highlight=True,
-        uppercase=True, font_override="Montserrat Black",
-        fonts_dir_override="fonts",
-        max_chars_per_line=0,
-    ),
-
-    "karaoke": CaptionPreset(
-        key="karaoke", label="Karaoke fill",
-        font_size=64, primary="#FFFFFF", secondary="#39FF14",
-        outline_color="#101010", outline_width=3, shadow=1,
-        karaoke=True, position_y=0.78,
-    ),
-    "lower_third": CaptionPreset(
-        key="lower_third", label="Clean lower-third",
-        font_size=48, primary="#FFFFFF", secondary="#FFFFFF",
-        outline_color="#000000", outline_width=2, shadow=2,
-        pop=False, position_y=0.86,
-    ),
-    "boxed": CaptionPreset(
-        key="boxed", label="Boxed",
-        font_size=60, primary="#FFFFFF", secondary="#39FF14",
-        outline_color="#000000", outline_width=0, shadow=0,
-        box=True, pop=False, position_y=0.78,
-    ),
-    # ----------------------------------------------------------------- #
-    # Animated (Ssemble/Submagic-style) looks. These are ORIGINAL presets:
-    # free Google fonts, our own colours and spacing, no template assets
-    # copied from any product. The style data lives in app.captions_animated
-    # so the look is a value rather than a branch in the render loop.
-    #
-    # All five pin the caption 18 % above the bottom edge (MarginV = 18 % of
-    # frame height) with 90 px side margins, which keeps the text out of the
-    # band TikTok/Reels paint their own UI over.
-    # ----------------------------------------------------------------- #
-    "bold_yellow": CaptionPreset(
-        key="bold_yellow", label="Animated · Bold Yellow",
-        font_size=94, primary="#FFFFFF", secondary="#FFD400",
-        outline_color="#000000", outline_width=9, shadow=5,
-        pop=True, highlight=True, uppercase=True, position_y=0.82,
-        font_override="Anton", fonts_dir_override="fonts",
-        animated="bold_yellow", emoji=True,
-    ),
-    "clean_white": CaptionPreset(
-        key="clean_white", label="Animated · Clean White",
-        font_size=76, primary="#FFFFFF", secondary="#FFFFFF",
-        outline_color="#111111", outline_width=2, shadow=6,
-        pop=True, uppercase=False, position_y=0.82,
-        font_override="Poppins", fonts_dir_override="fonts",
-        animated="clean_white",
-    ),
-    "green_karaoke": CaptionPreset(
-        key="green_karaoke", label="Animated · Green Karaoke",
-        font_size=84, primary="#FFFFFF", secondary="#39FF14",
-        outline_color="#000000", outline_width=6, shadow=3,
-        pop=True, highlight=True, uppercase=True, position_y=0.82,
-        font_override="Montserrat", fonts_dir_override="fonts",
-        animated="green_karaoke",
-    ),
-    "neon": CaptionPreset(
-        key="neon", label="Animated · Neon Glow",
-        font_size=104, primary="#EAF4FF", secondary="#00E5FF",
-        outline_color="#04121F", outline_width=5, shadow=2,
-        pop=True, highlight=True, uppercase=True, position_y=0.82,
-        font_override="Bebas Neue", fonts_dir_override="fonts",
-        animated="neon",
-    ),
-    "box_highlight": CaptionPreset(
-        key="box_highlight", label="Animated · Box Highlight",
-        font_size=74, primary="#FFFFFF", secondary="#FF2D55",
-        outline_color="#000000", outline_width=2, shadow=2,
-        pop=True, highlight=True, uppercase=True, position_y=0.82,
-        font_override="Poppins", fonts_dir_override="fonts",
-        animated="box_highlight",
-    ),
-    # ----------------------------------------------------------------- #
-    # Bold stack: the reference look as data. Two stacked lines per burst,
-    # one coloured, thick black outline, ALL CAPS, no animation (the size
-    # and the colour cycle are the style). See the BOLD_STACK_* constants.
-    # ----------------------------------------------------------------- #
-    "bold_stack": CaptionPreset(
-        key="bold_stack", label="Bold stack (reference look)",
-        font_size=BOLD_STACK_SIZE, primary="#FFFFFF", secondary="#FFFF00",
-        outline_color="#000000", outline_width=BOLD_STACK_OUTLINE,
-        shadow=BOLD_STACK_SHADOW,
-        box=False, karaoke=False, pop=False, highlight=False,
-        position_y=BOLD_STACK_POSITION_Y,
-        uppercase=True,
-        font_override=BOLD_STACK_FONT, fonts_dir_override="fonts",
-        max_chars_per_line=BOLD_STACK_MAX_CHARS,
-        animated=None, emoji=False,
-    ),
-}
-
-
-def get_preset(key: str | None, highlight_color: str | None = None) -> CaptionPreset:
-    """Resolve a preset by key, falling back to the default (never raises).
-
-    `highlight_color` replaces the preset's own accent — the colour the word
-    being spoken is painted in. Empty or absent keeps the preset's accent, so
-    picking "Karaoke fill" still looks like karaoke fill and a preset switch
-    does not quietly inherit a colour chosen for a different one.
-    """
-    preset = CAPTION_PRESETS.get(key or "", CAPTION_PRESETS["vertical_916"])
-    color = (highlight_color or "").strip()
-    if not color or color == preset.secondary:
-        return preset
-    return replace(preset, secondary=color)
+# The preset table lives in app/caption_presets.py — ONE data file that the
+# UI, the live preview and this renderer all read. Imported here so the
+# historical `subtitle.CAPTION_PRESETS` / `subtitle.get_preset` call sites
+# keep working without a second copy of the data.
+from app.caption_presets import (  # noqa: E402
+    CAPTION_PRESETS,
+    DEFAULT_PRESET,
+    PRESET_ORDER,
+    CaptionPreset,
+    get_preset,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,7 +186,12 @@ def caption_size_scale(settings: Settings) -> float:
 #: therefore asks for 54 * 1.2658 = 68, which measures 38 px — the reference's
 #: capital height. Keeping the factor here means the preset, the auto-fit and
 #: the printed cap height all stay in reference space.
-BOLD_STACK_LIBASS_EM = 1.2658
+# MEASURED, not derived from the font's own cap ratio: rendering the fixture
+# at ASS Fontsize 68 on this host (libass 0.15.2, Montserrat-ExtraBold, PPRes
+# 1080x1920) and counting the glyph rows gives a 32 px capital, and 81 gives
+# 38 px. 81 / 54 = 1.5, so the reference's 38 px cap height is ASS Fontsize
+# 80.75 -> round 81. tools/caption_proof.py measures it end to end.
+BOLD_STACK_LIBASS_EM = 1.4954
 
 
 def bold_stack_ass_size(size: float) -> int:
@@ -596,6 +403,7 @@ def build_bold_stack_events(
     frame_w: int = 1080,
     frame_h: int = 1920,
     scale: float | None = None,
+    preset_key: str | None = None,
 ) -> str:
     """One Dialogue event per STACKED LINE, at \\an2\\pos(540, y).
 
@@ -609,10 +417,20 @@ def build_bold_stack_events(
     colour cycles yellow -> green -> red per chunk and the coloured line
     alternates between line 1 and line 2, exactly as the reference does.
     """
+    resolved = _resolved(settings, preset_key)
     base_scale = caption_size_scale(settings) if scale is None else float(scale)
-    position_y = getattr(settings.subtitle, "position_y", BOLD_STACK_POSITION_Y)
+    position_y = float(resolved["positionY"])
     preset = CAPTION_PRESETS["bold_stack"]
     white = _hex_to_ass("#FFFFFF")
+    # "If the user picked a Highlight colour, use that instead of the cycle":
+    # an explicit pick (stored or in config.toml) wins for EVERY chunk; with no
+    # pick the reference's yellow -> green -> red cycle runs instead.
+    picked = str((resolved.get("overrides") or {}).get("highlight_color") or "").strip()
+    if not picked:
+        picked = str(settings.subtitle.highlight_color or "").strip()
+    fixed_accent = _hex_to_ass(picked) if picked else ""
+    two_lines = int(resolved["lines"]) >= 2
+    max_chars = int(resolved["maxCharsPerLine"]) or BOLD_STACK_MAX_CHARS
     lines_out: list[str] = []
     for idx, cue in enumerate(cues):
         text = str(cue.get("text") or "")
@@ -623,7 +441,10 @@ def build_bold_stack_events(
         words = [w for w in text.replace("{", "(").replace("}", ")").split() if w]
         if not words:
             continue
-        line1, line2 = split_stack_lines(words)
+        if two_lines:
+            line1, line2 = split_stack_lines(words, max_chars)
+        else:
+            line1, line2 = words, []
         chunk_scale, _widest = auto_fit_scale(
             [" ".join(line1), " ".join(line2)], base_scale, frame_w
         )
@@ -631,7 +452,8 @@ def build_bold_stack_events(
         l1_y, l2_y = bold_stack_positions(
             frame_h, metrics["pitch"], anchor_y=anchor_y, position_y=position_y
         )
-        colour = _hex_to_ass(BOLD_STACK_COLORS[idx % len(BOLD_STACK_COLORS)])
+        cycle = tuple(resolved["colors"]) or BOLD_STACK_COLORS
+        colour = fixed_accent or _hex_to_ass(cycle[idx % len(cycle)])
         # Alternate which line carries the colour: chunk 0 colours line 1.
         colour_on_first = idx % 2 == 0
         lines = [(line1, l1_y, colour_on_first), (line2, l2_y, not colour_on_first)]
@@ -1998,6 +1820,25 @@ def ass_font_dir(settings: Settings, preset_key: str | None = None) -> str | Non
     return str(d).replace("\\", "/") if d.exists() else None
 
 
+def _resolved(settings: Settings, preset_key: str | None = None) -> dict:
+    """The ONE resolved caption object, read by every ASS writer below.
+
+    An explicit ``preset_key`` argument (the batch's own choice) wins over the
+    stored default — the job's preset, not whatever the dashboard last saved,
+    is what the clip must wear.
+
+    Imported lazily so app.subtitle stays importable from app.caption_style's
+    own module-level code without a cycle.
+    """
+    from app import caption_style
+
+    if not preset_key:
+        return caption_style.resolve_caption_settings(settings)
+    overrides = dict(caption_style.read(settings.app.paths))
+    overrides["preset_key"] = preset_key
+    return caption_style.resolve_caption_settings(settings, overrides)
+
+
 def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
     """Short hash of everything that decides what a caption LOOKS like.
 
@@ -2044,33 +1885,32 @@ ASS_STYLE_NAME = "Clipmake"
 def build_ass_header(
     settings: Settings, width: int, height: int, preset_key: str | None = None
 ) -> str:
-    p = get_preset(preset_key, settings.subtitle.highlight_color)
+    resolved = _resolved(settings, preset_key)
+    p = get_preset(resolved["presetKey"], settings.subtitle.highlight_color)
     # Per-preset font override: the Viral look is a Montserrat ExtraBold look;
     # shipping it in the configured family would erase the style. Falls back
     # to the [subtitle] font when the preset does not name one.
-    font = p.font_override or settings.subtitle.font
-    # The bold-stack look is size-scaled (80-140 %): font, outline and pitch
-    # move together so the reference's cap height and line gap stay in ratio.
-    font_size, outline_w = p.font_size, p.outline_width
+    font = resolved["fontFamily"] or settings.subtitle.font
+    # Size and outline come from the PRESET (x the size slider), not from
+    # config.toml — otherwise every preset renders at the same size and the
+    # whole table above is decorative.
+    font_size, outline_w = int(resolved["fontSize"]), int(resolved["outline"])
     if p.key == "bold_stack":
         metrics = bold_stack_metrics(caption_size_scale(settings))
         font_size = bold_stack_ass_size(metrics["size"])
         outline_w = int(metrics["outline"])
     primary = _hex_to_ass(p.primary)
-    secondary = _hex_to_ass(p.secondary)
+    secondary = _hex_to_ass(resolved["highlightColor"] or p.secondary)
     outline = _hex_to_ass(p.outline_color)
     # BorderStyle 3 = opaque box (ASS renders BackColour behind the text)
     border_style = 3 if p.box else 1
     back = "&HA0000000" if p.box else "&H80000000"
-    pos = p.position_y if preset_key else settings.subtitle.position_y
+    pos = float(resolved["positionY"])
     # ASS MarginV is a fraction of the FRAME height measured DOWN from the
-    # bottom. The subtitle pipeline feeds 1.0 - position_y (i.e. 0.22 for the
-    # config default 0.78), which ASS reads as 22% from the BOTTOM — the very
-    # bottom 20%, exactly where the clip's TikTok buttons and username sit,
-    # so the strip lands low. Anchor the caption HIGHER (60-65% down = 35-40%
-    # from the bottom), i.e. MarginV ~ 0.36-0.40, and clamp it so it can never
-    # be pushed into the bottom 20% again no matter what the config says.
-    margin_v = int(height * min(0.40, max(0.36, 1 - pos)))
+    # bottom, so position_y = 0.78 is MarginV 22 %. The old clamp to 0.36-0.40
+    # made every preset sit at the same height, which is why "position" looked
+    # broken; the preset's own value now wins, clamped only to stay on frame.
+    margin_v = int(height * min(0.92, max(0.04, 1 - pos)))
     # Vertical strokes (the word being spoken) run RIGHT, so they must NOT be
     # flushed left: ASS rounds the left edge to the box's exact pixel, and with
     # word{black},word{whitesecondary}-style inline colour tags the colour
@@ -2157,6 +1997,7 @@ def build_ass_events(
         return build_bold_stack_events(
             cues, settings, start_offset,
             anchor_y=anchor_y, frame_w=frame_w, frame_h=frame_h,
+            preset_key=preset_key,
         )
     # The highlight colour lives on the caption track: the ASS `subtitles`
     # filter does NOT read [Events] colour tags, so we carry the preset's

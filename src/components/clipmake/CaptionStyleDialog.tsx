@@ -74,21 +74,6 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
     }
   };
 
-  const reset = async () => {
-    setSaving(true);
-    try {
-      const next = await api.resetCaptionStyle();
-      setCurrent(next);
-      setDraft(next);
-      toast.success("Back to the config.toml defaults.");
-      onApplied?.();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not reset caption settings.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const dirty =
     !!current &&
     !!draft &&
@@ -96,12 +81,21 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
       current.words_per_cue_max !== draft.words_per_cue_max ||
       current.pause_sec !== draft.pause_sec ||
       (current.size_scale ?? 1) !== (draft.size_scale ?? 1) ||
-      current.highlight_color !== draft.highlight_color);
+      current.highlight_color !== draft.highlight_color ||
+      // The preset chip and the emoji switch are settings too: without these
+      // two comparisons the Save button stayed disabled after picking a look.
+      (current.presetKey ?? "") !== (draft.presetKey ?? "") ||
+      (current.emojiEnabled ?? false) !== (draft.emojiEnabled ?? false) ||
+      (current.emojiDensity ?? "medium") !== (draft.emojiDensity ?? "medium"));
 
   const preview = draft ?? current;
   const accent = preview?.highlight_color || "#39FF14";
-  const pinned = preview?.overrides ?? {};
-  const selected = draft?.presetKey ?? current?.presetKey ?? "vertical_916";
+  const selected = draft?.presetKey ?? current?.presetKey ?? "bold_stack";
+  // "custom" badge: the set the BACKEND resolved (preset defaults vs sliders),
+  // not a local guess, so the badge matches what the render will use.
+  const custom = new Set(preview?.custom ?? []);
+  const emojiOn = preview?.emojiEnabled ?? false;
+  const emojiDensity = preview?.emojiDensity ?? "medium";
 
   // Preset keys in the order they should appear in the UI. The labels below
   // are known locally so the dialog can render the selector without importing
@@ -176,20 +170,48 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
             <div className="rounded-lg border border-border/60 bg-black/40 p-4">
               <div className="space-y-1.5">
                 {burst(SAMPLE, preview.words_per_cue, preview.words_per_cue_max).map(
-                  (group, i) => (
-                    <p
-                      key={i}
-                      className="text-center text-lg font-black leading-tight"
-                      style={{ color: "#fff", textShadow: `0 0 6px ${accent}` }}
-                    >
-                      {group.map((word, j) => (
-                        <span key={j} style={j === 0 ? { color: accent } : undefined}>
-                          {word}
-                          {j < group.length - 1 ? " " : ""}
-                        </span>
-                      ))}
-                    </p>
-                  ),
+                  (group, i) => {
+                    // Same shape the renderer burns: one colour per chunk from
+                    // the resolved palette (the preset's cycle, or the picked
+                    // highlight), the rest white, and 2 stacked lines when the
+                    // preset says so.
+                    const chunkColor = preview.highlight_color || accent;
+                    const lines =
+                      preview.lines === 2 && group.length > 2
+                        ? [group.slice(0, Math.ceil(group.length / 2)), group.slice(Math.ceil(group.length / 2))]
+                        : [group];
+                    return (
+                      <p
+                        key={i}
+                        className="text-center font-black leading-tight"
+                        style={{
+                          color: "#fff",
+                          fontSize: `${Math.max(12, Math.min(34, (preview.fontSize ?? 54) * 0.42))}px`,
+                          letterSpacing: "0.01em",
+                          textShadow: `0 0 6px ${chunkColor}`,
+                          textTransform: preview.uppercase ? "uppercase" : undefined,
+                        }}
+                      >
+                        {lines.map((line, li) => (
+                          <span key={li} className="block">
+                            {line.map((word, j) => (
+                              <span
+                                key={j}
+                                style={
+                                  (i % 2 === 0 ? li === 1 : li === 0)
+                                    ? { color: chunkColor }
+                                    : undefined
+                                }
+                              >
+                                {word}
+                                {j < line.length - 1 ? " " : ""}
+                              </span>
+                            ))}
+                          </span>
+                        ))}
+                      </p>
+                    );
+                  },
                 )}
               </div>
               <p className="mt-3 text-center text-[11px] text-muted-foreground">
@@ -201,7 +223,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
               label="Burst length"
               hint="Words per caption. A pause or the cap still ends one sooner."
               value={`${preview.words_per_cue} word${preview.words_per_cue === 1 ? "" : "s"}`}
-              pinned={pinned.words_per_cue !== undefined}
+              pinned={custom.has("words_per_cue")}
             >
               <Slider
                 min={preview.limits.words_per_cue?.min ?? 1}
@@ -218,7 +240,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
               label="Hard cap"
               hint="The most words a caption may ever hold."
               value={`${preview.words_per_cue_max} words`}
-              pinned={pinned.words_per_cue_max !== undefined}
+              pinned={custom.has("words_per_cue_max")}
             >
               <Slider
                 min={preview.limits.words_per_cue_max?.min ?? 1}
@@ -235,7 +257,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
               label="Pause threshold"
               hint="A silence this long always ends a caption, whatever the word count."
               value={`${preview.pause_sec.toFixed(2)} s`}
-              pinned={pinned.pause_sec !== undefined}
+              pinned={custom.has("pause_sec")}
             >
               <Slider
                 min={preview.limits.pause_sec?.min ?? 0}
@@ -250,7 +272,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
               label="Caption size"
               hint="Scales the bold-stack text, its outline and the line gap together."
               value={`${Math.round((preview.size_scale ?? 1) * 100)} %`}
-              pinned={pinned.size_scale !== undefined}
+              pinned={custom.has("size_scale")}
             >
               <Slider
                 min={preview.limits.size_scale?.min ?? 0.8}
@@ -265,7 +287,7 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
               label="Highlight colour"
               hint="The word being spoken. Empty keeps the style's own colour."
               value={preview.highlight_color || "Style default"}
-              pinned={pinned.highlight_color !== undefined}
+              pinned={custom.has("highlight_color")}
             >
               <div className="flex flex-wrap items-center gap-2">
                 {["#39FF14", "#FFD400", "#FF5C39", "#FF2E88", "#4DA3FF", "#FFFFFF"].map((hex) => (
@@ -299,6 +321,43 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                     Default
                   </Button>
                 )}
+              </div>
+            </Field>
+
+            <Field
+              label="Emoji per caption"
+              hint="Twemoji PNGs burned in one ffmpeg pass, above the caption block. Low 15% of chunks, medium 35%, high 60%."
+              value={emojiOn ? emojiDensity : "Off"}
+              pinned={false}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  aria-label="Emoji off"
+                  onClick={() => setDraft({ ...preview, emojiEnabled: false })}
+                  className={
+                    !emojiOn
+                      ? "cursor-pointer rounded-lg border border-foreground/30 bg-accent/40 px-3 py-1.5 text-xs font-medium text-foreground"
+                      : "cursor-pointer rounded-lg border border-border/60 px-3 py-1.5 text-xs text-muted-foreground hover:border-foreground/40"
+                  }
+                >
+                  Off
+                </button>
+                {(["low", "medium", "high"] as const).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    aria-label={`Emoji density ${level}`}
+                    onClick={() => setDraft({ ...preview, emojiEnabled: true, emojiDensity: level })}
+                    className={
+                      emojiOn && emojiDensity === level
+                        ? "cursor-pointer rounded-lg border border-foreground/30 bg-accent/40 px-3 py-1.5 text-xs font-medium capitalize text-foreground"
+                        : "cursor-pointer rounded-lg border border-border/60 px-3 py-1.5 text-xs capitalize text-muted-foreground hover:border-foreground/40"
+                    }
+                  >
+                    {level}
+                  </button>
+                ))}
               </div>
             </Field>
 
@@ -342,11 +401,18 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                 size="sm"
                 variant="ghost"
                 className="cursor-pointer gap-1.5 text-xs"
-                disabled={saving || Object.keys(current?.overrides ?? {}).length === 0}
-                onClick={() => void reset()}
+                disabled={saving || (preview?.custom ?? []).length === 0}
+                onClick={() =>
+                  void save({
+                    presetKey: selected,
+                    emojiEnabled: emojiOn,
+                    emojiDensity,
+                    reset: true,
+                  })
+                }
               >
                 <RotateCcw className="size-3.5" />
-                Reset to defaults
+                Reset to preset
               </Button>
               <Button
                 size="sm"
@@ -359,6 +425,11 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                     pause_sec: draft?.pause_sec,
                     size_scale: draft?.size_scale,
                     highlight_color: draft?.highlight_color,
+                    // Without these two the chip was a picture of a preset:
+                    // the save dropped the key and every render used the default.
+                    presetKey: selected,
+                    emojiEnabled: emojiOn,
+                    emojiDensity,
                   })
                 }
               >

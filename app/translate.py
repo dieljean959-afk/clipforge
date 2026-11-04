@@ -173,12 +173,27 @@ def build_cues(
     # or a pause of 0.4 s, then split into two balanced lines at burn time (each
     # line is its own ASS event, so the chunk itself is only word-grouped here).
     stack = preset.key == "bold_stack"
+    # THE RHYTHM KNOBS, read from the resolved settings instead of literals.
+    # These three were hard-coded here (4 / 2.6 s / BOLD_STACK_PAUSE_BREAK), so
+    # "Burst length", "Hard cap" and "Pause threshold" were saved, displayed
+    # and then ignored by the only code that decides where a chunk ends.
+    sub = getattr(settings, "subtitle", None)
+    target = int(getattr(sub, "words_per_cue", 4 if stack else 2) or (4 if stack else 2))
+    cap = int(getattr(sub, "words_per_cue_max", max(target, 4)) or max(target, 4))
+    cap = max(target, cap)
+    pause_break = float(
+        getattr(sub, "pause_sec", _subtitle.BOLD_STACK_PAUSE_BREAK if stack else 0.30)
+        or 0.0
+    )
     cues = _subtitle.words_to_cues(
         kept,
-        words_per_cue=4 if stack else 2,
+        words_per_cue=target,
+        max_words=cap,
         max_chars=max_chars * 2,   # cue-level cap = 2 display lines
         max_duration=2.6 if stack else 2.2,
-        pause_sec=_subtitle.BOLD_STACK_PAUSE_BREAK if stack else 0.30,
+        # 0 means "never cut on a pause", which is what the slider's own 0.0
+        # means — not "cut on every word boundary".
+        pause_sec=(pause_break if pause_break > 0 else 1e9),
     )
     if stack:
         # A lone word would leave the stack's second line empty — fold it into a

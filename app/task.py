@@ -24,6 +24,7 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -594,6 +595,46 @@ class Pipeline:
     def _log(self, job_id: str, line: str) -> None:
         logger.info(f"[job {job_id}] {line}")
         self.store.append_job_log(job_id, line)
+
+    def _caption_settings(self, job: dict[str, Any]) -> tuple[Settings, dict[str, Any]]:
+        """(Settings for the renderer, THE resolved caption object).
+
+        One call decides every caption number this batch will burn: the stored
+        preset + the dashboard's slider overrides + this job's own preset and
+        emoji choice. Everything downstream reads the returned Settings, so a
+        value cannot be applied in one place and ignored in another.
+
+        The per-job fields are folded in as overrides rather than replacing
+        the stored ones, so a batch created from the dashboard keeps the
+        sliders and picks its own look on top of them.
+        """
+        from app import caption_style
+
+        overrides = dict(caption_style.read(self.settings.app.paths))
+        preset = str(job.get("captionPreset") or "").strip()
+        if preset:
+            overrides["preset_key"] = preset
+        if job.get("emojiEnabled") is not None:
+            overrides["emoji_enabled"] = bool(job.get("emojiEnabled"))
+        if job.get("emojiDensity"):
+            overrides["emoji_density"] = job.get("emojiDensity")
+
+        resolved = caption_style.resolve_caption_settings(self.settings, overrides)
+        sub = self.settings.subtitle
+        applied = replace(
+            sub,
+            font_size=int(resolved["fontSize"]),
+            words_per_cue=int(resolved["wordsPerCue"]),
+            words_per_cue_max=int(resolved["wordsPerCueMax"]),
+            pause_sec=float(resolved["pauseSec"]),
+            size_scale=float(resolved["sizeScale"]),
+            highlight_color=str(resolved["highlightColor"] or ""),
+            position_y=float(resolved["positionY"]),
+            emoji_enabled=bool(resolved["emojiEnabled"]),
+            emoji_density=str(resolved["emojiDensity"]),
+            preset=str(resolved["presetKey"]),
+        )
+        return replace(self.settings, subtitle=applied), resolved
 
     def _patch_job(self, job_id: str, **fields: Any) -> dict[str, Any]:
         """Re-read the job, apply `fields`, write it back.
@@ -1465,15 +1506,27 @@ class Pipeline:
             )
             self._log(job_id, f"caption language: {caption_language} (auto)")
 
-        style_key = str(job.get("captionPreset") or self.settings.subtitle.preset or "bold_pop")
+        # THE resolved caption object for this batch: preset defaults + the
+        # dashboard's sliders + the job's own preset/emoji choice. Reading
+        # self.settings here was the bug — the stored overrides were never
+        # applied to the render, so every slider was inert.
+        cap_settings, resolved = self._caption_settings(job)
+        style_key = str(resolved["presetKey"])
         # Emoji: ON/OFF and density are per batch (job), falling back to config.
-        emoji_enabled = bool(job.get("emojiEnabled", self.settings.subtitle.emoji_enabled))
-        emoji_density = str(
-            job.get("emojiDensity") or self.settings.subtitle.emoji_density or "medium"
-        ).strip().lower()
+        emoji_enabled = bool(resolved["emojiEnabled"])
+        emoji_density = str(resolved["emojiDensity"] or "medium").strip().lower()
+        self._log(
+            job_id,
+            f"caption style: {style_key} ({resolved['label']}) "
+            f"size={resolved['fontSize']}px outline={resolved['outline']} "
+            f"lines={resolved['lines']} pitch={resolved['pitch']}px "
+            f"words={resolved['wordsPerCue']}/{resolved['wordsPerCueMax']} "
+            f"pause={resolved['pauseSec']}s pos={resolved['positionMode']}@{resolved['positionY']} "
+            f"emoji={emoji_density if emoji_enabled else 'off'} styleId={resolved['hash']}"
+        )
         for i, cut in enumerate(cuts):
             cues = translate.build_cues(
-                transcript, cut, self.settings,
+                transcript, cut, cap_settings,
                 language=caption_language,
                 style=style_key,
                 # An explicit ENG/ESP pick wins for the whole job. On "auto",
@@ -1570,6 +1623,12 @@ class Pipeline:
         total_sec = 0.0
         rendered = 0
         failed: list[tuple[int, str, str]] = []
+        # Resolved ONCE for the whole export loop, and fingerprinted: a clip
+        # whose stored styleId still matches may be reused, anything else must
+        # re-encode. Without the id, "Re-render captions" skipped every clip
+        # whose file already existed and served the stale render.
+        cap_settings, resolved = self._caption_settings(job)
+        style_id = str(resolved["hash"])
 
         for i, cut in enumerate(cuts):
             self._progress(
@@ -1588,11 +1647,22 @@ class Pipeline:
             if (
                 existing_doc is not None
                 and existing_doc.get("renderState") == "done"
+                and existing_doc.get("styleId") == style_id
                 and existing_file.exists()
                 and existing_file.stat().st_size > 0
             ):
-                self._log(job_id, f"resume: clip {i + 1} already rendered, skipping")
+                self._log(job_id, f"resume: clip {i + 1} already rendered at this style, skipping")
                 continue
+            if (
+                existing_doc is not None
+                and existing_doc.get("renderState") == "done"
+                and existing_doc.get("styleId") != style_id
+            ):
+                self._log(
+                    job_id,
+                    f"style changed ({existing_doc.get('styleId')} -> {style_id}) "
+                    f"— re-rendering clip {i + 1}",
+                )
             self.store.write_clip(
                 clip_id,
                 {"renderState": "running", "jobId": job_id},
@@ -1605,9 +1675,9 @@ class Pipeline:
                     # track = no emoji layer, never a guess at render time.
                     emoji_track = ws.read_json("captions", f"emoji_{i:03d}.json") or {}
                     meta = encode.render_clip(
-                        src, cut, dest / f"clip_{i:03d}.mp4", self.settings,
+                        src, cut, dest / f"clip_{i:03d}.mp4", cap_settings,
                         cues=(ws.read_json("captions", f"cues_{i:03d}.json") or {}).get("cues") or [],
-                        preset_key=job.get("captionPreset") or self.settings.subtitle.preset or "bold_pop",
+                        preset_key=str(resolved["presetKey"]),
                         emoji_selection=emoji_track.get("selected") or [],
                         # The FIT/FILL choice per shot is carried from the
                         # reframe stage on each cut and logged here.
@@ -1657,6 +1727,10 @@ class Pipeline:
                         "encoderLabel": meta.get("encoderLabel"),
                         "hardwareEncoded": meta.get("hardwareEncoded"),
                         "preset": meta.get("preset"),
+                        # Which resolved style this file wears, so a changed
+                        # style is never mistaken for an up-to-date render.
+                        "styleId": style_id,
+                        "captionSettings": resolved,
                         "ffmpegCommand": meta.get("ffmpegCommand"),
                         "ffmpegStderr": meta.get("ffmpegStderr"),
                         "jobId": job_id,
@@ -1679,6 +1753,8 @@ class Pipeline:
                         "encoderLabel": meta.get("encoderLabel"),
                         "hardwareEncoded": meta.get("hardwareEncoded"),
                         "preset": meta.get("preset"),
+                        "styleId": style_id,
+                        "captionSettings": resolved,
                         "ffmpegCommand": meta.get("ffmpegCommand"),
                         "ffmpegStderr": meta.get("ffmpegStderr"),
                         "jobId": job_id,

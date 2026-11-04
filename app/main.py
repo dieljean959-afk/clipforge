@@ -1425,6 +1425,26 @@ def remove_s3_key(confirm: bool = False) -> dict:
     return {**status, "linesRemoved": removed, "envDropped": dropped}
 
 
+def _freeze_caption_settings(job: dict) -> None:
+    """Store the RESOLVED caption object on the job (preset + sliders).
+
+    Written at submit time so the payload the UI sent is what renders, and
+    so the dashboard can show exactly which style a batch wears.
+    """
+    overrides = dict(caption_style.read(settings.app.paths))
+    preset = str(job.get("captionPreset") or "").strip()
+    if preset:
+        overrides["preset_key"] = preset
+    if job.get("emojiEnabled") is not None:
+        overrides["emoji_enabled"] = bool(job.get("emojiEnabled"))
+    if job.get("emojiDensity"):
+        overrides["emoji_density"] = job.get("emojiDensity")
+    resolved = caption_style.resolve_caption_settings(settings, overrides)
+    job["captionPreset"] = resolved["presetKey"]
+    job["captionSettings"] = resolved
+    job["captionStyleId"] = resolved["hash"]
+
+
 class CaptionStyleIn(BaseModel):
     # All optional: the dialog sends the whole set it knows about, and a
     # missing key means "stop overriding this one".
@@ -1432,6 +1452,19 @@ class CaptionStyleIn(BaseModel):
     words_per_cue_max: float | None = None
     pause_sec: float | None = None
     highlight_color: str | None = None
+    # These two were MISSING from this model while the dialog sent them, so
+    # pydantic dropped them silently: "Caption size" and the preset chip never
+    # reached the store, the renderer therefore never saw them, and every
+    # render came out at the default size wearing the default look. That is
+    # the whole "the sliders do nothing" report.
+    size_scale: float | None = None
+    preset_key: str | None = None
+    emoji_enabled: bool | None = None
+    emoji_density: str | None = Field(default=None, pattern="^(low|medium|high)$")
+    position_mode: str | None = Field(default=None, pattern="^(video_bottom|frame|custom)$")
+    position_y: float | None = None
+    # "Reset to preset": drop the slider overrides but KEEP the chosen look.
+    reset: bool | None = None
 
 
 @app.get("/api/settings/captions")
@@ -1453,15 +1486,21 @@ def put_caption_style(body: CaptionStyleIn) -> dict:
     No restart is needed and the running process is not mutated: the render
     stage re-reads the stored file when a job starts (caption_style.resolve).
     """
-    stored = caption_style.write(
-        settings.app.paths, body.model_dump(exclude_none=True)
-    )
+    payload = body.model_dump(exclude_none=True)
+    if payload.pop("reset", False):
+        # Keep the identity keys (preset, emoji, position) and drop every
+        # slider override + the highlight colour, so the batch falls back to
+        # exactly what the preset file says.
+        keep = {caption_style.PRESET_KEY, caption_style.EMOJI_ENABLED_KEY,
+                caption_style.EMOJI_DENSITY_KEY, caption_style.POSITION_MODE_KEY}
+        payload = {k: v for k, v in payload.items() if k in keep}
+    stored = caption_style.write(settings.app.paths, payload)
+    resolved = caption_style.effective(settings)
+    logger.info(f"[caption-style] saved {stored or '(defaults)'} -> styleId {resolved['hash']}")
     return {
-        **caption_style.effective(settings),
+        **resolved,
         "saved": stored,
-        "styleId": subtitle_svc.style_fingerprint(
-            caption_style.resolve(settings), settings.subtitle.preset
-        ),
+        "styleId": resolved["hash"],
     }
 
 
@@ -1543,6 +1582,10 @@ def create_job(body: CreateJobIn) -> dict:
         job["emojiEnabled"] = bool(body.emojiEnabled)
     if body.emojiDensity:
         job["emojiDensity"] = body.emojiDensity
+    # Freeze the resolved caption object on the job. A batch must render the
+    # style it was submitted with, not whatever the dashboard is set to when
+    # the worker finally picks it up (queues are minutes long).
+    _freeze_caption_settings(job)
     job_id = job["_id"]
     store.append_job_log(job_id, f"job created ({body.sourceType}: {body.source[:80]})")
     store.write_job(job)
@@ -1581,6 +1624,7 @@ async def upload_job(
         job["emojiEnabled"] = bool(emojiEnabled)
     if emojiDensity in ("low", "medium", "high"):
         job["emojiDensity"] = emojiDensity
+    _freeze_caption_settings(job)
     job_id = job["_id"]
     store.write_job(job)
     dest_dir = store.job_source_dir_for_write(job_id)

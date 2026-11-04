@@ -135,6 +135,28 @@ class EncoderChoice:
             "-filter_complex_threads", str(self.threads),
         ]
 
+    def emoji_threads_args(self) -> list[str]:
+        """Threads for a filter_complex pass that carries emoji overlays.
+
+        A 1 CPU / 2 GiB host has nothing to parallelise: letting ffmpeg spawn
+        one filter thread per core it *thinks* it has spends the whole budget
+        on scheduling and, on this container, is the difference between the
+        emoji pass costing 10 % and 80 % more than the plain one. One thread,
+        deterministically, whenever the host reports a single usable core.
+        """
+        try:
+            from app import hostlimits
+
+            cpus = int(hostlimits.limits().get("cpus") or 0)
+        except Exception:  # noqa: BLE001 - never fail a render over a thread hint
+            cpus = 0
+        n = 1 if cpus <= 1 else max(1, self.threads)
+        return [
+            "-threads", str(n),
+            "-filter_threads", str(n),
+            "-filter_complex_threads", str(n),
+        ]
+
     def for_output(self, width: int, height: int, fps: float) -> "EncoderChoice":
         """Size the encode to the output it is actually producing.
 
@@ -729,44 +751,70 @@ def render_clip(
         # chain, and the static-crop fallback renders without emoji rather than
         # failing the clip over decoration.
         if emoji:
+            # ONE pass, ONE input per DISTINCT emoji image.
+            #
+            # The old chain opened the same PNG again for every occurrence and
+            # animated it with `scale=...:eval=frame`, which re-runs the scaler
+            # on every decoded frame — on a 1 CPU / 2 GiB host that was most of
+            # the render time. Now each distinct PNG is opened once, fanned out
+            # with `split`, pre-scaled ONCE, and the pop is a y-offset over the
+            # first 180 ms plus a short alpha fade (no per-frame scaling).
             chain = [f"[0:v]{graph}[cv0]"]
             extra: list[str] = []
-            for idx, item in enumerate(emoji, start=1):
-                extra += ["-loop", "1", "-t", f"{clip_seconds:.3f}", "-i", item["path"]]
-                size = int(item.get("size") or 150)
-                # Pop in: 0.62 -> 1.15 over 180 ms, settle back to 1.0 by 300 ms
-                # (the reference's springy emoji beat), then a 120 ms fade out
-                # at the end of the chunk's window. The scale factor is a
-                # function of the frame's own timestamp, which is what makes
-                # this a real animation and not three static sizes.
-                s0 = float(item["start"])
-                s1 = float(item["end"])
-                pop = (
-                    f"if(lt(t,{s0:.3f}),0.62,"
-                    f"if(lt(t,{s0 + 0.18:.3f}),0.62+2.944*(t-{s0:.3f}),"
-                    f"if(lt(t,{s0 + 0.30:.3f}),1.15-1.25*(t-{s0 + 0.18:.3f}),1.0)))"
-                )
-                chain.append(
-                    f"[{idx}:v]format=rgba,"
-                    f"scale=w='{size}*{pop}':h='{size}*{pop}':eval=frame,"
-                    f"fade=t=out:st={max(0.0, s1 - 0.12):.3f}:d=0.12:alpha=1[em{idx}]"
-                )
-                # Above the caption block, never on it. `x`/`y` come from
-                # emoji.emoji_geometry(), which derives them from the caption's
-                # own computed top edge, so the two layers cannot drift apart.
-                emoji_x = int(item.get("x") or (out_w - size) // 2)
-                emoji_y = int(item.get("y") or 0)
-                chain.append(
-                    f"[cv{idx - 1}][em{idx}]overlay=x={emoji_x}:y={emoji_y}:"
-                    f"enable='between(t,{s0:.3f},{s1:.3f})'[cv{idx}]"
-                )
+            by_path: dict[str, list[dict]] = {}
+            for item in emoji:
+                by_path.setdefault(str(item["path"]), []).append(item)
+            src_idx = 1
+            layer = 0
+            for path, items in by_path.items():
+                size = int(items[0].get("size") or 140)
+                extra += ["-loop", "1", "-t", f"{clip_seconds:.3f}", "-i", path]
+                n = len(items)
+                if n == 1:
+                    chain.append(
+                        f"[{src_idx}:v]format=rgba,scale={size}:{size}[em{layer}]"
+                    )
+                    outs = [f"[em{layer}]"]
+                else:
+                    # split=1 fan-out: one decode, one scale, N timed overlays.
+                    chain.append(
+                        f"[{src_idx}:v]format=rgba,scale={size}:{size},split={n}"
+                        + "".join(f"[e{layer}_{k}]" for k in range(n))
+                    )
+                    outs = [f"[e{layer}_{k}]" for k in range(n)]
+                for k, item in enumerate(items):
+                    s0 = float(item["start"])
+                    s1 = float(item["end"])
+                    fade_in = min(0.10, max(0.03, (s1 - s0) / 4))
+                    fade_out = min(0.12, max(0.03, (s1 - s0) / 4))
+                    lift = max(6, int(size * 0.09))
+                    chain.append(
+                        f"{outs[k]}fade=t=in:st={s0:.3f}:d={fade_in:.3f}:alpha=1,"
+                        f"fade=t=out:st={max(0.0, s1 - fade_out):.3f}:d={fade_out:.3f}:alpha=1"
+                        f"[em{layer}f{k}]"
+                    )
+                    emoji_x = int(item.get("x") or (out_w - size) // 2)
+                    # Rises `lift` px into place over 180 ms. Quoted, because
+                    # the expression contains commas that the filter parser
+                    # would otherwise read as filter separators.
+                    emoji_y = int(item.get("y") or 0)
+                    y_expr = (
+                        f"'{emoji_y}+{lift}*(1-min(1,(t-{s0:.3f})/0.18))'"
+                    )
+                    label = f"cv{layer + 1}"
+                    chain.append(
+                        f"[cv{layer}][em{layer}f{k}]overlay=x={emoji_x}:y={y_expr}:"
+                        f"enable='between(t,{s0:.3f},{s1:.3f})'[{label}]"
+                    )
+                    layer += 1
+                src_idx += 1
             return [
                 ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                 *enc.hw_accel_args(),
                 "-ss", f"{start:.3f}",
                 "-i", str(src),
                 *extra,
-                *enc.threads_args(),
+                *enc.emoji_threads_args(),
                 "-filter_complex", ";".join(chain),
                 *enc.ffmpeg_codec_args(),
                 "-map", f"[cv{len(emoji)}]",

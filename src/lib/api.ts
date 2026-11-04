@@ -33,6 +33,25 @@ export interface CaptionStyleDto {
   size_scale?: number;
   /** Which caption look preset this overrides resolve to. */
   presetKey?: string;
+  /** Every preset the backend ships, in the order the picker shows them. */
+  presetKeys?: string[];
+  /** Human label of the resolved look. */
+  label?: string;
+  /** Twemoji overlay switch + how many chunks get one (low 15% / medium 35% / high 60%). */
+  emojiEnabled?: boolean;
+  emojiDensity?: "low" | "medium" | "high";
+  /** Slider names whose value differs from the preset's own (drives the badge). */
+  custom?: string[];
+  /** Resolved look, so the preview draws the same text the renderer will. */
+  fontSize?: number;
+  outline?: number;
+  pitch?: number;
+  lines?: number;
+  uppercase?: boolean;
+  box?: boolean;
+  colors?: string[];
+  /** Resolved settings hash: the render cache key. */
+  hash?: string;
   /** Which of these are pinned here rather than inherited from config.toml. */
   overrides: Record<string, number | string>;
   limits: Record<string, { min: number; max: number; step: number }>;
@@ -42,9 +61,19 @@ export interface CaptionStyleDto {
 export type CaptionStyleUpdate = Partial<
   Pick<
     CaptionStyleDto,
-    "words_per_cue" | "words_per_cue_max" | "pause_sec" | "highlight_color" | "size_scale"
+    | "words_per_cue"
+    | "words_per_cue_max"
+    | "pause_sec"
+    | "highlight_color"
+    | "size_scale"
+    | "presetKey"
+    | "emojiEnabled"
+    | "emojiDensity"
   >
->;
+> & {
+  /** Drop the slider overrides, keep the chosen preset ("Reset to preset"). */
+  reset?: boolean;
+};
 
 /** Which backend scores the viral moments (NOT the ASR engine). */
 export interface DetectionDto {
@@ -182,6 +211,21 @@ export interface ClipDto {
   mediaDurationSec?: number | null;
   mediaError?: string | null;
   fps?: number | null;
+  /** The resolved caption look this clip was burned with (from the job). */
+  captionSettings?: {
+    presetKey?: string;
+    fontSize?: number;
+    outline?: number;
+    pitch?: number;
+    lines?: number;
+    uppercase?: boolean;
+    box?: boolean;
+    colors?: string[];
+    highlightColor?: string;
+    positionY?: number;
+    emojiEnabled?: boolean;
+    emojiDensity?: string;
+  } | null;
   renderState: "pending" | "running" | "done" | "failed";
   renderMs?: number | null;
   translationTracks?: { lang: string; source?: boolean; cached?: boolean; error?: string; files?: Record<string, string> }[] | null;

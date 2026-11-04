@@ -95,8 +95,14 @@ COOLDOWN_SEC = 2.0
 MAX_SAME_EMOJI = 3
 MIN_DURATION = 0.8
 MAX_DURATION = 2.0
-EMOJI_SIZE = 150
+#: Rendered emoji size in frame pixels. The bundled PNGs are pre-scaled to
+#: 144 px so this is a 1:1 blit at the normal setting — no runtime resize, and
+#: ffmpeg's scale filter is only used to keep the aspect identical.
+EMOJI_SIZE = 140
 CAPTION_GAP = 24
+
+#: Directory name of the pre-scaled copies, next to the 72 px originals.
+EMOJI_ASSET_SIZE = 144
 
 #: A shouting chunk may only upgrade to a stronger face from this table.
 INTENSITY_UPGRADE = {"😮": "🤯", "😲": "🤯", "😠": "🤬", "😨": "😱", "😢": "😭"}
@@ -111,6 +117,16 @@ class EmojiEntry:
 
     @property
     def path(self) -> Path:
+        """The bundled PNG, preferring the pre-scaled copy.
+
+        ``app/assets/emoji/144/`` is produced once by tools/scale_twemoji.py,
+        so the renderer blits at its native size instead of asking ffmpeg to
+        resize 72 px up to 140 px on every frame. The 72 px file stays as the
+        source of truth for the licence and the fallback.
+        """
+        scaled = EMOJI_DIR / str(EMOJI_ASSET_SIZE) / self.file
+        if scaled.exists():
+            return scaled
         return EMOJI_DIR / self.file
 
 
@@ -255,9 +271,19 @@ def parse_tags(reply: str, count: int) -> list[Tag]:
         if not 0 <= i < count:
             continue
         emotion = str(item.get("emotion") or "neutral").strip().lower()
-        emotion = EMOTION_SYNONYMS.get(emotion, emotion)
-        if emotion not in EMOTIONS:
-            emotion = "neutral"
+        # Models answer compound labels ("pride|joy", "joy / pride"). Split and
+        # take the first label we know: collapsing the whole string to neutral
+        # silently threw away the best chunk of the clip (a confident 🔥 became
+        # "neutral" and was then skipped by the selection rule).
+        parts = [p.strip() for p in re.split(r"[|/,+&]|\bor\b", emotion) if p.strip()]
+        emotion = "neutral"
+        for part in parts or [emotion]:
+            cand = EMOTION_SYNONYMS.get(part, part)
+            if cand in EMOTIONS and cand != "neutral":
+                emotion = cand
+                break
+            if cand in EMOTIONS:
+                emotion = "neutral"
         emoji = item.get("emoji")
         emoji = str(emoji).strip() if isinstance(emoji, str) else None
         if emoji in {"", "null", "None", "none"}:
@@ -610,19 +636,26 @@ def emoji_geometry(
     the clip carries its own style (a bold_stack job rendered with the config's
     bold_yellow guess put the emoji 144 px too high).
     """
+    from app import caption_style as _caption_style
     from app import subtitle as _subtitle
 
-    preset = _subtitle.get_preset(preset_key or getattr(settings.subtitle, "preset", None))
+    # The RESOLVED object, so the emoji sits above the block the render will
+    # actually produce (the preview and the renderer agree by construction).
+    resolved = _caption_style.resolve_caption_settings(settings)
+    key = preset_key or resolved["presetKey"]
+    preset = _subtitle.get_preset(key)
     caption_top: int
     if preset.key == "bold_stack":
-        metrics = _subtitle.bold_stack_metrics(_subtitle.caption_size_scale(settings))
+        metrics = _subtitle.bold_stack_metrics(float(resolved["sizeScale"]))
         line1_y, _line2_y = _subtitle.bold_stack_positions(
             frame_h, metrics["pitch"], anchor_y=anchor_y,
-            position_y=getattr(settings.subtitle, "position_y", 0.78),
+            position_y=float(resolved["positionY"]),
         )
         caption_top = int(line1_y - metrics["cap_h"] - metrics["outline"])
     else:
-        caption_top = int(frame_h * 0.60)
+        # One line: the block's top is the text row above its baseline.
+        baseline = int(round(frame_h * float(resolved["positionY"])))
+        caption_top = int(baseline - resolved["fontSize"] * 0.72 - resolved["outline"])
     y = max(int(frame_h * 0.06), caption_top - CAPTION_GAP - size)
     x = (frame_w - size) // 2
     return {"x": x, "y": y, "size": size}
