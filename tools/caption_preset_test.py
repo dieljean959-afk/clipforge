@@ -519,51 +519,46 @@ def main() -> int:
     check("no audio-processing call crept in (audio is never cut)",
           "af=" not in subtitle_src and "volume=0" not in subtitle_src,
           "the ASS filter chain must not carry any audio edit")
-        before = dict(body)
+    before = dict(body)
 
-        r = client.put("/api/settings/captions",
-                       json={"words_per_cue": 2, "pause_sec": 0.45, "highlight_color": "#FF5C39"})
-        check("PUT caption style answers 200", r.status_code == 200, r.text)
-        put = r.json()
-        check("PUT echoes the saved values",
+    r = client.put("/api/settings/captions",
+               json={"words_per_cue": 2, "pause_sec": 0.45, "highlight_color": "#FF5C39"})
+    check("PUT caption style answers 200", r.status_code == 200, r.text)
+    put = r.json()
+    check("PUT echoes the saved values",
               put["words_per_cue"] == 2 and abs(put["pause_sec"] - 0.45) < 1e-6
               and put["highlight_color"] == "#FF5C39", str(put))
-        check("PUT marks them as pinned",
+    check("PUT marks them as pinned",
               set(put.get("overrides", {})) == {"words_per_cue", "pause_sec", "highlight_color"},
               str(put.get("overrides")))
-        check("PUT returns a new style id so a re-render will not be skipped",
+    check("PUT returns a new style id so a re-render will not be skipped",
               put.get("styleId") and put["styleId"] != before.get("styleId"),
               f"{before.get('styleId')} -> {put.get('styleId')}")
 
-        check("the saved values reach the next render with no restart",
+    check("the saved values reach the next render with no restart",
               caption_style.resolve(main_mod.settings).subtitle.words_per_cue == 2)
-        check("GET after PUT agrees", client.get("/api/settings/captions").json()["words_per_cue"] == 2)
+    check("GET after PUT agrees", client.get("/api/settings/captions").json()["words_per_cue"] == 2)
 
-        r = client.put("/api/settings/captions", json={"words_per_cue": 99, "pause_sec": -1})
-        check("PUT with absurd values is clamped, not a 500", r.status_code == 200, r.text)
-        check("the clamped burst length is inside the advertised range",
+    r = client.put("/api/settings/captions", json={"words_per_cue": 99, "pause_sec": -1})
+    check("PUT with absurd values is clamped, not a 500", r.status_code == 200, r.text)
+    check("the clamped burst length is inside the advertised range",
               r.json()["words_per_cue"] <= r.json()["limits"]["words_per_cue"]["max"],
               str(r.json()["words_per_cue"]))
-        r = client.put("/api/settings/captions", json={"words_per_cue": "banana"})
+    r = client.put("/api/settings/captions", json={"words_per_cue": "banana"})
         # A number field given a word is rejected outright rather than quietly
         # dropped: a 422 names the offending key, whereas silently ignoring it
         # would leave the user staring at a slider that refuses to move.
-        check("PUT with a non-numeric value is rejected, not silently ignored",
+    check("PUT with a non-numeric value is rejected, not silently ignored",
               r.status_code == 422, f"{r.status_code} {r.text[:120]}")
-        check("the rejected PUT stored nothing",
+    check("the rejected PUT stored nothing",
               client.get("/api/settings/captions").json()["words_per_cue"] != "banana")
 
-        r = client.delete("/api/settings/captions")
-        check("DELETE caption style answers 200", r.status_code == 200, r.text)
-        check("DELETE clears the pinned markers", r.json()["overrides"] == {}, str(r.json()["overrides"]))
-        check("DELETE brings the config.toml value back",
+    r = client.delete("/api/settings/captions")
+    check("DELETE caption style answers 200", r.status_code == 200, r.text)
+    check("DELETE clears the pinned markers", r.json()["overrides"] == {}, str(r.json()["overrides"]))
+    check("DELETE brings the config.toml value back",
               r.json()["words_per_cue"] == before["words_per_cue"],
               f"{r.json()['words_per_cue']} vs {before['words_per_cue']}")
-    finally:
-        client.close()
-        # leave the real store exactly as it was found
-        caption_style.write(main_mod.settings.app.paths, saved)
-        check("the test restored whatever was stored before it ran", True)
 
 
 def section_tunable(s, task_src: str) -> None:
@@ -726,6 +721,12 @@ def section_tunable(s, task_src: str) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
 
 
 
