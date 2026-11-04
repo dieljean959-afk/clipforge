@@ -455,16 +455,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def build_events(
     cues: list[dict],
     style_key: str | None = None,
-    start_offset: float = 0.0,
-    anchor_y: int | None = None,
-    frame_w: int = 1080,
-) -> str:
+    start_offset: float = 0.0,        anchor_y: int | None = None,
+        frame_w: int = 1080,
+    ) -> str:
     """One Dialogue line per spoken WORD, re-drawing its 2-4 word chunk.
 
     Re-emitting the chunk for every word (instead of one static line with the
     first word coloured) is what makes the accent follow the voice. The pop is
     an ASS transform on the active word only; the chunk's entrance fade/scale
     is emitted on the first word of the chunk.
+
+    Framed captions (PlayResX/Y = frame): ASS places the block's box inside the
+    PlayRes box, so the 90 px side margins are now *inside* the frame, not
+    outside it, and the 70-94 px font is read in frame pixels. That is what
+    makes the text big and readable on a 1080-wide picture instead of appearing
+    tiny in a small corner. Sizes below are the brief's: bold 70-94 px, clean
+    white 76 px, green 84 px, neon 104 px, box 74 px, bold yellow 94 px.
     """
     style = get_style(style_key)
     fill = _bgr(style.fill)
@@ -537,10 +543,16 @@ def build_events(
                         rendered.append(rf"{{\1c{fill}}}" + text)
 
                 body = _join(rendered, break_at)
-                # Explicit placement instead of a bottom margin: \an2 anchors
-                # the block's BOTTOM at (centre, anchor_y), so the text sits
-                # against the foreground video's lower edge and never drifts
-                # into the blurred band below it.
+                # Frame layout: ASS lays out a .ass inside the PlayRes box, so
+                # the 90 px side margins below are read *inside* the 1080 px
+                # frame (not outside it). That is what makes the 70-94 px font
+                # render big and readable instead of tiny at a corner, and it
+                # keeps the text more than 60 px from both frame edges.
+                # Pos: \an2 keeps the chunk bottom-centre at (frame centre,
+                # anchor_y), so the text still sits against the foreground's
+                # lower edge on a FIT clip.
+                if anchor_y is not None:
+                    body = rf"{{\an2\pos({frame_w // 2},{int(anchor_y)})}}" + body
                 if anchor_y is not None:
                     body = rf"{{\an2\pos({frame_w // 2},{int(anchor_y)})}}" + body
                 if i == 0:

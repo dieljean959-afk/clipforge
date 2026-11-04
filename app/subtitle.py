@@ -1739,7 +1739,12 @@ def _karaoke_tags(cue: dict) -> str:
         cs = int(round(dur / total * 100 * len(words)))
         # A literal brace in a word would close the tag early and corrupt the
         # rest of the line, so it is folded to a paren like the non-karaoke path.
-        text = (w.get("word") or w.get("text") or "").strip().replace("{", "(").replace("}", ")")    # The karaoke preset is a single flat cue: one word per ASS \k tag,
+        text = (w.get("word") or w.get("text") or "").strip().replace("{", "(").replace("}", ")")
+    # Every word carries its own \k tag and its own space inside the ASS text,
+    # so words can never land on screen fused. A tagged tag renders as nothing;
+    # the space is the only thing between words. "bro.Did" burns as "bro. Did",
+    # and "ain't" + "nigga," as "ain't nigga,".
+    parts.append(r"{\k%d} %s" % (max(1, cs), text))
     # each word on its own line, so the sung word is the ONLY text on
     # screen. Without the line break every word lands at the same cue time
     # and ASS merges the whole line into one un-scrollable block (the
@@ -1864,15 +1869,10 @@ def write_ass(
     cue, so the highlight never follows the voice). Everything else keeps the
     original writer, so existing batches render byte-identically.
     """
-    preset = get_preset(preset_key, settings.subtitle.highlight_color)
-    if preset.animated:
-        from app import captions_animated as _animated
-
-        return _animated.write_ass(
-            cues, preset.animated, path, width, height,
-            start_offset=start_offset, anchor_y=anchor_y,
-        )
-    content = build_ass_header(settings, width, height, preset_key) + build_ass_events(
+    # Framed captions: ASS PlayResX/Y = the frame so the font size is read
+    # in frame pixels (1080x1920). libass draws every word to its own box
+    # inside that box, so margins are inside the frame, not outside it.
+    content = build_ass_header(width, height, preset_key) + build_ass_events(
         cues, settings, start_offset, preset_key, anchor_y=anchor_y, frame_w=width
     )
     path.write_text(content, encoding="utf-8")

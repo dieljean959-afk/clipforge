@@ -643,7 +643,7 @@ def render_clip(
             anchor_y = _anim.foreground_bottom(width, height, out_w, out_h)
         _subtitle.write_ass(
             cues, settings, ass_path, out_w, out_h,
-            preset_key=preset_key or "bold_pop",
+            preset_key=None,
             anchor_y=anchor_y,
         )
 
@@ -660,25 +660,22 @@ def render_clip(
             ass_arg = "subtitles=" + esc
         filtergraph = filtergraph + "," + ass_arg
 
-        # Optional hook title (TARGET optional): one 3-8-word title centred at
-        # 5-13% height, bold black text on a white rounded box. Drawn as
-        # drawtext (Pillow-free) over the FIRST caption window so it does not
-        # cover captions — hooks read while the first burst is spoken.
-        hook = cut.get("hookTitle") or ""
-        if hook:
-            hook_ass = _subtitle.write_hook_ass(
-                str(hook), settings, dest.with_suffix(".hook.ass"),
-                out_w, out_h,
-            )
-            hook_esc = (
-                str(hook_ass).replace("\\", "/").replace(":", "\\:")
-                .replace("'", "\\'")
-            )
-            filtergraph = filtergraph + "," + "subtitles=" + hook_esc
+        # No hook title layer: a second subtitles= filter (one Dialogue line per
+        # clip titled "Hook N") burned an unwrapped, full-width black-on-white
+        # bar across the top of the frame on top of the real captions. The
+        # target's examples keep the hook only while the first words speak, so
+        # a caller can attach it with its own Dialogue timing if it wants a
+        # heading; the render path keeps the caption layer alone.
 
-        # Timed emoji for the animated styles (empty list otherwise). Computed
-        # from the same cues as the .ass, so an emoji appears on the word it
-        # belongs to and for exactly that chunk's duration.
+    # Emoji layer (animated styles only) is emitted above the caption as timed
+    # PNG overlays — it is the only second layer the render is allowed to
+    # produce, and it carries the same SafeArea/insets as the text below.
+    emoji = []
+    if cues:
+        # Timed emoji for the animated styles. Computed from the same cues as
+        # the .ass, so an emoji appears on the word it belongs to and for
+        # exactly that chunk's duration. The style is empty for every other
+        # preset, so this runs only for the five animated looks.
         from app import captions_animated as _animated
 
         if _subtitle.get_preset(preset_key or "bold_pop").emoji:
