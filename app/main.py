@@ -2219,24 +2219,34 @@ def edit_clip_emoji(clip_id: str, body: EmojiEditIn) -> dict:
     cues = (StageWorkspace(load_config().app.paths.data_dir, str(clip.get("jobId") or ""))
             .read_json("captions", f"cues_{int(clip.get('order') or 0):03d}.json") or {}).get("cues") or []
     if body.i >= len(cues):
-        raise HTTPException(400, f"chunk {body.i} does not exist ({len(cues)} chunks)")
+        raise HTTPException(400, f"caption {body.i} does not exist ({len(cues)} cues)")
     if body.emoji is not None and not _emoji.is_allowed(body.emoji):
         raise HTTPException(400, f"{body.emoji!r} is not in the emoji whitelist")
 
-    selected = [s for s in track.get("selected") or [] if int(s.get("i", -1)) != body.i]
+    cue = cues[body.i]
+    start = float(cue.get("start") or 0.0)
+    cue_end = float(cue.get("end") or start)
+    # The model tags coarser chunks than the burned caption lines, so an edit is
+    # matched by TIME: any emoji already covering this cue's span is replaced,
+    # never stacked. Two overlays in the same second read as a rendering bug.
+    selected = [
+        s for s in track.get("selected") or []
+        if float(s.get("end") or 0.0) <= start + 1e-6
+        or float(s.get("start") or 0.0) >= cue_end - 1e-6
+    ]
     if body.emoji is not None:
         tag = next((t for t in track.get("tags") or [] if int(t.get("i", -1)) == body.i), {})
-        cue = cues[body.i]
-        start = float(cue.get("start") or 0.0)
-        span = min(_emoji.MAX_DURATION, max(_emoji.MIN_DURATION,
-                                           float(cue.get("end") or start) - start))
+        span = min(_emoji.MAX_DURATION, max(_emoji.MIN_DURATION, cue_end - start))
         selected.append({
             "i": body.i,
             "emoji": body.emoji,
             "emotion": tag.get("emotion") or "manual",
             "intensity": tag.get("intensity"),
             "confidence": tag.get("confidence"),
-            "reason": f"added by hand (model said: {tag.get('reason') or 'nothing'})",
+            "reason": (
+                f"added by hand (model said: {tag['reason']})" if tag.get("reason")
+                else "added by hand"
+            ),
             "sensitive": bool(tag.get("sensitive")),
             "start": round(start, 3),
             "end": round(start + span, 3),

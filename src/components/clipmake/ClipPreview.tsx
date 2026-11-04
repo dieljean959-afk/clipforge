@@ -618,13 +618,14 @@ function ClipLightbox({
   const activeIndex = cues.findIndex(
     (c) => t >= c.start - 0.05 && t <= c.end + 0.05,
   );
-  // Emoji: the burned track and the model's judgements, keyed by chunk index so
-  // the list can show WHY a chunk got one — and let the user change it.
-  const emojiByIndex = new Map((clip.emojiTrack ?? []).map((e) => [e.i, e] as const));
-  const tagsByIndex = new Map((clip.emojiTags ?? []).map((e) => [e.i, e] as const));
-  const activeEmoji = (clip.emojiTrack ?? []).find(
-    (e) => t >= e.start - 0.02 && t <= e.end + 0.02,
-  );
+  // Emoji are matched by TIME, not by index: the model tags sentence-sized
+  // chunks while the burned lines are shorter, so an index would put the chip
+  // on the wrong line. The chip sits on the first caption line the emoji
+  // covers, and the edit endpoint resolves swaps by the same span.
+  const emojiTrack = clip.emojiTrack ?? [];
+  const activeEmoji = emojiTrack.find((e) => t >= e.start - 0.02 && t <= e.end + 0.02);
+  const emojiOnCue = (start: number) =>
+    emojiTrack.find((e) => start >= e.start - 0.05 && start < e.end);
 
   // Portalled to <body> on purpose. `position: fixed` is only viewport-relative
   // while no ancestor establishes a containing block — and the dashboard uses
@@ -694,6 +695,12 @@ function ClipLightbox({
         <div className="max-h-[28vh] shrink-0 overflow-y-auto border-t border-white/10 px-3 py-2">
           <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-white/50">
             Captions as rendered · {cues.length} cues
+            {emojiTrack.length > 0 && (
+              <span className="ml-2 normal-case tracking-normal text-white/60">
+                · {emojiTrack.length} emoji
+                {clip.emojiSource?.startsWith("fallback") ? " (fallback: keywords)" : ""}
+              </span>
+            )}
           </p>
           <ol className="space-y-0.5">
             {cues.map((cue, i) => (
@@ -711,8 +718,7 @@ function ClipLightbox({
                 <EmojiEditor
                   clip={clip}
                   index={i}
-                  tag={tagsByIndex.get(i)}
-                  chosen={emojiByIndex.get(i)}
+                  chosen={emojiOnCue(cue.start)}
                   onSaved={onEmojiSaved}
                 />
               </li>
@@ -749,14 +755,12 @@ function ClipLightbox({
 function EmojiEditor({
   clip,
   index,
-  tag,
   chosen,
   onSaved,
 }: {
   clip: ClipDto;
   index: number;
-  tag?: { emoji: string | null; emotion: string; reason: string; confidence: number; sensitive: boolean };
-  chosen?: { emoji: string; reason?: string; byHandle?: boolean };
+  chosen?: { emoji: string; reason?: string; byHandle?: boolean; emotion?: string };
   onSaved?: (clipId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -799,11 +803,7 @@ function EmojiEditor({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        title={
-          chosen
-            ? `${tag?.emotion ?? chosen.emoji} · ${chosen.reason ?? ""}`
-            : `No emoji${tag ? ` · ${tag.emotion} (${Math.round((tag.confidence ?? 0) * 100)}% sure)` : ""}`
-        }
+        title={chosen ? `${chosen.emotion ?? chosen.emoji} · ${chosen.reason ?? ""}` : "No emoji on this line"}
         className={cn(
           "flex items-center gap-1 rounded border px-1 py-0.5 text-[12px] leading-none transition",
           chosen
