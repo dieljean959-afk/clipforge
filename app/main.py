@@ -1266,6 +1266,80 @@ def remove_deepseek_key(confirm: bool = False) -> dict:
     return {**live.status(), "linesRemoved": removed, "envDropped": dropped}
 
 
+# --------------------------------------------------------------------------- #
+# media download cookies (the platform Keys tab has no Edit/Delete for this
+# variable, so the app exposes it in-app — same trap as the AI keys above).
+# --------------------------------------------------------------------------- #
+_COOKIES_VAR_TO_FIELD: dict[str, str] = {
+    "YT_DLP_COOKIES_FILE": "cookies_file",
+    "YT_DLP_COOKIES_FROM_BROWSER": "cookies_from_browser",
+}
+
+
+def _cookies_field(body: dict[str, str]) -> dict[str, str]:
+    """The non-blank fields of a cookies save request, stripped and ready."""
+    out: dict[str, str] = {}
+    for field in ("cookies_file", "cookies_from_browser"):
+        raw = body.get(field)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            out[field] = value
+    return out
+
+
+def _live_cookies_key() -> _LiveKeyState:
+    """One state object for the media-download cookies; resolves from the
+    same env files as the other keys so the saved value is always current."""
+    return _LiveKeyState(ROOT, resolver=_resolve_cookies_key)
+
+
+def _resolve_cookies_key(env: dict[str, str]) -> tuple[str | None, str, str | None]:
+    """Resolve the YAML file path for yt-dlp cookies.
+
+    Returns (path, source, problem). A missing/invalid path is a hard problem;
+    yt-dlp refuses to use an empty or non-filesystem ``cookiefile``.
+    """
+    from app import download as _dl
+
+    path = env.get("YT_DLP_COOKIES_FILE") or env.get("YT_DLP_COOKIES_FROM_BROWSER")
+    if not path:
+        return None, "none", None
+
+    from app.config import DownloadConfig
+
+    # re-apply exactly the same rules the host-side config applies at boot
+    cookies_file = str(os.getenv("YT_DLP_COOKIES_FILE", path) or "").strip()
+    cookies_from_browser = str(
+        os.getenv("YT_DLP_COOKIES_FROM_BROWSER", "") or ""
+    ).strip()
+    resolved = DownloadConfig(
+        max_height=1080,
+        cookies_from_browser=cookies_from_browser,
+        auto_update=True,
+        cookies_file=cookies_file,
+    )
+    value = resolved.cookies_file or resolved.cookies_from_browser
+    if not value:
+        return None, "empty", "no cookie file configured"
+    p = Path(value).expanduser()
+    if not p.is_file():
+        return None, "missing", f"{p} does not exist"
+    if not p.is_file():
+        return None, "not_file", f"{p} is not a file"
+    if p.stat().st_size == 0:
+        return None, "empty", f"{p} is empty"
+    # Netscape-format sanity check: at least a domain= header and a path= line
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return None, "read_fail", f"cannot read {p}: {exc}"
+    if "domain=" not in text or "path=" not in text:
+        return None, "format", f"{p} is not Netscape-format (no domain=/path= lines)"
+    return str(p), "file", None
+
+
 class SetStorageIn(BaseModel):
     """Media-offload (S3/R2) credentials.
 
@@ -1311,6 +1385,77 @@ STORAGE_REQUIRED: tuple[tuple[str, str, str], ...] = (
     ("CLIPFORGE_S3_ACCESS_KEY", "access_key", "access key"),
     ("CLIPFORGE_S3_SECRET_KEY", "secret_key", "secret key"),
 )
+
+
+# --------------------------------------------------------------------------- #
+# media download cookies — YAML file path (new: cookies_file / cookies_from_browser)
+# --------------------------------------------------------------------------- #
+_COOKIES_VAR_TO_FIELD: dict[str, str] = {
+    "YT_DLP_COOKIES_FILE": "cookies_file",
+    "YT_DLP_COOKIES_FROM_BROWSER": "cookies_from_browser",
+}
+
+
+def _cookies_field(body: dict[str, str]) -> dict[str, str]:
+    """The non-blank fields of a cookies save request, stripped and ready."""
+    out: dict[str, str] = {}
+    for field in ("cookies_file", "cookies_from_browser"):
+        raw = body.get(field)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            out[field] = value
+    return out
+
+
+def _live_cookies_key() -> _LiveKeyState:
+    """One state object for the media-download cookies; resolves from the same
+    env files as the other keys so the saved value is always read back fresh."""
+    return _LiveKeyState(ROOT, resolver=_resolve_cookies_key)
+
+
+def _resolve_cookies_key(env: dict[str, str]) -> tuple[str | None, str, str | None]:
+    """Resolve the YAML file path for yt-dlp cookies.
+
+    Returns (path, source, problem). A missing/invalid path is a hard problem;
+    yt-dlp refuses to use an empty or non-filesystem ``cookiefile``.
+    """
+    from app import download as _dl
+
+    path = env.get("YT_DLP_COOKIES_FILE") or env.get("YT_DLP_COOKIES_FROM_BROWSER")
+    if not path:
+        return None, "none", None
+
+    from app.config import DownloadConfig
+
+    # re-apply exactly the same rules the host-side config applies at boot
+    cookies_file = str(os.getenv("YT_DLP_COOKIES_FILE", path) or "").strip()
+    cookies_from_browser = str(
+        os.getenv("YT_DLP_COOKIES_FROM_BROWSER", "") or ""
+    ).strip()
+    resolved = DownloadConfig(
+        max_height=1080,
+        cookies_from_browser=cookies_from_browser,
+        auto_update=True,
+        cookies_file=cookies_file,
+    )
+    value = resolved.cookies_file or resolved.cookies_from_browser
+    if not value:
+        return None, "empty", "no cookie file configured"
+    p = Path(value).expanduser()
+    if not p.is_file():
+        return None, "missing", f"{p} does not exist"
+    if p.stat().st_size == 0:
+        return None, "empty", f"{p} is empty"
+    # Netscape-format sanity check: at least a domain= header and a path= line
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return None, "read_fail", f"cannot read {p}: {exc}"
+    if "domain=" not in text or "path=" not in text:
+        return None, "format", f"{p} is not Netscape-format (no domain=/path= lines)"
+    return str(p), "file", None
 
 
 def _storage_field(body: SetStorageIn) -> dict[str, str]:
