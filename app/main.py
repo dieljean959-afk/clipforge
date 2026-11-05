@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from app import (
     caption_style,
     clipcount,
+    download,
     eta,
     hosting,
     hostlimits,
@@ -47,6 +48,9 @@ from app import llm as llm_mod
 
 
 from uuid import uuid4 as uuid4
+
+
+MIN_FREE_BYTES = 100 * 1024 * 1024  # 100 MB free-disk floor before HTTP 507
 
 
 from app.config import (
@@ -1677,7 +1681,7 @@ def create_job(body: CreateJobIn) -> dict:
             "this endpoint only creates URL jobs.",
         )
     if body.sourceType == "url":
-        info = probe_url(body.source)
+        info = download.probe_url(body.source)
         if info:
             title = info.get("title")
             duration = info.get("duration")
