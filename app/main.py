@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -35,14 +36,17 @@ from app import (
     hosting,
     hostlimits,
     jobstatus,
+    objectstore,
     share_video,
     sharelink,
+    subtitle,
 )
+from app import encode as encode_mod
+from app.hosting import disk_stats
+from app import llm as llm_mod
 
-try:
-    from starlette.background import BackgroundTask
-except Exception:
-    BackgroundTask = None
+
+from uuid import uuid4 as uuid4
 
 
 from app.config import (
@@ -74,6 +78,7 @@ from app.config import (
 from app.store import LocalStore
 from app.social.accounts import AccountStore
 from app.hosting import RetentionCleaner
+from app import subtitle as subtitle_svc
 from app.worker import InProcessWorker
 
 
@@ -285,18 +290,36 @@ def _boot() -> None:
 
 def _do_warmup() -> None:
     """Pre-download the Whisper model in a background thread."""
+    global warmup
 
     try:
         from app.video import whisper_is_downloaded
 
         if whisper_is_downloaded():
+            warmup = {
+                "current": "already downloaded",
+                "configured": settings.whisper.model,
+                "model": settings.whisper.model,
+                "engine": "faster-whisper",
+            }
             return
 
         from app.task import _warmup_model
         _warmup_model()
-    except Exception:
-        pass
+        warmup = {
+            "current": "downloaded",
+            "configured": settings.whisper.model,
+            "model": settings.whisper.model,
+            "engine": "faster-whisper",
+        }
+    except Exception as exc:
+        warmup = {
+            "current": "failed",
+            "reason": str(exc),
+            "configured": settings.whisper.model,
+        }
 
+warmup = {}
 _boot()
 
 app = FastAPI(
@@ -304,6 +327,31 @@ app = FastAPI(
     version="1.1.0",
     description="Hosted video → viral clips pipeline (MoneyPrinterTurbo heritage).",
 )
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Every unhandled exception elsewhere in the API returns JSON and is logged with its request id, so a 500 can never escape as HTML or a blank screen."""
+    rid = request.headers.get("x-request-id") or uuid4().hex
+    logger.exception(f"[api] {request.method} {request.url.path} id={rid} raised")
+    _record_api_error(request, 500)
+    return JSONResponse(
+        status_code=500,
+        content={"error": f"{type(exc).__name__}: {exc}", "request_id": rid},
+        headers={"x-request-id": rid},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    rid = request.headers.get("x-request-id") or uuid4().hex
+    logger.warning(f"[api] {request.method} {request.url.path} id={rid} validation error")
+    _record_api_error(request, 422)
+    return JSONResponse(
+        status_code=422,
+        content={"error": f"validation error: {exc.errors()}", "request_id": rid},
+        headers={"x-request-id": rid},
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -796,7 +844,10 @@ def health() -> dict:
         "degraded": degraded,
         "version": "1.1.0",
         "worker": worker_status,
-        "warmup": warmup,
+        "warmup": _block(
+            "warmup",
+            lambda: dict(warmup),
+        ),
         "llm": _block(
             "llm",
             lambda: {
@@ -866,7 +917,7 @@ def health() -> dict:
         # Whether clips are pushed to durable storage. `enabled` needs all four
         # CLIPFORGE_S3_* values, and config_from_env() re-reads per call, so this
         # turns ON by itself once the keys land — no restart, nothing to guess at.
-        "storage": _block("storage", objectstore_mod.status),
+        "storage": _block("storage", objectstore.status),
         "encode": _block("encode", lambda: encode_mod.as_dict(encode_mod.choose(settings))),
         "disk": _block("disk", lambda: disk_stats(settings.app.paths.data_dir)),
         # The status card reports the pipeline's real toolchain and where it
@@ -1344,7 +1395,7 @@ def set_s3_key(body: SetStorageIn) -> dict:
         written[env_name] = value
     sync_s3_env_after_save(written)
 
-    cfg = objectstore_mod.config_from_env()
+    cfg = objectstore.config_from_env()
     missing = [label for _var, attr, label in STORAGE_REQUIRED if not getattr(cfg, attr)]
     if missing:
         # Everything given was persisted — this is not a failure to save, it is
@@ -1360,7 +1411,7 @@ def set_s3_key(body: SetStorageIn) -> dict:
         f"(bucket={cfg.bucket!r} endpoint={cfg.endpoint!r} "
         f"secret={len(cfg.secret_key)} chars, not logged)"
     )
-    status = objectstore_mod.status()
+    status = objectstore.status()
     return {
         **status,
         "savedFields": sorted(given),
@@ -1390,7 +1441,7 @@ def remove_s3_key(confirm: bool = False) -> dict:
         f"[config] S3/R2 credentials deleted via dashboard ({removed} line(s) "
         f"removed, process env dropped: {dropped or 'none'})"
     )
-    status = objectstore_mod.status()
+    status = objectstore.status()
     return {**status, "linesRemoved": removed, "envDropped": dropped}
 
 
