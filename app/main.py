@@ -71,6 +71,10 @@ from app.config import (
     write_env_var,
     delete_env_var,
 )
+from app.store import LocalStore
+from app.social.accounts import AccountStore
+from app.hosting import RetentionCleaner
+from app.worker import InProcessWorker
 
 
 def _share_backfill() -> dict[str, int]:
@@ -278,6 +282,20 @@ def _boot() -> None:
     # responds immediately while the model loads.
     threading.Thread(target=_do_warmup, name="clipforge-warmup", daemon=True).start()
 
+
+def _do_warmup() -> None:
+    """Pre-download the Whisper model in a background thread."""
+
+    try:
+        from app.video import whisper_is_downloaded
+
+        if whisper_is_downloaded():
+            return
+
+        from app.task import _warmup_model
+        _warmup_model()
+    except Exception:
+        pass
 
 _boot()
 

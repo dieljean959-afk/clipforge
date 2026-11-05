@@ -846,6 +846,32 @@ export const api = {
       "/api/settings/gemini-key?confirm=true",
       { method: "DELETE" },
     ),
+  /** Save/replace the yt-dlp live cookies path (cookies.txt) in the server's env. */
+  setCookiesKey: (body: { cookies_file?: string; cookies_from_browser?: string }) =>
+    request<{ cookies_file: string | null; cookies_from_browser: string | null; source: string | null; problem: string | null }>(
+      "/api/settings/cookies",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+
+  /** Delete the yt-dlp cookies from the server's env file. */
+  deleteCookiesKey: (confirm = false) =>
+    request<{ linesRemoved: number; envDropped: string }>(
+      `/api/settings/cookies${confirm ? "?confirm=true" : ""}`,
+      { method: "DELETE" },
+    ),
+
+  /** Read the current yt-dlp cookies values from the server's env. */
+  getCookiesKey: () =>
+    request<{ cookies_file: string | null; cookies_from_browser: string | null; source: string | null; problem: string | null }>(
+      "/api/settings/cookies",
+      { method: "GET" },
+    ),
+
+
   /** Which detection backend is active right now. */
   detectBackend: () => request<DetectionDto>("/api/settings/detection"),
   /** Switch the AI detection backend. Transcription engine is untouched. */

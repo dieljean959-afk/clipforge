@@ -796,7 +796,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             ? "Media offload — checking…"
             : storageOn
               ? storage?.clientReady
-                ? `Media offload on — ${storage.bucket}`
+                ? `Media offload on — ${storage?.bucket ?? ""}`
                 : "Offload configured, but boto3 is missing"
               : "Media offload off"}
         </span>
@@ -821,7 +821,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             </DialogTitle>
             <DialogDescription>
               {storage?.enabled
-                ? `Offloading to ${storage.bucket}. Saving replaces the fields you fill in; empty ones are left alone.`
+                ? `Offloading to ${storage?.bucket ?? ""}. Saving replaces the fields you fill in; empty ones are left alone.`
                 : "No bucket configured. Finished clips live only inside this sandbox and are lost when it is rebuilt."}
             </DialogDescription>
           </DialogHeader>
