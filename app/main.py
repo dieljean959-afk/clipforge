@@ -69,88 +69,8 @@ from app.config import (
     sync_s3_env_after_save,
     sync_s3_env_for_delete,
     write_env_var,
+    delete_env_var,
 )
-from app.download import probe_url
-from app import hosting as hosting_mod  # noqa: F401 - reused by delete paths
-from app.hosting import RetentionCleaner, disk_stats
-from app.social import (
-    PLATFORMS,
-    AccountStore,
-    NeedsReconnect,
-    NotConfigured,
-    PostRejected,
-    SocialError,
-    describe_all,
-    redirect_uri,
-)
-from app.social import base as social_base
-from app.social import post_video as social_post
-from app.slices.cleanup import unlink_model_dirs
-from app.stages import StageWorkspace, remove_workspace
-from app.store import LocalStore
-from app.worker import InProcessWorker
-
-import app.encode as encode_mod
-import app.llm as llm_mod
-import app.objectstore as objectstore_mod
-import app.subtitle as subtitle_svc
-import app.video as video_svc
-import app.worker as worker_mod
-
-# --------------------------------------------------------------------------- #
-# boot
-# --------------------------------------------------------------------------- #
-
-settings: Settings
-store: LocalStore
-worker: InProcessWorker
-retention: RetentionCleaner | None = None
-warmup: dict = {"stage": "pending", "detail": "", "startedAt": None}
-
-# Disk preflight floor for new jobs: source download + caption/work files need
-# headroom (a 2h 1080p source is multi-GB). Below this, submits are refused
-# with a readable 507 instead of failing mid-pipeline.
-MIN_FREE_BYTES = 1.5 * 1024**3
-
-
-def _do_warmup() -> None:
-    """Pre-download / load the model once, with honest progress."""
-    if settings.hosted.worker_url:
-        # dispatch mode: rendering happens on the home machine — do not burn
-        # sandbox RAM/disk on a model this process will never use.
-        warmup["stage"] = "skipped"
-        warmup["detail"] = "dispatch mode — the remote worker loads its own model"
-        logger.info("[boot] Whisper warmup skipped (remote worker dispatch mode)")
-        return
-    # Tight-memory hosts: holding the model in the API process would leave too
-    # little for the job that has to load its own copy, so the API process would
-    # be the thing that OOMs. Jobs still load the model themselves on first use.
-    headroom_need = hostlimits.per_job_bytes(settings.whisper.model) * 2
-    limit = hostlimits.effective_memory_bytes()
-    if limit is not None and headroom_need > limit:
-        warmup["stage"] = "skipped"
-        warmup["detail"] = (
-            f"skipped to save memory — {hostlimits.describe()}; each job loads its own model "
-            "(the first job therefore starts a little slower)"
-        )
-        logger.info(f"[boot] Whisper warmup skipped: {warmup['detail']}")
-        return
-    warmup["startedAt"] = time.time()
-    warmup["stage"] = "loading_model"
-    t0 = time.time()
-    try:
-        def on_log(line: str) -> None:
-            warmup["detail"] = line
-            logger.info(f"[warmup] {line}")
-
-        transcript = subtitle_svc.predownload_model(settings, on_log=on_log)
-        warmup["stage"] = "ready"
-        warmup["detail"] = f"{transcript.engine} / {transcript.model_size} loaded in {time.time() - t0:.1f}s"
-        logger.info(f"[boot] ASR model loaded: {warmup['detail']}")
-    except Exception as exc:
-        warmup["stage"] = "failed"
-        warmup["detail"] = str(exc)
-        logger.exception("[boot] Whisper warmup failed")
 
 
 def _share_backfill() -> dict[str, int]:
@@ -182,6 +102,24 @@ def _share_backfill() -> dict[str, int]:
     threading.Thread(target=_finish, name="share-backfill", daemon=True).start()
     return started
 
+
+def _boot() -> None:
+    global settings, store, worker, retention
+    try:
+        settings = load_config()
+    except ConfigError as exc:
+        logger.error(f"[boot] {exc}")
+        raise SystemExit(2) from exc
+    boot_banner(settings)
+
+    # fail fast on missing ffmpeg/ffprobe
+    logger.info(f"[boot] ffmpeg: {ffmpeg_bin()}")
+    logger.info(f"[boot] ffprobe: {ffprobe_bin()}")
+
+    store = LocalStore(settings.app.paths)
+    worker = InProcessWorker(settings, store)
+    retention = RetentionCleaner(settings, store)
+    accounts = AccountStore(settings.app.paths.data_dir)
 
 def _boot() -> None:
     global settings, store, worker, retention
@@ -1276,70 +1214,6 @@ _COOKIES_VAR_TO_FIELD: dict[str, str] = {
 }
 
 
-def _cookies_field(body: dict[str, str]) -> dict[str, str]:
-    """The non-blank fields of a cookies save request, stripped and ready."""
-    out: dict[str, str] = {}
-    for field in ("cookies_file", "cookies_from_browser"):
-        raw = body.get(field)
-        if raw is None:
-            continue
-        value = raw.strip()
-        if value:
-            out[field] = value
-    return out
-
-
-def _live_cookies_key() -> _LiveKeyState:
-    """One state object for the media-download cookies; resolves from the
-    same env files as the other keys so the saved value is always current."""
-    return _LiveKeyState(ROOT, resolver=_resolve_cookies_key)
-
-
-def _resolve_cookies_key(env: dict[str, str]) -> tuple[str | None, str, str | None]:
-    """Resolve the YAML file path for yt-dlp cookies.
-
-    Returns (path, source, problem). A missing/invalid path is a hard problem;
-    yt-dlp refuses to use an empty or non-filesystem ``cookiefile``.
-    """
-    from app import download as _dl
-
-    path = env.get("YT_DLP_COOKIES_FILE") or env.get("YT_DLP_COOKIES_FROM_BROWSER")
-    if not path:
-        return None, "none", None
-
-    from app.config import DownloadConfig
-
-    # re-apply exactly the same rules the host-side config applies at boot
-    cookies_file = str(os.getenv("YT_DLP_COOKIES_FILE", path) or "").strip()
-    cookies_from_browser = str(
-        os.getenv("YT_DLP_COOKIES_FROM_BROWSER", "") or ""
-    ).strip()
-    resolved = DownloadConfig(
-        max_height=1080,
-        cookies_from_browser=cookies_from_browser,
-        auto_update=True,
-        cookies_file=cookies_file,
-    )
-    value = resolved.cookies_file or resolved.cookies_from_browser
-    if not value:
-        return None, "empty", "no cookie file configured"
-    p = Path(value).expanduser()
-    if not p.is_file():
-        return None, "missing", f"{p} does not exist"
-    if not p.is_file():
-        return None, "not_file", f"{p} is not a file"
-    if p.stat().st_size == 0:
-        return None, "empty", f"{p} is empty"
-    # Netscape-format sanity check: at least a domain= header and a path= line
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return None, "read_fail", f"cannot read {p}: {exc}"
-    if "domain=" not in text or "path=" not in text:
-        return None, "format", f"{p} is not Netscape-format (no domain=/path= lines)"
-    return str(p), "file", None
-
-
 class SetStorageIn(BaseModel):
     """Media-offload (S3/R2) credentials.
 
@@ -1390,74 +1264,6 @@ STORAGE_REQUIRED: tuple[tuple[str, str, str], ...] = (
 # --------------------------------------------------------------------------- #
 # media download cookies — YAML file path (new: cookies_file / cookies_from_browser)
 # --------------------------------------------------------------------------- #
-_COOKIES_VAR_TO_FIELD: dict[str, str] = {
-    "YT_DLP_COOKIES_FILE": "cookies_file",
-    "YT_DLP_COOKIES_FROM_BROWSER": "cookies_from_browser",
-}
-
-
-def _cookies_field(body: dict[str, str]) -> dict[str, str]:
-    """The non-blank fields of a cookies save request, stripped and ready."""
-    out: dict[str, str] = {}
-    for field in ("cookies_file", "cookies_from_browser"):
-        raw = body.get(field)
-        if raw is None:
-            continue
-        value = raw.strip()
-        if value:
-            out[field] = value
-    return out
-
-
-def _live_cookies_key() -> _LiveKeyState:
-    """One state object for the media-download cookies; resolves from the same
-    env files as the other keys so the saved value is always read back fresh."""
-    return _LiveKeyState(ROOT, resolver=_resolve_cookies_key)
-
-
-def _resolve_cookies_key(env: dict[str, str]) -> tuple[str | None, str, str | None]:
-    """Resolve the YAML file path for yt-dlp cookies.
-
-    Returns (path, source, problem). A missing/invalid path is a hard problem;
-    yt-dlp refuses to use an empty or non-filesystem ``cookiefile``.
-    """
-    from app import download as _dl
-
-    path = env.get("YT_DLP_COOKIES_FILE") or env.get("YT_DLP_COOKIES_FROM_BROWSER")
-    if not path:
-        return None, "none", None
-
-    from app.config import DownloadConfig
-
-    # re-apply exactly the same rules the host-side config applies at boot
-    cookies_file = str(os.getenv("YT_DLP_COOKIES_FILE", path) or "").strip()
-    cookies_from_browser = str(
-        os.getenv("YT_DLP_COOKIES_FROM_BROWSER", "") or ""
-    ).strip()
-    resolved = DownloadConfig(
-        max_height=1080,
-        cookies_from_browser=cookies_from_browser,
-        auto_update=True,
-        cookies_file=cookies_file,
-    )
-    value = resolved.cookies_file or resolved.cookies_from_browser
-    if not value:
-        return None, "empty", "no cookie file configured"
-    p = Path(value).expanduser()
-    if not p.is_file():
-        return None, "missing", f"{p} does not exist"
-    if p.stat().st_size == 0:
-        return None, "empty", f"{p} is empty"
-    # Netscape-format sanity check: at least a domain= header and a path= line
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return None, "read_fail", f"cannot read {p}: {exc}"
-    if "domain=" not in text or "path=" not in text:
-        return None, "format", f"{p} is not Netscape-format (no domain=/path= lines)"
-    return str(p), "file", None
-
-
 def _storage_field(body: SetStorageIn) -> dict[str, str]:
     """The non-blank fields of a save request, stripped and ready to write."""
     out: dict[str, str] = {}
