@@ -51,6 +51,7 @@ from uuid import uuid4 as uuid4
 
 
 MIN_FREE_BYTES = 100 * 1024 * 1024  # 100 MB free-disk floor before HTTP 507
+_STARTED_AT = time.time()
 
 
 from app.config import (
@@ -83,6 +84,11 @@ from app.store import LocalStore
 from app.social.accounts import AccountStore
 from app.hosting import RetentionCleaner
 from app import subtitle as subtitle_svc
+# Module handle, distinct from the `worker` INSTANCE below. The boot recovery
+# pass needs `unrecoverable_reason` / `INTERRUPT_MAX_RESUMES` from the module;
+# without this import that pass raised NameError at import time and uvicorn
+# exited before binding port 8000, so the proxy answered a bodiless 500.
+from app import worker as worker_mod
 from app.worker import InProcessWorker
 
 
@@ -134,23 +140,29 @@ def _boot() -> None:
     retention = RetentionCleaner(settings, store)
     accounts = AccountStore(settings.app.paths.data_dir)
 
-def _boot() -> None:
-    global settings, store, worker, retention
+    # --- durable logs + native-crash tracebacks ---------------------------
+    # The platform only keeps the web process's stdout for the life of that
+    # process, so a traceback from the failure itself is gone by the time anyone
+    # looks. Write both the app log and the faulthandler dump to files that
+    # survive a restart, under the data dir (never inside the watched app/).
     try:
-        settings = load_config()
-    except ConfigError as exc:
-        logger.error(f"[boot] {exc}")
-        raise SystemExit(2) from exc
-    boot_banner(settings)
+        log_dir = settings.app.paths.data_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            log_dir / "api.log",
+            rotation="10 MB",
+            retention=5,
+            enqueue=False,
+            level="INFO",
+            backtrace=True,
+            diagnose=False,
+        )
+        import faulthandler
 
-    # fail fast on missing ffmpeg/ffprobe
-    logger.info(f"[boot] ffmpeg: {ffmpeg_bin()}")
-    logger.info(f"[boot] ffprobe: {ffprobe_bin()}")
-
-    store = LocalStore(settings.app.paths)
-    worker = InProcessWorker(settings, store)
-    retention = RetentionCleaner(settings, store)
-    accounts = AccountStore(settings.app.paths.data_dir)
+        _crash_fh = open(log_dir / "crash.log", "a", encoding="utf-8")
+        faulthandler.enable(_crash_fh)
+    except Exception as exc:  # noqa: BLE001 - logging must never block boot
+        logger.warning(f"[boot] file logging unavailable: {exc}")
 
     # --- crash recovery ---------------------------------------------------
     # Four things are recoverable, and they are not the same thing:
@@ -292,45 +304,130 @@ def _boot() -> None:
     threading.Thread(target=_do_warmup, name="clipforge-warmup", daemon=True).start()
 
 
+def _whisper_model_cached(model: str) -> bool:
+    """Is this faster-whisper model already in the HuggingFace cache?
+
+    A directory check only — deliberately NOT a model load. The API process
+    must never hold a Whisper model: on a 2 GiB host that is ~1 GB of RSS in
+    the same process that has to answer /api/health, and it is the reason a
+    job could starve the API. The model is loaded once inside the per-job
+    runner child process instead, and reused there for every clip.
+    """
+    from pathlib import Path
+
+    from app.asr import model_cache_dir
+
+    base = Path(model_cache_dir())
+    if not base.is_dir():
+        return False
+    needle = model.replace("/", "--")
+    return any(
+        p.is_dir() and p.name.startswith("models--") and needle in p.name
+        for p in base.iterdir()
+    )
+
+
 def _do_warmup() -> None:
-    """Pre-download the Whisper model in a background thread."""
+    """Report model readiness without loading anything in the API process."""
     global warmup
 
     try:
-        from app.video import whisper_is_downloaded
+        from app.asr import resolved_model
 
-        if whisper_is_downloaded():
-            warmup = {
-                "current": "already downloaded",
-                "configured": settings.whisper.model,
-                "model": settings.whisper.model,
-                "engine": "faster-whisper",
-            }
-            return
-
-        from app.task import _warmup_model
-        _warmup_model()
+        model, note = resolved_model(settings)
+        cached = _whisper_model_cached(model)
         warmup = {
-            "current": "downloaded",
+            "current": "already downloaded" if cached else "downloads on first job",
             "configured": settings.whisper.model,
-            "model": settings.whisper.model,
+            "model": model,
             "engine": "faster-whisper",
         }
+        if note:
+            warmup["note"] = note
     except Exception as exc:
         warmup = {
-            "current": "failed",
-            "reason": str(exc),
+            "current": "unknown",
+            "reason": f"{type(exc).__name__}: {exc}",
             "configured": settings.whisper.model,
         }
 
 warmup = {}
-_boot()
+
+# `_boot()` runs at import time, so an exception escaping it makes the MODULE
+# unimportable: uvicorn prints a traceback and exits before it ever binds
+# 127.0.0.1:8000. Nothing in the browser can distinguish that from "the host is
+# down" — the Vite proxy just answers 500 with an empty body, which is the
+# "API unreachable" banner. Config errors still exit on purpose (SystemExit),
+# but recovery/bookkeeping bugs must cost queued jobs, never the API.
+try:
+    _boot()
+except SystemExit:
+    raise
+except Exception:  # noqa: BLE001 - availability beats bookkeeping
+    logger.exception(
+        "[boot] startup tasks failed — serving the API anyway "
+        "(check the traceback above; jobs were left as they are)"
+    )
 
 app = FastAPI(
     title="Clipmake",
     version="1.1.0",
     description="Hosted video → viral clips pipeline (MoneyPrinterTurbo heritage).",
 )
+
+
+def _rss_mb(pid: int) -> float | None:
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except OSError:
+        return None
+    return None
+
+
+async def _resource_monitor() -> None:
+    """Log API RSS, runner-child RSS and event-loop lag every 30 s.
+
+    Event-loop lag is the number that separates "the API is busy" from "the API
+    is hung": a starved loop is what makes /api/health time out while the
+    process is technically alive, and the platform proxy turns exactly that
+    into an empty 500. These lines land in data/logs/api.log.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    baseline = 0.0
+    while True:
+        loop.time()
+        t0 = loop.time()
+        await asyncio.sleep(30)
+        lag = max(0.0, (loop.time() - t0) - 30.0)
+        api_rss = _rss_mb(os.getpid())
+        try:
+            with worker._lock:
+                kids = {jid: proc.pid for jid, proc in worker._active.items()}
+        except Exception:  # noqa: BLE001 - telemetry only
+            kids = {}
+        kid_rss = {jid: _rss_mb(pid) for jid, pid in kids.items()}
+        logger.info(
+            f"[monitor] api_rss={api_rss}MB loop_lag={lag:.2f}s "
+            f"children={kid_rss or '{}'} uptime={int(time.time() - _STARTED_AT)}s"
+        )
+        if api_rss is not None and baseline and api_rss > baseline * 1.5 and api_rss - baseline > 200:
+            logger.warning(
+                f"[monitor] API RSS grew {baseline:.0f}MB → {api_rss:.0f}MB — "
+                "heavy work in the API process would explain a proxy 500"
+            )
+        baseline = api_rss or baseline
+
+
+@app.on_event("startup")
+async def _start_resource_monitor() -> None:
+    import asyncio
+
+    asyncio.create_task(_resource_monitor())
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -948,6 +1045,111 @@ def health() -> dict:
             if settings.hosted.worker_url
             else {"enabled": False}
         ),
+    }
+
+
+@app.get("/api/status")
+def api_status() -> dict:
+    """Per-dependency status: one broken dependency never 500s the endpoint.
+
+    `/api/health` answers "is the API process serving?" and is cheap on purpose.
+    This route answers the next question — "which dependency is broken?" — and
+    therefore touches the disk, the bucket config and the yt-dlp/ffmpeg binaries.
+    Every probe runs through its own try/except: a failing bucket probe, a
+    missing binary or an unreadable data dir each degrade ONE entry to
+    ``{"ok": false, "message": ...}`` while the remaining entries still answer,
+    and the response is always 200. A status page that dies because a dependency
+    died is useless exactly when it is needed.
+    """
+    def _probe(name: str, fn, *args, **kwargs) -> dict:
+        try:
+            out = fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - isolation is the point
+            logger.warning(f"[status] {name} probe failed: {type(exc).__name__}: {exc}")
+            return {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+        if isinstance(out, dict) and out.get("ok") is False:
+            return {"ok": False, "message": out.get("message") or out.get("error") or "not ready"}
+        message = out.get("message") if isinstance(out, dict) else None
+        return {"ok": True, "message": message or "ok"}
+
+    def _db() -> dict:
+        # Job records are JSON files, so the real question is "can we read and
+        # write the data dir?" — not a socket connect.
+        probe = settings.app.paths.data_dir / ".status-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        jobs = store.list_jobs()
+        return {"ok": True, "message": f"readable · {len(jobs)} job(s)"}
+
+    def _config() -> dict:
+        if not settings.whisper.model:
+            return {"ok": False, "message": "no whisper model configured"}
+        return {"ok": True, "message": f"loaded · model {settings.whisper.model}"}
+
+    def _bucket() -> dict:
+        # Fail SOFT. Object storage is optional: without keys, and without the
+        # boto3 client, media simply stays on local disk. That is "offload
+        # unavailable", not "the API is broken".
+        st = objectstore.status()
+        enabled = bool(st.get("enabled"))
+        ready = bool(st.get("clientReady"))
+        if not enabled:
+            return {"ok": True, "message": "offload unavailable — no bucket configured (local disk only)"}
+        if not ready:
+            return {"ok": True, "message": "offload unavailable — bucket configured but client not ready (local disk only)"}
+        return {"ok": True, "message": f"offload on · {st.get('bucket')}"}
+
+    def _worker() -> dict:
+        st = worker.status()
+        if not st.get("online"):
+            return {"ok": False, "message": "worker queue is not running"}
+        return {
+            "ok": True,
+            "message": (
+                f"online · {st.get('activeCount', 0)} active, "
+                f"{st.get('queueDepth', 0)} queued"
+            ),
+        }
+
+    def _binary(name: str, getter, flag: str) -> dict:
+        path = getter()
+        line = _tool_version(path, flag)
+        if not line:
+            return {"ok": False, "message": f"{name} not found or not runnable at {path}"}
+        return {"ok": True, "message": line}
+
+    def _disk() -> dict:
+        st = disk_stats(settings.app.paths.data_dir)
+        free = st.get("freeBytes") or 0
+        if free < MIN_FREE_BYTES:
+            return {
+                "ok": False,
+                "message": f"only {free // (1024 * 1024)} MB free — new jobs are refused below {MIN_FREE_BYTES // (1024 * 1024)} MB",
+            }
+        return {"ok": True, "message": f"{free // (1024 * 1024)} MB free"}
+
+    deps = {
+        "db": _probe("db", _db),
+        "config": _probe("config", _config),
+        "bucket": _probe("bucket", _bucket),
+        "worker": _probe("worker", _worker),
+        "ytdlp": _probe("ytdlp", lambda: (
+            {"ok": True, "message": _ytdlp_version()}
+            if _ytdlp_version()
+            else {"ok": False, "message": "yt-dlp python package is not installed"}
+        )),
+        "ffmpeg": _probe("ffmpeg", lambda: _binary("ffmpeg", ffmpeg_bin, "-version")),
+        "disk": _probe("disk", _disk),
+    }
+    failing = [name for name, d in deps.items() if not d["ok"]]
+    return {
+        # Always 200: this endpoint's job is to REPORT, so a down dependency is
+        # data, not an HTTP error.
+        "ok": not failing,
+        "failing": failing,
+        "deps": deps,
+        "pid": os.getpid(),
+        "uptimeSec": int(time.time() - _STARTED_AT),
     }
 
 

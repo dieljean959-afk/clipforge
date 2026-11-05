@@ -1335,6 +1335,22 @@ class Pipeline:
         def _on_transcribe_log(line: str) -> None:
             self._log(job_id, line)
 
+        # Detection's own callbacks. `detect_clips` takes `on_log(line)` and
+        # `on_progress(fraction, detail)` with a 0..1 fraction, and the call
+        # below passed names that were never defined in this scope — every job
+        # with a transcript died at "finding" with NameError while the API kept
+        # serving. Keep them here, next to the call that uses them.
+        def on_log(line: str) -> None:
+            self._log(job_id, line)
+
+        def on_progress(frac: float, detail: str | None = None) -> None:
+            self._progress(
+                job_id,
+                "finding",
+                max(0.0, min(1.0, float(frac))) * 100,
+                detail or "Scoring viral moments...",
+            )
+
         # Source length drives the no-speech fallback (evenly spaced clips).
         # Prefer the job document, fall back to the fetch stage's own record,
         # so an older job whose durationSec was never patched still works.

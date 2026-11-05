@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -430,9 +431,18 @@ class InProcessWorker:
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         # start_new_session: the child gets its own process group so the
-        # watchdog can kill the ffmpeg descendants along with the runner
+        # watchdog can kill the ffmpeg descendants along with the runner.
+        #
+        # `nice -n 15`: transcription and x264 are pure CPU, and on a 1-vCPU
+        # host an unpinned runner competes with the API for the only core. At
+        # nice 15 the kernel always prefers the API, so a job can never make
+        # /api/health time out while the process is alive (the platform proxy
+        # reports that as an empty 500).
+        prefix: list[str] = []
+        if sys.platform != "win32" and shutil.which("nice"):
+            prefix = ["nice", "-n", "15"]
         proc = subprocess.Popen(
-            [sys.executable, "-m", "app.runner", job_id],
+            [*prefix, sys.executable, "-m", "app.runner", job_id],
             cwd=str(ROOT),
             env=env,
             stdout=subprocess.PIPE,

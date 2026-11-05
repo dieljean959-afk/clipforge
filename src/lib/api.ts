@@ -505,13 +505,29 @@ async function errorText(res: Response): Promise<string> {
   }
   if (raw) {
     try {
-      const body = JSON.parse(raw) as { detail?: unknown; errorMessage?: unknown };
+      const body = JSON.parse(raw) as {
+        detail?: unknown;
+        errorMessage?: unknown;
+        error?: unknown;
+        request_id?: unknown;
+        restarting?: unknown;
+      };
       if (typeof body.detail === "string") return body.detail;
       if (Array.isArray(body.detail)) {
         const first = body.detail[0] as { msg?: unknown } | undefined;
         if (first && typeof first.msg === "string") return first.msg;
       }
       if (typeof body.errorMessage === "string") return body.errorMessage;
+      // The backend's own envelope: {error, request_id}. Two different things
+      // must not read the same in the UI:
+      //   * the supervisor is restarting the API (retry, nothing to report), and
+      //   * the API answered and crashed on this request (a real bug, and the
+      //     request id is the only handle on its traceback).
+      if (typeof body.error === "string") {
+        if (body.restarting === true) return `API restarting — ${body.error}`;
+        const rid = typeof body.request_id === "string" ? body.request_id.slice(0, 8) : null;
+        return rid ? `${body.error} (id ${rid})` : body.error;
+      }
     } catch {
       // not JSON — fall through and show the text
     }

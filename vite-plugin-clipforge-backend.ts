@@ -164,6 +164,23 @@ function log(msg: string) {
   console.log(`${LOG_TAG} ${msg}`);
 }
 
+let backendLog: fs.WriteStream | null = null;
+function openBackendLog(): fs.WriteStream | null {
+  if (backendLog) return backendLog;
+  try {
+    const dir = path.join(ROOT, "data", "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    backendLog = fs.createWriteStream(path.join(dir, "backend.log"), { flags: "a" });
+    backendLog.on("error", () => {
+      backendLog = null;
+    });
+    return backendLog;
+  } catch {
+    // Logging is best-effort; never let it stop the backend from booting.
+    return null;
+  }
+}
+
 function pickPython(): string | null {
   for (const py of [".venv/bin/python", "python3", "python"]) {
     const p = path.isAbsolute(py)
@@ -222,6 +239,11 @@ async function startBackend(): Promise<boolean> {
 
   log(`starting FastAPI via ${state.python} (uvicorn app.main:app on 127.0.0.1:8000)...`);
   state.lastAttemptAt = Date.now();
+  // Tee the child's output: the platform only keeps this web process's stdout
+  // for the life of THIS process, so a traceback from the crash itself is gone
+  // after the restart that follows it. The file lives under data/ (not app/),
+  // so writing it does not trigger the source watcher.
+  const childOut = openBackendLog();
   const proc = spawn(
     state.python,
     [
@@ -240,9 +262,15 @@ async function startBackend(): Promise<boolean> {
     {
       cwd: ROOT,
       env,
-      stdio: ["ignore", "inherit", "inherit"], // boot log lands in the platform web-process log
+      stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  for (const stream of [proc.stdout, proc.stderr]) {
+    stream?.on("data", (chunk: Buffer) => {
+      process.stdout.write(chunk);
+      childOut?.write(chunk);
+    });
+  }
 
   state.proc = proc;
   // Compare-and-clear: a restart kills this child and immediately spawns a
@@ -401,7 +429,7 @@ export function clipforgeBackend(): Plugin {
       // The reviving request now WAITS for the backend instead of being
       // proxied into a guaranteed 500 — so the first page load after a crash
       // succeeds rather than showing the user an error and needing a refresh.
-      server.middlewares.use(async (req, _res, next) => {
+      server.middlewares.use(async (req, res, next) => {
         const url = req.url ?? "";
         if (url.startsWith("/api") || url.startsWith("/clips")) {
           const deadline = Date.now() + 4000;
@@ -438,6 +466,30 @@ export function clipforgeBackend(): Plugin {
                 });
               await state.starting;
             }
+          }
+
+          // Answer the request ourselves when the backend is still not
+          // listening. Continuing to `next()` here is what produced the
+          // reported "HTTP 500 (empty response — the request did not reach the
+          // API)": vite's http-proxy answers ECONNREFUSED with a bare 500 and
+          // no body, which is indistinguishable from a crash mid-request. A
+          // 503 with `restarting: true` and Retry-After is the truth, and it
+          // lets the dashboard say "API restarting, retrying…" instead of
+          // inventing an error id.
+          if (!(await pingBackend(1200))) {
+            res.statusCode = 503;
+            res.setHeader("content-type", "application/json");
+            res.setHeader("retry-after", "2");
+            res.setHeader("cache-control", "no-store");
+            res.end(
+              JSON.stringify({
+                error: "API is restarting — retrying shortly.",
+                restarting: true,
+                retryAfterMs: 2000,
+                attempt: state.attempts,
+              }),
+            );
+            return;
           }
         }
         next();

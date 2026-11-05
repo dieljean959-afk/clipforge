@@ -461,7 +461,10 @@ export function LocalWorkerCard({ className }: { className?: string }) {
         {error ? (
           <span className="flex items-center gap-1.5 font-semibold text-destructive">
             <span className="size-2 rounded-full bg-destructive" />
-            API unreachable: {error}
+            {/* "API error (id …)" = the API answered and crashed on this
+                request. "API did not answer" = the process is gone/restarting.
+                Different causes, different fixes — never one label. */}
+            {/\(id [0-9a-f]+\)/.test(error) ? "API error" : "API did not answer"}: {error}
           </span>
         ) : health === undefined ? (
           <span className="flex items-center gap-1.5 text-muted-foreground">
@@ -477,7 +480,9 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             title={`Last poll failed: ${stale}. The values below are from the most recent successful read.`}
           >
             <span className="size-2 rounded-full bg-amber-400/70" />
-            last check failed ({stale}) — showing the most recent reading
+            {stale.startsWith("API restarting")
+              ? `${stale} — showing the most recent reading`
+              : `last check failed (${stale}) — showing the most recent reading`}
           </span>
         ) : (
           <span className="flex items-center gap-1.5 font-semibold">

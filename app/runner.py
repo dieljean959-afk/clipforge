@@ -174,6 +174,49 @@ def _unwrap143(exc: BaseException) -> BaseException:
     return exc
 
 
+def _available_mb() -> float | None:
+    """Usable RAM right now, from MemAvailable (already excludes reclaimable)."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        return None
+    return None
+
+
+# Refuse to start a stage below this. Whisper `small` peaks around 1.1 GiB and
+# ffmpeg adds hundreds of MB; with under ~300 MB usable the stage does not run
+# slowly, it makes the cgroup reclaim in a loop (this host showed `max 1391`
+# events) and the API stops answering in time. Refusing is the cheaper failure.
+MIN_START_MB = 300.0
+
+
+def _refuse_if_starved(job_id: str, store) -> bool:
+    avail = _available_mb()
+    if avail is None or avail >= MIN_START_MB:
+        return False
+    msg = (
+        f"Host is low on memory ({avail:.0f} MB usable, needs ~{MIN_START_MB:.0f} MB to start). "
+        "The stage was not started, so the pipeline server stays responsive. "
+        "Retry when the host is idle — cached stages mean it resumes where it stopped."
+    )
+    job = store.get_job(job_id)
+    if job is not None:
+        job.update({
+            "stage": "failed",
+            "error": msg,
+            "errorDetail": None,
+            "interrupted": False,
+            "completedAt": int(time.time() * 1000),
+        })
+        store.write_job(job)
+        store.append_job_log(job_id, f"NOT STARTED: {msg}")
+    sys.stderr.write(f"[runner] {msg}\n")
+    return True
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: python -m app.runner <job_id>", file=sys.stderr)
@@ -214,13 +257,26 @@ def main(argv: list[str]) -> int:
         store.append_job_log(job_id, f"Stage: fetch — starting")
     # Keep large native allocations from pushing the process into swap-less
     # OOM territory where the kernel picks a victim.
+    #
+    # This used to be a flat 6 GiB, which is ABOVE the host's memory limit: on a
+    # 2 GiB cgroup it never fired, so the kernel's cgroup OOM killer chose the
+    # victim instead — and on this host the victim can be the API process in the
+    # same cgroup. Cap at 80% of the REAL limit instead, so an over-allocating
+    # stage dies here with a MemoryError the job records, and the API survives.
     try:
         import resource
 
-        soft = 6 * 1024 * 1024 * 1024
+        from app import hostlimits
+
+        eff = hostlimits.effective_memory_bytes()
+        soft = int(eff * 0.8) if eff else 1536 * 1024 * 1024
+        soft = max(768 * 1024 * 1024, soft)
         resource.setrlimit(resource.RLIMIT_AS, (soft, soft))
+        sys.stderr.write(f"[runner] memory cap: {soft // (1024 * 1024)} MB\n")
     except Exception:
         pass
+    if _refuse_if_starved(job_id, store):
+        return 1
     try:
         Pipeline(settings, store).run(job_id)
     except BaseException as exc:  # noqa: BLE001 - the job must never die silently

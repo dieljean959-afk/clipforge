@@ -45,6 +45,40 @@ function triage(raw: string): { fatal: boolean; message: string } {
 /** Consecutive failures before an outage is believed. */
 const FAILURES_BEFORE_ALARM = 3;
 
+/** Ceiling for the retry delay while the API is unavailable. */
+const MAX_BACKOFF_MS = 30_000;
+
+/**
+ * Self-scheduling poller with exponential backoff.
+ *
+ * A fixed 2 s interval kept hammering the API while it was restarting — one
+ * request per 2 s, each one answered by the proxy with a 500, which is both
+ * useless load on a 1-vCPU host and the reason the banner counted "6 failed
+ * polls" for one short outage. On failure the wait doubles (2s → 4s → 8s →
+ * 16s → 30s cap) and snaps back to the base interval on the first success, so
+ * recovery is still detected within one poll.
+ */
+function usePollLoop(run: () => Promise<boolean>, baseMs: number) {
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const tick = async () => {
+      const ok = await run();
+      failures = ok ? 0 : Math.min(failures + 1, 4);
+      const wait = ok
+        ? baseMs
+        : Math.min(baseMs * 2 ** failures, MAX_BACKOFF_MS);
+      if (!stopped) timer = setTimeout(() => void tick(), wait);
+    };
+    timer = setTimeout(() => void tick(), 0);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [run, baseMs]);
+}
+
 /** Batches fetched on the first paint. Ten is enough to fill a phone screen. */
 export const BATCH_PAGE_SIZE = 10;
 
@@ -67,6 +101,13 @@ export function useJobs(intervalMs = 2000) {
 
   const applyFailure = useCallback((err: unknown) => {
     const raw = err instanceof Error ? err.message : "API unreachable";
+    // The supervisor said "restarting" (503 + restarting:true). That is a
+    // known, self-healing state: say so, keep the last known batches on screen,
+    // and let the backoff poller find the API again. It is NOT an error id.
+    if (raw.startsWith("API restarting")) {
+      setStale("API restarting, retrying…");
+      return;
+    }
     const { fatal } = triage(raw);
     if (!fatal) {
       // The server answered and rejected one request. That is not an outage,
@@ -115,8 +156,10 @@ export function useJobs(intervalMs = 2000) {
       setTotal(page.total);
       setHasMore(page.nextBefore !== null);
       applySuccess();
+      return true;
     } catch (err) {
       applyFailure(err);
+      return false;
     }
   }, [applyFailure, applySuccess, limit]);
 
@@ -126,14 +169,7 @@ export function useJobs(intervalMs = 2000) {
     setLimit((n) => n + BATCH_PAGE_SIZE);
   }, []);
 
-  useEffect(() => {
-    const initial = setTimeout(() => void refresh(), 0);
-    const t = setInterval(() => void refresh(), intervalMs);
-    return () => {
-      clearTimeout(initial);
-      clearTimeout(t);
-    };
-  }, [refresh, intervalMs]);
+  usePollLoop(refresh, intervalMs);
 
   // Force an immediate poll of ONE job, so "Check now" answers "is this
   // specific job actually moving?" without waiting out the interval or
@@ -239,8 +275,14 @@ export function useHealth(intervalMs = 5000) {
       setHealth(data);
       setError(null);
       setStale(null);
+      return true;
     } catch (err) {
       const raw = err instanceof Error ? err.message : "API unreachable";
+      // Known self-healing state from the supervisor, not a fault to report.
+      if (raw.startsWith("API restarting")) {
+        setStale("API restarting, retrying…");
+        return false;
+      }
       // What failed decides whether a banner is honest:
       //   5xx              — the server answered and is broken. Banner-worthy.
       //   no status at all — fetch itself threw (offline, DNS, restart). A
@@ -255,10 +297,10 @@ export function useHealth(intervalMs = 5000) {
       const status = /HTTP (\d{3})/.exec(raw)?.[1];
       const fatal = status === undefined || status.startsWith("5");
       failures.current = fatal ? failures.current + 1 : 0;
-      // Retry twice (three strikes across the 5s polls, ~10s) before a red
-      // banner is allowed: a deploy restarting under the reader produces
-      // exactly one or two blips, and none of them deserve the alarm.
-      if (!fatal || failures.current < 3) return;
+      // Retry twice (three strikes) before a red banner is allowed: a deploy
+      // restarting under the reader produces exactly one or two blips, and
+      // none of them deserve the alarm.
+      if (!fatal || failures.current < 3) return false;
       const msg = failures.current > 1 ? `${raw} (${failures.current} failed polls)` : raw;
       if (haveData.current) {
         // We are still showing the last good reading; keep it and note the
@@ -267,19 +309,13 @@ export function useHealth(intervalMs = 5000) {
       } else {
         setError(msg);
       }
+      return false;
     } finally {
       setTried(true);
     }
   }, []);
 
-  useEffect(() => {
-    const initial = setTimeout(() => void refresh(), 0);
-    const t = setInterval(() => void refresh(), intervalMs);
-    return () => {
-      clearTimeout(initial);
-      clearInterval(t);
-    };
-  }, [refresh, intervalMs]);
+  usePollLoop(refresh, intervalMs);
 
   return { health, error, stale, tried, refresh };
 }
