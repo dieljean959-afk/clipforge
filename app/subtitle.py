@@ -15,6 +15,7 @@ captions must export either way.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -26,7 +27,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from app import asr
+from app import asr, asr_iso
 from app.config import Settings, ffmpeg_bin, ffprobe_bin
 
 
@@ -68,7 +69,7 @@ WHISPER_KWARGS = dict(asr.ANTI_REPETITION, word_timestamps=True)
 # constraint: the engine batches its own 30s windows inside each chunk, so a
 # large chunk costs no extra compute — it just means a resume may lose up to
 # CHUNK_SEC of transcription instead of 30s.
-CHUNK_SEC = 300.0
+CHUNK_SEC = 60.0
 OVERLAP_SEC = 2.0
 
 # Back-compat aliases for callers/tests that used the old 30s window names.
@@ -524,6 +525,13 @@ class Transcript:
     duration: float = 0.0
     model_size: str = ""
     model_path: str = ""
+    #: Every ladder attempt that ran, in order, as recorded in the job metadata:
+    #: window, beam, vad, model, ok, whether it failed on memory, peak RSS.
+    attempts: list[dict] = field(default_factory=list)
+    #: "transcribed with base (low memory)" when the ladder had to downshift.
+    label: str = ""
+    #: Highest per-chunk RSS the isolated ASR process reported, in MB.
+    peak_rss_mb: float = 0.0
     # Which engine produced this transcript, and how fast it ran
     # (RTF = wall-seconds / audio-seconds; lower is faster).
     engine: str = ""
@@ -654,6 +662,26 @@ def _extract_audio(path: Path, dest: Path) -> Path:
         raise TranscribeError(f"could not extract audio from {path.name}: {tail[0]}") from exc
     tmp.replace(dest)
     return dest
+
+
+def _write_chunk_wav(reader: "_WavReader", target: Path, start: float, end: float) -> None:
+    """Write one chunk as a 16 kHz mono WAV for the isolated ASR process.
+
+    A path, not an array: the decode child pages in its own copy, so the parent
+    job process never holds chunk audio while a model is resident.
+    """
+    import wave  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+
+    audio = reader.samples(start, end)
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(target), "wb") as fh:
+        fh.setnchannels(1)
+        fh.setsampwidth(2)
+        fh.setframerate(16000)
+        fh.writeframes(pcm.tobytes())
 
 
 class _WavReader:
@@ -799,6 +827,7 @@ def transcribe(
     should_pause=None,
     on_chunk=None,
     language: str | None = None,
+    on_detail=None,
 ) -> Transcript:
     """Word-level transcription through the configured ASR engine.
 
@@ -823,7 +852,11 @@ def transcribe(
     `on_progress` (fractions of audio) is still called, but it is a secondary,
     smoother signal — the two together give a number that never stalls at zero.
     """
-    loaded = _load_model(settings)
+    # Resolve model/engine WITHOUT loading: the decode runs in an isolated
+    # `app.asr_child` process (see app.asr_iso), so this process never holds a
+    # 900 MB model next to the API.
+    model_name, _model_note = asr.resolved_model(settings)
+    engine_name, _engine_detail = asr.choose_engine(settings)
     duration = _probe_duration(path)
     # Explicit call-site language (per-job ENG/ESP selection) wins over the
     # global config; None falls back to the config's own auto/explicit choice.
@@ -838,14 +871,14 @@ def transcribe(
         cache_dir.mkdir(parents=True, exist_ok=True)
     if len(windows) == 1:
         logger.info(
-            f"[subtitle] transcribing {duration:.1f}s with {loaded.engine} "
-            f"({loaded.device}/{loaded.compute_type}, batch {loaded.batch_size}) — one chunk"
+            f"[subtitle] transcribing {duration:.1f}s with {engine_name} "
+            f"model '{model_name}' in an isolated process — one chunk"
         )
     else:
         logger.info(
-            f"[subtitle] transcribing {duration:.1f}s with {loaded.engine} in {len(windows)} "
-            f"~{CHUNK_SEC / 60:.0f} min chunks (overlap {OVERLAP_SEC:.1f}s, "
-            f"batch {loaded.batch_size}) — resumable per chunk"
+            f"[subtitle] transcribing {duration:.1f}s with {engine_name} in "
+            f"{len(windows)} x {CHUNK_SEC:.0f}s chunks (overlap {OVERLAP_SEC:.1f}s) — "
+            "each chunk in its own process, checkpointed when it lands"
         )
 
     # ---- decode the whole source to 16kHz mono WAV once --------------------
@@ -866,6 +899,9 @@ def transcribe(
     resumed = 0
     decoded_seconds = 0.0
     decode_wall = 0.0
+    attempts_all: list[dict] = []
+    used_models: set[str] = set()
+    peak_rss = 0.0
     # Language pinning (TARGET C): None means "auto" — the first chunk lets the
     # engine detect, then every later chunk receives the DETECTED language
     # explicitly instead of re-detecting. `language` given by the caller means
@@ -927,79 +963,72 @@ def transcribe(
                     on_progress(min(1.0, (_w_start + local_end) / duration))
 
             t0 = time.time()
-            words = None
-            # A chunk is retried on its own before the whole job is failed.
-            # Whisper on a shared, memory-constrained box fails transiently
-            # far more often than it fails permanently: a cgroup reclaim, a
-            # ctranslate2 thread that could not allocate, an interrupted read.
-            # After CHUNK_ATTEMPTS the chunk falls back to a SMALLER model,
-            # which needs a fraction of the memory and still produces correct
-            # words with correct timings -- a slightly worse transcript beats
-            # a failed batch, and the offsets are computed from w_start either
-            # way so a fallback cannot desynchronise the captions.
-            for attempt in range(1, CHUNK_ATTEMPTS + 2):
-                engine = loaded
-                if attempt > CHUNK_ATTEMPTS:
-                    engine = _load_smaller_model(settings, loaded)
-                try:
-                    # 'auto' pins NOTHING on the first chunk: the engine is
-                    # allowed to detect, and whatever it detected is then
-                    # PASSED EXPLICITLY to every later chunk — Whisper's own
-                    # per-chunk redetection is what breaks a mixed stream.
-                    # An explicitly configured/forced language always wins.
-                    # (detect_pinned is the sentinel "en-forced" when the
-                    # caller forced a language, so the truthy test below keeps
-                    # chunks honest in both modes.)
-                    chunk_lang = language or (detect_pinned if detect_pinned != "en-forced" else None)
-                    words, _detected = engine.asr_words(
-                        audio, chunk_lang, on_segment=on_segment,
-                    )
-                    if _detected and not language and detect_pinned is None:
-                        # first auto chunk: pin what the engine heard
-                        detect_pinned = _detected
-                        detected_language = _detected
-                        logger.info(
-                            f"[subtitle] engine detected language=\"{_detected}\" "
-                            "on the first chunk — pinning it for the rest"
-                        )
-                    if attempt > 1:
-                        logger.warning(
-                            f"[subtitle] chunk {idx + 1}/{len(windows)} decoded on "
-                            f"attempt {attempt} using '{engine.model_name}'"
-                        )
-                    break
-                except Exception as exc:  # noqa: BLE001 - retried, then escalated
-                    if attempt > CHUNK_ATTEMPTS and engine is loaded:
-                        # even the small model failed on the last attempt
-                        raise TranscribeError(
-                            f"{loaded.engine} decode failed on chunk "
-                            f"{idx + 1}/{len(windows)} ({w_start:.0f}-{w_end:.0f}s) "
-                            f"{CHUNK_ATTEMPTS} times and the smaller fallback model "
-                            f"also failed: {exc}"
-                        ) from exc
-                    if attempt <= CHUNK_ATTEMPTS:
-                        back = CHUNK_BACKOFF_SEC * (2 ** (attempt - 1))
-                        logger.warning(
-                            f"[subtitle] chunk {idx + 1}/{len(windows)} attempt "
-                            f"{attempt}/{CHUNK_ATTEMPTS} failed ({exc}) — retrying "
-                            f"in {back:.0f}s"
-                        )
-                        if on_progress:
-                            on_progress(min(1.0, w_start / duration))
-                        time.sleep(back)
-            if words is None:
+            # 'auto' pins NOTHING on the first chunk: the engine detects, and
+            # whatever it detected is PASSED EXPLICITLY to every later chunk —
+            # Whisper's own per-chunk redetection is what breaks a mixed stream.
+            # (detect_pinned is the sentinel "en-forced" when the caller forced
+            # a language, so the truthy test below keeps chunks honest.)
+            chunk_lang = language or (detect_pinned if detect_pinned != "en-forced" else None)
+            chunk_tmp = (cache_dir / "chunks") if cache_dir is not None else (
+                Path(settings.app.paths.data_dir) / "asr-tmp"
+            )
+            try:
+                # The LADDER lives here: per attempt, a fresh process with its
+                # own address space and a budget-checked memory limit. A failed
+                # allocation kills that child, never this job.
+                decoded = asr_iso.decode_span(
+                    functools.partial(_write_chunk_wav, reader),
+                    w_start,
+                    w_end,
+                    configured_model=model_name,
+                    language=chunk_lang,
+                    tmp_dir=chunk_tmp,
+                    on_log=lambda line: logger.warning(
+                        f"[subtitle] chunk {idx + 1}/{len(windows)}: {line}"
+                    ),
+                    on_chunk=(
+                        lambda text: on_detail(f"chunk {idx + 1}/{len(windows)} ({text})")
+                    ) if on_detail else None,
+                )
+            except asr_iso.AsrLadderError as exc:
+                last = str(exc)
+                reason = (
+                    "ran out of memory while transcribing"
+                    if asr_iso.is_memory_error(last)
+                    else "could not transcribe this audio"
+                )
                 raise TranscribeError(
-                    f"{loaded.engine} decode failed on chunk {idx + 1}/{len(windows)} "
-                    f"({w_start:.0f}-{w_end:.0f}s)"
+                    f"{reason} (chunk {idx + 1}/{len(windows)}, "
+                    f"{w_start:.0f}-{w_end:.0f}s); tried {len(exc.attempts)} "
+                    f"lighter settings and the last one still failed: {last[:400]}"
+                ) from exc
+            words = decoded.words
+            attempts_all.extend(a.as_dict() for a in decoded.attempts)
+            used_models.add(decoded.model)
+            peak_rss = max(peak_rss, decoded.peak_rss_mb)
+            if decoded.language and not language and detect_pinned is None:
+                detect_pinned = decoded.language
+                detected_language = decoded.language
+                logger.info(
+                    f"[subtitle] engine detected language=\"{decoded.language}\" "
+                    "on the first chunk — pinning it for the rest"
+                )
+            if decoded.model != model_name:
+                logger.warning(
+                    f"[subtitle] chunk {idx + 1}/{len(windows)} decoded with the "
+                    f"lighter model '{decoded.model}' (configured '{model_name}')"
                 )
             chunk_wall = time.time() - t0
-            chunk_audio = audio.size / sample_rate
+            chunk_audio = max(0.0, w_end - w_start)
             decoded_seconds += chunk_audio
             decode_wall += chunk_wall
             logger.info(
                 f"[subtitle] chunk {idx + 1}/{len(windows)}: {chunk_audio:.0f}s audio in "
-                f"{chunk_wall:.1f}s (RTF {chunk_wall / max(0.001, chunk_audio):.3f})"
+                f"{chunk_wall:.1f}s (RTF {chunk_wall / max(0.001, chunk_audio):.3f}, "
+                f"model '{decoded.model}', peak {decoded.peak_rss_mb:.0f} MB)"
             )
+            if on_progress and duration > 0:
+                on_progress(min(1.0, w_end / duration))
 
             # chunk-local word timings → source-absolute time
             abs_words = [
@@ -1046,7 +1075,9 @@ def transcribe(
     # one. hostlimits downgrades a model that cannot fit the container, so
     # labelling a `small` run as `medium` makes the stored transcript lie
     # about which model produced it (and about RTF, which is per-model).
-    ran_model = loaded.model_name or settings.whisper.model
+    ran_model = (
+        sorted(used_models)[-1] if used_models else model_name
+    ) or settings.whisper.model
     if ran_model != settings.whisper.model:
         logger.info(
             f"[subtitle] configured model '{settings.whisper.model}' was downgraded to "
@@ -1056,14 +1087,17 @@ def transcribe(
         words=words_out,
         duration=duration,
         model_size=ran_model,
-        engine=loaded.engine,
+        engine=engine_name,
         rtf=round(rtf, 4) if rtf is not None else None,
         language=language or detected_language or "",
+        attempts=attempts_all,
+        label=asr_iso.transcript_label(model_name, ran_model) or "",
+        peak_rss_mb=round(peak_rss, 1),
     )
     logger.info(
         f"[subtitle] transcribed {len(words_out)} words across {len(windows)} chunk(s), "
         f"{transcript.duration:.1f}s of audio, model '{ran_model}'"
-        + (f", RTF {rtf:.3f} ({loaded.engine})" if rtf is not None else "")
+        + (f", RTF {rtf:.3f} ({engine_name})" if rtf is not None else "")
         + (f", language '{transcript.language}'" if transcript.language else ""),
     )
     return transcript

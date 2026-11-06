@@ -340,6 +340,13 @@ class WorkerSupervisor:
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"  # app/ is watched for source edits
+        # LOCKED_SPEC §5: one core, one arena family. Every thread MKL/OpenMP
+        # creates multiplies its buffers, and those buffers are what pushed
+        # int8 `small` past a 2 GiB cgroup.
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env.setdefault("MKL_NUM_THREADS", "1")
+        env.setdefault("MALLOC_ARENA_MAX", "2")
+        env.setdefault("OPENBLAS_NUM_THREADS", "1")
         with open(log_path, "ab") as sink:
             self._proc = subprocess.Popen(
                 [*prefix, sys.executable, "-m", "app.workerd"],

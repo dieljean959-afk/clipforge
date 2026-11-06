@@ -274,6 +274,15 @@ def main(argv: list[str]) -> int:
         return 1
     try:
         Pipeline(settings, store).run(job_id)
+    finally:
+        # The ASR child holds the model between chunks; a finished job must not
+        # leave 600-900 MB resident for the next one on a 2 GiB host.
+        try:
+            from app import asr_iso
+
+            asr_iso.shutdown_shared()
+        except Exception:  # noqa: BLE001 - never mask the job's own outcome
+            pass
     except BaseException as exc:  # noqa: BLE001 - the job must never die silently
         # Pipeline.run already catches Exception and records it. This is the
         # backstop for BaseException (SystemExit from a handler, a

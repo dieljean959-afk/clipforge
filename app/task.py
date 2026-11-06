@@ -32,6 +32,7 @@ from loguru import logger
 
 from app import (
     asr,
+    asr_iso,
     clipcount,
     download,
     encode,
@@ -289,6 +290,8 @@ class Pipeline:
             "failedStage": stage,
             "error": message,
             "errorDetail": detail,
+            # The worker re-queues only this kind, after cleaning up orphans.
+            "errorKind": "memory" if asr_iso.is_memory_error(message) else None,
             "completedAt": now_ms,
             "stageStatus": self._stage_status,
             "interrupted": False,
@@ -933,10 +936,18 @@ class Pipeline:
         )[-4000:]
 
     def _fail_args_for(self, exc_info) -> tuple[str, str]:
-        """Build (message, detail) for _mark_stage_failed from an exception."""
+        """Build (message, detail) for _mark_stage_failed from an exception.
+
+        A memory failure gets a plain sentence (the traceback stays in
+        `errorDetail`, behind "Show details"), because "mkl_malloc: failed to
+        allocate memory" tells the user nothing they can act on.
+        """
         exc_type, exc_value, exc_tb = exc_info
         msg = f"{exc_type.__name__}: {exc_value}"
         detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))[-4000:]
+        if asr_iso.is_memory_error(f"{exc_value}"):
+            msg = asr_iso.plain_memory_reason()
+            detail = "memory failure\n" + detail
         return msg, detail
 
     # ------------------------------------------------------------------
@@ -1184,8 +1195,19 @@ class Pipeline:
                     prior_eta_sec=prior_eta,
                 )
 
+        def on_detail(text: str) -> None:
+            """Ladder detail for the Transcribing chip: "chunk 3 of 9 (small)"."""
+            self._progress(
+                job_id, "transcribing",
+                chunk_state["done"] / chunk_state["total"],
+                f"Transcribing {text}",
+                unit_label="chunks",
+                units_done=chunk_state["done"], units_total=chunk_state["total"],
+                prior_eta_sec=prior_eta,
+            )
+
         def on_progress(frac: float) -> None:
-            # Sub-chunk smoothing only. It must never move the bar BACKWARDS
+            # Sub-chunk smoothing only. It must never move the progress BACKWARDS
             # past what the chunk counter already proved, which is what makes
             # the first chunk usable instead of a dead 0%.
             base = chunk_state["done"] / chunk_state["total"]
@@ -1216,7 +1238,21 @@ class Pipeline:
                 should_pause=lambda: self.pause_requested(job_id),
                 on_chunk=on_chunk,
                 language=transcribe_language,
+                on_detail=on_detail,
             )
+        # Truthful metadata: which rung of the ladder produced these words,
+        # and whether the UI must label the transcript as a downshift.
+        if transcript.attempts or transcript.label:
+            fresh = self.store.get_job(job_id)
+            if fresh is not None:
+                fresh.update({
+                    "asrAttempts": transcript.attempts,
+                    "transcriptLabel": transcript.label,
+                    "asrPeakRssMb": transcript.peak_rss_mb,
+                })
+                self.store.write_job(fresh)
+            if transcript.label:
+                self._log(job_id, f"transcript: {transcript.label}")
         # Record what this host actually achieved so the next job's ETA starts
         # from a measurement instead of the documented prior.
         if transcript.rtf is not None:

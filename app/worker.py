@@ -121,6 +121,68 @@ def unrecoverable_reason(store: Any, job: dict[str, Any]) -> str | None:
     return SOURCE_LOST_MESSAGE
 
 
+MEMORY_MAX_JOB_ATTEMPTS = 3
+
+#: Names that can be left behind by a job that died. `app.asr_child` holds the
+#: model; ffmpeg and yt-dlp hold the source. An orphan of any of them keeps RAM
+#: or CPU busy that the next attempt is budgeted on.
+_ORPHAN_MARKERS = ("app.asr_child", "app.runner", "ffmpeg", "ffprobe", "yt-dlp")
+
+
+def cleanup_orphans(data_dir: Path, *, protect_pids: set[int] | None = None) -> list[str]:
+    """Kill orphaned job processes and delete stale temp audio.
+
+    An orphan is a process whose parent is gone (ppid 1) or is not this worker
+    and not alive. Live children of the current worker are never touched.
+    """
+    protected = set(protect_pids or set())
+    protected.add(os.getpid())
+    killed: list[str] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in protected:
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode(
+                "utf-8", "replace"
+            )
+        except OSError:
+            continue
+        if not any(marker in cmdline for marker in _ORPHAN_MARKERS):
+            continue
+        if "app.worker" in cmdline or "app.main" in cmdline or "app.workerd" in cmdline:
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8")
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        if ppid != 1 and ppid != os.getpid():
+            # Owned by a live daemon/supervisor: not ours to kill.
+            if Path(f"/proc/{ppid}").exists():
+                continue
+        try:
+            os.kill(pid, 9)
+            killed.append(f"{pid} ({cmdline.strip()[:60]})")
+            logger.warning(f"[worker] killed orphaned job process {pid}: {cmdline.strip()[:80]}")
+        except OSError:
+            continue
+    # Stale temp audio: chunk WAVs are per-attempt scratch, never inputs to a
+    # resume (the JSON checkpoints are). Anything older than a day is debris.
+    cutoff = time.time() - 24 * 3600
+    for pattern in ("asr-tmp/*.wav", "*/chunks/*.wav", "*/chunks/span_*.wav"):
+        for path in Path(data_dir).glob(pattern):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    killed.append(f"temp audio {path.name}")
+            except OSError:
+                continue
+    return killed
+
+
 class InProcessWorker:
     def __init__(self, settings: Settings, store: LocalStore) -> None:
         self.settings = settings
@@ -164,6 +226,14 @@ class InProcessWorker:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
+        # LOCKED_SPEC §6: never inherit the previous run's debris. Orphans from
+        # a killed job hold the RAM the next attempt is budgeted against.
+        try:
+            cleaned = cleanup_orphans(self.settings.app.paths.data_dir)
+            if cleaned:
+                logger.info(f"[worker] startup cleanup removed {len(cleaned)} item(s)")
+        except Exception as exc:  # noqa: BLE001 - cleanup must never block boot
+            logger.warning(f"[worker] startup cleanup failed: {exc}")
         with self._lock:
             if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
                 return
@@ -446,6 +516,14 @@ class InProcessWorker:
                     if self._current_job == job_id:
                         self._current_job = None
                         self._current_proc = None
+                # LOCKED_SPEC §6: after EVERY job, not just on failure. A
+                # finished job can still leave a stuck ffmpeg or an ASR child
+                # holding the model, and the next job is budgeted on the RAM
+                # those processes are sitting in.
+                try:
+                    cleanup_orphans(self.settings.app.paths.data_dir)
+                except Exception as exc:  # noqa: BLE001 - never break the queue
+                    logger.warning(f"[worker] post-job cleanup failed: {exc}")
                 self._queue.task_done()
 
     def _clear_queue_position(self, job_id: str) -> None:
@@ -617,35 +695,11 @@ class InProcessWorker:
             # A pause is a user decision, not a failure: never auto-retry it.
             if stage == "paused":
                 return
-            # A retryable failure (render deadline, stall watchdog) gets ONE
-            # automatic second attempt before the user is told anything. Both
-            # are environmental — a hung ffmpeg or a starved host — and the
-            # pipeline resumes from the last COMPLETED clip, so a retry is
-            # cheap: it does not repeat the download, transcription or the paid
-            # detection call, only the render that actually failed.
-            if self._auto_retry(job_id, job or {}, "stall/render deadline"):
-                return
-            return
-
-        # A retry may have started a new process for this job before the old
-        # supervisor finished reaping. Never let the old process report the new
-        # attempt's terminal state.
-        with self._lock:
-            is_current_process = self._active.get(job_id) is proc
-            if is_current_process:
-                self._active.pop(job_id, None)
-            if self._current_proc is proc:
-                self._current_proc = None
-        if not is_current_process:
-            return
-        job = self.store.get_job(job_id)
-        stage = (job or {}).get("stage")
-        if self._stalled_job == job_id or job_id in self._stalled_jobs:
-            # watchdog already failed it with a specific reason
-            return
-        if stage in {"complete", "failed", "paused"}:
-            # A pause is a user decision, not a failure: never auto-retry it.
-            if stage == "paused":
+            # A MEMORY failure is environmental, and the in-process ladder has
+            # already spent its cheaper rungs. Clean up whatever the dead
+            # attempt left behind and re-queue the job (max 3), which resumes
+            # from the chunk checkpoints on disk instead of from zero.
+            if (job or {}).get("errorKind") == "memory" and self._memory_requeue(job_id, job or {}):
                 return
             # A retryable failure (render deadline, stall watchdog) gets ONE
             # automatic second attempt before the user is told anything. Both
@@ -940,6 +994,48 @@ class InProcessWorker:
         logger.warning(
             f"[worker] job {job_id} interrupted by {how} during '{stage}' — "
             f"re-queuing (attempt {count}/{INTERRUPT_MAX_RESUMES})"
+        )
+        self.enqueue(job_id)
+        return True
+
+    def _memory_requeue(self, job_id: str, job: dict[str, Any]) -> bool:
+        """Re-queue a job that died of memory, after cleaning up its debris."""
+        count = int(job.get("memoryAttempts") or 0)
+        if count >= MEMORY_MAX_JOB_ATTEMPTS:
+            return False
+        try:
+            cleanup_orphans(self.settings.app.paths.data_dir)
+        except Exception as exc:  # noqa: BLE001 - requeue regardless
+            logger.warning(f"[worker] cleanup before memory retry failed: {exc}")
+        job.update({
+            "memoryAttempts": count + 1,
+            "stage": "queued",
+            "failedStage": None,
+            "error": None,
+            "errorDetail": None,
+            "errorKind": None,
+            "completedAt": None,
+            "progress": 0,
+            "progressDetail": (
+                f"Ran out of memory — retrying with a lighter setting "
+                f"(attempt {count + 1} of {MEMORY_MAX_JOB_ATTEMPTS}); finished "
+                "chunks are saved"
+            ),
+            "interrupted": True,
+            "interruptReason": "Ran out of memory while transcribing — resuming from the last saved chunk.",
+        })
+        for field in ("stagePlan", "unitsDone", "unitsTotal", "unitLabel",
+                      "stageEtaSec", "totalEtaSec"):
+            job.pop(field, None)
+        self.store.write_job(job)
+        self.store.append_job_log(
+            job_id,
+            f"MEMORY: re-queued automatically (attempt {count + 1} of "
+            f"{MEMORY_MAX_JOB_ATTEMPTS}) — chunk checkpoints are reused",
+        )
+        logger.warning(
+            f"[worker] job {job_id} hit a memory failure — re-queued "
+            f"(attempt {count + 1}/{MEMORY_MAX_JOB_ATTEMPTS})"
         )
         self.enqueue(job_id)
         return True
