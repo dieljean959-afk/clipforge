@@ -150,6 +150,22 @@ def download_url(
         "concurrent_fragment_downloads": 8,
         "progress_hooks": [],
     }
+    # YouTube signs its media URLs with an "n/sig challenge" that only a
+    # JavaScript engine can solve. Without one, yt-dlp lists IMAGES instead of
+    # video and the app reports "Requested format is not available" even though
+    # cookies are fine. Node is on this host; the solver script itself is a
+    # remote component, fetched once and cached by yt-dlp.
+    runtime = next(
+        (name for name in ("deno", "node") if shutil.which(name)), None
+    )
+    if runtime:
+        ydl_opts["js_runtimes"] = {runtime: {}}
+        ydl_opts["remote_components"] = {"ejs:github"}
+    else:
+        logger.warning(
+            "[download] no JavaScript runtime (deno/node) on PATH — YouTube "
+            "will only offer images for most videos"
+        )
     if settings.download.cookies_from_browser:
         ydl_opts["cookiesfrombrowser"] = (settings.download.cookies_from_browser,)
     cookies_file = getattr(settings.download, "cookies_file", "") or ""

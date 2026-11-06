@@ -491,6 +491,10 @@ max_height = 720
 # Leave "" for none. Set to "chrome"/"firefox"/"edge"/"brave"/"safari" to borrow
 # that browser's cookies for age-restricted videos you can access.
 cookies_from_browser = ""
+# Netscape-format cookies.txt (or YT_DLP_COOKIES_FILE). YouTube answers this
+# datacenter IP with "Sign in to confirm you're not a bot" without it. The file
+# lives in data/ (gitignored) and holds live credentials — never commit it.
+cookies_file = "/home/daytona/codebase/data/cookies.txt"
 # Auto `pip install -U yt-dlp` once on failure before the retry.
 auto_update = true
 
