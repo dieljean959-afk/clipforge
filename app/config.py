@@ -186,6 +186,37 @@ _PLACEHOLDER_VALUES = {
 }
 
 
+def _env_files_fingerprint(root: Path) -> str:
+    """Cheap change detector for the env files — no parsing, no decryption.
+
+    `_fresh_env_snapshot` decrypts every `encrypted:` value, which shells out and
+    costs hundreds of milliseconds. It was being paid on EVERY config refresh,
+    i.e. on every /api/health poll, and a health check that takes a second is a
+    health check the supervisor's 1.2s probe reports as dead — which is how a
+    perfectly healthy API kept getting restarted. The fingerprint only needs
+    size+mtime, so compute that first and decrypt only when it changes.
+    """
+    parts: list[str] = []
+    for name in (".env", ".env.local", ".env.keys"):
+        p = root / name
+        if p.exists():
+            try:
+                stat = p.stat()
+                parts.append(f"{name}:{stat.st_size}:{int(stat.st_mtime)}")
+            except OSError:
+                parts.append(f"{name}:missing")
+    return "|".join(parts)
+
+
+#: Decrypted env snapshot, shared by every _LiveKeyState (and every load_config
+#: call). Each instance used to parse + decrypt the env files itself, so one
+#: /api/health poll paid for it several times over — hundreds of milliseconds of
+#: EC crypto per poll, which is what made /api/health look dead to the
+#: supervisor. Keyed by root; invalidated by the cheap fingerprint.
+_ENV_SNAPSHOT_CACHE: dict[str, tuple[str, dict[str, str]]] = {}
+_ENV_SNAPSHOT_LOCK = threading.Lock()
+
+
 def _fresh_env_snapshot(root: Path) -> tuple[str, dict[str, str]]:
     """Fingerprint + raw contents of the project's env files.
 
@@ -193,7 +224,13 @@ def _fresh_env_snapshot(root: Path) -> tuple[str, dict[str, str]]:
     .env/.env.local/.env.keys — which is what makes live re-detection possible
     without restarting the web process.
     """
-    parts: list[str] = []
+    cache_key = str(root)
+    fingerprint_now = _env_files_fingerprint(root)
+    with _ENV_SNAPSHOT_LOCK:
+        cached = _ENV_SNAPSHOT_CACHE.get(cache_key)
+        if cached is not None and cached[0] == fingerprint_now:
+            return cached[0], dict(cached[1])
+
     merged: dict[str, str] = {}
     for name in (".env", ".env.local", ".env.keys"):
         p = root / name
@@ -202,7 +239,6 @@ def _fresh_env_snapshot(root: Path) -> tuple[str, dict[str, str]]:
                 text = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 text = ""
-            parts.append(f"{name}:{len(text)}:{int(p.stat().st_mtime)}")
             for line in text.splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -214,7 +250,9 @@ def _fresh_env_snapshot(root: Path) -> tuple[str, dict[str, str]]:
     # would misreport a decryptable platform-saved key as "unusable
     # (encrypted)" even though _load_env_files decrypts it into os.environ.
     _decrypt_encrypted_values(merged)
-    return "|".join(parts), merged
+    with _ENV_SNAPSHOT_LOCK:
+        _ENV_SNAPSHOT_CACHE[cache_key] = (fingerprint_now, merged)
+    return fingerprint_now, dict(merged)
 
 
 def _empty_encrypted(value: str) -> bool:
@@ -469,9 +507,19 @@ class _LiveKeyState:
         self.source: str = "not checked"
         self.problem: str | None = None
         self.lastCheckedAt: float = 0.0
+        #: (key-present, source, problem) as last logged. `/api/health`
+        #: re-resolves keys on every poll (that is how a key saved in the
+        #: platform is picked up without a restart), so logging the outcome
+        #: unconditionally wrote ~19 identical lines a second into api.log and
+        #: rotated the real evidence out of it. Report transitions only.
+        self._last_reported: tuple[bool, str, str | None] | None = None
 
     def refresh(self, force: bool = False) -> None:
         with self._lock:
+            # Cheap stat-only check first: an unchanged env must not pay for
+            # decryption on every health poll (see _env_files_fingerprint).
+            if not force and _env_files_fingerprint(self._root) == self._fingerprint:
+                return
             fingerprint, file_values = _fresh_env_snapshot(self._root)
             if not force and fingerprint == self._fingerprint:
                 return
@@ -497,10 +545,13 @@ class _LiveKeyState:
             self.source = source or "not found in env files or OS env"
             self.problem = problem
             self.lastCheckedAt = time.time()
-            if key is not None:
-                logger.info(f"[config] {self._label} key detected ({source})")
-            elif problem:
-                logger.warning(f"[config] {self._label} key rejected: {problem}")
+            outcome = (key is not None, source or "", problem)
+            if outcome != self._last_reported:
+                self._last_reported = outcome
+                if key is not None:
+                    logger.info(f"[config] {self._label} key detected ({source})")
+                elif problem:
+                    logger.warning(f"[config] {self._label} key rejected: {problem}")
 
     def status(self) -> dict:
         self.refresh()

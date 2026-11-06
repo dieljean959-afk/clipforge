@@ -204,7 +204,12 @@ function pickPython(): string | null {
   return null;
 }
 
-async function pingBackend(timeoutMs = 1500): Promise<boolean> {
+// 5s, not 1.5s: this probe decides whether the child is ALIVE, and on a 1-vCPU
+// host a busy API can take a second to answer /api/health. A false "dead" here
+// respawns a working backend, which the browser then reports as "API
+// restarting, retrying..." forever. Timeout means "slow", not "dead"; a real
+// crash is detected immediately by the child's exit event instead.
+async function pingBackend(timeoutMs = 5000): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.get(HEALTH, { timeout: timeoutMs }, (res) => {
       if (res.statusCode !== 200) {
@@ -302,7 +307,7 @@ async function startBackend(): Promise<boolean> {
   const deadline = Date.now() + 30_000;
   let up = false;
   while (Date.now() < deadline) {
-    up = await pingBackend(1200);
+    up = await pingBackend(2500);
     if (up) break;
     if (state.proc === null) break; // died during boot
     await new Promise((r) => setTimeout(r, 400));

@@ -41,7 +41,12 @@ _STATS_LOCK = threading.Lock()
 
 
 def _proc_stat_cpu_percent() -> float | None:
-    """Sample /proc/stat twice (0.15s apart) → busy percentage, or None."""
+    """Sample /proc/stat twice (0.05s apart) → busy percentage, or None.
+
+    The gap is a blocking sleep inside /api/health (2s cache). 150ms was long
+    enough to push a health poll past the supervisor's probe timeout on a busy
+    1-vCPU host, so it is kept short — the delta is still measurable, and
+    jiffies are 10ms, so 50ms resolves the percentage. """
     try:
         def read() -> tuple[int, int]:
             with open("/proc/stat", encoding="ascii") as fh:
@@ -51,7 +56,7 @@ def _proc_stat_cpu_percent() -> float | None:
             return sum(parts), idle
 
         total0, idle0 = read()
-        time.sleep(0.15)
+        time.sleep(0.05)
         total1, idle1 = read()
         dt, di = total1 - total0, idle1 - idle0
         if dt <= 0:

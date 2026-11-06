@@ -871,6 +871,13 @@ def set_detection_backend(body: DetectionIn) -> dict:
 # health / status
 # --------------------------------------------------------------------------- #
 
+# Spawning `<binary> -version` costs ~300ms on this 1-vCPU host, and /api/health
+# asked for two of them on every poll — that alone pushed health past the
+# supervisor's probe timeout and restarted a healthy API in a loop. A binary's
+# version cannot change while this process runs, so the answer is cached.
+_TOOL_VERSION_CACHE: dict[tuple[str, str], str | None] = {}
+
+
 def _tool_version(binary: str, flag: str = "-version") -> str | None:
     """First line of `<binary> -version`, or None when it cannot run.
 
@@ -881,14 +888,21 @@ def _tool_version(binary: str, flag: str = "-version") -> str | None:
     """
     import subprocess
 
+    cache_key = (binary, flag)
+    if cache_key in _TOOL_VERSION_CACHE:
+        return _TOOL_VERSION_CACHE[cache_key]
+
     try:
         proc = subprocess.run(
             [binary, flag], capture_output=True, text=True, timeout=10
         )
     except (OSError, subprocess.SubprocessError):
+        # Not cached: a missing binary may be installed later (the UI offers
+        # that), and a negative answer is cheap to retry.
         return None
     out = (proc.stdout or "") + (proc.stderr or "")
     line = out.strip().splitlines()[0] if out.strip() else ""
+    _TOOL_VERSION_CACHE[cache_key] = line or None
     return line or None
 
 
