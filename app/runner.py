@@ -18,6 +18,8 @@ import threading
 import time
 import traceback
 
+from app import memguard
+
 
 def _describe(exc: BaseException) -> str:
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
@@ -174,34 +176,18 @@ def _unwrap143(exc: BaseException) -> BaseException:
     return exc
 
 
-def _available_mb() -> float | None:
-    """Usable RAM right now, from MemAvailable (already excludes reclaimable)."""
-    try:
-        with open("/proc/meminfo", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) / 1024
-    except OSError:
-        return None
-    return None
+# One helper, explicit units (LOCKED_SPEC §4). The old guard here divided
+# /proc bytes by 1024 (KB) and compared that against a byte constant, which is
+# how a 1 GB requirement printed as "needs ~1000000000 MB" and refused a host
+# with 1992 MB free. app.memguard owns the comparison now.
+MIN_START_MB = memguard.requirement_mb("small")
 
 
-# Refuse to start a stage below this. Whisper `small` peaks around 1.1 GiB and
-# ffmpeg adds hundreds of MB; with under ~300 MB usable the stage does not run
-# slowly, it makes the cgroup reclaim in a loop (this host showed `max 1391`
-# events) and the API stops answering in time. Refusing is the cheaper failure.
-MIN_START_MB = 300.0
-
-
-def _refuse_if_starved(job_id: str, store) -> bool:
-    avail = _available_mb()
-    if avail is None or avail >= MIN_START_MB:
+def _refuse_if_starved(job_id: str, store, model: str | None = None) -> bool:
+    admission = memguard.check(model)
+    if admission.ok:
         return False
-    msg = (
-        f"Host is low on memory ({avail:.0f} MB usable, needs ~{MIN_START_MB:.0f} MB to start). "
-        "The stage was not started, so the pipeline server stays responsive. "
-        "Retry when the host is idle — cached stages mean it resumes where it stopped."
-    )
+    msg = admission.message or "Host is low on memory."
     job = store.get_job(job_id)
     if job is not None:
         job.update({
@@ -275,7 +261,7 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"[runner] memory cap: {soft // (1024 * 1024)} MB\n")
     except Exception:
         pass
-    if _refuse_if_starved(job_id, store):
+    if _refuse_if_starved(job_id, store, getattr(settings.whisper, "model", None)):
         return 1
     try:
         Pipeline(settings, store).run(job_id)

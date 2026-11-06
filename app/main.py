@@ -626,16 +626,9 @@ class CreateJobIn(BaseModel):
     minClipSec: int | None = Field(default=None, ge=5, le=180)
     maxClipSec: int | None = Field(default=None, ge=10, le=180)
     maxClips: int | None = Field(default=None, ge=1, le=clipcount.HARD_CEILING)
-    # Every key in subtitle.CAPTION_PRESETS is selectable per job, including the
-    # animated ones — a pattern that only knew the classic keys 422'd a job
-    # submitted with the new default style.
-    captionPreset: str | None = Field(
-        default=None,
-        pattern=(
-            "^(bold_pop|karaoke|lower_third|boxed|vertical_916|viral|"
-            "bold_yellow|clean_white|green_karaoke|neon|box_highlight|bold_stack)$"
-        ),
-    )
+    # ONE caption style (LOCKED_SPEC §1). The field stays for older clients, but
+    # `bold_stack` is the only key any render can wear.
+    captionPreset: str | None = Field(default=None, pattern="^(bold_stack)$")
     language: str = Field(default="auto", pattern="^(auto|en|es)$")
     # Emoji per batch: on/off and how dense. Omitted = the config defaults.
     emojiEnabled: bool | None = None
@@ -2077,6 +2070,10 @@ async def upload_job(
     # there is no way to recreate, so this is never allowed to be lossy.
     offloaded = _offload_source(job_id, final)
     job["sourceRemote"] = bool(offloaded)
+    # The bytes exist now, so the "Waiting for upload" gate is over: the job is
+    # runnable and the worker may pick it up (LOCKED_SPEC §4).
+    job["stage"] = "queued"
+    job["progressDetail"] = "Upload received — queued."
     store.write_job(job)
     store.append_job_log(
         job_id,

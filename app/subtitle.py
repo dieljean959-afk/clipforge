@@ -1,3 +1,4 @@
+# LOCKED: do not modify — see LOCKED_SPEC.md §1 (ONE caption style).
 """Subtitle service: WhisperX/batched-whisper word-level transcription + ASS captions.
 
 Transcription is delegated to ``app.asr`` (WhisperX when installed, otherwise
@@ -418,7 +419,14 @@ def build_bold_stack_events(
     alternates between line 1 and line 2, exactly as the reference does.
     """
     resolved = _resolved(settings, preset_key)
-    base_scale = caption_size_scale(settings) if scale is None else float(scale)
+    # The RESOLVED scale (stored override + preset), not settings.subtitle's
+    # raw value: reading the config file here while the dialog read the
+    # override made the Caption size slider preview one size and render
+    # another — the exact preview/render split LOCKED_SPEC §1 forbids.
+    base_scale = (
+        float(scale) if scale is not None
+        else float(resolved.get("sizeScale") or caption_size_scale(settings))
+    )
     position_y = float(resolved["positionY"])
     preset = CAPTION_PRESETS["bold_stack"]
     white = _hex_to_ass("#FFFFFF")
@@ -452,6 +460,14 @@ def build_bold_stack_events(
         l1_y, l2_y = bold_stack_positions(
             frame_h, metrics["pitch"], anchor_y=anchor_y, position_y=position_y
         )
+        # `\an2` anchors the line BOX, whose bottom is the baseline plus the
+        # font's descent and the outline's outward half — so a block placed at
+        # captionBottomY had its visible glyphs sitting ~24 px above the video's
+        # edge. The spec is about where the TEXT is, so the box is pushed down
+        # by that gap; pitch is untouched (both lines move together).
+        gap = int(round(metrics["cap_h"] * 0.63))
+        l1_y += gap
+        l2_y += gap
         cycle = tuple(resolved["colors"]) or BOLD_STACK_COLORS
         colour = fixed_accent or _hex_to_ass(cycle[idx % len(cycle)])
         # Alternate which line carries the colour: chunk 0 colours line 1.
@@ -1519,43 +1535,6 @@ def _build_viral_cue(cue: dict, highlight_color: str) -> str:
     return "".join(parts)
 
 
-def build_ass_events(
-    cues: list[dict], settings: Settings, start_offset: float = 0.0,
-    preset_key: str | None = None,
-) -> str:
-    p = get_preset(preset_key, settings.subtitle.highlight_color)
-    # The highlight colour lives on the caption track: the ASS `subtitles`
-    # filter does NOT read [Events] colour tags, so we carry the preset's
-    # own accent as the highlight colour for this clip's cues — that's the
-    # colour the word being spoken gets painted.
-    highlight_color = p.secondary if p.secondary else settings.subtitle.highlight_color
-    lines: list[str] = []
-    for c in cues:
-        start = _ass_time(c["start"] - start_offset)
-        end = _ass_time(c["end"] - start_offset)
-        # The viral preset is word-by-word. Each word gets its own ASS cue
-        # (and therefore its own ASS events line), so the spoken word stays
-        # on screen exactly as long as it was spoken and never stacks on top
-        # of the next word. The whole burst is one flat, centred, max-2-line
-        # white strip with a thick black outline and soft shadow.
-        # ``c["text"]`` is the burst text; ``c["words"]`` is what we paint on.
-        text = c["text"].replace("{", "(").replace("}", ")")
-        if p.pop:
-            text = (
-                r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
-                r"\t(90,140,\fscx100\fscy100)}" + text
-            )
-        # The spoken word is painted bright in sync with the audio. Because
-        # each word is its own flat cue, this colour never bleeds onto the
-        # next word — no more bottom-of-frame merge mess.
-        if p.highlight and c.get("words"):
-            text = _build_viral_cue(c, highlight_color)
-        lines.append(
-            f"Dialogue: 0,{start},{end},{p.key},,0,0,0,,{text}"
-        )
-    return "\n".join(lines) + "\n"
-
-
 # --------------------------------------------------------------------------- #
 # Keyword emphasis (TARGET B) — 1-2 highlighted words per chunk in rotating
 # #1FE01F / #FFF000 / #FF1A1A, chosen with language-aware stopword lists so
@@ -1707,82 +1686,6 @@ def display_text(text: str, *, uppercase: bool, max_line: int = 0) -> str:
     return t
 
 
-def write_hook_ass(
-    title: str,
-    settings: Settings,
-    path: Path,
-    width: int,
-    height: int,
-) -> Path:
-    """The optional hook title: bold black text on a white rounded box.
-
-    Rendered as a SECOND tiny .ass script layered by a second ``subtitles``
-    filter (libass handles the rounded-box look via BorderStyle=3 +
-    BackColour=white, and rounds the corners itself with
-    ScaledBorderAndShadow). Centred horizontally at 5-13% height — the band
-    above the captions where the target places it. Duration is the whole clip
-    (the hook is the clip's pitch, it leads), which the caller reads as
-    "always on"; the target's own examples keep it for the clip's first
-    seconds, which a caller can trim with the file's own Dialogue line.
-    """
-    p = get_preset("viral")
-    black = _hex_to_ass("#0A0A0A")
-    white = _hex_to_ass("#FFFFFF")
-    font = p.font_override or settings.subtitle.font
-    # 5-13% window: centre at 9% via Alignment 8 (top-middle) + MarginV 9%.
-    margin_v = int(height * 0.09)
-    content = f"""[Script Info]
-Title: Clipmake Hook
-ScriptType: v4.00+
-PlayResX: {width}
-PlayResY: {height}
-WrapStyle: 2
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Hook,{font},{int(p.font_size * 0.66)},{black},{white},{white},{white},-1,0,0,0,100,100,0,0,3,{int(p.font_size * 0.18)},0,8,40,40,{margin_v},1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,0:00:10.00,Hook,,0,0,0,,{title.replace("{", "(").replace("}", ")")}
-"""
-    path.write_text(content, encoding="utf-8")
-    return path
-
-
-def hook_title_text(
-    cue_texts: list[str],
-    *,
-    language: str | None = None,
-    existing_title: str | None = None,
-) -> str:
-    """A 3-8 word hook title for the whole clip, in the audio's language.
-
-    Prefers the detection stage's own title (it is already the AI's chosen
-    hook), truncated/filled to the 3-8 word window; falls back to the clip's
-    first strong sentence fragment. Never translates — whatever language the
-    transcript is in is what comes out.
-    """
-    words: list[str]
-    if existing_title and existing_title.strip():
-        words = existing_title.strip().split()
-    else:
-        joined = " ".join(cue_texts)
-        # take the longest strong-worded opening — enough for a hook
-        strong = [w for w in joined.split() if _word_feature(w, language) >= 4]
-        words = (strong or joined.split())[:8] or [""]
-    if len(words) < 3:
-        # pad from the transcript's own first words so the hook is 3+ words
-        extra = " ".join(cue_texts).split()
-        for w in extra:
-            if len(words) >= 3:
-                break
-            if w not in words:
-                words.append(w)
-    return " ".join(words[:8]).strip()
-
-
 def _make_cue(
     start: float, end: float, text: str, words: list[dict],
     threshold: float, inaudible_threshold: float,
@@ -1871,7 +1774,7 @@ def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
         # The size-scale knob changes the pixels (font, outline and pitch move
         # together), so it must move the fingerprint too or "Re-render
         # captions" would skip every clip wearing the previous size.
-        round(caption_size_scale(settings), 3),
+        round(float(_resolved(settings, preset_key).get("sizeScale") or 1.0), 3),
     ))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
@@ -1896,7 +1799,12 @@ def build_ass_header(
     # whole table above is decorative.
     font_size, outline_w = int(resolved["fontSize"]), int(resolved["outline"])
     if p.key == "bold_stack":
-        metrics = bold_stack_metrics(caption_size_scale(settings))
+        # Same resolved scale the events use — a header written from the raw
+        # config made the style "Clipmake" a different size from the lines it
+        # is supposed to style.
+        metrics = bold_stack_metrics(
+            float(resolved.get("sizeScale") or caption_size_scale(settings))
+        )
         font_size = bold_stack_ass_size(metrics["size"])
         outline_w = int(metrics["outline"])
     primary = _hex_to_ass(p.primary)
@@ -1990,49 +1898,14 @@ def build_ass_events(
     preset_key: str | None = None, anchor_y: int | None = None,
     frame_w: int = 1080, frame_h: int = 1920,
 ) -> str:
-    p = get_preset(preset_key, settings.subtitle.highlight_color)
-    if p.key == "bold_stack":
-        # Two Dialogue events per burst (one per stacked line), each with its
-        # own \an2\pos so the 86 px pitch is exact. See build_bold_stack_events.
-        return build_bold_stack_events(
-            cues, settings, start_offset,
-            anchor_y=anchor_y, frame_w=frame_w, frame_h=frame_h,
-            preset_key=preset_key,
-        )
-    # The highlight colour lives on the caption track: the ASS `subtitles`
-    # filter does NOT read [Events] colour tags, so we carry the preset's
-    # own accent as the highlight colour for this clip's cues — that's the
-    # colour the word being spoken gets painted.
-    highlight_color = p.secondary if p.secondary else settings.subtitle.highlight_color
-    lines: list[str] = []
-    for c in cues:
-        start = _ass_time(c["start"] - start_offset)
-        end = _ass_time(c["end"] - start_offset)
-        # The Ssemble-style viral path must be ONE flat, SINGLE-cue STRIP per
-        # burst. Each cue is a compact 2-4 word burst (single Dialogue line,
-        # no per-word \k tags, no multiple lines crammed into the events file),
-        # ALL CAPS, white with a thick black outline and soft shadow tied to
-        # the style. The word being spoken is painted bright by wrapping just
-        # that word in the inline colour tag and leaving the rest plain white
-        # — this is what the Ssemble look does, and it is what keeps the
-        # subtitle read-able instead of a jumbled word-by-word stack.
-        text = c["text"].replace("{", "(").replace("}", ")")
-        if p.pop:
-            text = (
-                r"{\fad(60,40)\fscx84\fscy84\t(0,90,\fscx105\fscy105)"
-                r"\t(90,140,\fscx100\fscy100)}" + text
-            )
-        if c.get("words") and not c.get("uncertain"):
-            text = _build_viral_cue(c, highlight_color)
-        # Same layout rule as the animated styles: on a FIT clip the caption
-        # belongs against the foreground video's lower edge, not down in the
-        # blurred band under it (where a bottom margin puts it).
-        if anchor_y is not None:
-            text = rf"{{\an2\pos({frame_w // 2},{int(anchor_y)})}}" + text
-        lines.append(
-            f"Dialogue: 0,{start},{end},{p.key},,0,0,0,,{text}"
-        )
-    return "\n".join(lines) + "\n"
+    # ONE style (LOCKED_SPEC §1): two Dialogue events per burst (one per
+    # stacked line), each with its own \an2\pos so the 86 px pitch is exact.
+    # See build_bold_stack_events.
+    return build_bold_stack_events(
+        cues, settings, start_offset,
+        anchor_y=anchor_y, frame_w=frame_w, frame_h=frame_h,
+        preset_key=preset_key,
+    )
 
 
 def _emphasis_tags(cue: dict, uppercase: bool) -> str:

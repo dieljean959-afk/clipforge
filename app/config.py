@@ -1266,8 +1266,9 @@ class SubtitleConfig:
     # Read the audio's loudness to raise intensity on shouted chunks. One
     # ffmpeg pass per clip; off means the model's own intensity is used.
     emoji_audio_cue: bool = True
-    # Default caption style preset: bold_pop | karaoke | lower_third | boxed
-    preset: str = "bold_pop"
+    # The caption style. ONE exists (LOCKED_SPEC §1); the field is kept so a
+    # stored job/config key still resolves.
+    preset: str = "bold_stack"
     # --- unclear speech ------------------------------------------------
     # A caption cue whose mean per-word confidence is below `low_confidence`
     # is shown as [muttering] instead of the model's guess, and below
@@ -1785,26 +1786,20 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
             in ("low", "medium", "high") else "medium"
         ),
         emoji_audio_cue=bool(s.get("emoji_audio_cue", True)),
-        preset=str(s.get("preset", "bold_pop")),
+        preset=str(s.get("preset", "bold_stack")),
         low_confidence=float(s.get("low_confidence", 0.45)),
         inaudible_below=float(s.get("inaudible_below", 0.30)),
         strip_fillers=bool(s.get("strip_fillers", True)),
         strip_stutters=bool(s.get("strip_stutters", True)),
         highlight_color=_hex_or_blank(s.get("highlight_color", ""), "subtitle.highlight_color", errors),
     )
-    # Keep this in step with subtitle.CAPTION_PRESETS: the animated styles are
-    # new preset KEYS, so a config naming one is valid and must not be rejected
-    # at boot (a rejected preset takes the whole server down, not one render).
-    _known_presets = (
-        "bold_pop", "karaoke", "lower_third", "boxed", "vertical_916", "viral",
-        "bold_yellow", "clean_white", "green_karaoke", "neon", "box_highlight",
-        "bold_stack",
-    )
+    # ONE caption style (LOCKED_SPEC §1): keep this in step with
+    # caption_presets.CAPTION_PRESETS, which has exactly one key. An old config
+    # naming a removed look is a warning-level mistake, so the value is forced
+    # to `bold_stack` rather than taking the whole server down at boot.
+    _known_presets = ("bold_stack",)
     if subtitle.preset not in set(_known_presets):
-        errors.append(
-            f'subtitle.preset "{subtitle.preset}" is not one of '
-            + "/".join(_known_presets)
-        )
+        subtitle = replace(subtitle, preset="bold_stack")
     for name, value in (("low_confidence", subtitle.low_confidence),
                         ("inaudible_below", subtitle.inaudible_below)):
         if not 0.0 <= value <= 1.0:

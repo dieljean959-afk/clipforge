@@ -60,7 +60,8 @@ STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "600"))
 # Bounded on purpose: a job that cannot survive a restart loop must stop
 # looping eventually, but losing hours of transcription to a 30-second host
 # bounce is the failure this prevents.
-INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "5"))
+# LOCKED_SPEC §4: a job resumes automatically at most THREE times.
+INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "3"))
 
 # Matches the signalled-death banners this module writes, e.g.
 # "exited unexpectedly (code -15)". Kept deliberately narrow so it cannot match
@@ -214,6 +215,11 @@ class InProcessWorker:
         self._write_queue_position(job_id, depth - 1)
         logger.info(f"[worker] job {job_id} queued (depth {depth})")
         return depth
+
+    def is_queued(self, job_id: str) -> bool:
+        """Is this job sitting in the queue right now?"""
+        with self._lock:
+            return job_id in self._pending
 
     def cancel(self, job_id: str) -> str:
         """Stop a job for good. Returns what was actually cancelled.
@@ -449,8 +455,64 @@ class InProcessWorker:
         job["queuePosition"] = None
         self.store.write_job(job)
 
+    #: A job created by the upload route exists before its bytes do. It must
+    #: never be handed to a runner in that state — the runner would look for a
+    #: file called "pending-upload" and fail a job whose upload is still
+    #: streaming. It waits, visibly, and expires if the upload never lands.
+    WAITING_UPLOAD_STAGE = "waiting-upload"
+    UPLOAD_WAIT_MAX_SEC = 30 * 60
+
+    def _hold_for_upload(self, job_id: str, job: dict[str, Any]) -> bool:
+        """True when this job must NOT start because its upload is missing."""
+        if str(job.get("source") or "") != "pending-upload":
+            return False
+        created_ms = float(job.get("createdAt") or 0.0)
+        age_sec = (time.time() * 1000 - created_ms) / 1000.0 if created_ms else 0.0
+        if age_sec > self.UPLOAD_WAIT_MAX_SEC:
+            msg = (
+                "Waiting for upload — the file never arrived, so this job "
+                "expired after 30 minutes. Attach the video again to start it."
+            )
+            fresh = self.store.get_job(job_id) or job
+            fresh.update({
+                "stage": "failed",
+                "failedStage": None,
+                "error": msg,
+                "errorDetail": None,
+                "interrupted": False,
+                "progress": 0,
+                "completedAt": int(time.time() * 1000),
+            })
+            from app import jobstatus
+
+            jobstatus.describe(fresh)
+            self.store.write_job(fresh)
+            self.store.append_job_log(job_id, f"FAILED: {msg}")
+            return True
+        if job.get("stage") != self.WAITING_UPLOAD_STAGE:
+            job.update({
+                "stage": self.WAITING_UPLOAD_STAGE,
+                "progress": 0,
+                "progressDetail": (
+                    "Waiting for upload — the job starts by itself when the "
+                    "file is attached (expires in 30 minutes)."
+                ),
+            })
+            self.store.write_job(job)
+            self.store.append_job_log(
+                job_id, "Waiting for upload — no file yet, so no stage was started"
+            )
+        return True
+
     def _run_job_process(self, job_id: str) -> None:
         """Run one job in a child process; supervise exit; surface crashes."""
+        job_now = self.store.get_job(job_id)
+        if job_now is not None and self._hold_for_upload(job_id, job_now):
+            return
+        # Preflight BEFORE the child process exists: a missing binary or a
+        # starved host is a message with a fix, not a crashed job.
+        if self._preflight_environment(job_id, job_now):
+            return
         log_dir = self.settings.app.paths.data_dir / "work" / job_id
         log_dir.mkdir(parents=True, exist_ok=True)
         runner_log = log_dir / "runner.log"
@@ -527,10 +589,6 @@ class InProcessWorker:
         # Section 3: ring buffer of the last 500 log lines, flushed every
         # second and on exit, so "View logs" and "Show details" never go empty.
         self._log_ringbuffer(job_id)
-
-        # Section 6: environment preflight — fail fast with a clear error
-        # instead of exiting 0 when yt-dlp/ffmpeg are missing.
-        self._preflight_environment(job_id)
 
         try:
             if runner_log.exists():
@@ -943,16 +1001,30 @@ class InProcessWorker:
             if jobstatus.is_terminal(job):
                 continue
             stage = job.get("stage")
-            # A QUEUED job not in the queue is equally stale — it was enqueued
-            # by a process that died before the worker picked it up.
-            silent = int((job.get("lastProgressAt") or job.get("stageStartedAt")
-                          or job.get("createdAt") or 0))
             # A job that already carries a reason (the runner reported back, the
             # stage guard refused to start, an upload went missing) keeps it.
             # Only a job with no explanation at all gets the generic one: its
             # message is what tells the user whether to retry, re-upload or set
             # cookies, and a guess would throw that away.
             reported_error = str(job.get("error") or "").strip() or _reason_from_logs(job)
+            # LOCKED_SPEC §4: a job that was mid-flight with no worker behind it
+            # and NO reason of its own was INTERRUPTED (host restart, redeploy,
+            # OOM kill), not broken. Bump its attempt counter, mark it
+            # interrupted, put it back on the queue, and let the cached stages
+            # resume it — the user never presses Retry. A job the runner itself
+            # explained keeps that explanation and fails as before, and the
+            # 3-attempt budget stops a crash loop from requeueing forever.
+            if not reported_error and str(stage or "") != "paused":
+                if self._note_interrupted(job, job_id, -signal.SIGKILL, str(stage or "queued"), ""):
+                    logger.warning(
+                        f"[worker] stale job {job_id} was '{stage}' with no worker "
+                        f"— marked interrupted and re-queued (attempt "
+                        f"{job.get('interruptCount')}/{INTERRUPT_MAX_RESUMES})"
+                    )
+                    fixed.append(job_id)
+                    continue
+            silent = int((job.get("lastProgressAt") or job.get("stageStartedAt")
+                          or job.get("createdAt") or 0))
             job.update({
                 "stage": "failed",
                 "failedStage": job.get("failedStage") or stage,
@@ -1229,29 +1301,70 @@ class InProcessWorker:
         except Exception:
             pass
 
-    def _preflight_environment(self, job_id: str) -> None:
-        """Fail fast with a clear error instead of exiting 0 when tools or
-        required env vars are missing."""
+    def _preflight_environment(self, job_id: str, job: dict[str, Any] | None = None) -> list[str]:
+        """Everything that must be true BEFORE a job starts (LOCKED_SPEC §4).
+
+        Returns the problems found (empty when the job may start). Each problem
+        names the exact cause and the fix. Called before the runner is spawned:
+        the old version ran AFTER the child had already exited, and swallowed
+        every exception it raised, so a missing binary surfaced as a generic
+        "worker stopped" instead of a fixable message.
+        """
+        import shutil as _shutil
+
+        from app import hosting as _hosting
+        from app import memguard as _memguard
+
+        problems: list[str] = []
+        missing = [name for name in ("yt-dlp", "ffmpeg") if _shutil.which(name) is None]
+        if missing:
+            problems.append(
+                "missing tool(s) in PATH: " + ", ".join(missing)
+                + " — install them (apt-get install -y ffmpeg yt-dlp) and retry"
+            )
+        # Presence only: never read, compare or log a key's value.
+        if not any(os.environ.get(name) for name in (
+            "GROQ_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_API_KEY", "NVIDIA_API_KEY", "OPENAI_API_KEY",
+        )):
+            problems.append(
+                "no detection provider key is set — add one in the Keys tab "
+                "(GROQ_API_KEY, DEEPSEEK_API_KEY, GEMINI_API_KEY or NVIDIA_API_KEY)"
+            )
         try:
-            import shutil
-            missing = [name for name in ("yt-dlp", "ffmpeg") if shutil.which(name) is None]
-            if missing:
-                job = self.store.get_job(job_id)
-                msg = "Worker could not start: missing tool(s) in PATH: " + ", ".join(missing)
-                if job is not None:
-                    job.update({
-                        "stage": "failed",
-                        "failedStage": "fetch",
-                        "error": msg,
-                        "errorDetail": msg,
-                        "interrupted": False,
-                        "completedAt": int(time.time() * 1000),
-                    })
-                    self.store.write_job(job)
-                    self.store.append_job_log(job_id, f"FAILED: {msg}")
-                raise RuntimeError(msg)
+            free = _hosting.disk_stats(self.settings.app.paths.data_dir).get("freeBytes")
+            if free is not None and int(free) < 100 * 1024 * 1024:
+                problems.append(
+                    f"only {int(free) // (1024 * 1024)} MB of disk free — free space "
+                    "(delete finished jobs) and retry; the render needs at least 100 MB"
+                )
         except Exception:
             pass
+        admission = _memguard.check(getattr(self.settings.whisper, "model", None))
+        if not admission.ok and admission.message:
+            problems.append(admission.message)
+        if not problems:
+            return []
+        doc = self.store.get_job(job_id) or job
+        if doc is not None:
+            msg = "Worker could not start this job — " + " | ".join(problems)
+            doc.update({
+                "stage": "failed",
+                "failedStage": "fetch",
+                "error": msg,
+                "errorDetail": msg,
+                "interrupted": False,
+                "completedAt": int(time.time() * 1000),
+            })
+            try:
+                from app import jobstatus
+
+                jobstatus.describe(doc)
+            except Exception:
+                pass
+            self.store.write_job(doc)
+            self.store.append_job_log(job_id, f"FAILED: {msg}")
+        return problems
 
     # ------------------------------------------------------------------
     # status for the dashboard card

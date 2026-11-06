@@ -25,19 +25,17 @@ def base():
 # resolveCaptionSettings: preset defaults + slider overrides
 # --------------------------------------------------------------------------- #
 
-def test_every_preset_resolves_and_they_differ(base):
-    assert len(PRESET_ORDER) == 7
-    looks = {}
-    for key in PRESET_ORDER:
+def test_there_is_exactly_one_caption_style(base):
+    # LOCKED_SPEC §1: ONE style. A second key is a spec violation, not a
+    # feature — and a removed key must still resolve to the one look.
+    assert PRESET_ORDER == ("bold_stack",)
+    assert list(CAPTION_PRESETS) == ["bold_stack"]
+    for key in ("bold_stack", "viral", "bold_pop", "karaoke", "boxed", "nonsense"):
         r = caption_style.resolve_caption_settings(base, {"preset_key": key})
-        assert r["presetKey"] == key
+        assert r["presetKey"] == "bold_stack", key
         assert r["fontSize"] > 0 and r["outline"] >= 0 and r["pitch"] > 0
-        looks[key] = (
-            r["fontFamily"], r["fontSize"], r["outline"], r["box"],
-            r["lines"], r["uppercase"], tuple(r["colors"]), r["positionMode"],
-        )
-    # The whole point of seven presets: no two render the same.
-    assert len(set(looks.values())) == len(looks)
+        assert r["lines"] == 2 and r["uppercase"] is True and r["box"] is False
+        assert tuple(r["colors"]) == ("#FFFF00", "#00FF00", "#FF0000")
 
 
 def test_size_scale_scales_font_outline_and_pitch_together(base):
@@ -85,7 +83,9 @@ def test_hash_changes_with_any_rendered_value(base):
     b = caption_style.resolve_caption_settings(
         base, {"preset_key": "bold_stack", "size_scale": 1.2}
     )["hash"]
-    c = caption_style.resolve_caption_settings(base, {"preset_key": "viral"})["hash"]
+    c = caption_style.resolve_caption_settings(
+        base, {"preset_key": "bold_stack", "words_per_cue": 3}
+    )["hash"]
     d = caption_style.resolve_caption_settings(
         base, {"preset_key": "bold_stack", "highlight_color": "#00FF00"}
     )["hash"]

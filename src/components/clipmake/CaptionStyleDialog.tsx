@@ -1,3 +1,6 @@
+// LOCKED: do not modify — see LOCKED_SPEC.md §1 (ONE caption style).
+// The only customisation here changes the RENDER: size, highlight colour,
+// burst length, hard cap, pause threshold, emoji. There is no style picker.
 import { useState } from "react";
 import { toast } from "sonner";
 import { Captions, Loader2, RotateCcw, Save } from "lucide-react";
@@ -90,47 +93,15 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
 
   const preview = draft ?? current;
   const accent = preview?.highlight_color || "#39FF14";
-  const selected = draft?.presetKey ?? current?.presetKey ?? "bold_stack";
   // "custom" badge: the set the BACKEND resolved (preset defaults vs sliders),
   // not a local guess, so the badge matches what the render will use.
   const custom = new Set(preview?.custom ?? []);
   const emojiOn = preview?.emojiEnabled ?? false;
   const emojiDensity = preview?.emojiDensity ?? "medium";
 
-  // Preset keys in the order they should appear in the UI. The labels below
-  // are known locally so the dialog can render the selector without importing
-  // the backend package that also ships the CaptionPreset class.
-  const CAPTION_PRESETS_ORDERED = [
-    "bold_stack",
-    "viral",
-    "vertical_916",
-    "bold_pop",
-    "karaoke",
-    "lower_third",
-    "boxed",
-  ] as const;
-
-  type CaptionPresetKey = (typeof CAPTION_PRESETS_ORDERED)[number];
-
-  const CAPTION_PRESET_LABELS: Record<string, string> = {
-    bold_stack: "Bold stack (reference look)",
-    viral: "Ssemble-style viral",
-    vertical_916: "Vertical 9:16 big captions",
-    bold_pop: "Bold pop (default)",
-    karaoke: "Karaoke fill",
-    lower_third: "Clean lower-third",
-    boxed: "Boxed",
-  };
-
-  function presetLabel(key: string | undefined): string {
-    if (!key) return "Caption style";
-    return CAPTION_PRESET_LABELS[key] ?? "Caption style";
-  }
-
-  const presetOptions = CAPTION_PRESETS_ORDERED.map((key) => ({
-    key,
-    label: CAPTION_PRESET_LABELS[key] ?? "Caption style",
-  }));
+  // ONE style, so the key is a constant. Kept in the saved payload because a
+  // stored job resolves its look from it.
+  const selected = "bold_stack";
 
   return (
     <Dialog
@@ -285,12 +256,24 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
 
             <Field
               label="Highlight colour"
-              hint="The word being spoken. Empty keeps the style's own colour."
-              value={preview.highlight_color || "Style default"}
+              hint="One line of each chunk is coloured. Auto cycles yellow → green → red; pick a colour to use it for every chunk."
+              value={preview.highlight_color || "Auto cycle"}
               pinned={custom.has("highlight_color")}
             >
               <div className="flex flex-wrap items-center gap-2">
-                {["#39FF14", "#FFD400", "#FF5C39", "#FF2E88", "#4DA3FF", "#FFFFFF"].map((hex) => (
+                <button
+                  type="button"
+                  aria-label="Auto colour cycle"
+                  onClick={() => setDraft({ ...preview, highlight_color: "" })}
+                  className={
+                    !preview.highlight_color
+                      ? "cursor-pointer rounded-lg border border-foreground/30 bg-accent/40 px-3 py-1.5 text-xs font-medium text-foreground"
+                      : "cursor-pointer rounded-lg border border-border/60 px-3 py-1.5 text-xs text-muted-foreground hover:border-foreground/40"
+                  }
+                >
+                  Auto cycle
+                </button>
+                {["#FFFF00", "#00FF00", "#FF0000", "#39FF14", "#FFD400", "#FF2E88"].map((hex) => (
                   <button
                     key={hex}
                     type="button"
@@ -311,16 +294,6 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                   onChange={(e) => setDraft({ ...preview, highlight_color: e.target.value })}
                   className="size-7 cursor-pointer rounded-full border-2 border-border/60 bg-transparent p-0"
                 />
-                {preview.highlight_color !== "" && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 cursor-pointer px-2 text-xs"
-                    onClick={() => setDraft({ ...preview, highlight_color: "" })}
-                  >
-                    Default
-                  </Button>
-                )}
               </div>
             </Field>
 
@@ -361,35 +334,6 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
               </div>
             </Field>
 
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">Caption style</Label>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                The look of every clip in this batch — size, outline, position,
-                and the colour the word you are speaking lights up.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {presetOptions.map((presetOption) => {
-                  const isSelected = selected === presetOption.key;
-                  return (
-                    <button
-                      key={presetOption.key}
-                      type="button"
-                      aria-label={`Use ${presetOption.label}`}
-                      onClick={() => setDraft({ ...preview, presetKey: presetOption.key })}
-                      className={
-                        isSelected
-                          ? "flex items-center gap-2 rounded-lg border border-foreground/30 bg-accent/40 px-3 py-1.5 text-xs font-medium text-foreground"
-                          : "flex items-center gap-2 rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:border-foreground/40 hover:text-foreground"
-                      }
-                    >
-                      <Captions className="size-3.5" />
-                      {presetOption.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
             <p className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
               Captions are burned into each clip when it renders. Saving changes the next
               render — use <span className="font-medium text-foreground">Re-render captions</span>{" "}
@@ -402,17 +346,28 @@ export function CaptionStyleDialog({ onApplied }: { onApplied?: () => void }) {
                 variant="ghost"
                 className="cursor-pointer gap-1.5 text-xs"
                 disabled={saving || (preview?.custom ?? []).length === 0}
-                onClick={() =>
-                  void save({
-                    presetKey: selected,
-                    emojiEnabled: emojiOn,
-                    emojiDensity,
-                    reset: true,
-                  })
-                }
+                onClick={() => {
+                  // Reset restores the DEFAULTS: every override dropped, the
+                  // one style's own size/colour/rhythm back in place.
+                  setSaving(true);
+                  void api
+                    .resetCaptionStyle()
+                    .then((next) => {
+                      setCurrent(next);
+                      setDraft(next);
+                      toast.success("Reset to the default caption settings.");
+                      onApplied?.();
+                    })
+                    .catch((err: unknown) =>
+                      toast.error(
+                        err instanceof Error ? err.message : "Could not reset caption settings.",
+                      ),
+                    )
+                    .finally(() => setSaving(false));
+                }}
               >
                 <RotateCcw className="size-3.5" />
-                Reset to preset
+                Reset
               </Button>
               <Button
                 size="sm"

@@ -1,3 +1,4 @@
+# LOCKED: do not modify — see LOCKED_SPEC.md §1 (ONE caption style).
 """Caption knobs the dashboard can change, without editing config.toml.
 
 Three things decide whether the captions feel right, and all three used to be

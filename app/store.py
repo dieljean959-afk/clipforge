@@ -186,7 +186,7 @@ class LocalStore:
                 "maxClipSec": max_clip_sec,
                 "maxClips": max_clips,
             },
-            "captionPreset": caption_preset or "bold_pop",
+            "captionPreset": caption_preset or "bold_stack",
             "clips": [],
             "logs": [],
             "progress": 0.0,

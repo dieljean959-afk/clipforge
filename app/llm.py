@@ -1784,6 +1784,68 @@ def heuristic_candidates(
     return picked
 
 
+def _title_from_reply(raw: str) -> str | None:
+    """Pull the hook title out of a model reply (JSON or bare line)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        import json as _json
+
+        start, end = text.find("{"), text.rfind("}")
+        if 0 <= start < end:
+            data = _json.loads(text[start : end + 1])
+            if isinstance(data, dict):
+                text = str(data.get("title") or data.get("hook") or "")
+    except Exception:
+        pass
+    text = " ".join(text.strip().strip('"\'').split())
+    if not text:
+        return None
+    # A title, not a paragraph: keep it to one short line.
+    return text[:90].strip() or None
+
+
+def clip_hook_title(
+    cue_texts: list[str],
+    settings: Settings,
+    *,
+    language: str | None = None,
+    attempts: int = 2,
+) -> str | None:
+    """A 3-8 word hook title for ONE clip, in the transcript's own language.
+
+    This is the white title bar's text (LOCKED_SPEC §2). The detection pass
+    usually supplies a title already; this is the per-clip path for a clip that
+    has none, with exactly ONE retry before the caller falls back to the
+    transcript's first sentence. Returns None when every attempt failed — the
+    caller decides what to burn, this function never invents placeholder text.
+    """
+    transcript = " ".join(str(t).strip() for t in cue_texts if str(t).strip())
+    if not transcript:
+        return None
+    spoken = {"en": "English", "es": "Spanish"}.get(
+        str(language or "").strip().lower(), "the transcript's own language"
+    )
+    prompt = (
+        "You write the hook title burned into the top of a short vertical clip.\n"
+        f"Transcript of this clip: {transcript[:1200]}\n"
+        f"Write ONE hook title, 3 to 8 words, in {spoken}. Never translate.\n"
+        'Reply with JSON only: {"title": "..."}\n'
+    )
+    for attempt in range(max(1, attempts)):
+        try:
+            raw = call_llm(prompt, settings, plain_json=True)
+        except Exception as exc:  # noqa: BLE001 - any failure means "no LLM title"
+            logger.warning(f"[llm] hook title attempt {attempt + 1} failed: {exc}")
+            continue
+        title = _title_from_reply(raw)
+        if title:
+            return title
+        logger.warning(f"[llm] hook title attempt {attempt + 1} returned no title")
+    return None
+
+
 def detect_clips(
     words: list[dict],
     settings: Settings,

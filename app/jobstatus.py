@@ -103,7 +103,9 @@ def status_of(job: dict[str, Any]) -> str:
         # A signalled worker leaves `interrupted` set while the resume runs;
         # it is still running work, just resumed, so it stays "running".
         return "running"
-    if not stage or stage == "queued":
+    if not stage or stage in {"queued", "waiting-upload"}:
+        # A job whose upload never finished is not running: it waits, and the
+        # upload endpoint is what queues it. Its card says "Waiting for upload".
         return "queued"
     # An unknown stage is a real possibility after a bad deploy. Treat it as
     # running rather than inventing a new status the UI cannot render.

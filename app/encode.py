@@ -494,6 +494,7 @@ def render_clip(
     cues: list[dict[str, Any]] | None = None,
     preset_key: str | None = None,
     emoji_selection: list[dict[str, Any]] | None = None,
+    title: str | None = None,
     on_log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Render one reframe cut into a 9:16 MP4.
@@ -716,17 +717,27 @@ def render_clip(
         # a caller can attach it with its own Dialogue timing if it wants a
         # heading; the render path keeps the caption layer alone.
 
+    # White title bar (LOCKED_SPEC §2): a full-width white plate near the top
+    # with the clip's hook title. Drawn to a PNG by app.titlebar, which
+    # measures every line with the real font and shrinks/wraps so nothing can
+    # ever run off an edge; it is then overlaid for the whole clip. One extra
+    # input and one overlay — no second libass pass, no guesswork.
+    title_png: Path | None = None
+    title_top = 0
+    if title and str(title).strip():
+        from app import titlebar as _titlebar
+
+        plan = _titlebar.plan(str(title), frame_w=out_w)
+        title_png = _titlebar.render_png(plan, dest.with_suffix(".title.png"))
+        title_top = plan.top
+
     # Emoji layer (animated styles only) is emitted above the caption as timed
     # PNG overlays — it is the only second layer the render is allowed to
     # produce, and it carries the same SafeArea/insets as the text below.
-    if not emoji and cues:
-        # Keyword emoji for the animated styles only, and only when the caller
-        # did not already supply a context-aware selection — two emoji layers
-        # on one chunk is exactly the decoration this feature avoids.
-        from app import captions_animated as _animated
-
-        if _subtitle.get_preset(preset_key or "bold_pop").emoji:
-            emoji = _animated.emoji_overlays(cues, preset_key)
+    # The keyword emoji layer belonged to the animated styles, which no longer
+    # exist (LOCKED_SPEC §1). The Twemoji overlay that remains is the
+    # context-aware selection above — chosen once per clip in the captions
+    # stage and burned in this same single pass.
 
     # Encode to a temp file and only then replace the destination. A render
     # that is killed mid-write (host restart, stall watchdog, a re-render
@@ -750,7 +761,7 @@ def render_clip(
         # ask for emoji take this path; everything else keeps the plain -vf
         # chain, and the static-crop fallback renders without emoji rather than
         # failing the clip over decoration.
-        if emoji:
+        if emoji or title_png:
             # ONE pass, ONE input per DISTINCT emoji image.
             #
             # The old chain opened the same PNG again for every occurrence and
@@ -808,6 +819,15 @@ def render_clip(
                     )
                     layer += 1
                 src_idx += 1
+            # The title plate goes on LAST, above every other layer, for the
+            # whole clip (no enable window).
+            out_label = f"cv{layer}"
+            if title_png is not None:
+                extra += ["-loop", "1", "-t", f"{clip_seconds:.3f}", "-i", str(title_png)]
+                chain.append(
+                    f"[{out_label}][{src_idx}:v]overlay=x=0:y={title_top}:format=auto[ttl]"
+                )
+                out_label = "ttl"
             return [
                 ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                 *enc.hw_accel_args(),
@@ -817,7 +837,7 @@ def render_clip(
                 *enc.emoji_threads_args(),
                 "-filter_complex", ";".join(chain),
                 *enc.ffmpeg_codec_args(),
-                "-map", f"[cv{len(emoji)}]",
+                "-map", f"[{out_label}]",
                 "-map", "0:a:0?",
                 "-c:a", "aac",
                 "-b:a", "128k",

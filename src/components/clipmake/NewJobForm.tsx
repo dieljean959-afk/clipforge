@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Globe, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api, type CaptionPresetDto, type UsageDto, waitForSandbox } from "@/lib/api";
+// LOCKED: do not modify — see LOCKED_SPEC.md §1 (ONE caption style).
+import { api, type UsageDto, waitForSandbox } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { CaptionLanguage } from "@/lib/api";
 
@@ -24,10 +25,9 @@ export function NewJobForm({
   const [submitting, setSubmitting] = useState(false);
   const [sandboxState, setSandboxState] = useState<"idle" | "starting" | "failed">("idle");
   const [sandboxMessage, setSandboxMessage] = useState<string | null>(null);
-  const [presets, setPresets] = useState<CaptionPresetDto[]>([]);
-  // Animated word-by-word captions are the default look; the picker still
-  // exposes every classic style the backend reports.
-  const [preset, setPreset] = useState("bold_yellow");
+  // ONE caption style (LOCKED_SPEC §1). No picker: a job cannot choose a look
+  // that the renderer would silently resolve to a different one.
+  const preset = "bold_stack";
   const [clipCap, setClipCap] = useState<number | undefined>(undefined);
   const [language, setLanguage] = useState<LanguageChoice>("auto");
   // Emoji per batch. Density is the share of chunks allowed to carry one; the
@@ -36,23 +36,6 @@ export function NewJobForm({
   const [emojiOn, setEmojiOn] = useState(true);
   const [emojiDensity, setEmojiDensity] = useState<"low" | "medium" | "high">("medium");
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const list = await api.captionPresets();
-        if (!cancelled && list.length > 0) setPresets(list);
-      } catch {
-        // never block submission on a stale presets fetch
-      }
-    };
-    const t = setTimeout(() => void load(), 0);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, []);
 
   const canSubmit =
     confirmed &&
@@ -180,35 +163,6 @@ export function NewJobForm({
           </button>
         </>
       )}
-
-      <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
-        <span className="mt-0.5 size-3.5 shrink-0 text-primary" />
-        <span className="flex-1">
-          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Caption style
-          </span>
-          <select
-            value={preset}
-            onChange={(e) => setPreset(e.target.value)}
-            className="h-9 w-full cursor-pointer rounded-md border border-input bg-card px-2 text-sm text-foreground"
-          >
-            {(presets.length > 0
-              ? presets
-              : [
-                  { key: "bold_stack", label: "Bold stack (reference look)" },
-                  { key: "bold_pop", label: "Bold pop (default)" },
-                  { key: "karaoke", label: "Karaoke fill" },
-                  { key: "lower_third", label: "Clean lower-third" },
-                  { key: "boxed", label: "Boxed" },
-                ]
-            ).map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </span>
-      </label>
 
       <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
         <span className="mt-0.5 size-3.5 shrink-0 text-primary" />

@@ -102,7 +102,7 @@ def build_cues(
     settings: Any,
     *,
     language: str | None = None,
-    style: str = "viral",
+    style: str = "bold_stack",
     allow_clip_override: bool = True,
 ) -> list[dict[str, Any]]:
     """Assemble caption cues for ONE rendered clip from a transcript + cut window.

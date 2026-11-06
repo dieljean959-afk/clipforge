@@ -69,7 +69,8 @@ def test_reconcile_keeps_the_reason_the_runner_reported(env):
     assert job["completedAt"] == 1793926000000
 
 
-def test_reconcile_still_explains_a_job_that_never_reported(env):
+def test_reconcile_requeues_a_silent_job_instead_of_failing_it(env):
+    """LOCKED_SPEC §4: stale heartbeat -> interrupted -> re-queued, no Retry."""
     settings, store = env
     store.write_job({
         "_id": "job_silent",
@@ -79,14 +80,40 @@ def test_reconcile_still_explains_a_job_that_never_reported(env):
         "progress": 40,
         "createdAt": 1,
     })
+    worker = _worker(settings, store)
 
-    _worker(settings, store).reconcile_stale_running(force=True)
+    fixed = worker.reconcile_stale_running(force=True)
 
     job = store.get_job("job_silent")
+    assert fixed == ["job_silent"]
+    assert job["stage"] == "transcribing"       # resumes from the cached stage
+    assert job.get("interrupted") is True
+    assert job.get("interruptCount") == 1
+    assert job.get("error") in (None, "")
+    assert worker.is_queued("job_silent") is True
+
+
+def test_reconcile_gives_up_after_three_attempts(env):
+    settings, store = env
+    store.write_job({
+        "_id": "job_loop",
+        "sourceType": "url",
+        "source": "https://example.com/x.mp4",
+        "stage": "transcribing",
+        "progress": 40,
+        "createdAt": 1,
+        "interruptCount": 3,
+    })
+    worker = _worker(settings, store)
+
+    worker.reconcile_stale_running(force=True)
+
+    job = store.get_job("job_loop")
     assert job["stage"] == "failed"
     assert job["failedStage"] == "transcribing"
     assert GENERIC in job["error"]
     assert job["progress"] == 0
+    assert worker.is_queued("job_loop") is False
 
 
 def test_replayed_progress_never_revives_a_failed_job(env):

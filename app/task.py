@@ -1598,6 +1598,41 @@ class Pipeline:
                 units_done=i + 1, units_total=len(cuts),
             )
 
+    def _clip_title(
+        self, job: dict[str, Any], cut: dict[str, Any], cues: list[dict[str, Any]]
+    ) -> tuple[str, str]:
+        """The white title bar's text for ONE clip — LOCKED_SPEC §2.
+
+        Order: the detection pass's own LLM title for this clip (already
+        written from its transcript in the video's language) → one LLM call
+        with a single retry → the transcript's first sentence, labelled
+        "fallback: first sentence" in the clip metadata. Placeholder text is
+        never an answer.
+        """
+        existing = " ".join(str(cut.get("title") or cut.get("hookText") or "").split())
+        texts = [str(c.get("text") or "") for c in cues]
+        if existing:
+            return existing[:90], "llm"
+        try:
+            from app import llm as llm_mod
+
+            spoken = llm_mod.clip_hook_title(
+                texts, self.settings, language=str(job.get("language") or "auto")
+            )
+        except Exception as exc:  # noqa: BLE001 - a title must never fail a clip
+            self._log(job["_id"], f"hook title: LLM unavailable ({exc}) — using first sentence")
+            spoken = None
+        if spoken:
+            return spoken, "llm"
+        from app import titlebar as titlebar_mod
+
+        fallback = titlebar_mod.first_sentence(texts)
+        self._log(
+            job["_id"],
+            f"hook title: fallback: first sentence — {fallback!r}",
+        )
+        return fallback, "fallback: first sentence"
+
     # ------------------------------------------------------------------
     # stage 6: export (encode + package)
     # ------------------------------------------------------------------
@@ -1690,11 +1725,18 @@ class Pipeline:
                     # LLM judgement, filtered by the selection rules). Missing
                     # track = no emoji layer, never a guess at render time.
                     emoji_track = ws.read_json("captions", f"emoji_{i:03d}.json") or {}
+                    clip_cues = (
+                        ws.read_json("captions", f"cues_{i:03d}.json") or {}
+                    ).get("cues") or []
+                    # LOCKED_SPEC §2: the white bar's text, per clip, from the
+                    # clip's own content, in the video's language.
+                    clip_title, title_source = self._clip_title(job, cut, clip_cues)
                     meta = encode.render_clip(
                         src, cut, dest / f"clip_{i:03d}.mp4", cap_settings,
-                        cues=(ws.read_json("captions", f"cues_{i:03d}.json") or {}).get("cues") or [],
+                        cues=clip_cues,
                         preset_key=str(resolved["presetKey"]),
                         emoji_selection=emoji_track.get("selected") or [],
+                        title=clip_title,
                         # The FIT/FILL choice per shot is carried from the
                         # reframe stage on each cut and logged here.
                         on_log=lambda line: self._log(job_id, line),
@@ -1738,6 +1780,8 @@ class Pipeline:
                         "emojiTrack": emoji_track.get("selected") or [],
                         "emojiSource": emoji_track.get("source"),
                         "emojiTags": emoji_track.get("tags") or [],
+                        "title": clip_title,
+                        "titleSource": title_source,
                         "renderMs": meta.get("renderMs"),
                         "encoder": meta.get("encoder"),
                         "encoderLabel": meta.get("encoderLabel"),
@@ -1764,6 +1808,8 @@ class Pipeline:
                         "mediaHeight": meta["height"],
                         "mediaDurationSec": meta["durationSec"],
                         "renderState": "done",
+                        "title": clip_title,
+                        "titleSource": title_source,
                         "renderMs": meta.get("renderMs"),
                         "encoder": meta.get("encoder"),
                         "encoderLabel": meta.get("encoderLabel"),
