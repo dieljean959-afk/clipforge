@@ -2024,23 +2024,33 @@ async def upload_job(
     tmp = dest_dir / "upload.bin"
     max_mb = settings.hosted.max_source_mb
     written = 0
-    with tmp.open("wb") as fh:
-        while chunk := await file.read(1024 * 1024):
-            written += len(chunk)
-            # Checked while streaming, so an oversized upload is abandoned
-            # rather than written in full and then rejected — on a 4 GB disk
-            # that is the difference between a clear error and a full volume.
-            if max_mb and written > max_mb * 1024 * 1024:
-                fh.close()
-                tmp.unlink(missing_ok=True)
-                shutil.rmtree(dest_dir, ignore_errors=True)
-                store.delete_job(job_id)
-                raise HTTPException(
-                    413,
-                    f"That file is larger than the {max_mb} MB limit for this plan. "
-                    f"Compress it or trim it and attach again.",
-                )
-            fh.write(chunk)
+    try:
+        with tmp.open("wb") as fh:
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                # Checked while streaming, so an oversized upload is abandoned
+                # rather than written in full and then rejected — on a 4 GB disk
+                # that is the difference between a clear error and a full volume.
+                if max_mb and written > max_mb * 1024 * 1024:
+                    fh.close()
+                    tmp.unlink(missing_ok=True)
+                    shutil.rmtree(dest_dir, ignore_errors=True)
+                    store.delete_job(job_id)
+                    raise HTTPException(
+                        413,
+                        f"That file is larger than the {max_mb} MB limit for this plan. "
+                        f"Compress it or trim it and attach again.",
+                    )
+                fh.write(chunk)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        # Never leave a job behind for bytes that were not stored: that orphan
+        # shows up as "pending-upload — source was lost" on the dashboard.
+        tmp.unlink(missing_ok=True)
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        store.delete_job(job_id)
+        raise HTTPException(507, f"Could not store the upload: {exc}") from exc
     final = download_svc.save_upload(tmp, dest_dir, file.filename)
     try:
         uploaded_meta = video_svc.probe(final)
@@ -2379,8 +2389,22 @@ def retry_job(job_id: str) -> dict:
         raise HTTPException(404, "job not found")
     if job.get("stage") != "failed":
         raise HTTPException(400, "only failed jobs can be retried")
-    if worker_mod.unrecoverable_reason(store, job) is not None:
-        raise HTTPException(400, worker_mod.unrecoverable_reason(store, job))
+    dead_end = worker_mod.unrecoverable_reason(store, job)
+    if dead_end is not None:
+        # Record the reason on the job as well as returning it: the card is
+        # rendered from the document, so a refusal that only lives in the HTTP
+        # response leaves the old, wrong message on screen (this is how a job
+        # kept showing a memory-guard message from a build that no longer
+        # exists instead of "re-upload the file").
+        job.update({
+            "stage": "failed",
+            "error": dead_end,
+            "errorDetail": None,
+            "interrupted": False,
+            "interruptReason": None,
+        })
+        store.write_job(job)
+        raise HTTPException(400, dead_end)
     try:
         depth = worker.retry_from_cache(job_id)
     except KeyError:

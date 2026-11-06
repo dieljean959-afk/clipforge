@@ -74,6 +74,32 @@ SOURCE_LOST_MESSAGE = (
     "resumed — attach the file again to start a new one."
 )
 
+# Stages a job never leaves on its own. Anything that writes progress must
+# refuse to move a job OUT of one of these: only a retry/resume may.
+_TERMINAL_STAGES = frozenset({"complete", "failed", "paused"})
+
+# The runner's own failure line, e.g.
+#   "FAILED at grabbing: Could not fetch video: This site asked this server …"
+# or the one the supervisor lands from events.jsonl: "FAILED: <reason>".
+_FAILED_LINE = re.compile(r"\bFAILED(?: at [A-Za-z]+)?: (.+)$")
+
+
+def _reason_from_logs(job: dict[str, Any]) -> str:
+    """Recover the runner's last explicit failure from the job log.
+
+    A job can lose the `error` field to a stale write and still have the real
+    reason sitting in its log. Reading it back beats telling the user the
+    generic "worker stopped" when the log says exactly what happened.
+    """
+    logs = job.get("logs")
+    if not isinstance(logs, list):
+        return ""
+    for line in reversed(logs[-300:]):
+        match = _FAILED_LINE.search(str(line))
+        if match:
+            return match.group(1).strip()[:1000]
+    return ""
+
 
 def unrecoverable_reason(store: Any, job: dict[str, Any]) -> str | None:
     """Can this job EVER be resumed? Return the reason when it cannot.
@@ -905,22 +931,39 @@ class InProcessWorker:
             if jobstatus.is_terminal(job):
                 continue
             job_id = job["_id"]
+            # Re-read before acting: the listing above is a snapshot, and the
+            # runner may have written its own terminal state in between. A stale
+            # snapshot written back here is how a precise reason ("the site asked
+            # this server to sign in") was replaced by this generic guess, with
+            # the child's failure line still sitting right above it in the log.
+            fresh = self.store.get_job(job_id)
+            if fresh is None:
+                continue
+            job = fresh
+            if jobstatus.is_terminal(job):
+                continue
             stage = job.get("stage")
             # A QUEUED job not in the queue is equally stale — it was enqueued
             # by a process that died before the worker picked it up.
             silent = int((job.get("lastProgressAt") or job.get("stageStartedAt")
                           or job.get("createdAt") or 0))
+            # A job that already carries a reason (the runner reported back, the
+            # stage guard refused to start, an upload went missing) keeps it.
+            # Only a job with no explanation at all gets the generic one: its
+            # message is what tells the user whether to retry, re-upload or set
+            # cookies, and a guess would throw that away.
+            reported_error = str(job.get("error") or "").strip() or _reason_from_logs(job)
             job.update({
                 "stage": "failed",
-                "failedStage": stage,
-                "error": (
+                "failedStage": job.get("failedStage") or stage,
+                "error": reported_error or (
                     "The worker stopped while this job was in progress and never "
                     "reported back. Completed stages are cached, so Retry resumes "
                     "from the last finished one."
                 ),
                 "interrupted": False,
                 "interruptReason": None,
-                "completedAt": silent or None,
+                "completedAt": job.get("completedAt") or silent or None,
             })
             # Clear the running-shaped fields through the same derivation the
             # API uses, so the stored document matches what the API serves.
@@ -934,11 +977,13 @@ class InProcessWorker:
             self.store.append_job_log(
                 job_id,
                 f"RECONCILED: job was marked '{stage}' but no worker held it — "
-                f"cleared to failed (stale running state)",
+                f"cleared to failed (stale running state)"
+                + ("; reason kept from the runner" if reported_error else ""),
             )
             logger.warning(
                 f"[worker] reconciled stale job {job_id}: stage '{stage}' with no "
                 f"active worker and no queue entry"
+                + ("" if not reported_error else " (kept the reason the runner reported)")
             )
             fixed.append(job_id)
         return fixed
@@ -1092,14 +1137,18 @@ class InProcessWorker:
             if isinstance(ev, dict):
                 stage = ev.get("stage")
                 if stage:
-                    job = self.store.get_job(job_id)
-                    if job is not None:
-                        if stage in {"complete", "failed", "paused"}:
+                    def apply(job: dict, stage=stage, ev=ev) -> None:
+                        # A replayed line describes what the child was doing
+                        # SECONDS ago, and the child may have failed since. This
+                        # is how job 0d9f0a3a ended up 'grabbing' again with its
+                        # error gone, one second after the child reported it.
+                        if str(job.get("stage")) in _TERMINAL_STAGES:
+                            return
+                        if stage in _TERMINAL_STAGES:
                             job["stage"] = stage
                             if stage == "failed":
                                 job["completedAt"] = int(time.time() * 1000)
-                            self.store.write_job(job)
-                        if stage == "stage_started":
+                        elif stage == "stage_started":
                             job["stage"] = ev.get("stage_name", job.get("stage", ""))
                             job["stageStartedAt"] = int(time.time() * 1000)
                             job["progress"] = ev.get("progress", job.get("progress"))
@@ -1107,14 +1156,14 @@ class InProcessWorker:
                                 "progressDetail",
                                 job.get("progressDetail", ""),
                             )
-                            self.store.write_job(job)
-                        if stage == "stage_done":
+                        elif stage == "stage_done":
                             job["progress"] = ev.get("progress", job.get("progress"))
                             job["progressDetail"] = ev.get(
                                 "progressDetail",
                                 job.get("progressDetail", ""),
                             )
-                            self.store.write_job(job)
+
+                    self.store.update_job(job_id, apply)
             # Plain (non-JSON) runner output lands verbatim in the job log so
             # "View logs" always shows the real worker output.
             self.store.append_job_log(job_id, line[:500])
@@ -1167,16 +1216,16 @@ class InProcessWorker:
     def _log_ringbuffer(self, job_id: str, max_lines: int = 500) -> None:
         """Keep the last 500 log lines in the job doc, flushed every second."""
         try:
-            job = self.store.get_job(job_id)
-            if job is None:
-                return
-            lines = job.get("logs", [])
-            if not isinstance(lines, list):
-                lines = [str(l) for l in lines]
-            # Keep only the last max_lines lines.
-            tail = lines[-max_lines:]
-            job["logs"] = tail
-            self.store.write_job(job)
+            def apply(job: dict) -> None:
+                lines = job.get("logs")
+                if not isinstance(lines, list):
+                    lines = [str(entry) for entry in lines] if lines else []
+                # Only the log field is touched, on the document read under the
+                # lock — writing a whole snapshot back here would be another
+                # chance to undo the child's terminal state.
+                job["logs"] = lines[-max_lines:]
+
+            self.store.update_job(job_id, apply)
         except Exception:
             pass
 

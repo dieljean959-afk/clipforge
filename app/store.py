@@ -219,6 +219,25 @@ class LocalStore:
         tmp.replace(path)
         return job
 
+    def update_job(self, job_id: str, mutate) -> dict[str, Any] | None:
+        """Locked read-modify-write of the CURRENT job document.
+
+        `save_job` is an unconditional overwrite, so a caller that holds a
+        snapshot across time (the supervisor replaying a child's stdout runs
+        seconds behind the child) writes its stale copy back and silently
+        reverts whatever the child wrote in between. Observed as a failed job
+        flipped back to `grabbing` with its error dropped. Mutating the
+        document read *inside* the lock removes that window.
+        """
+        path = self._job_path(job_id)
+        with self._file_lock(path):
+            job = self.get_job(job_id)
+            if not isinstance(job, dict) or not job:
+                return None
+            mutate(job)
+            self.save_job(job)
+            return job
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         path = self._job_path(job_id)
         if not path.exists():
@@ -1024,11 +1043,45 @@ class LocalStore:
             for p in d.iterdir():
                 if p.is_file() and p.suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
                     return p
+        # No local copy. An upload is pushed to durable storage and its local
+        # bytes are dropped on purpose (`_offload_source`), so the source has to
+        # be pulled back from the bucket here. Without this every upload job
+        # died at fetch with "the uploaded file is no longer on the server"
+        # while the file was sitting in the bucket the whole time.
+        return self._materialize_source(job_id)
+
+    def _materialize_source(self, job_id: str) -> Path | None:
+        """Pull a job's source back from durable storage if it was offloaded."""
+        try:
+            from app import objectstore  # local: the store works without it
+
+            cfg = objectstore.config_from_env()
+            if not cfg.enabled:
+                return None
+            job = self.get_job(job_id)
+            name = str((job or {}).get("source") or "").strip()
+            if not name or name == "pending-upload" or "/" in name:
+                return None
+            dest = _uploads_root(self._paths) / job_id / name
+            if objectstore.materialize(objectstore.upload_key(job_id, name), dest, cfg):
+                logger.info(f"[store] job {job_id}: source pulled back from durable storage")
+                return dest
+        except Exception as exc:  # noqa: BLE001 - a missing bucket is not fatal
+            logger.warning(f"[store] job {job_id}: source could not be fetched: {exc}")
         return None
 
     def job_source_dir_for_write(self, job_id: str) -> Path:
-        """Return the directory where a job's source file should be written."""
-        return _uploads_root(self._paths) / job_id
+        """Return (and create) the directory a job's source file is written to.
+
+        The upload route streams the request body straight into a file under
+        this directory before any other writer touches it, so the directory has
+        to exist here: returning a path that is not there made every upload fail
+        with `FileNotFoundError: …/uploads/<job>/upload.bin` and leave behind a
+        job whose source was never saved.
+        """
+        upload_dir = _uploads_root(self._paths) / job_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        return upload_dir
 
     def upload_file(self, job_id: str, filename: str, data: bytes) -> Path:
         """Store an uploaded file for a job."""
