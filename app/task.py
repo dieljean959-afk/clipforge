@@ -370,12 +370,13 @@ class Pipeline:
             blob["error"] = error
         if errorDetail is not None:
             blob["errorDetail"] = errorDetail
-        job = self.store.get_job(job_id)
-        if job is None:
-            return
-        job["stageStatus"] = dict(self._stage_status)
-        job["lastProgressAt"] = now
-        self.store.write_job(job)
+        def apply(job: dict[str, Any]) -> None:
+            job["stageStatus"] = dict(self._stage_status)
+            job["lastProgressAt"] = now
+
+        # Same locked read-modify-write as _progress: a whole-document write
+        # here could undo a newer stage/progress write that landed meanwhile.
+        self.store.update_job(job_id, apply)
 
     def _mark_stage_running(self, job_id: str, stage: str) -> None:
         prev = self._stage_status_for(job_id, stage)
@@ -441,11 +442,42 @@ class Pipeline:
         indefinite spinner. Every estimate is labelled with how it was derived
         (``etaSource``) so the UI never presents a guess as a measurement.
         """
-        job = self.store.get_job(job_id)
-        if job is None:
-            return
         now_ms = int(time.time() * 1000)
         fraction = max(0.0, min(1.0, pct))
+
+        # Read-modify-write INSIDE the job lock. This used to read the doc,
+        # think for a while and then overwrite it, so a heartbeat thread (or
+        # the worker's log pump) that had read an older copy wrote that copy
+        # back afterwards — observed as a 25-minute job sitting on
+        # "Transcribing chunk 27 of 27, 96%" for the five minutes detection was
+        # actually running: the transcribe heartbeat's snapshot landed after
+        # detection's first "finding" write, and detection then reported
+        # nothing until its last chunk. `store.update_job` closes that window.
+        def apply(job: dict[str, Any]) -> None:
+            self._apply_progress(
+                job_id, job, stage, pct, detail, now_ms, fraction,
+                unit_label=unit_label, units_done=units_done, units_total=units_total,
+                prior_eta_sec=prior_eta_sec,
+            )
+
+        self.store.update_job(job_id, apply)
+
+    def _apply_progress(
+        self,
+        job_id: str,
+        job: dict[str, Any],
+        stage: str,
+        pct: float,
+        detail: str,
+        now_ms: int,
+        fraction: float,
+        *,
+        unit_label: str | None = None,
+        units_done: float | None = None,
+        units_total: float | None = None,
+        prior_eta_sec: float | None = None,
+    ) -> None:
+        """Mutate `job` with this tick's progress/ETA (caller holds the lock)."""
         prev_stage = job.get("stage")
         if prev_stage != stage:
             self._prior_eta_sec = None
@@ -533,7 +565,6 @@ class Pipeline:
             "stagePlan": plan,
             "lastProgressAt": now_ms,
         })
-        self.store.write_job(job)
 
     @contextmanager
     def _heartbeat(self, job_id: str, what: str):
@@ -650,12 +681,7 @@ class Pipeline:
         detecting 20 chunks in a row reported itself "queued" at 0%: this
         method's whole reason for existing.
         """
-        job = self.store.get_job(job_id)
-        if job is None:
-            return {}
-        job.update(fields)
-        self.store.write_job(job)
-        return job
+        return self.store.update_job(job_id, lambda job: job.update(fields)) or {}
 
     # ------------------------------------------------------------------ #
     # cooperative pause
@@ -1379,11 +1405,18 @@ class Pipeline:
         def on_log(line: str) -> None:
             self._log(job_id, line)
 
+        # Detection reports twice: once per chunk while its calls are still in
+        # flight (that pass may cap below 1.0) and again in its sequential pass.
+        # Never let the second, lower number drag the bar backwards.
+        best_detect_frac = 0.0
+
         def on_progress(frac: float, detail: str | None = None) -> None:
+            nonlocal best_detect_frac
+            best_detect_frac = max(best_detect_frac, max(0.0, min(1.0, float(frac))))
             self._progress(
                 job_id,
                 "finding",
-                max(0.0, min(1.0, float(frac))) * 100,
+                best_detect_frac * 100,
                 detail or "Scoring viral moments...",
             )
 

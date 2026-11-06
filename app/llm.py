@@ -2069,10 +2069,21 @@ def detect_clips(
                     if should_pause is not None and should_pause():
                         break  # a pause is in: do not bill another chunk
                     launched.append(pool.submit(_prefetch, index))
-                for future in launched:
+                for done, future in enumerate(launched, start=1):
                     # _prefetch records its own outcome; a raise here would be a
                     # bug in it, and must not be swallowed.
                     future.result()
+                    # This pass is where the wall-clock time goes (each call may
+                    # wait out a provider token budget), and it used to report
+                    # NOTHING until every chunk came back: a 25-minute job sat
+                    # on one frozen percentage for five minutes. The sequential
+                    # pass below then reports the real 0..1, so cap this at 0.9
+                    # to keep the number moving forwards.
+                    if on_progress is not None:
+                        on_progress(
+                            min(0.9, 0.9 * done / len(launched)),
+                            f"Detection: {done}/{len(launched)} chunk(s) scored — waiting on the model for the rest",
+                        )
     for i, (start_index, chunk) in enumerate(chunks):
         # Pause is honoured at a chunk boundary: never between the API call
         # and the cache write, which is the window where a kill would lose
