@@ -112,6 +112,11 @@ export interface JobDto {
   downloadSource?: string | null;
   /** Word count of the transcript (server-measured). */
   transcriptWordCount?: number | null;
+  /** How it was transcribed when that differs from the default, e.g.
+   *  "transcribed with base (low memory)". Null for a normal run. */
+  transcriptLabel?: string | null;
+  /** Peak RSS of the ASR child during transcription, in MB. */
+  asrPeakRssMb?: number | null;
   /** Human-readable failure message. Present on failed jobs. */
   error?: string | null;
   /** Full traceback / detail behind `error`, shown collapsed. */

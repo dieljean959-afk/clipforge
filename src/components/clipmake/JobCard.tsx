@@ -587,6 +587,18 @@ export function JobCard({
           {job.transcriptWordCount !== undefined && job.transcriptWordCount !== null && (
             <span>{job.transcriptWordCount} words transcribed</span>
           )}
+          {job.transcriptLabel && (
+            <span
+              className="rounded-full border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold text-amber-300"
+              title={
+                job.asrPeakRssMb
+                  ? `Peak ASR memory ${Math.round(job.asrPeakRssMb)} MB`
+                  : "Decoded with a lighter setting to fit this machine's memory"
+              }
+            >
+              {job.transcriptLabel}
+            </span>
+          )}
         </div>
       )}
 
@@ -689,6 +701,18 @@ function friendlyError(error: string | null | undefined, where?: string | null):
   // like two different problems at once.
   if (/the server restarted \d+ times/i.test(raw)) {
     return raw;
+  }
+
+  // Stage truth BEFORE any chunk parser: a transcription failure names a
+  // chunk too ("chunk 2/10"), and the detection rules below would otherwise
+  // report it as "AI detection failed", which is the wrong stage entirely.
+  if (where && where.startsWith("transcrib")) {
+    const head = (raw.split("; tried")[0] ?? raw).trim();
+    const sentence = head.replace(/^./, (c) => c.toUpperCase());
+    if (/out of memory|mkl_malloc|failed to allocate|memoryerror/i.test(raw)) {
+      return `${sentence} — finished chunks are saved, so Retry resumes from the last one.`;
+    }
+    return sentence.length > 240 ? `${sentence.slice(0, 239)}…` : sentence;
   }
 
   // Chunk-level detection failures already name the chunk; lead with that.

@@ -277,7 +277,8 @@ def shutdown_shared() -> None:
         _SHARED.clear()
 
 
-def _trim_parent() -> None:
+def trim_parent() -> None:
+    """Give the freed bytes of the last chunk back to the allocator."""
     import gc
 
     gc.collect()
@@ -323,12 +324,14 @@ def decode_span(
                 f"needs ~{need_mb:.0f} MB, {budget.describe()}"
             )
             log(line)
-            _trim_parent()
+            trim_parent()
             continue
         line = f"attempt {index}/{len(steps)}: {step.label(configured_model)} — {budget.describe()}"
         log(line)
         if on_chunk:
-            on_chunk(f"chunk {int(start)}-{int(end)}s ({model})")
+            # Just the rung's model: the caller knows the chunk numbers and
+            # composes the chip text ("chunk 3 of 9 (model small)").
+            on_chunk(model)
 
         piece_paths: list[tuple[float, float, Path]] = []
         offset = start
@@ -380,7 +383,7 @@ def decode_span(
                 drop_shared()
                 if proc is not None:
                     proc.kill()
-            _trim_parent()
+            trim_parent()
 
         attempt = Attempt(step=step, model=model, ok=ok, error=error,
                           memory=memory, peak_rss_mb=peak, seconds=time.time() - started)

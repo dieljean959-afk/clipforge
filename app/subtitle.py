@@ -936,6 +936,18 @@ def transcribe(
                         data = json.loads(cache_file.read_text(encoding="utf-8"))
                         if abs(float(data.get("w_start", -1)) - w_start) < 0.01:
                             all_words.extend(Word(**w) for w in data.get("words", []))
+                            # Which model produced this chunk is part of the
+                            # checkpoint: without it a resumed job forgets it
+                            # downshifted and labels itself with the configured
+                            # (heavier) model it never ran.
+                            cached_model = data.get("model") or model_name
+                            used_models.add(cached_model)
+                            peak_rss = max(peak_rss, float(data.get("peak_rss_mb") or 0))
+                            attempts_all.append({
+                                "start": w_start, "end": w_end, "model": cached_model,
+                                "ok": True, "resumed": True,
+                                "peakRssMb": data.get("peak_rss_mb"),
+                            })
                             resumed += 1
                             logger.info(
                                 f"[subtitle] resume: chunk {idx + 1}/{len(windows)} reused from cache"
@@ -987,7 +999,9 @@ def transcribe(
                         f"[subtitle] chunk {idx + 1}/{len(windows)}: {line}"
                     ),
                     on_chunk=(
-                        lambda text: on_detail(f"chunk {idx + 1}/{len(windows)} ({text})")
+                        lambda model: on_detail(
+                            f"chunk {idx + 1}/{len(windows)} (model {model})"
+                        )
                     ) if on_detail else None,
                 )
             except asr_iso.AsrLadderError as exc:
@@ -1043,6 +1057,7 @@ def transcribe(
                 tmp.write_text(
                     json.dumps(
                         {"w_start": w_start, "w_end": w_end,
+                         "model": decoded.model, "peak_rss_mb": decoded.peak_rss_mb,
                          "words": [w.as_dict() for w in abs_words]},
                         ensure_ascii=False,
                     ),
@@ -1054,6 +1069,11 @@ def transcribe(
                 on_progress(min(1.0, w_end / duration))
             if on_chunk is not None:
                 on_chunk(idx, len(windows), phase="done")
+
+            # Between chunks, hand every byte this chunk used back to the OS:
+            # the next chunk's ASR child needs that headroom on a 2 GiB host.
+            del audio, words, abs_words, decoded
+            asr_iso.trim_parent()
     finally:
         reader.close()
         del reader

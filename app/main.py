@@ -2566,6 +2566,8 @@ def retranscribe_job(job_id: str) -> dict:
         "errorDetail": None,
         "completedAt": None,
         "transcriptWordCount": None,
+        "transcriptLabel": None,
+        "asrPeakRssMb": None,
         "unitLabel": None,
         "unitsDone": None,
         "unitsTotal": None,

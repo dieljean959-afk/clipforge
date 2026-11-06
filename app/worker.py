@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -159,10 +160,12 @@ def cleanup_orphans(data_dir: Path, *, protect_pids: set[int] | None = None) -> 
             ppid = int(stat.rsplit(")", 1)[1].split()[1])
         except (OSError, IndexError, ValueError):
             continue
-        if ppid != 1 and ppid != os.getpid():
+        if ppid == os.getpid():
+            # A live child of this worker: its own job is still using it.
+            continue
+        if ppid != 1 and Path(f"/proc/{ppid}").exists():
             # Owned by a live daemon/supervisor: not ours to kill.
-            if Path(f"/proc/{ppid}").exists():
-                continue
+            continue
         try:
             os.kill(pid, 9)
             killed.append(f"{pid} ({cmdline.strip()[:60]})")
