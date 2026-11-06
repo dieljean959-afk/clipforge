@@ -25,7 +25,7 @@ from loguru import logger
 
 from app import encode, hostlimits
 from app import subtitle as subtitle_svc
-from app.config import Settings, ffmpeg_bin, ffprobe_bin
+from app.config import Settings, ffmpeg_bin, ffprobe_bin, load_config
 from app import store
 
 from fastapi import HTTPException
@@ -238,6 +238,9 @@ def retry_clip_render(clip_id: str) -> dict:
     # so this repair path raised NameError the first time anyone called it.
     from app.stages import StageWorkspace
 
+    # `settings` was never in scope here (this function takes only a clip id),
+    # so the retry path raised NameError instead of re-rendering.
+    settings = load_config(quiet=True)
     ws = StageWorkspace(settings.app.paths.data_dir, job_id)
     cuts = ws.read_json("reframe", "cuts.json") or []
     cut = next((c for c in cuts if f"clip_{c.get('order', 0):03d}" == clip_id), None)

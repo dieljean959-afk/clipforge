@@ -1564,7 +1564,12 @@ class Pipeline:
                     cues, self.settings,
                     enabled=emoji_enabled,
                     density=emoji_density,
-                    src=src,
+                    # `_stage_captions` never received the source path, so
+                    # this read raised NameError on every clip that reached the
+                    # emoji track — the whole render stage died there. Look it
+                    # up from the store instead of threading a new argument
+                    # through every caller.
+                    src=self.store.find_source_file(job_id),
                     cut_start=float(cut.get("start") or 0.0),
                     duration=float(cut.get("end") or 0.0) - float(cut.get("start") or 0.0),
                     use_loudness=self.settings.subtitle.emoji_audio_cue,

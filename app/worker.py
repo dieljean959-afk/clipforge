@@ -27,6 +27,7 @@ keep stall tests fast).
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -430,6 +431,10 @@ class InProcessWorker:
 
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
+        # The supervisor watches app/ for edits. Bytecode written into
+        # app/__pycache__ is noise on that tree, so keep the runner's bytecode
+        # in memory — a job must never be able to look like a source change.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         # start_new_session: the child gets its own process group so the
         # watchdog can kill the ffmpeg descendants along with the runner.
         #
@@ -1071,8 +1076,11 @@ class InProcessWorker:
 
 
 
-    @staticmethod
-    def _replay_runner_event(job_id: str, line: str) -> None:
+    # Instance method, not a staticmethod: it reads and writes the job store
+    # (stage transitions + verbatim stdout). As a staticmethod every call
+    # raised NameError on `self` and the whole branch was silently swallowed by
+    # the `except Exception: pass` below, so runner events never landed.
+    def _replay_runner_event(self, job_id: str, line: str) -> None:
         """Plain STDOUT line from the runner: land stage events and everything
         else verbatim in the job log so "View logs" shows the real worker output."""
         try:

@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -84,6 +85,22 @@ from app.store import LocalStore
 from app.social.accounts import AccountStore
 from app.hosting import RetentionCleaner
 from app import subtitle as subtitle_svc
+from app import video as video_svc
+from app import hosting as hosting_mod
+from app import social as social_mod
+from app.social import PLATFORMS, describe_all, describe, redirect_uri
+from app.social import base as social_base
+from app.social import post_video as social_post
+from app.config import _LiveKeyState
+from app.social.base import (
+    NeedsReconnect,
+    NotConfigured,
+    PostRejected,
+    SocialError,
+)
+from app.stages import StageWorkspace, remove_workspace
+from app.slices.cleanup import unlink_model_dirs
+from starlette.background import BackgroundTask
 # Module handle, distinct from the `worker` INSTANCE below. The boot recovery
 # pass needs `unrecoverable_reason` / `INTERRUPT_MAX_RESUMES` from the module;
 # without this import that pass raised NameError at import time and uvicorn
@@ -122,8 +139,14 @@ def _share_backfill() -> dict[str, int]:
     return started
 
 
+#: Repository root. Used for state that is keyed by path rather than by
+#: config (the live-key refreshers). Derived, never hardcoded, so the app keeps
+#: working when it is started from another directory.
+ROOT = Path(__file__).resolve().parent.parent
+
+
 def _boot() -> None:
-    global settings, store, worker, retention
+    global settings, store, worker, retention, accounts
     try:
         settings = load_config()
     except ConfigError as exc:
@@ -1739,10 +1762,15 @@ def remove_cookies_key(confirm: bool = False) -> dict[str, str]:
         confirm,
         "cookies (the pasted cookies.txt itself lives at /home/daytona/clipforge-data/cookies.txt)",
     )
-    dropped = _sync_cookies_env_for_delete(
-        ("YT_DLP_COOKIES_FILE", "YT_DLP_COOKIES_FROM_BROWSER"), "YT_DLP_COOKIES_FILE"
+    dropped = [
+        name
+        for name in ("YT_DLP_COOKIES_FILE", "YT_DLP_COOKIES_FROM_BROWSER")
+        if os.environ.pop(name, None) is not None
+    ]
+    removed = sum(
+        delete_env_var(name)
+        for name in ("YT_DLP_COOKIES_FILE", "YT_DLP_COOKIES_FROM_BROWSER")
     )
-    removed = sum(delete_cookies_env_var(name) for name in ("YT_DLP_COOKIES_FILE", "YT_DLP_COOKIES_FROM_BROWSER"))
     logger.info(
         f"[config] cookies deleted via dashboard ({removed} line(s) removed, process env dropped: {dropped or 'none'})"
     )
@@ -3082,7 +3110,7 @@ def _share_copy_for(clip: dict) -> Path | None:
         return None
     try:
         return _JOB_SHARE.get(master)
-    except Exception:
+    except Exception as exc:
         # A transient path/lock issue must never turn a share request into a
         # 503: degrade to the link, and let the lock reap the copy later.
         logger.warning(f"[share] _share_copy_for failed for {clip.get('_id')}: {exc}")

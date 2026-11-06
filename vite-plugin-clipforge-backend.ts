@@ -138,8 +138,16 @@ function watchPythonSources() {
   };
   try {
     sourceWatcher = fs.watch(path.join(ROOT, "app"), { recursive: true }, (_event, file) => {
-      if (file && !String(file).endsWith(".py")) return;
-      schedule(String(file || "app"));
+      // ONLY real source files. Besides .py edits, `fs.watch` on Linux also
+      // emits events with NO filename (rename/atomic-write sequences) and can
+      // report files other than .py inside app/ (__pycache__ writes from any
+      // Python process importing app.*). Neither is an edit, and restarting on
+      // either kills a job mid-render — which then shows up as a render that
+      // flips back to "queued" partway through. Only a named `.py` counts.
+      const rel = String(file || "").replace(/\\/g, "/");
+      if (!rel.endsWith(".py")) return;
+      if (rel.includes("__pycache__") || rel.endsWith(".pyc")) return;
+      schedule(rel || "app");
     });
     sourceWatcher.on("error", (err) => log(`source watcher error: ${err.message}`));
     log("watching app/**.py — backend restarts automatically after an edit");
@@ -235,6 +243,10 @@ async function startBackend(): Promise<boolean> {
     CLIPFORGE_PORT: "8000",
     // hint for logs; real limits enforced by app.config at submit time
     PYTHONUNBUFFERED: "1",
+    // Keep __pycache__ out of app/ entirely: the watcher lives on that tree, so
+    // bytecode writes are noise it should never have to classify. Belt and
+    // braces with the .py filter above.
+    PYTHONDONTWRITEBYTECODE: "1",
   };
 
   log(`starting FastAPI via ${state.python} (uvicorn app.main:app on 127.0.0.1:8000)...`);
