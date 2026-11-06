@@ -1370,6 +1370,12 @@ class InProcessWorker:
     # status for the dashboard card
     # ------------------------------------------------------------------
 
+    def active_pids(self) -> dict[str, int]:
+        """job_id -> pid of the child running it (telemetry, one RPC away)."""
+        with self._lock:
+            return {jid: proc.pid for jid, proc in self._active.items()
+                    if proc.poll() is None}
+
     def status(self) -> dict:
         with self._lock:
             active = {job_id: proc for job_id, proc in self._active.items()}

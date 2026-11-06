@@ -1744,6 +1744,12 @@ class Pipeline:
                 except Exception as exc:
                     detail = str(exc)[:500]
                     self._log(job_id, f"render failed clip {i + 1}: {detail}")
+                    # Keep WHERE it failed: "failed to map segment from shared
+                    # object" names a library, not the code that asked for it.
+                    self._log(
+                        job_id,
+                        "render traceback: " + traceback.format_exc().strip()[-900:],
+                    )
                     failed.append((i, clip_id, detail))
                     try:
                         self.store.write_clip(

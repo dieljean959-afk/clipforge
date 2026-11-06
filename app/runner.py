@@ -261,6 +261,15 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"[runner] memory cap: {soft // (1024 * 1024)} MB\n")
     except Exception:
         pass
+    # Map the caption font's shared libraries while the address space is still
+    # empty. Doing it lazily inside the render (with Whisper resident) failed
+    # with "failed to map segment from shared object" and lost the clip.
+    try:
+        from app import titlebar
+
+        titlebar.preload()
+    except Exception:  # noqa: BLE001 - a missing font is reported at render time
+        pass
     if _refuse_if_starved(job_id, store, getattr(settings.whisper, "model", None)):
         return 1
     try:

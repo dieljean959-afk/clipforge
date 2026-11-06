@@ -2037,7 +2037,7 @@ def boot_banner(settings: Settings) -> None:
     if settings.hosted.worker_url:
         print(f"[boot] Worker dispatch: {settings.hosted.worker_url} (rendering happens on the remote worker)")
     else:
-        print("[boot] Worker dispatch: local (pipeline runs in this process)")
+        print("[boot] Worker dispatch: local worker daemon (separate process, nice 15; API only proxies)")
 
 
 def _self_check() -> int:

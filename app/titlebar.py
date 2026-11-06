@@ -53,6 +53,25 @@ def _font(size: int):
     return ImageFont.truetype(str(FONT_FILE), int(size))
 
 
+def preload() -> bool:
+    """Map the font's freetype library NOW, before the pipeline gets big.
+
+    The render child runs under an address-space cap (80% of the host). Whisper
+    is loaded by then, so dlopen'ing libfreetype for the first time during the
+    title pass could fail with "failed to map segment from shared object" — a
+    crash that names a library instead of the code and loses the whole clip.
+    Called by the runner before any stage, where there is room to map it.
+    """
+    try:
+        _font(FONT_SIZE)
+        return True
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal here
+        from loguru import logger
+
+        logger.warning(f"[titlebar] font preload failed: {exc}")
+        return False
+
+
 def measure(text: str, size: int) -> int:
     font = _font(size)
     box = font.getbbox(text)

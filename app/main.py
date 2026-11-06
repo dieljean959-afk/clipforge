@@ -107,6 +107,7 @@ from starlette.background import BackgroundTask
 # exited before binding port 8000, so the proxy answered a bodiless 500.
 from app import worker as worker_mod
 from app.worker import InProcessWorker
+from app.workerd import WorkerSupervisor
 
 
 def _share_backfill() -> dict[str, int]:
@@ -159,7 +160,10 @@ def _boot() -> None:
     logger.info(f"[boot] ffprobe: {ffprobe_bin()}")
 
     store = LocalStore(settings.app.paths)
-    worker = InProcessWorker(settings, store)
+    # LOCKED_SPEC §4: the pipeline lives in its own process. The supervisor
+    # spawns that daemon (nice 15), adopts it if the API itself was restarted,
+    # and restarts it if it dies. The API only proxies control calls.
+    worker = WorkerSupervisor(settings, store)
     retention = RetentionCleaner(settings, store)
     accounts = AccountStore(settings.app.paths.data_dir)
 
@@ -429,8 +433,7 @@ async def _resource_monitor() -> None:
         lag = max(0.0, (loop.time() - t0) - 30.0)
         api_rss = _rss_mb(os.getpid())
         try:
-            with worker._lock:
-                kids = {jid: proc.pid for jid, proc in worker._active.items()}
+            kids = worker.active_pids()
         except Exception:  # noqa: BLE001 - telemetry only
             kids = {}
         kid_rss = {jid: _rss_mb(pid) for jid, pid in kids.items()}
@@ -574,7 +577,20 @@ def _mark_interrupted() -> None:
 
 @app.on_event("startup")
 def _start_worker() -> None:
-    worker.start()
+    # The worker daemon is a separate process now: if it cannot come up, the
+    # API must still serve (every route reports the worker as offline, and the
+    # supervisor keeps retrying). Failing startup here took the whole dashboard
+    # down for a worker-only problem.
+    try:
+        worker.start()
+        st = worker.status()
+        logger.info(
+            f"[boot] worker daemon: online={st.get('online')} "
+            f"pid={worker.daemon_pid} concurrency={st.get('concurrency')} "
+            "(separate process, nice 15 — this API only proxies)"
+        )
+    except Exception as exc:  # noqa: BLE001 - never make the API unavailable
+        logger.error(f"[boot] worker daemon did not start: {exc}")
     retention.start()
     # Sweep ONCE at boot, not just on the daemon's first 30-minute tick.
     #
