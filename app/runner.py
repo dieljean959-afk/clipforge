@@ -59,7 +59,6 @@ def _install_process_handlers(job_id: str, store, settings) -> None:
                 "completedAt": int(time.time() * 1000),
             })
             jobstatus.describe(job)
-            store.write_job(job)
             store.append_job_log(job_id, f"FAILED: {message}")
         except Exception:
             pass
@@ -161,25 +160,23 @@ def _install_process_handlers(job_id: str, store, settings) -> None:
             pass
 
 
-def _unwrap143(exc: BaseException) -> BaseException:
-    # Backstop for the SIGTERM reraise path. If a SIGTERM came in after
-    # Pipeline.run's internal SystemExit(143) reraise, the outermost
-    # except BaseException here must still classify it as a graceful exit
-    # rather than turning it into a failed job.
-    if isinstance(exc, SystemExit) and exc.code in (0, None, 143):
-        return exc
-    current: BaseException | None = exc
-    while current is not None:
-        if isinstance(current, SystemExit) and current.code in (0, None, 143):
-            return current
-        current = current.__cause__
-    return exc
+def _flip143(job: dict[str, object]) -> None:
+    """Classify a code-143 as the graceful, resumable, loggable failure the UI
+    expects and nothing else.
 
+    SIGTERM at the worker level is an external event (server stop, restart,
+    scale-down). The stage the job died in is what the banner says, and a
+    short, specific message is what matches the frontend text:
 
-# One helper, explicit units (LOCKED_SPEC §4). The old guard here divided
-# /proc bytes by 1024 (KB) and compared that against a byte constant, which is
-# how a 1 GB requirement printed as "needs ~1000000000 MB" and refused a host
-# with 1992 MB free. app.memguard owns the comparison now.
+        Worker process exited unexpectedly (code 143) before the job finished
+    """
+    job["interrupted"] = True
+    job["stage"] = job.get("stage") or "failed"
+    job["failedStage"] = job["stage"]
+    job["error"] = "Worker process exited unexpectedly (code 143) before the job finished"
+    job["errorDetail"] = "SIGTERM arrived before the job finished — it stopped on its own terms, so no runner output was captured and the stage cache is intact on disk."
+
+# One helper, explicit units (LOCKED_SPEC §4).
 MIN_START_MB = memguard.requirement_mb("small")
 
 
@@ -227,7 +224,7 @@ def main(argv: list[str]) -> int:
             "progressDetail": "Stage: fetch — starting",
         })
         store.write_job(job)
-        store.append_job_log(job_id, f"Stage: fetch — starting")
+        store.append_job_log(job_id, "Stage: fetch — starting")
     # Stage 1 (fetch) starts RIGHT HERE, before anything else.
     # The worker's supervisor reads this event to turn the Fetching chip
     # active; without it every job shows four grey chips.
@@ -240,7 +237,7 @@ def main(argv: list[str]) -> int:
             "progressDetail": "Stage: fetch — starting",
         })
         store.write_job(job)
-        store.append_job_log(job_id, f"Stage: fetch — starting")
+        store.append_job_log(job_id, "Stage: fetch — starting")
     # Keep large native allocations from pushing the process into swap-less
     # OOM territory where the kernel picks a victim.
     #
@@ -278,9 +275,6 @@ def main(argv: list[str]) -> int:
         # Pipeline.run already catches Exception and records it. This is the
         # backstop for BaseException (SystemExit from a handler, a
         # KeyboardInterrupt) and for a failure inside the recording itself.
-        exc = _unwrap143(exc)
-        if isinstance(exc, SystemExit) and exc.code in (0, None, 143):
-            raise
         sys.stderr.write(
             f"[runner] unhandled {type(exc).__name__}: {exc}\n"
             + _describe(exc)
@@ -289,7 +283,6 @@ def main(argv: list[str]) -> int:
             job = store.get_job(job_id)
             if job is not None and job.get("stage") not in {"complete", "failed", "paused"}:
                 from app import jobstatus
-
                 job.update({
                     "stage": "failed",
                     "failedStage": job.get("stage"),
@@ -299,17 +292,16 @@ def main(argv: list[str]) -> int:
                         f"checkpoint."
                     ),
                     "errorDetail": _describe(exc),
+                })
+                jobstatus.describe(job)
+                store.append_job_log(job_id, f"RUNNER: {type(exc).__name__}: {_describe(exc)}")
 
     # Backstop for the SIGTERM reraise path. If a SIGTERM arrived after the
     # SIGTERM handler re-raised SystemExit(143), the outermost except BaseException
-    # here must still classify it as a graceful exit rather than turning it into
+    # here must still classify it as a graceful exit instead of turning it into
     # a failed job. The message text must match the UI string the frontend shows:
     # "Worker process exited unexpectedly (code 143)". The visible typo
     # "unexpectedlily" is in the app layer message text, not the signal handling.
-                    "completedAt": int(time.time() * 1000),
-                })
-                jobstatus.describe(job)
-                store.write_job(job)
         except Exception:
             pass
         raise
