@@ -151,7 +151,7 @@ export function JobCard({
     | undefined;
   const activeIdx = stepStage ? STAGES.indexOf(stepStage) : -1;
   const stalled = useStalled(job, serverStallSec * 1000 * STALL_WARN_FRACTION);
-  const [busy, setBusy] = useState<null | "pause" | "resume" | "check">(null);
+  const [busy, setBusy] = useState<null | "pause" | "resume" | "check" | "retry">(null);
   // Live ONLY while the backend says the job is live. isTerminal is the
   // backend's single verdict, so this can never show a spinner for a job that
   // has already stopped.
@@ -212,11 +212,17 @@ export function JobCard({
   };
 
   const retryJob = async () => {
+    setBusy("retry");
     try {
       await api.retryJob(job._id);
-      toast.info("Retrying — Clippy is grabbing the video...");
+      toast.info("Running this batch again — finished stages are cached.");
+      // Ask for this job's fresh status now instead of waiting out the poll,
+      // so the card flips back to "running" the moment the server accepts it.
+      await onCheckNow?.(job._id);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Retry failed.");
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -254,15 +260,23 @@ export function JobCard({
           {complete && (
             <ConfirmDeleteJob job={job} onDeleted={() => onDeleted?.()} />
           )}
-          {failed && job.error === undefined ? (
+          {/* A failed job ALWAYS carries an `error` string, so the old
+              `job.error === undefined` guard hid this button on exactly the
+              jobs that needed it. Show it whenever the job is dead. */}
+          {failed ? (
             <Button
               size="sm"
               variant="outline"
               className="h-8 cursor-pointer gap-1.5 text-xs"
+              disabled={busy === "retry"}
               onClick={() => void retryJob()}
             >
-              <RotateCcw className="size-3.5" />
-              Retry
+              {busy === "retry" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="size-3.5" />
+              )}
+              Run again
             </Button>
           ) : null}
         </div>

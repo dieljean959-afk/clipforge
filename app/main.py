@@ -1094,6 +1094,33 @@ def health() -> dict:
     }
 
 
+@app.post("/api/sandbox/restart")
+def restart_sandbox() -> dict:
+    """Stop the worker daemon and start a fresh one.
+
+    This is the dashboard's "Restart sandbox" button. It deliberately replaces
+    the process instead of waiting for a boot: the daemon owns the queue and
+    every worker thread, so a stage wedged on a dead child only clears when that
+    process goes away. Stages are cached on disk, so a queued job resumes from
+    its last checkpoint.
+
+    Never raises: the button shows the reason inline, and a 500 here would read
+    as "the API is down" when the API is exactly what answered.
+    """
+    try:
+        result = worker.restart()
+    except Exception as exc:  # noqa: BLE001 - report, do not 500
+        logger.warning("[sandbox] restart failed: %s: %s", type(exc).__name__, exc)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    pid = result.get("pid")
+    if pid is None:
+        return {
+            "ok": False,
+            "error": "the worker daemon did not come back — see data/logs/workerd.out",
+        }
+    return {"ok": True, "pid": pid, "previousPid": result.get("previousPid")}
+
+
 @app.get("/api/status")
 def api_status() -> dict:
     """Per-dependency status: one broken dependency never 500s the endpoint.

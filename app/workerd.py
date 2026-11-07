@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -74,6 +75,10 @@ STARTUP_WAIT_SEC = 20.0
 
 #: Supervisor ping/restart interval.
 MONITOR_INTERVAL_SEC = 2.0
+
+#: How long an on-request restart waits for the old daemon to exit before it
+#: is killed. `worker.stop()` gets 3s of that for in-flight job threads.
+DAEMON_STOP_WAIT_SEC = 15.0
 
 
 def socket_path(settings: Settings) -> Path:
@@ -423,6 +428,72 @@ class WorkerSupervisor:
     def stop(self) -> None:
         """Stop supervising. The daemon is NOT killed: it owns the running job."""
         self._stop.set()
+
+    def restart(self) -> dict[str, Any]:
+        """Replace the daemon with a fresh process; returns the new pid.
+
+        This backs the dashboard's "Restart sandbox" button. A wait is not
+        enough: the daemon owns the queue and every worker thread, so a stage
+        wedged on a dead socket/child only clears when that process goes away.
+        Job documents and stage artifacts are on disk, so whatever was running
+        resumes from its cached stages instead of starting over.
+
+        Raises WorkerUnavailable when the replacement never answers — the
+        caller reports that rather than pretending the restart worked.
+        """
+        with self._lock:
+            previous = self._stop_daemon()
+            self._restarts += 1
+            self._ensure_daemon()
+            pid = self.daemon_pid
+            logger.info(f"[worker] daemon restarted on request ({previous} -> {pid})")
+            return {"pid": pid, "previousPid": previous}
+
+    def _stop_daemon(self, wait: float = DAEMON_STOP_WAIT_SEC) -> int | None:
+        """SIGTERM the daemon and wait for it to exit, SIGKILL if it will not.
+
+        SIGTERM is the daemon's own shutdown path (`request_stop`), so it stops
+        the worker's threads and unlinks the socket instead of leaving a stale
+        one behind. An ADOPTED daemon (spawned by a previous API process) has no
+        `subprocess.Popen` handle, so the pid comes from `ping`.
+        """
+        pid: int | None = None
+        if self._proc is not None and self._proc.poll() is None:
+            pid = self._proc.pid
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=wait)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            self._proc = None
+            return pid
+
+        try:
+            reply = self._call("ping", retry=False)
+            pid = int(reply["pid"]) if isinstance(reply, dict) else None
+        except (WorkerUnavailable, KeyError, TypeError, ValueError):
+            return None  # nothing to stop — `_ensure_daemon` will spawn one
+        if pid is None:
+            return None
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return pid
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if not self._daemon_answers(0.3):
+                return pid
+            time.sleep(0.1)
+        try:
+            os.kill(pid, signal.SIGKILL)
+            logger.warning(f"[worker] daemon {pid} ignored SIGTERM — killed")
+        except OSError:
+            pass
+        return pid
 
     # -- transport -------------------------------------------------------
 

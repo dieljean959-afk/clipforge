@@ -27,14 +27,14 @@ import { useJobs, useClips, useHealth } from "@/hooks/use-poll";
 import type { ClipDto, UsageDto, VerifyClipsDto } from "@/lib/api";
 import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipmake";
 import { cn } from "@/lib/utils";
-import { api, waitForSandbox } from "@/lib/api";
+import { api } from "@/lib/api";
 
 /** One-shot restart: stop the daemon, let it come back as a fresh process,
  *  then report the restarted sandbox as ready again. The old button called
  *  waitForSandbox over and over, which only ever waited for a boot and never
  *  actually restarted anything.
  */
-export async function restartSandbox(): Promise<{ ok: boolean; pid?: number; error: string }> {
+export async function restartSandbox(): Promise<{ ok: boolean; pid?: number; error?: string }> {
   try {
     const res = await api.restartSandbox();
     if (!res.ok) {
@@ -374,6 +374,7 @@ export default function Dashboard() {
                 size="sm"
                 variant="outline"
                 className="mt-3 cursor-pointer"
+                disabled={sandboxState === "starting"}
                 onClick={async () => {
                   if (sandboxState === "idle" || sandboxState === "failed") {
                     setSandboxState("starting");
@@ -396,7 +397,7 @@ export default function Dashboard() {
                   }
                 }}
               >
-                Restart sandbox
+                {sandboxState === "starting" ? "Restarting…" : "Restart sandbox"}
               </Button>
             </div>
           </div>
