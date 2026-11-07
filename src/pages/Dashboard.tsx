@@ -45,7 +45,6 @@ export async function restartSandbox(): Promise<{ ok: boolean; pid?: number; err
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
-import type { ClipDto } from "@/lib/api";
 
 
 /** Placeholder cards in the clip grid's own proportions, shown while the
