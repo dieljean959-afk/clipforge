@@ -1,0 +1,35 @@
+# Build-context exclusions. Everything the image rewrites at runtime lives in
+# /data (a volume), so none of it belongs in the build context.
+.git
+.venv
+node_modules
+dist
+webui
+.vite-cache
+.pytest_cache
+__pycache__
+*.pyc
+
+# Job artifacts, renders, models and scratch media
+data
+outputs
+downloads
+tmp
+agent_tools
+.pipeline-backup
+.qa-backup
+
+# Docs and local tooling that the runtime never imports
+docs
+tests
+tools
+isolate
+install
+*.md
+!README.md
+
+# Local env/keys and editor noise
+.env
+.env.*
+*.log
+.DS_Store
