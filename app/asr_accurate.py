@@ -542,7 +542,11 @@ def model_ladder(language: str | None) -> list[str]:
     if language and language != "en":
         names = ["small", "base", "tiny"]
     else:
-        names = ["distil-medium.en", "small.en", "small", "base"]
+        # small.en is deliberately absent: on this host's own LibriSpeech run it
+        # scored WORSE than plain small (10.1% vs 4.7% WER) while costing the
+        # same 461 MB of cache, so it was a step that could only waste a
+        # download and 461 MB of disk.
+        names = ["distil-medium.en", "small", "base"]
     fits = [m for m in names if asr_quality.fits(m)]
     return fits or ["tiny"]
 
