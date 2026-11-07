@@ -24,7 +24,10 @@ import { CaptionStyleDialog } from "@/components/clipmake/CaptionStyleDialog";
 import { GroqUsageBadge } from "@/components/clipmake/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips, useHealth } from "@/hooks/use-poll";
-import { api, type UsageDto, type VerifyClipsDto, waitForSandbox, restartSandbox } from "@/lib/api";
+import type { ClipDto, UsageDto, VerifyClipsDto } from "@/lib/api";
+import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipmake";
+import { cn } from "@/lib/utils";
+import { api, waitForSandbox } from "@/lib/api";
 
 /** One-shot restart: stop the daemon, let it come back as a fresh process,
  *  then report the restarted sandbox as ready again. The old button called
@@ -43,8 +46,6 @@ export async function restartSandbox(): Promise<{ ok: boolean; pid?: number; err
   }
 }
 import type { ClipDto } from "@/lib/api";
-import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipmake";
-import { cn } from "@/lib/utils";
 
 
 /** Placeholder cards in the clip grid's own proportions, shown while the
