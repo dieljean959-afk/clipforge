@@ -617,7 +617,13 @@ export interface UsageDto {
 }
 
 export const api = {
+  /** Current backend/API process health. */
   health: () => request<HealthDto>("/api/health"),
+  /** Restart the backend worker daemon (the sandbox). */
+  restartSandbox: () =>
+    request<{ ok: boolean; pid?: number; error?: string }>("/api/sandbox/restart", {
+      method: "POST",
+    }),
   doctor: () => request<DoctorReport>("/api/doctor"),
   /** Today's token budget for the ACTIVE detection provider. Never throws. */
   usage: () => request<UsageDto>("/api/usage"),

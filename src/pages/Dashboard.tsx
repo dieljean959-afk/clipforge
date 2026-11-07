@@ -24,10 +24,28 @@ import { CaptionStyleDialog } from "@/components/clipmake/CaptionStyleDialog";
 import { GroqUsageBadge } from "@/components/clipmake/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips, useHealth } from "@/hooks/use-poll";
-import { api, type UsageDto, type VerifyClipsDto, waitForSandbox } from "@/lib/api";
+import { api, type UsageDto, type VerifyClipsDto, waitForSandbox, restartSandbox } from "@/lib/api";
+
+/** One-shot restart: stop the daemon, let it come back as a fresh process,
+ *  then report the restarted sandbox as ready again. The old button called
+ *  waitForSandbox over and over, which only ever waited for a boot and never
+ *  actually restarted anything.
+ */
+export async function restartSandbox(): Promise<{ ok: boolean; pid?: number; error: string }> {
+  try {
+    const res = await api.restartSandbox();
+    if (!res.ok) {
+      return { ok: false, error: res.error ?? "Sandbox restart failed" };
+    }
+    return { ok: true, pid: res.pid };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+import type { ClipDto } from "@/lib/api";
 import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel, sourceLabel } from "@/lib/clipmake";
 import { cn } from "@/lib/utils";
-import type { ClipDto } from "@/lib/api";
+
 
 /** Placeholder cards in the clip grid's own proportions, shown while the
  *  request for the OPENED batch is genuinely in flight.
@@ -359,20 +377,14 @@ export default function Dashboard() {
                 onClick={async () => {
                   if (sandboxState === "idle" || sandboxState === "failed") {
                     setSandboxState("starting");
-                    setSandboxMessage("Sandbox is starting, please wait…");
+                    setSandboxMessage("Restarting the sandbox, please wait…");
                   }
                   try {
-                    const ready = await waitForSandbox({
-                      waitForWorker: true,
-                      onUpdate: (state, message) => {
-                        setSandboxState(state === "ready" ? "idle" : state);
-                        setSandboxMessage(message);
-                      },
-                    });
-                    if (!ready.ok) {
-                      toast.error("Sandbox still not running.");
+                    const restarted = await restartSandbox();
+                    if (!restarted.ok) {
+                      toast.error(restarted.error || "Sandbox restart failed.");
                     } else {
-                      toast.success("Sandbox is running.");
+                      toast.success(`Sandbox restarted (pid ${restarted.pid ?? "unknown"}).`);
                     }
                   } catch (err) {
                     toast.error(
