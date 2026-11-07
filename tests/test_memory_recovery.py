@@ -47,7 +47,10 @@ def test_a_checkpointed_chunk_is_never_decoded_again(settings, tmp_path, monkeyp
 
     monkeypatch.setattr(asr_iso, "decode_span", explode)
 
-    transcript = subtitle.transcribe(FIXTURE, settings, cache_dir=cache)
+    # The legacy decoder still owns this resume contract; `subtitle.transcribe`
+    # now routes to app.asr_accurate, whose own window checkpoints are pinned in
+    # tests/test_subtitle_accuracy.py.
+    transcript = subtitle._transcribe_legacy(FIXTURE, settings, cache_dir=cache)
 
     assert [w.word for w in transcript.words] == ["cached", "words"]
     assert transcript.duration > 0
@@ -63,7 +66,7 @@ def test_a_memory_failure_is_labelled_transcribing(settings, tmp_path, monkeypat
     monkeypatch.setattr(asr_iso, "decode_span", out_of_memory)
 
     with pytest.raises(subtitle.TranscribeError) as exc:
-        subtitle.transcribe(FIXTURE, settings, cache_dir=tmp_path / "c2")
+        subtitle._transcribe_legacy(FIXTURE, settings, cache_dir=tmp_path / "c2")
 
     assert "ran out of memory" in str(exc.value).lower()
     assert "mkl_malloc" not in str(exc.value).split("; tried")[0]

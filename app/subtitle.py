@@ -509,14 +509,22 @@ class Word:
     # missing value as 1.0 — "never measured" must not silently become
     # "measured and certain".
     conf: float = 1.0
+    #: Two independent decodes disagreed on THIS word: show it in the existing
+    #: transcript view as "check this". The word is never replaced, because
+    #: neither decode can prove the other wrong — the flag is honesty about
+    #: uncertainty, not an edit.
+    check: bool = False
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "start": self.start,
             "end": self.end,
             "word": self.word,
             "conf": round(float(self.conf), 3),
         }
+        if self.check:
+            out["check"] = True
+        return out
 
 
 @dataclass
@@ -540,6 +548,17 @@ class Transcript:
     # transcripts written before this field existed — every reader treats ""
     # as "unknown, guess from the words" (translate.guess_language).
     language: str = ""
+    #: No-reference self-check (app.asr_accurate.sync_report): % of speech with
+    #: no caption, % of caption over silence, average caption start error, WER
+    #: against whatever captions exist, and whether the gate passed.
+    sync: dict = field(default_factory=dict)
+    #: Words flagged "check this" by the second decoding pass.
+    check_words: int = 0
+    #: True when the self-check failed — the clip still renders, but the
+    #: transcript is labelled as needing a look rather than presented as clean.
+    needs_review: bool = False
+    #: True when word timings were refined by forced alignment.
+    aligned: bool = False
 
 
 _MODEL_LOCK = threading.Lock()
@@ -820,6 +839,62 @@ def _plan_windows(duration: float) -> list[tuple[float, float]]:
 
 
 def transcribe(
+    path: Path,
+    settings: Settings,
+    on_progress=None,
+    cache_dir: Path | None = None,
+    should_pause=None,
+    on_chunk=None,
+    language: str | None = None,
+    on_detail=None,
+) -> Transcript:
+    """Word-level transcription: the local accuracy pipeline, with a fallback.
+
+    The accuracy pipeline lives in :mod:`app.asr_accurate` (creator subtitles +
+    forced alignment, then the largest LOCAL Whisper that fits this host, 2 s
+    overlap windows, a second decode of low-confidence windows, alignment and a
+    no-reference sync gate). It returns the same `Transcript` of `Word`s this
+    module has always returned, so nothing downstream changes.
+
+    If it cannot run at all — an exotic container ffmpeg decodes but the model
+    rejects, say — the previous implementation below still produces a
+    transcript, labelled so the job never claims the new path ran.
+    """
+    from app import asr_accurate
+
+    hint = asr_accurate.source_hint(path, cache_dir, settings)
+    try:
+        return asr_accurate.transcribe_source(
+            path,
+            settings,
+            cache_dir=cache_dir,
+            language=language,
+            on_progress=on_progress,
+            on_chunk=on_chunk,
+            on_detail=on_detail,
+            should_pause=should_pause,
+            source_url=hint.url,
+            title=hint.title,
+            description=hint.description,
+        )
+    except TranscriptionPaused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the legacy path is the safety net
+        logger.warning(
+            f"[subtitle] accuracy pipeline unavailable ({type(exc).__name__}: {exc}); "
+            "falling back to the legacy decoder"
+        )
+        out = _transcribe_legacy(
+            path, settings, on_progress=on_progress, cache_dir=cache_dir,
+            should_pause=should_pause, on_chunk=on_chunk, language=language,
+            on_detail=on_detail,
+        )
+        note = "accuracy pipeline unavailable"
+        out.label = f"{out.label} ({note})" if out.label else note
+        return out
+
+
+def _transcribe_legacy(
     path: Path,
     settings: Settings,
     on_progress=None,
