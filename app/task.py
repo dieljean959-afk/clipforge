@@ -32,6 +32,7 @@ from loguru import logger
 
 from app import (
     asr,
+    asr_accurate,
     asr_iso,
     clipcount,
     download,
@@ -1604,7 +1605,73 @@ class Pipeline:
             f"pause={resolved['pauseSec']}s pos={resolved['positionMode']}@{resolved['positionY']} "
             f"emoji={emoji_density if emoji_enabled else 'off'} styleId={resolved['hash']}"
         )
+        # ---- COVERAGE GUARD (LOCKED_SPEC §4) ------------------------------
+        # Silero's view of where the speech is, computed ONCE for the source.
+        # A 30 s window that decoded to zero words is what made a 52 s clip
+        # stop captioning at 24.5 s, so no cue is built before the clip is
+        # checked against this.
+        speech_wav = ws.stage_dir("transcribe") / "chunks" / "speech16k.wav"
+        regions: list[Any] = []
+        if speech_wav.exists():
+            try:
+                regions = asr_accurate.speech_regions(
+                    speech_wav, float(transcript.duration or 0.0)
+                )
+                self._log(
+                    job_id,
+                    f"coverage guard: {len(regions)} speech region(s), "
+                    f"{asr_accurate.speech_vad.speech_seconds(regions):.1f}s voiced",
+                )
+            except Exception as exc:  # noqa: BLE001 - a check must not kill a render
+                self._log(job_id, f"coverage guard unavailable: {exc}")
+        else:
+            self._log(job_id, "coverage guard unavailable: no speech16k.wav for this transcript")
+
         for i, cut in enumerate(cuts):
+            clip_id = str(cut.get("clipId") or "")
+            clip_start = float(cut.get("start") or 0.0)
+            clip_end = float(cut.get("end") or 0.0)
+            clip_span = (clip_start, clip_end)
+            if regions and clip_end > clip_start:
+                # Speech with no words at all is re-transcribed on that region
+                # alone, before the cue builder ever sees the transcript.
+                gap = asr_accurate.coverage_report(
+                    [(w.start, w.end) for w in transcript.words], regions, span=clip_span,
+                )
+                if gap.get("uncovered"):
+                    fixed, repair = asr_accurate.cover_speech(
+                        [w.as_dict() for w in transcript.words], regions,
+                        wav=speech_wav, span=clip_span, language=caption_language,
+                    )
+                    if repair.get("repairedWords"):
+                        # enforce_order only: the dedupe rule (same text within
+                        # 2 s) would delete the real repeated shouts this
+                        # recovered region is made of, and that re-opens the
+                        # very holes it was called to close (measured: 97.3 %
+                        # -> 83.7 % coverage on the real clip).
+                        words_fixed = [
+                            subtitle.Word(**w) for w in asr_accurate.enforce_order(fixed)
+                        ]
+                        transcript.words = words_fixed
+                        # Persist the repaired transcript: a re-render must not
+                        # pay for the same re-decodes again, and the chips in
+                        # the dashboard must show the words that actually exist.
+                        ws.write_json("transcribe", "words.json", {
+                            "words": [w.as_dict() for w in transcript.words],
+                            "duration": transcript.duration,
+                            "model": transcript.model_size,
+                            "engine": transcript.engine,
+                            "rtf": transcript.rtf,
+                            "language": getattr(transcript, "language", "") or "",
+                        })
+                        self._set_word_count(job_id, len(transcript.words))
+                        self._log(
+                            job_id,
+                            f"coverage guard clip {i + 1}: re-transcribed "
+                            f"{repair.get('repairedWords')} word(s) into "
+                            f"{len(gap.get('uncovered') or [])} uncovered speech span(s) "
+                            f"({', '.join(f'{a:.1f}-{b:.1f}s' for a, b in (gap.get('uncovered') or [])[:4])})",
+                        )
             cues = translate.build_cues(
                 transcript, cut, cap_settings,
                 language=caption_language,
@@ -1622,6 +1689,40 @@ class Pipeline:
                 "captions", f"cues_{i:03d}.json",
                 {"cues": cues, "clipId": cut.get("clipId")},
             )
+            # Final judgement, on the CAPTION spans the viewer will actually
+            # see: >=95 % of this clip's speech and the last cue within 1 s of
+            # the last speech. A clip that fails is NEVER presented as ready.
+            coverage: dict[str, Any] = {"passed": True, "needsReview": False}
+            if regions and clip_end > clip_start:
+                coverage = asr_accurate.coverage_report(
+                    [(float(c["start"]) + clip_start, float(c["end"]) + clip_start) for c in cues],
+                    regions,
+                    word_spans=[(w.start, w.end) for w in transcript.words],
+                    span=clip_span,
+                )
+            warning = None
+            if coverage.get("needsReview"):
+                warning = "needs review: " + (
+                    coverage.get("reason") or "captions missing part of the speech"
+                )
+                self._log(job_id, f"clip {i + 1} {warning}")
+            else:
+                self._log(
+                    job_id,
+                    f"coverage clip {i + 1}: {coverage.get('coveredFraction', 1.0):.1%} of "
+                    f"{coverage.get('speechSec', 0.0):.1f}s speech, last cue "
+                    f"{coverage.get('lastCaptionSec')}s / last speech {coverage.get('lastSpeechSec')}s",
+                )
+            if clip_id:
+                self.store.write_clip(
+                    clip_id,
+                    {
+                        "needsReview": bool(coverage.get("needsReview")),
+                        "captionWarning": warning,
+                        "captionCoverage": coverage,
+                    },
+                    job_id=job_id,
+                )
             # Context-aware emoji, tagged from the whole clip's chunks in ONE
             # batched LLM call and then filtered by the selection rules. Never
             # fatal: a failure is recorded as "fallback: keywords" on the track

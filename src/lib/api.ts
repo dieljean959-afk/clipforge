@@ -232,6 +232,23 @@ export interface ClipDto {
     emojiDensity?: string;
   } | null;
   renderState: "pending" | "running" | "done" | "failed";
+  /** COVERAGE GUARD: true when this clip's captions miss speech. */
+  needsReview?: boolean | null;
+  /** "needs review: captions missing at 27.1-43.5 s" — never shown as ready. */
+  captionWarning?: string | null;
+  /** Speech vs caption numbers behind that flag (seconds, clip-relative). */
+  captionCoverage?: {
+    speechSec?: number;
+    captionSec?: number;
+    coveredFraction?: number;
+    uncoveredSec?: number;
+    uncovered?: number[][];
+    lastSpeechSec?: number | null;
+    lastCaptionSec?: number | null;
+    passed?: boolean;
+    needsReview?: boolean;
+    reason?: string;
+  } | null;
   renderMs?: number | null;
   translationTracks?: { lang: string; source?: boolean; cached?: boolean; error?: string; files?: Record<string, string> }[] | null;
   shareId?: string | null;

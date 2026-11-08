@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from app.stages import StageWorkspace
 
@@ -130,29 +133,54 @@ def build_cues(
     if cut_end <= cut_start:
         return []
 
-    inside: list[Any] = []
-    for w in words:
-        ws = float(getattr(w, "start", 0.0))
-        we = float(getattr(w, "end", 0.0))
+    # ONE bad word must never cost the rest of the clip its captions. A
+    # missing/NaN timestamp used to raise inside this loop (or poison every
+    # comparison downstream), which ended the cue list at that word. Each bad
+    # word is now logged with the clip window and skipped, and the loop keeps
+    # going to the end.
+    as_dicts: list[dict[str, Any]] = []
+    for idx, w in enumerate(words):
+        try:
+            ws = float(getattr(w, "start", 0.0))
+            we = float(getattr(w, "end", 0.0))
+            text = str(getattr(w, "word", "") or "").strip()
+            conf = float(getattr(w, "conf", 1.0) or 1.0)
+        except (TypeError, ValueError, AttributeError):
+            logger.warning(
+                f"[captions] clip {cut_start:.1f}-{cut_end:.1f}s: skipping word #{idx} "
+                f"with an unusable timing/text: {getattr(w, 'word', w)!r}"
+            )
+            continue
+        if not text:
+            logger.warning(f"[captions] clip {cut_start:.1f}-{cut_end:.1f}s: skipping empty word #{idx}")
+            continue
+        if not math.isfinite(ws) or not math.isfinite(we):
+            logger.warning(
+                f"[captions] clip {cut_start:.1f}-{cut_end:.1f}s: skipping word #{idx} "
+                f"{text!r} with a NaN/inf timestamp ({ws}, {we})"
+            )
+            continue
+        if we < ws:
+            logger.warning(
+                f"[captions] clip {cut_start:.1f}-{cut_end:.1f}s: skipping word #{idx} "
+                f"{text!r} whose end {we:.2f}s is before its start {ws:.2f}s"
+            )
+            continue
         if we <= cut_start or ws >= cut_end:
             continue
-        inside.append(w)
+        as_dicts.append({
+            "start": ws - cut_start,
+            "end": we - cut_start,
+            "word": text,
+            "conf": conf,
+        })
 
-    if not inside:
+    if not as_dicts:
         return []
 
     # Display pipeline shared with the burn stage: bilingual fixes then burst
     # grouping then the emphasis planner. All timings are clip-relative.
     lang = language or guess_language(transcript) or "en"
-    as_dicts = [
-        {
-            "start": float(getattr(w, "start", 0.0)) - cut_start,
-            "end": float(getattr(w, "end", 0.0)) - cut_start,
-            "word": str(getattr(w, "word", "")),
-            "conf": float(getattr(w, "conf", 1.0) or 1.0),
-        }
-        for w in inside
-    ]
     # Per-clip language. A video is rarely one language end to end: an English
     # interview with a Spanish-speaking guest, or a Spanish podcast quoting an
     # English clip. The job-level language is only a prior — when THIS clip's

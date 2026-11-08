@@ -195,6 +195,19 @@ export function ClipCard({
             ` · ${String(clip.mediaError).slice(0, 60)}`
           )}
         </p>
+        {/* COVERAGE GUARD: a clip whose captions miss speech is never shown as
+            ready. The reason names the exact seconds that are missing. */}
+        {clip.needsReview && (
+          <p
+            className="flex items-start gap-1 text-[10px] font-medium text-amber-300"
+            title={clip.captionWarning ?? "Some speech has no captions"}
+          >
+            <TriangleAlert className="mt-px size-3 shrink-0" />
+            <span className="line-clamp-2">
+              {clip.captionWarning ?? "needs review: captions missing"}
+            </span>
+          </p>
+        )}
         {/* Says out loud that some captions are markers, not transcriptions —
             otherwise [muttering] in the video looks like a bug. */}
         {(clip.uncertainCues ?? 0) > 0 && (

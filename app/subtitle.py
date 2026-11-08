@@ -879,6 +879,13 @@ def transcribe(
         )
     except TranscriptionPaused:
         raise
+    except TranscribeError:
+        # A real, EXPLAINED failure — a window no local model could decode.
+        # Falling back to the legacy decoder here would hand the renderer a
+        # transcript with the same hole in it, silently; that is how a 52 s
+        # clip reached export with 16 s of speech uncaptioned. Fail the stage
+        # with the window range instead.
+        raise
     except Exception as exc:  # noqa: BLE001 - the legacy path is the safety net
         logger.warning(
             f"[subtitle] accuracy pipeline unavailable ({type(exc).__name__}: {exc}); "

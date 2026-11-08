@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import subprocess
 import time
@@ -59,6 +60,18 @@ SECOND_PASS_LOGPROB = -1.0
 
 #: Silero coverage below which a word is treated as a hallucination.
 MIN_VOICING = 0.10
+
+#: COVERAGE GUARD (LOCKED_SPEC §4): a speech run at least this long with no
+#: words at all is a caption hole worth re-transcribing, not a breath.
+COVERAGE_MIN_GAP_SEC = 0.5
+#: Captions must cover at least this share of the clip's Silero speech time.
+COVERAGE_MIN_FRACTION = 0.95
+#: The last caption must end within this much of the last speech — and a
+#: hole shorter than this is a gap in the words themselves (a laugh, a breath
+#: Silero still counts), not a caption that stopped early.
+COVERAGE_TAIL_TOLERANCE_SEC = 1.0
+#: Re-decodes of one uncovered span before the clip is marked needs-review.
+COVERAGE_MAX_TRIES = 3
 
 #: Sync gate thresholds (step 8).
 MAX_START_ERROR = 0.150
@@ -551,6 +564,31 @@ def model_ladder(language: str | None) -> list[str]:
     return fits or ["tiny"]
 
 
+def _window_speech_sec(w_start: float, w_end: float,
+                       regions: list[speech_vad.Region] | None) -> float:
+    """Seconds of Silero speech inside [w_start, w_end) — 0.0 without VAD."""
+    if not regions:
+        return 0.0
+    return speech_vad.overlap_seconds(regions, w_start, w_end)
+
+
+def _checkpoint_usable(
+    data: dict, w_start: float, w_end: float,
+    regions: list[speech_vad.Region] | None,
+) -> bool:
+    """True when a stored window is a real result, not a silent hole.
+
+    A checkpoint with zero words is only a valid answer for a window Silero
+    also calls silent. Anywhere else it is a decode that failed quietly and
+    must be re-attempted rather than resumed.
+    """
+    if data.get("words"):
+        return True
+    if not regions:
+        return True  # no VAD evidence either way: treat as a genuine gap
+    return _window_speech_sec(w_start, w_end, regions) < COVERAGE_MIN_GAP_SEC
+
+
 def _decode_windows(
     reader: _WavReader,
     windows: list[tuple[float, float]],
@@ -564,6 +602,7 @@ def _decode_windows(
     on_chunk: Callable[..., None] | None,
     on_detail: Callable[[str], None] | None,
     duration: float,
+    regions: list[speech_vad.Region] | None = None,
 ) -> tuple[list[dict], list[dict], list[Attempt], str, str | None, float]:
     """Decode every window with the largest model that fits; checkpoint each."""
     attempts: list[Attempt] = []
@@ -585,7 +624,14 @@ def _decode_windows(
             if cache_file is not None and cache_file.exists():
                 try:
                     data = json.loads(cache_file.read_text(encoding="utf-8"))
-                    if data.get("params") == params:
+                    # An EMPTY checkpoint is not a result to resume from: this
+                    # job stored win_00033 (924-954 s) with zero words over 30 s
+                    # that Silero calls speech, and a resume that trusts it
+                    # never learns the words. Only reuse it when the window is
+                    # genuinely silent.
+                    if data.get("params") == params and _checkpoint_usable(
+                        data, w_start, w_end, regions
+                    ):
                         cycles.append(data)
                         model = data.get("model") or model
                         # The peak is part of the checkpoint: a resumed job must
@@ -607,7 +653,8 @@ def _decode_windows(
             wav = _write_span(reader, tmp_dir / f"win_{idx:05d}.wav", w_start, w_end)
             reply = None
             start_model = model
-            for candidate in ladder[ladder.index(start_model):] if start_model in ladder else ladder:
+            ladder_from = ladder[ladder.index(start_model):] if start_model in ladder else ladder
+            for candidate in ladder_from:
                 try:
                     if proc is None or proc.model != candidate:
                         if proc is not None:
@@ -618,26 +665,65 @@ def _decode_windows(
                             candidate, log_path=tmp_dir / "asr_child.log",
                         )
                         model = candidate
-                    reply = proc.decode(
-                        wav, language=language, beam_size=5,
-                        temperature=[0.0, 0.2, 0.4], initial_prompt=prompt,
-                    )
-                    attempts.append(Attempt(w_start, w_end, candidate, True,
-                                            float(reply.get("peak_rss_mb") or 0.0)))
-                    peak = max(peak, float(reply.get("peak_rss_mb") or 0.0))
-                    break
                 except asr_quality.DecodeError as exc:
+                    # A rung that cannot even load is a lighter rung's job, not
+                    # the job's death: record it and step down.
                     attempts.append(Attempt(w_start, w_end, candidate, False, 0.0, str(exc)))
-                    logger.warning(f"[accurate] chunk {idx + 1}: {candidate} failed: {exc}")
+                    logger.warning(
+                        f"[accurate] chunk {idx + 1}/{len(windows)} "
+                        f"({w_start:.1f}-{w_end:.1f}s) {candidate} could not load: {exc}"
+                    )
                     if proc is not None:
                         proc.kill()
                         proc = None
-                    if not exc.memory:
-                        raise
+                    continue
+                # A window that decodes to NOTHING is not silence. On this very
+                # job, 924-954 s returned 0 segments WITH the previous-window
+                # prompt and 50 words with the prompt removed, same audio and
+                # model — so try the same audio prompt-free first, and only
+                # then spend a lighter model on it.
+                prompt_tries: list[str | None] = [prompt, None] if prompt else [None]
+                for prompt_try in prompt_tries:
+                    try:
+                        reply = proc.decode(
+                            wav, language=language, beam_size=5,
+                            temperature=[0.0, 0.2, 0.4], initial_prompt=prompt_try,
+                        )
+                    except asr_quality.DecodeError as exc:
+                        attempts.append(Attempt(w_start, w_end, candidate, False, 0.0, str(exc)))
+                        logger.warning(
+                            f"[accurate] chunk {idx + 1}/{len(windows)} "
+                            f"({w_start:.1f}-{w_end:.1f}s, {candidate}) failed: {exc}"
+                        )
+                        if proc is not None:
+                            proc.kill()
+                            proc = None
+                        reply = None
+                        break
+                    decoded = reply.get("words") or []
+                    attempts.append(Attempt(
+                        w_start, w_end, candidate, True,
+                        float(reply.get("peak_rss_mb") or 0.0),
+                        "" if decoded else "returned 0 words",
+                    ))
+                    peak = max(peak, float(reply.get("peak_rss_mb") or 0.0))
+                    if decoded:
+                        break
+                    logger.warning(
+                        f"[accurate] chunk {idx + 1}/{len(windows)} "
+                        f"({w_start:.1f}-{w_end:.1f}s, {candidate}) returned 0 words"
+                        + (" — retrying without the previous-window prompt" if prompt_try else "")
+                    )
+                if reply is not None and (reply.get("words") or []):
+                    break
+                reply = None
             if reply is None:
+                # NEVER continue with a hole. A transcript missing a window
+                # must fail visibly at this stage, not render clips with the
+                # speech silently cut out of them.
                 raise TranscribeError(
-                    f"no local model could decode {w_start:.0f}-{w_end:.0f}s; "
-                    f"tried {', '.join(ladder)}"
+                    f"window {w_start:.1f}-{w_end:.1f}s could not be transcribed by any local "
+                    f"model ({', '.join(ladder)}); refusing a transcript with a hole"
                 )
             if detected is None and reply.get("language"):
                 detected = str(reply["language"])
@@ -725,7 +811,9 @@ def _second_pass(
             segs = cycle.get("segments") or []
             worst = min((float(s.get("avg_logprob", 0.0)) for s in segs), default=0.0)
             hot = any(float(s.get("temperature") or 0.0) > 0.0 for s in segs)
-            if not segs or (worst >= SECOND_PASS_LOGPROB and not hot):
+            # An EMPTY window used to `continue` here — the one case that most
+            # needs a second look. Decode it again (prompt-free) instead.
+            if segs and worst >= SECOND_PASS_LOGPROB and not hot:
                 continue
             wav = _write_span(reader, tmp_dir / f"re_{int(cycle['start']):05d}.wav",
                               float(cycle["start"]), float(cycle["end"]))
@@ -774,6 +862,303 @@ def _second_pass(
         if proc is not None:
             proc.close()
     return flagged
+
+
+# --------------------------------------------------------------------------- #
+# coverage guard: captions must cover the WHOLE clip (LOCKED_SPEC §4)
+# --------------------------------------------------------------------------- #
+
+def _finite_spans(spans: Any) -> list[tuple[float, float]]:
+    """Coerce (start, end) pairs to finite, forward spans. Bad ones are gone."""
+    out: list[tuple[float, float]] = []
+    for s, e in spans:
+        a, b = float(s), float(e)
+        if math.isfinite(a) and math.isfinite(b) and b > a:
+            out.append((max(0.0, a), b))
+    return out
+
+
+def _clip_to(spans: list[tuple[float, float]], lo: float, hi: float) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for a, b in spans:
+        s, e = max(lo, a), min(hi, b)
+        if e > s:
+            out.append((s, e))
+    return out
+
+
+def _union_spans(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _subtract_spans(spans: list[tuple[float, float]],
+                    cuts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """`spans` minus `cuts` (both merged), as a fresh span list."""
+    pieces = _union_spans(spans)
+    for cs, ce in _union_spans(cuts):
+        nxt: list[tuple[float, float]] = []
+        for a, b in pieces:
+            if ce <= a or cs >= b:
+                nxt.append((a, b))
+                continue
+            if cs > a:
+                nxt.append((a, min(cs, b)))
+            if ce < b:
+                nxt.append((max(ce, a), b))
+        pieces = nxt
+    return [(a, b) for a, b in pieces if b > a]
+
+
+def _word_span(w: dict) -> tuple[float, float] | None:
+    """(start, end) of a word dict, or None when the timing is not usable."""
+    try:
+        a, b = float(w["start"]), float(w["end"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if math.isfinite(a) and math.isfinite(b) and b > a:
+        return (max(0.0, a), b)
+    return None
+
+
+def speech_holes(
+    spans: Any,
+    regions: list[speech_vad.Region],
+    *,
+    span: tuple[float, float] | None = None,
+    min_gap: float = COVERAGE_MIN_GAP_SEC,
+) -> list[tuple[float, float]]:
+    """Silero speech with NOTHING of `spans` on it, as (start, end) seconds.
+
+    A hole of `min_gap` seconds or more is speech the captions never touch —
+    the signature of the 924-954 s window bug, where a whole 26.6 s stretch of
+    talking had no words at all.
+    """
+    lo, hi = (0.0, float("inf")) if span is None else (float(span[0]), float(span[1]))
+    speech = _union_spans(_clip_to(_finite_spans((r.start, r.end) for r in regions), lo, hi))
+    covered = _clip_to(_finite_spans(spans), lo, hi)
+    out: list[tuple[float, float]] = []
+    for a, b in speech:
+        for s, e in _subtract_spans([(a, b)], covered):
+            if e - s >= min_gap:
+                out.append((s, e))
+    return out
+
+
+def coverage_report(
+    caption_spans: Any,
+    regions: list[speech_vad.Region],
+    *,
+    word_spans: Any | None = None,
+    span: tuple[float, float] | None = None,
+) -> dict[str, Any]:
+    """Speech vs captions for ONE clip. `span` is the clip window, in seconds.
+
+    Holes are judged on WORDS ("speech with no words" is the re-transcribe
+    trigger), while the 95 % rule and the 1 s tail rule are judged on the
+    CAPTION spans the viewer actually sees.
+    """
+    lo, hi = (0.0, float("inf")) if span is None else (float(span[0]), float(span[1]))
+    speech = _union_spans(_clip_to(_finite_spans((r.start, r.end) for r in regions), lo, hi))
+    caps = _union_spans(_clip_to(_finite_spans(caption_spans), lo, hi))
+    hole_spans = word_spans if word_spans is not None else caption_spans
+    holes = speech_holes(hole_spans, regions, span=span)
+
+    speech_total = sum(b - a for a, b in speech)
+    uncovered = sum(b - a for a, b in holes)
+    covered = max(0.0, speech_total - uncovered)
+    fraction = 1.0 if speech_total <= 0 else covered / speech_total
+    last_speech = max((b for _a, b in speech), default=None)
+    last_caption = max((b for _a, b in caps), default=None)
+    tail = None if last_speech is None or last_caption is None else last_speech - last_caption
+
+    worst_hole = max((b - a for a, b in holes), default=0.0)
+    passed = speech_total <= 0 or (
+        fraction >= COVERAGE_MIN_FRACTION
+        and worst_hole <= COVERAGE_TAIL_TOLERANCE_SEC
+        and tail is not None
+        and abs(tail) <= COVERAGE_TAIL_TOLERANCE_SEC
+    )
+    reasons: list[str] = []
+    if fraction < COVERAGE_MIN_FRACTION:
+        reasons.append(f"captions cover {fraction:.0%} of speech (needs {COVERAGE_MIN_FRACTION:.0%})")
+    if worst_hole > COVERAGE_TAIL_TOLERANCE_SEC:
+        reasons.append(
+            "captions missing at "
+            + ", ".join(f"{a:.1f}-{b:.1f} s" for a, b in holes if b - a > COVERAGE_TAIL_TOLERANCE_SEC)
+        )
+    if tail is None:
+        reasons.append("no caption on the speech")
+    elif abs(tail) > COVERAGE_TAIL_TOLERANCE_SEC:
+        reasons.append(f"last caption ends {abs(tail):.1f} s from the last speech")
+
+    return {
+        "speechSec": round(speech_total, 2),
+        "captionSec": round(sum(b - a for a, b in caps), 2),
+        "coveredFraction": round(fraction, 4),
+        "uncoveredSec": round(uncovered, 2),
+        "uncovered": [[round(a, 2), round(b, 2)] for a, b in holes],
+        "lastSpeechSec": None if last_speech is None else round(last_speech, 2),
+        "lastCaptionSec": None if last_caption is None else round(last_caption, 2),
+        "passed": bool(passed),
+        "needsReview": not passed,
+        "reason": "; ".join(reasons),
+    }
+
+
+class _RegionDecoder:
+    """One resident model, reused for every uncovered span of a clip.
+
+    Prompt-free on purpose: the previous-window prompt is what turned this
+    job's 924-954 s audio into zero words. Returns ABSOLUTE word dicts.
+    """
+
+    def __init__(self, wav: Path, tmp_dir: Path, ladder: list[str], language: str | None) -> None:
+        self.wav = wav
+        self.tmp_dir = tmp_dir
+        self.ladder = ladder
+        self.language = language
+        self.proc: asr_quality.DecodeProcess | None = None
+        self.model = ""
+
+    def _process(self, model: str) -> asr_quality.DecodeProcess:
+        if self.proc is not None and self.model == model:
+            return self.proc
+        if self.proc is not None:
+            try:
+                self.proc.close()
+            except Exception:  # noqa: BLE001 - the next model replaces it
+                pass
+            self.proc = None
+        self.proc = asr_quality.DecodeProcess(model, log_path=self.tmp_dir / "asr_child.log")
+        self.model = model
+        return self.proc
+
+    def decode(self, start: float, end: float) -> list[dict]:
+        pad = 0.20
+        a = max(0.0, start - pad)
+        b = end + pad
+        try:
+            with _WavReader(self.wav) as reader:
+                piece = _write_span(
+                    reader, self.tmp_dir / f"fix_{int(round(start * 1000)):09d}.wav", a, b,
+                )
+        except (OSError, ValueError) as exc:
+            logger.warning(f"[cover] could not cut {start:.1f}-{end:.1f}s: {exc}")
+            return []
+        for model in self.ladder:
+            try:
+                reply = self._process(model).decode(
+                    piece, language=self.language, beam_size=5, temperature=[0.0, 0.2, 0.4],
+                )
+            except asr_quality.DecodeError as exc:
+                logger.warning(f"[cover] {start:.1f}-{end:.1f}s: {model} failed: {exc}")
+                if self.proc is not None:
+                    self.proc.kill()
+                    self.proc = None
+                continue
+            words = []
+            for w in reply.get("words") or []:
+                ws, we = float(w["start"]) + a, float(w["end"]) + a
+                if math.isfinite(ws) and math.isfinite(we) and we > ws:
+                    words.append({
+                        "word": str(w["word"]), "start": round(ws, 3), "end": round(we, 3),
+                        "conf": float(w.get("conf") or w.get("prob") or 0.0), "check": False,
+                    })
+            if words:
+                return words
+            logger.warning(f"[cover] {start:.1f}-{end:.1f}s: {model} returned 0 words")
+        return []
+
+    def close(self) -> None:
+        if self.proc is not None:
+            try:
+                self.proc.close()
+            except Exception:  # noqa: BLE001 - shutdown must not raise
+                pass
+            self.proc = None
+
+
+def cover_speech(
+    words: list[dict],
+    regions: list[speech_vad.Region],
+    *,
+    wav: Path,
+    span: tuple[float, float] | None = None,
+    language: str | None = None,
+    ladder: list[str] | None = None,
+    max_tries: int = COVERAGE_MAX_TRIES,
+    decoder: Any | None = None,
+) -> tuple[list[dict], dict]:
+    """Re-transcribe every speech span (`span`-clipped) that has no words.
+
+    Up to `max_tries` rounds, each round re-decoding only the holes that are
+    still empty, with the lighter ladder and no prompt. Returns the (possibly
+    grown) word list plus the numbers the caller reports and stores. This never
+    drops a word and never raises: what it cannot repair is returned as
+    `needsReview` with the exact missing spans.
+    """
+    lo, hi = (0.0, float("inf")) if span is None else (float(span[0]), float(span[1]))
+    try:
+        tmp_dir = wav.parent / (wav.stem + "_cover")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(f"[cover] cannot create a work dir beside {wav}: {exc}")
+        return words, coverage_report([], regions, span=span) | {"repairedWords": 0, "repaired": []}
+
+    models = ladder or model_ladder(language)
+    kept = list(words)
+
+    def spans_of(items: list[dict]) -> list[tuple[float, float]]:
+        return [s for s in (_word_span(w) for w in items) if s]
+
+    holes = speech_holes(spans_of(kept), regions, span=span)
+    repaired: list[list[float]] = []
+    repaired_words = 0
+    tries = 0
+    worker = decoder or _RegionDecoder(wav, tmp_dir, models, language)
+    while holes and tries < max_tries:
+        tries += 1
+        added = 0
+        for a, b in holes:
+            logger.warning(f"[cover] no words at {a:.1f}-{b:.1f}s — re-transcribing that region")
+            got = worker.decode(a, b)
+            if not got:
+                continue
+            # Keep a word when it OVERLAPS the hole (plus 0.25 s of context):
+            # a 0.7 s hole is decoded with padding, so its first and last word
+            # legitimately start/end just outside it. Words wholly outside are
+            # a re-decode inventing past its edges and are dropped.
+            inside = [
+                g for g in got
+                if min(g["end"], b + 0.25) > max(g["start"], a - 0.25)
+            ]
+            if not inside:
+                continue
+            kept.extend(inside)
+            added += len(inside)
+            repaired.append([round(a, 2), round(b, 2)])
+        repaired_words += added
+        kept = sorted(
+            kept, key=lambda w: (_word_span(w) or (math.inf, math.inf)),
+        )
+        holes = speech_holes(spans_of(kept), regions, span=span)
+        if not added:
+            break  # no progress: more identical tries would only cost time
+
+    if hasattr(worker, "close"):
+        worker.close()
+    spans = spans_of(kept)
+    report = coverage_report(spans, regions, word_spans=spans, span=span)
+    report["repairedWords"] = repaired_words
+    report["repaired"] = repaired
+    report["tries"] = tries
+    return kept, report
 
 
 # --------------------------------------------------------------------------- #
@@ -882,7 +1267,7 @@ def transcribe_source(
                 reader, windows, languages=langs, prompt_base=(title, description),
                 cache_dir=cache_dir, tmp_dir=tmp_dir, should_pause=should_pause,
                 on_progress=on_progress, on_chunk=on_chunk, on_detail=on_detail,
-                duration=duration,
+                duration=duration, regions=regions,
             )
             if cycles:
                 flagged = _second_pass(
