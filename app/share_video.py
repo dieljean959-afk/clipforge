@@ -128,17 +128,20 @@ class JobShareLocker:
 
     def __init__(self) -> None:
         self._by_master: dict[str, Path] = {}
-        self._master_to_job: dict[str, str] = {}
         self._job_locks: dict[str, Lock] = {}
 
     def _lock(self, master: Path) -> Lock:
+        # The lock lives in its OWN map. It used to be cached in `_by_master`,
+        # the map of finished share copies, so the first call inserted a Lock
+        # where a Path belonged and `get()` then handed that Lock to callers
+        # as if it were the file — /s/<id>.mp4 answered 500 for every clip
+        # with "'_thread.lock' object has no attribute 'exists'".
         key = str(master)
         with _locks_guard:
-            lock = self._by_master.get(key)
+            lock = self._job_locks.get(key)
             if lock is None:
                 lock = Lock()
-                self._by_master[key] = lock
-                self._master_to_job[lock] = str(master)
+                self._job_locks[key] = lock
             return lock
 
     def get(self, master: Path, *, force: bool = False) -> Path | None:
@@ -149,10 +152,10 @@ class JobShareLocker:
         served from disk for every clip in that same job.
         """
         key = str(master)
-        if not force and key in self._by_master:
+        if not force and isinstance(self._by_master.get(key), Path):
             return self._by_master[key]
         with self._lock(master):
-            if not force and key in self._by_master:
+            if not force and isinstance(self._by_master.get(key), Path):
                 return self._by_master[key]
             share = share_path_for(master)
             stamp = _stamp_path(share)

@@ -1103,3 +1103,82 @@ def thumb_needs_rewrite(p: Path) -> bool:
     if w == 1080 and h == 1920:
         return False
     return True
+
+
+#: Job stages in which a child process still owns its clip documents. A repair
+#: must never fight a live render for the same record.
+_ACTIVE_STAGES = {
+    "queued", "grabbing", "transcribing", "finding", "rendering", "exporting",
+}
+
+
+def repair_render_states(store_obj: Any, *, limit: int = 512) -> dict[str, int]:
+    """Reconcile clip documents with the MP4s that actually exist on disk.
+
+    A worker killed mid-render leaves the exact state this app showed on the
+    dashboard: the MP4 is finished and playable, but the document still says
+    `renderState: pending` (or `running`) and carries no `fps`, because the
+    final `write_clip` never ran. The UI then renders those cards as
+    “queued · no fps” and refuses to play, download or share them — a clip
+    that works, reported as broken.
+
+    The filesystem is the authority here: if the media file exists, is
+    non-empty and ffprobe reports a duration, the clip IS rendered, whatever
+    the document says. Only terminal jobs are repaired, and a missing file is
+    never turned into `failed` — the copy may live in the durable bucket and
+    be restored on demand.
+    """
+    stats = {"scanned": 0, "repaired": 0, "skipped": 0}
+    try:
+        clips = store_obj.list_all_clips(limit=limit)
+    except Exception as exc:  # noqa: BLE001 - a repair pass must never break boot
+        logger.warning(f"[repair] cannot list clips: {exc}")
+        return stats
+    for clip in clips:
+        stats["scanned"] += 1
+        state = clip.get("renderState")
+        stuck = state in {"pending", "running"}
+        missing_fps = state == "done" and not float(clip.get("fps") or 0) > 0
+        if not (stuck or missing_fps):
+            continue
+        raw = clip.get("videoPath")
+        if not raw:
+            continue
+        path = Path(str(raw))
+        try:
+            if not path.exists() or path.stat().st_size <= 0:
+                stats["skipped"] += 1
+                continue
+        except OSError:
+            stats["skipped"] += 1
+            continue
+        job_id = str(clip.get("jobId") or "")
+        job = store_obj.get_job(job_id) if job_id else {}
+        if job and job.get("stage") in _ACTIVE_STAGES:
+            stats["skipped"] += 1
+            continue
+        try:
+            meta = probe(path)
+        except RenderError as exc:
+            logger.warning(f"[repair] {clip.get('_id')}: {exc}")
+            stats["skipped"] += 1
+            continue
+        if float(meta.get("duration") or 0) <= 0:
+            stats["skipped"] += 1
+            continue
+        patch = {
+            "renderState": "done",
+            "mediaError": None,
+            "videoPath": str(path),
+            "mediaBytes": int(path.stat().st_size),
+            "mediaDurationSec": round(float(meta["duration"]), 3),
+            "mediaWidth": int(meta.get("width") or 0),
+            "mediaHeight": int(meta.get("height") or 0),
+            "fps": float(meta.get("fps") or 30.0),
+        }
+        try:
+            store_obj.write_clip(str(clip.get("_id")), patch, job_id=job_id or None)
+            stats["repaired"] += 1
+        except Exception as exc:  # noqa: BLE001 - keep going through the backlog
+            logger.warning(f"[repair] {clip.get('_id')} write failed: {exc}")
+    return stats

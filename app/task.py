@@ -1632,6 +1632,11 @@ class Pipeline:
             clip_start = float(cut.get("start") or 0.0)
             clip_end = float(cut.get("end") or 0.0)
             clip_span = (clip_start, clip_end)
+            # Speech for THIS clip's judgement. It shrinks when the re-decode
+            # ladder proves a voiced blip carries no words at all (a laugh, a
+            # clap, music), so a clip is never flagged for “missing captions”
+            # over audio no model can transcribe.
+            clip_regions = regions
             if regions and clip_end > clip_start:
                 # Speech with no words at all is re-transcribed on that region
                 # alone, before the cue builder ever sees the transcript.
@@ -1672,6 +1677,16 @@ class Pipeline:
                             f"{len(gap.get('uncovered') or [])} uncovered speech span(s) "
                             f"({', '.join(f'{a:.1f}-{b:.1f}s' for a, b in (gap.get('uncovered') or [])[:4])})",
                         )
+                    non_speech = repair.get("nonSpeech") or []
+                    if non_speech:
+                        clip_regions = asr_accurate.without_spans(regions, non_speech)
+                        self._log(
+                            job_id,
+                            f"coverage guard clip {i + 1}: "
+                            + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in non_speech[:4])
+                            + " is voiced audio with no words in any model — "
+                            "not counted as missing captions",
+                        )
             cues = translate.build_cues(
                 transcript, cut, cap_settings,
                 language=caption_language,
@@ -1693,13 +1708,18 @@ class Pipeline:
             # see: >=95 % of this clip's speech and the last cue within 1 s of
             # the last speech. A clip that fails is NEVER presented as ready.
             coverage: dict[str, Any] = {"passed": True, "needsReview": False}
-            if regions and clip_end > clip_start:
+            if clip_regions and clip_end > clip_start:
                 coverage = asr_accurate.coverage_report(
                     [(float(c["start"]) + clip_start, float(c["end"]) + clip_start) for c in cues],
-                    regions,
+                    clip_regions,
                     word_spans=[(w.start, w.end) for w in transcript.words],
                     span=clip_span,
                 )
+                if clip_regions is not regions:
+                    coverage["nonSpeech"] = [
+                        [round(float(a), 2), round(float(b), 2)]
+                        for a, b in (repair.get("nonSpeech") or [])
+                    ]
             warning = None
             if coverage.get("needsReview"):
                 warning = "needs review: " + (

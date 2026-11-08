@@ -251,6 +251,42 @@ def test_a_sub_second_residual_hole_still_passes_the_95_percent_rule():
     assert report["uncovered"] == [[9.0, 9.7]]  # still reported, for honesty
 
 
+def test_a_wordless_voiced_blip_is_not_missing_captions():
+    """The real batch: a 1.0 s VAD blip every model refuses is not speech.
+
+    Both flagged clips in production had exactly this shape (0.85 s and 1.04 s
+    of voiced audio that distil-medium.en, small and base all decoded to zero
+    words). Flagging those told the user a finished clip needed review over a
+    sound nobody can caption.
+    """
+    regions = [speech_vad.Region(0.0, 10.0), speech_vad.Region(11.0, 12.0)]
+    words = [{"start": 0.0, "end": 10.0, "word": "hi", "conf": 0.9}]
+
+    _fixed, report = asr_accurate.cover_speech(
+        words, regions, wav=Path("unused.wav"), span=(0.0, 12.0),
+        language="en", decoder=_HoleFiller(work=False),
+    )
+
+    assert report["nonSpeech"] == [[11.0, 12.0]]
+    assert report["needsReview"] is False
+    assert report["coveredFraction"] == 1.0
+
+
+def test_a_long_wordless_stretch_is_still_a_hole():
+    """The 924-954 s signature stays flagged: 20 s of speech, zero words."""
+    regions = [speech_vad.Region(0.0, 30.0)]
+    words = [{"start": 0.0, "end": 10.0, "word": "hi", "conf": 0.9}]
+
+    _fixed, report = asr_accurate.cover_speech(
+        words, regions, wav=Path("unused.wav"), span=(0.0, 30.0),
+        language="en", decoder=_HoleFiller(work=False),
+    )
+
+    assert report["nonSpeech"] == []
+    assert report["needsReview"] is True
+    assert "captions missing at" in report["reason"]
+
+
 def test_coverage_report_passes_a_fully_captioned_clip():
     regions = [speech_vad.Region(1.0, 10.0), speech_vad.Region(12.0, 20.0)]
     words = [(1.0, 10.0), (12.0, 20.0)]

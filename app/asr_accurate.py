@@ -72,6 +72,13 @@ COVERAGE_MIN_FRACTION = 0.95
 COVERAGE_TAIL_TOLERANCE_SEC = 1.0
 #: Re-decodes of one uncovered span before the clip is marked needs-review.
 COVERAGE_MAX_TRIES = 3
+#: A wordless Silero span up to this long that EVERY model in the ladder
+#: refuses is not captioned speech — a laugh, a clap, a door, music the VAD
+#: calls voiced. Measured on this app's own batch: two flagged clips whose
+#: “missing captions” windows (0.85 s and 1.04 s) returned zero words from
+#: distil-medium.en, small AND base. Anything longer stays a hole: a 20 s
+#: wordless stretch is the 924-954 s bug, not a sound effect.
+COVERAGE_WORDLESS_MAX_SEC = 2.0
 
 #: Sync gate thresholds (step 8).
 MAX_START_ERROR = 0.150
@@ -915,6 +922,25 @@ def _subtract_spans(spans: list[tuple[float, float]],
     return [(a, b) for a, b in pieces if b > a]
 
 
+def without_spans(
+    regions: list[speech_vad.Region], spans: Any,
+) -> list[speech_vad.Region]:
+    """`regions` minus `spans`, as fresh Regions.
+
+    Used to drop spans the decode ladder proved are not speech, so the
+    coverage judgement is made on the speech that can actually be captioned.
+    """
+    cuts = _union_spans(_finite_spans(spans))
+    if not cuts:
+        return list(regions)
+    out: list[speech_vad.Region] = []
+    for r in regions:
+        for a, b in _subtract_spans([(float(r.start), float(r.end))], cuts):
+            if b - a > 0:
+                out.append(speech_vad.Region(a, b))
+    return out
+
+
 def _word_span(w: dict) -> tuple[float, float] | None:
     """(start, end) of a word dict, or None when the timing is not usable."""
     try:
@@ -1121,14 +1147,20 @@ def cover_speech(
     repaired: list[list[float]] = []
     repaired_words = 0
     tries = 0
+    #: Spans the ladder was pointed at and produced nothing for. Those are
+    #: judged again at the end: a short one is a sound the VAD calls voiced,
+    #: not speech anybody can caption.
+    wordless: list[tuple[float, float]] = []
     worker = decoder or _RegionDecoder(wav, tmp_dir, models, language)
     while holes and tries < max_tries:
         tries += 1
         added = 0
+        empty: list[tuple[float, float]] = []
         for a, b in holes:
             logger.warning(f"[cover] no words at {a:.1f}-{b:.1f}s — re-transcribing that region")
             got = worker.decode(a, b)
             if not got:
+                empty.append((a, b))
                 continue
             # Keep a word when it OVERLAPS the hole (plus 0.25 s of context):
             # a 0.7 s hole is decoded with padding, so its first and last word
@@ -1139,10 +1171,12 @@ def cover_speech(
                 if min(g["end"], b + 0.25) > max(g["start"], a - 0.25)
             ]
             if not inside:
+                empty.append((a, b))
                 continue
             kept.extend(inside)
             added += len(inside)
             repaired.append([round(a, 2), round(b, 2)])
+        wordless = empty
         repaired_words += added
         kept = sorted(
             kept, key=lambda w: (_word_span(w) or (math.inf, math.inf)),
@@ -1154,10 +1188,25 @@ def cover_speech(
     if hasattr(worker, "close"):
         worker.close()
     spans = spans_of(kept)
-    report = coverage_report(spans, regions, word_spans=spans, span=span)
+    # A short span every model in the ladder refused is not captioned speech.
+    # Longer ones stay holes: they are the shape of the original 26.6 s bug.
+    non_speech = [
+        (a, b) for a, b in wordless if b - a <= COVERAGE_WORDLESS_MAX_SEC
+    ]
+    if non_speech:
+        logger.info(
+            "[cover] "
+            + f"{len(non_speech)} wordless span(s) refused by {len(models)} model(s) "
+            + "treated as non-speech: "
+            + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in non_speech[:4])
+        )
+    report = coverage_report(
+        spans, without_spans(regions, non_speech), word_spans=spans, span=span,
+    )
     report["repairedWords"] = repaired_words
     report["repaired"] = repaired
     report["tries"] = tries
+    report["nonSpeech"] = [[round(a, 2), round(b, 2)] for a, b in non_speech]
     return kept, report
 
 

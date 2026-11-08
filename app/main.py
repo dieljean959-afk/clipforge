@@ -621,6 +621,18 @@ def _start_worker() -> None:
             )
     except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
         logger.warning(f"[boot] clip reconcile failed: {exc}")
+    # Clip documents a killed worker left mid-flight: the MP4 is on disk but the
+    # document still says pending/running, so the dashboard shows “queued ·
+    # no fps” and blocks play/download/share on a clip that is actually fine.
+    try:
+        fixed = video_svc.repair_render_states(store)
+        if fixed.get("repaired"):
+            logger.info(
+                f"[boot] render state repaired for {fixed['repaired']} clip(s) "
+                f"({fixed['scanned']} scanned, {fixed['skipped']} skipped)"
+            )
+    except Exception as exc:  # noqa: BLE001 - never block startup on a repair
+        logger.warning(f"[boot] render state repair failed: {exc}")
     tailnet = hosting.tailnet_ip()
     logger.info(
         f"[boot] API up on http://{settings.app.host}:{settings.app.port} "
