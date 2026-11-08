@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-/** Clipmake logo mark, drawn from scratch: two blades on a pivot, a handle
+/** ClipForge logo mark, drawn from scratch: two blades on a pivot, a handle
  * base and two thumb holes. No shared-library glyph, no external trademark. */
 export function LogoMark({ className }: { className?: string }) {
   return (

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Clipmake in one container.
+# ClipForge in one container.
 #
 # The hosted app is a single Python process: `uvicorn app.main:app` serves the
 # API *and* the built SPA (app/main.py mounts ./webui at "/"), and spawns
@@ -9,8 +9,8 @@
 # harness, not part of the runtime — here the frontend is built once and served
 # as static files by FastAPI.
 #
-#   docker build -t clipmake .
-#   docker run --rm -p 8000:8000 -v clipmake-data:/data clipmake
+#   docker build -t clipforge .
+#   docker run --rm -p 8000:8000 -v clipforge-data:/data clipforge
 #
 # Everything writable — job artifacts, renders, the Whisper weights, the
 # wav2vec2 aligner — lives under /data, so the container itself stays read-only
@@ -82,10 +82,10 @@ COPY --from=web /web/webui ./webui
 
 # Non-root, and every writable path on the volume. The app creates these dirs
 # on boot if they are missing; pre-creating them just gets the ownership right.
-RUN useradd --create-home --uid 10001 clipmake \
+RUN useradd --create-home --uid 10001 clipforge \
  && mkdir -p /data/data /data/downloads /data/outputs /data/uploads \
             /data/media /data/.cache/huggingface \
- && chown -R clipmake:clipmake /data /app
+ && chown -R clipforge:clipforge /data /app
 
 # Relative paths in config.toml ("data", "downloads", "outputs") would land in
 # the image layer; point them at the volume. HF_HOME is what keeps the Whisper
@@ -99,7 +99,7 @@ ENV CLIPFORGE_DATA_DIR=/data/data \
     CLIPFORGE_HOST=0.0.0.0 \
     CLIPFORGE_PORT=8000
 
-USER clipmake
+USER clipforge
 WORKDIR /app
 EXPOSE 8000
 VOLUME ["/data"]

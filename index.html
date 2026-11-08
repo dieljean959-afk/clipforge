@@ -6,7 +6,7 @@
   <link rel="icon" type="image/svg+xml" href="/logo.svg" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Clipmake</title>
+  <title>ClipForge</title>
   <style>
     /* Inline and dependency-free on purpose: if the module graph fails to
        load, the stylesheet never arrives either, so this is the only thing
@@ -112,7 +112,7 @@
   -->
   <div id="boot">
     <div class="card">
-      <p class="title"><span class="spin"></span><span id="boot-title">Starting Clipmake…</span></p>
+      <p class="title"><span class="spin"></span><span id="boot-title">Starting ClipForge…</span></p>
       <p class="sub" id="boot-sub">Loading the app.</p>
       <div class="meter" id="boot-meter" hidden><i></i></div>
       <pre class="err" id="boot-err" hidden></pre>
@@ -127,7 +127,7 @@
   <script>
     (function () {
       // ---------------------------------------------------------------
-      // Clipmake boot loader.
+      // ClipForge boot loader.
       //
       // Rule 1: a SLOW load is not a failure. The app is ~3 MB across a lot of
       // separate requests on cold start; a phone legitimately takes longer than
@@ -150,14 +150,14 @@
       // get past that gate.
       // ---------------------------------------------------------------
 
-      window.__clipmakeBooted = false;
+      window.__clipforgeBooted = false;
 
       var BUILD_VERSION = "1.0.0";
-      var CACHE_NAMESPACE = "clipmake-shell-";
+      var CACHE_NAMESPACE = "clipforge-shell-";
       var CACHE_NAME = CACHE_NAMESPACE + BUILD_VERSION;
 
       // Reload-loop guard (session-only).
-      var LOOP_KEY = "clipmake.bootLoop";
+      var LOOP_KEY = "clipforge.bootLoop";
       var LOOP_WINDOW_SECONDS = 30;
       var LOOP_MAX_RELOADS = 2;
 
@@ -193,10 +193,10 @@
         if (detail != null) entry.detail = detail;
         bootLog.push(entry);
         try {
-          if (window.__clipmakeBootLogs) window.__clipmakeBootLogs.push(entry);
+          if (window.__clipforgeBootLogs) window.__clipforgeBootLogs.push(entry);
         } catch (e) { /* ignore */ }
         if (type === "error" || type === "loop-stop" || type === "reload") {
-          console.warn("[clipmake/boot] " + type + ": " + message + (detail != null ? " (" + JSON.stringify(detail) + ")" : ""));
+          console.warn("[clipforge/boot] " + type + ": " + message + (detail != null ? " (" + JSON.stringify(detail) + ")" : ""));
         }
       }
 
@@ -294,7 +294,7 @@
             caches.keys().then(function (names) {
               return            Promise.all(
                 names
-                  .filter(function (n) { return n.indexOf(CACHE_NAMESPACE) === 0 || n === "clipmake-share-v1"; })
+                  .filter(function (n) { return n.indexOf(CACHE_NAMESPACE) === 0 || n === "clipforge-share-v1"; })
                   .map(function (n) { return caches.delete(n); }),
               );
             }),
@@ -307,7 +307,7 @@
             // stale shell on the next load.
             try {
               var active = navigator.serviceWorker.controller;
-              if (active) active.postMessage({ type: "CLIPMAKE_CLEAR_SHELL" });
+              if (active) active.postMessage({ type: "CLIPFORGE_CLEAR_SHELL" });
             } catch (e) { /* postMessage may throw on some browsers */ }
           }
       }
@@ -386,7 +386,7 @@
         boot.classList.add("failed");
         var deadMeter = el("boot-meter");
         if (deadMeter) deadMeter.hidden = true;
-        el("boot-title").textContent = "Clipmake didn't start";
+        el("boot-title").textContent = "ClipForge didn't start";
         el("boot-sub").textContent =
           "A piece of the app failed to load — often a server restart mid-load, " +
           "a bad connection, or a stale cached version. It will retry the failed " +
@@ -414,7 +414,7 @@
         boot.classList.add("failed");
         var deadMeter = el("boot-meter");
         if (deadMeter) deadMeter.hidden = true;
-        el("boot-title").textContent = "Clipmake is stuck loading";
+        el("boot-title").textContent = "ClipForge is stuck loading";
         el("boot-sub").textContent =
           "The app reloaded too many times in a short period, so auto-retry was " +
           "turned off to stop the loop.";
@@ -471,7 +471,7 @@
             failed = true;
             log("error", "hard ceiling reached with no mount", { elapsedMs: elapsed, idleMs: idleFor, files: files, bytes: bytes });
             boot.classList.add("failed");
-            el("boot-title").textContent = "Clipmake still hasn't loaded";
+            el("boot-title").textContent = "ClipForge still hasn't loaded";
             el("boot-sub").textContent =
               "This is a slow connection, not a broken app: " + files +
               " files downloaded but the app never finished starting. A reload " +

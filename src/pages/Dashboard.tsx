@@ -121,7 +121,7 @@ export default function Dashboard() {
   const { clips, loaded: clipsLoaded, error: clipsError } = useClips(effectiveJobId, 2000);
   // The worker's real silence budget. A stall banner that quotes a number
   // invented in the frontend will drift from the server the moment
-  // CLIPMAKE_STALL_TIMEOUT_SEC is set, so the card reads it from health.
+  // CLIPFORGE_STALL_TIMEOUT_SEC is set, so the card reads it from health.
   const { health } = useHealth(10_000);
 
   // "Load older batches" as the reader reaches the end of the pill list. The
@@ -300,7 +300,7 @@ export default function Dashboard() {
         <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">
-              Processed on Clipmake's server — videos are deleted after you download them
+              Processed on ClipForge's server — videos are deleted after you download them
             </p>
             <h1 className="mt-1 text-3xl font-black tracking-tight">
               The forge

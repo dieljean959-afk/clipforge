@@ -1,4 +1,4 @@
-"""Clipmake local API — FastAPI backend + in-process worker, one process.
+"""ClipForge local API — FastAPI backend + in-process worker, one process.
 
 Endpoints serve the React dashboard and the pipeline artifacts on ./downloads
 and ./outputs. Boot sequence: config validation → ffmpeg check → Whisper model
@@ -397,7 +397,7 @@ except Exception:  # noqa: BLE001 - availability beats bookkeeping
     )
 
 app = FastAPI(
-    title="Clipmake",
+    title="ClipForge",
     version="1.1.0",
     description="Hosted video → viral clips pipeline (MoneyPrinterTurbo heritage).",
 )

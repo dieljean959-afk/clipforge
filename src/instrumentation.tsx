@@ -18,7 +18,7 @@ import {
 
 // Boot-loop diagnostic capture. This is the source of truth for the loader's
 // structured logs once React owns the page. The inline loader writes
-// window.__clipmakeBootLogs and window.__clipmakeBootEvents before mount;
+// window.__clipforgeBootLogs and window.__clipforgeBootEvents before mount;
 // this component surfaces them when the boot is slow/failing so the user sees
 // real reasons instead of a mystery timing bar.
 function BootDiagnostics() {
@@ -30,12 +30,12 @@ function BootDiagnostics() {
     shown.current = true;
 
     const loaders =
-      (window as any).__clipmakeBootLogs
-      ? [(window as any).__clipmakeBootLogs, "loader"]
+      (window as any).__clipforgeBootLogs
+      ? [(window as any).__clipforgeBootLogs, "loader"]
       : [];
     const events =
-      (window as any).__clipmakeBootEvents
-      ? [(window as any).__clipmakeBootEvents, "runtime"]
+      (window as any).__clipforgeBootEvents
+      ? [(window as any).__clipforgeBootEvents, "runtime"]
       : [];
     const combined = [...loaders, ...events];
     if (!combined.length) return;

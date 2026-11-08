@@ -218,7 +218,7 @@ export function ClipPreview({
         // a decode error rejects too. Either way the card must say so rather
         // than sitting on a play icon that does nothing.
         setVideoFailed(true);
-        console.warn("[Clipmake] playback refused", err);
+        console.warn("[ClipForge] playback refused", err);
       }
     } else {
       v.pause();

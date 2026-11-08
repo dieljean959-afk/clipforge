@@ -6,7 +6,7 @@
   <link rel="icon" type="image/svg+xml" href="/logo.svg" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Clipmake</title>
+  <title>ClipForge</title>
   <style>
     /* Inline and dependency-free on purpose: if the module graph fails to
        load, the stylesheet never arrives either, so this is the only thing
@@ -113,7 +113,7 @@
   -->
   <div id="boot">
     <div class="card">
-      <p class="title"><span class="spin"></span><span id="boot-title">Starting Clipmake…</span></p>
+      <p class="title"><span class="spin"></span><span id="boot-title">Starting ClipForge…</span></p>
       <p class="sub" id="boot-sub">Loading the app.</p>
       <div class="meter" id="boot-meter" hidden><i></i></div>
       <pre class="err" id="boot-err" hidden></pre>
@@ -128,7 +128,7 @@
   <script>
     (function () {
       // ---------------------------------------------------------------
-      // Clipmake boot loader.
+      // ClipForge boot loader.
       //
       // Rule 1: a SLOW load is not a failure. The app is ~3 MB across a lot of
       // separate requests on cold start; a phone legitimately takes longer than
@@ -151,14 +151,14 @@
       // get past that gate.
       // ---------------------------------------------------------------
 
-      window.__clipmakeBooted = false;
+      window.__clipforgeBooted = false;
 
       var BUILD_VERSION = "1.0.0";
-      var CACHE_NAMESPACE = "clipmake-shell-";
+      var CACHE_NAMESPACE = "clipforge-shell-";
       var CACHE_NAME = CACHE_NAMESPACE + BUILD_VERSION;
 
       // Reload-loop guard (session-only).
-      var LOOP_KEY = "clipmake.bootLoop";
+      var LOOP_KEY = "clipforge.bootLoop";
       var LOOP_WINDOW_SECONDS = 30;
       var LOOP_MAX_RELOADS = 2;
 
@@ -194,10 +194,10 @@
         if (detail != null) entry.detail = detail;
         bootLog.push(entry);
         try {
-          if (window.__clipmakeBootLogs) window.__clipmakeBootLogs.push(entry);
+          if (window.__clipforgeBootLogs) window.__clipforgeBootLogs.push(entry);
         } catch (e) { /* ignore */ }
         if (type === "error" || type === "loop-stop" || type === "reload") {
-          console.warn("[clipmake/boot] " + type + ": " + message + (detail != null ? " (" + JSON.stringify(detail) + ")" : ""));
+          console.warn("[clipforge/boot] " + type + ": " + message + (detail != null ? " (" + JSON.stringify(detail) + ")" : ""));
         }
       }
 
@@ -330,7 +330,7 @@
         log("retry", "scheduling per-file retry", { url: url, attempt: attempt, backoffMs: backoff });
         var id = setTimeout(function () {
           // If boot succeeded in the meantime, do not inject another script.
-          if (window.__clipmakeBooted) return;
+          if (window.__clipforgeBooted) return;
           injectModuleScript(url, attempt + 1);
         }, backoff);
         perFileTimers.push(id);
@@ -358,7 +358,7 @@
       // ---- global failure path -------------------------------------------
 
       function hardReload() {
-        if (window.__clipmakeBooted) return;
+        if (window.__clipforgeBooted) return;
         if (programmaticReloadInFlight) return;
         if (!loopTryReload()) {
           log("loop-stop", "reload loop guard stopped auto-reload", readLoopState());
@@ -380,7 +380,7 @@
       }
 
       function failAndRetry(message, failingUrl) {
-        if (window.__clipmakeBooted || failed) return;
+        if (window.__clipforgeBooted || failed) return;
         failed = true;
         log("error", "boot failure", { message: message, failingUrl: failingUrl });
         var boot = el("boot");
@@ -388,7 +388,7 @@
         boot.classList.add("failed");
         var deadMeter = el("boot-meter");
         if (deadMeter) deadMeter.hidden = true;
-        el("boot-title").textContent = "Clipmake didn't start";
+        el("boot-title").textContent = "ClipForge didn't start";
         el("boot-sub").textContent =
           "A piece of the app failed to load — often a server restart mid-load, " +
           "a bad connection, or a stale cached version. It will retry the failed " +
@@ -416,7 +416,7 @@
         boot.classList.add("failed");
         var deadMeter = el("boot-meter");
         if (deadMeter) deadMeter.hidden = true;
-        el("boot-title").textContent = "Clipmake is stuck loading";
+        el("boot-title").textContent = "ClipForge is stuck loading";
         el("boot-sub").textContent =
           "The app reloaded too many times in a short period, so auto-retry was " +
           "turned off to stop the loop.";
@@ -460,7 +460,7 @@
 
       function watchProgress() {
         timer = setInterval(function () {
-          if (window.__clipmakeBooted) return;
+          if (window.__clipforgeBooted) return;
           var now = Date.now();
           var idleFor = now - lastProgressAt;
           var elapsed = now - startedAt;
@@ -500,7 +500,7 @@
       window.addEventListener(
         "error",
         function (e) {
-          if (window.__clipmakeBooted) return;
+          if (window.__clipforgeBooted) return;
           var target = e && e.target;
           var url = null;
           if (target && target.tagName === "SCRIPT" && target.src) {
@@ -515,7 +515,7 @@
       );
 
       window.addEventListener("unhandledrejection", function (e) {
-        if (window.__clipmakeBooted) return;
+        if (window.__clipforgeBooted) return;
         var r = e && e.reason;
         var msg = (r && r.message) || (r && r.toString()) || "Unhandled promise rejection";
         log("error", "unhandled rejection", { message: msg });

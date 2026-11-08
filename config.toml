@@ -1,4 +1,4 @@
-# Clipmake — hosted pipeline configuration (MoneyPrinterTurbo heritage, pruned).
+# ClipForge — hosted pipeline configuration (MoneyPrinterTurbo heritage, pruned).
 # Secrets are supplied through the platform Keys/API keys tab, never this file.
 
 [app]

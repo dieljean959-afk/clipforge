@@ -1,6 +1,6 @@
 {
-  "name": "Clipmake",
-  "short_name": "Clipmake",
+  "name": "ClipForge",
+  "short_name": "ClipForge",
   "description": "Turn one long video into ten viral 9:16 clips.",
   "start_url": "/",
   "display": "standalone",

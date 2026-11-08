@@ -2,7 +2,7 @@
 // captions.txt rendering, and the batch ZIP assembly for "Export all 9:16".
 // The ZIP carries the REAL rendered MP4s — no metadata-only exports.
 
-// Built for Clipmake: every name is derived from the clip's own title, so a
+// Built for ClipForge: every name is derived from the clip's own title, so a
 // whole job archives cleanly across machines and re-runs.
 
 import { downloadBlob, downloadText } from "@/lib/zip";

@@ -1918,7 +1918,7 @@ def style_fingerprint(settings: Settings, preset_key: str | None = None) -> str:
 #: The single style name every event must reference. Writing an event whose
 #: style does not exist makes libass fall back to its own default font/size —
 #: the caption then renders at the wrong weight with no outline at all.
-ASS_STYLE_NAME = "Clipmake"
+ASS_STYLE_NAME = "ClipForge"
 
 
 def build_ass_header(
@@ -1936,7 +1936,7 @@ def build_ass_header(
     font_size, outline_w = int(resolved["fontSize"]), int(resolved["outline"])
     if p.key == "bold_stack":
         # Same resolved scale the events use — a header written from the raw
-        # config made the style "Clipmake" a different size from the lines it
+        # config made the style "ClipForge" a different size from the lines it
         # is supposed to style.
         metrics = bold_stack_metrics(
             float(resolved.get("sizeScale") or caption_size_scale(settings))
@@ -1963,7 +1963,7 @@ def build_ass_header(
     # each stroke flush to the box; the 60/60 L/R margins keep the box inside
     # the safe zone on both sides.
     return f"""[Script Info]
-Title: Clipmake Captions
+Title: ClipForge Captions
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}

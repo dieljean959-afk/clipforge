@@ -24,7 +24,7 @@
 // mechanism; this is the HTTP-layer backstop for clips prefetched outside a
 // live page (share target reopening, a cold start).
 
-const CACHE = "clipmake-share-v1";
+const CACHE = "clipforge-share-v1";
 
 /** True only for the small share artifact. */
 function isShareClip(url) {
@@ -49,7 +49,7 @@ self.addEventListener("activate", (event) => {
     (async () => {
       const names = await caches.keys();
       await Promise.all(
-        names.filter((n) => n !== CACHE && n.indexOf("clipmake-shell-") !== 0).map((n) => caches.delete(n)),
+        names.filter((n) => n !== CACHE && n.indexOf("clipforge-shell-") !== 0).map((n) => caches.delete(n)),
       );
       // Do NOT claim clients here. Claiming every client on activation can
       // interleave an in-flight load with a new worker and is one of the
@@ -64,10 +64,10 @@ self.addEventListener("message", (event) => {
   // One-way escape hatch used by the boot loader and by main.tsx when the app
   // detects it is stuck. Asking the active worker to clear its own caches is
   // safer than unregistering it from the page while it is serving requests.
-  if (event.data && event.data.type === "CLIPMAKE_CLEAR_SHELL") {
+  if (event.data && event.data.type === "CLIPFORGE_CLEAR_SHELL") {
     event.waitUntil(
       caches.keys().then((names) => {
-        return Promise.all(names.filter((n) => n.indexOf("clipmake-shell-") === 0)
+        return Promise.all(names.filter((n) => n.indexOf("clipforge-shell-") === 0)
             .map((n) => caches.delete(n)),
         );
       }),

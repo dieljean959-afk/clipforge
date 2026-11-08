@@ -718,7 +718,7 @@ def call_ollama(chunk_text_prompt: str, settings: Settings) -> str:
 # User-Agent with "403 Forbidden: error code: 1010" — a request-signature
 # ban applied at the edge, so the API key is never even checked. Any
 # non-Python-urllib UA gets through. Never remove this.
-GROQ_USER_AGENT = "Clipmake/1.1 (+https://github.com/harry0703/MoneyPrinterTurbo)"
+GROQ_USER_AGENT = "ClipForge/1.1 (+https://github.com/harry0703/MoneyPrinterTurbo)"
 
 #: The clip contract, as a JSON Schema for Groq's strict Structured Outputs.
 #:

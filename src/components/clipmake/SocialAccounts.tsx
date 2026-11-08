@@ -125,7 +125,7 @@ export function SocialAccounts() {
       <header className="space-y-1">
         <h3 className="text-sm font-semibold tracking-tight">Post to social</h3>
         <p className="text-xs text-muted-foreground">
-          Optional. Clipmake still downloads and exports exactly as before — these
+          Optional. ClipForge still downloads and exports exactly as before — these
           accounts only add a one-tap "Post to..." button on each clip.
         </p>
       </header>

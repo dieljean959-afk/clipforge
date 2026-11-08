@@ -1,4 +1,4 @@
-// Typed REST client for the Clipmake backend (FastAPI, same origin).
+// Typed REST client for the ClipForge backend (FastAPI, same origin).
 // Every call uses relative /api URLs — same origin, no localhost, no IPs.
 
 import type { ClipStage } from "@/lib/clipmake";

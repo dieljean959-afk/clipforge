@@ -23,7 +23,7 @@
 // surface as a broken button: `get()` simply returns null and the UI shares a
 // link instead, which always works.
 
-const DB_NAME = "clipmake-share";
+const DB_NAME = "clipforge-share";
 const DB_VERSION = 1;
 const STORE = "blobs";
 

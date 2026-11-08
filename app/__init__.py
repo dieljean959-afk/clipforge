@@ -1,4 +1,4 @@
-"""Clipmake local pipeline — MoneyPrinterTurbo heritage.
+"""ClipForge local pipeline — MoneyPrinterTurbo heritage.
 
 Service modules:
 - task: pipeline orchestration (in-process worker thread)
