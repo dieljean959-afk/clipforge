@@ -1,23 +1,23 @@
 "use client";
 import {
+  Content,
+  Root,
+  Trigger,
+  createCollapsibleScope
+} from "./chunk-JOT4ZH44.js";
+import {
   createCollection
 } from "./chunk-EMF3DAXS.js";
 import {
   useDirection
 } from "./chunk-HXA2JS2N.js";
 import {
-  Content,
-  Root,
-  Trigger,
-  createCollapsibleScope
-} from "./chunk-ILMNDJSQ.js";
-import {
   useId
 } from "./chunk-JSG27HSD.js";
+import "./chunk-JXAX32XB.js";
 import {
   useControllableState
 } from "./chunk-IFXKPRT2.js";
-import "./chunk-JXAX32XB.js";
 import {
   composeEventHandlers
 } from "./chunk-FASKNQ62.js";
