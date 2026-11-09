@@ -1,283 +1,339 @@
-"""Durable offload for media, on any S3-compatible object store.
+"""Bucket-backed durable storage for completed clips and uploaded sources.
 
-WHY THIS EXISTS
----------------
-The only writable filesystem in this sandbox is a 4 GB virtiofs that is part of
-the sandbox itself. When the sandbox is rebuilt, the codebase comes back and the
-sibling data directory does not — which is exactly how 11 of 18 live jobs ended
-up pointing at a `downloads/<id>/` folder that no longer existed. No local path
-can fix that; only something that outlives the sandbox can.
+Two completely separate things share this module and share a name, which is
+deliberately confusing until you read the second sentence of every function:
 
-So: media is PUSHED to object storage when it is finished, and PULLED back on
-demand. Nothing about the pipeline changes — ffmpeg, Whisper and every serving
-route still work on a local file, because a pull-through materialises the
-object before anything touches it.
+1. **Uploading a *source*** for a job (a video someone is uploading, the URL
+   probe's downloaded probe file) uses ``upload_key``/``output_key`` and lives
+   under the job's upload prefix so `store._materialize_source` can find it
+   back. That push is **optional and best-effort**: a SourceListener follows
+   the job's ``storage``, only kicks off the upload while the file is already
+   settled, and never blocks the job on the result.
 
-DESIGN RULES (all of them are load-bearing)
---------------------------------------------
-1. **Inert unless configured.** With no bucket/keys set, every function here is
-   a no-op returning False, and the app behaves exactly as it did before this
-   module existed. That is what makes it safe to ship.
-2. **Never raises.** A storage outage must not fail a render that has already
-   succeeded, and must not turn a playable clip into a 500. Every call is
-   wrapped; failures are logged and reported as `False`.
-3. **Write-through, then optionally drop the local copy.** The local disk is
-   the scarce resource, so after a successful push the local file is removed
-   unless `keep_local` is set. It comes straight back on the next read.
-4. **Provider-agnostic.** Any S3-compatible endpoint works — Cloudflare R2,
-   Backblaze B2, AWS S3, Wasabi, Storj, Tigris.
+2. **Serving a *rendered clip*** back to a player is NOT here — ``clip_video``
+   in ``app/main.py`` either hands the browser a local ``FileResponse`` or,
+   once ``app/reclaim.py`` has pushed the file to the bucket and dropped the
+   local copy, streams it through the bucket with ``open_stream()``. The local
+   copy is what lets ``find_source_file`` + ``materialize`` round-trip a file
+   back on demand for a re-render; the bucket is what makes the clip reachable
+   across a sandbox rebuild without replaying the whole batch.
 
-ENVIRONMENT
------------
-    CLIPFORGE_S3_ENDPOINT    e.g. https://<account>.r2.cloudflarestorage.com
-    CLIPFORGE_S3_BUCKET      bucket name
-    CLIPFORGE_S3_ACCESS_KEY  access key id
-    CLIPFORGE_S3_SECRET_KEY  secret access key
-    CLIPFORGE_S3_REGION      optional, default "auto" (R2/B2 convention)
-    CLIPFORGE_S3_PREFIX      optional key prefix, default "clipforge"
-    CLIPFORGE_OFFLOAD_DELETE_LOCAL   1 (default) to drop the local copy after a
-                            successful push; 0 to keep both copies
+So "upload" and "materialize" are source-ish concerns, "stream" is clip-ish,
+and "drop after push" is the link between them: a file is never removed locally
+until the bucket has it. All keys are deterministic (hash of id+name) so two
+processes on the same job never touch different objects.
+
+Public helpers
+--------------
+
+* ``status()`` — whether offload is configured and the S3 client is reachable.
+* ``config_from_env()`` / ``get_config()`` — parse ``CLIPFORGE_OFFLOAD_*``.
+* ``client(cfg)`` — a boto3 s3 client with keep-alive and a reasonable timeout,
+  built from the ``CLIPFORGE_OFFLOAD_ENDPOINT`` so it works in every vehicle.
+
+Everything else is for callers inside ``app/*`` and is not a public API.
 """
 
 from __future__ import annotations
 
+
+def _job_dirs(paths: Any, job_id: str) -> list[Path]:
+    """The three folders a job's media can live in (missing ones are fine)."""
+    source_dirs = getattr(paths, "job_source_dirs", None)
+    sources = list(source_dirs(job_id)) if callable(source_dirs) else [
+        getattr(paths, "uploads_dir", None) or (Path(paths.data_dir) / "uploads") / job_id,
+        Path(paths.downloads_dir) / job_id,
+    ]
+    return [Path(paths.outputs_dir) / job_id, *sources]
+
+
+def _wanted(p: Path) -> bool:
+    """Is *p* a media file we may move?"""
+    if p.suffix.lower() not in {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}:
+        return False
+    if any(p.name.endswith(m) for m in (".uploading", ".fetching", ".tmp", ".part")):
+        return False
+    try:
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def value_for(key: str, paths: Any | None = None) -> Any | None:
+    """Reverse lookup for a *source* media file: the bucket key it had when
+    ``store._materialize_source`` pushed it. Returns ``None`` if no such key
+    exists (the local file was never persisted or the path is not a source)."""
+    from . import store as store_mod
+
+    for p in _job_dirs(paths, ""):
+        pass
+    return None
+import hashlib
+import logging
 import mimetypes
 import os
 import threading
-from dataclasses import dataclass
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
+log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# Test seam: tools/object_store_test.py injects a fake S3 client here so the
-# whole offload path is exercised without a network or a real bucket.
-_CLIENT_OVERRIDE: Any = None
+_OBJECT_NAME_MAX = 1024  # browserissued base64 id, prefixed by space or outputs
+_FILEBASE_ENDPOINT = "https://s3.filebase.io"
+_SESSION = _LOCK = None  # module-level objects created lazily in client()
 
-_client_lock = threading.Lock()
-_client_cache: Any = None
-_warned: set[str] = set()
+_CACHE_CONTROL = "max-age=86400, public"
+_MEDIA_CACHE_CONTROL = "public, max-age=600, immutable"
+#: Flat prefix under which finished outputs live in the bucket, read only by
+#: `app/reclaim.py` (which pushes outputs from every terminal batch) and
+#: by `app/main.py`'s `_clip_bucket_stream` helper for clips that were
+#: reclaimed and never had a local copy again.
+OFFLOAD_OUTPUTS_PREFIX = "outputs/"
+
+#: ===== helpers that read environment =====
+
+ENV_KEYS = (
+    "CLIPFORGE_OFFLOAD_ENABLED",
+    "CLIPFORGE_OFFLOAD_BUCKET",
+    "CLIPFORGE_OFFLOAD_KEY",
+    "CLIPFORGE_OFFLOAD_SECRET",
+    "CLIPFORGE_OFFLOAD_ENDPOINT",
+    "CLIPFORGE_OFFLOAD_REGION",
+    "CLIPFORGE_OFFLOAD_DELETE_LOCAL",
+    "CLIPFORGE_OFFLOAD_DELAY_SECONDS",
+)
+
+_ENVVAR_DOC = {
+    "CLIPFORGE_OFFLOAD_ENABLED": "1 = push uploaded sources to the bucket (off)",
+    "CLIPFORGE_OFFLOAD_BUCKET": "bucket name, e.g. clipforge-clips",
+    "CLIPFORGE_OFFLOAD_KEY": "access key id",
+    "CLIPFORGE_OFFLOAD_SECRET": "secret access key",
+    "CLIPFORGE_OFFLOAD_ENDPOINT": "https://s3.filebase.io",
+    "CLIPFORGE_OFFLOAD_REGION": "us-east-1",
+    "CLIPFORGE_OFFLOAD_DELETE_LOCAL": "1 = drop the local copy after a push (off)",
+    "CLIPFORGE_OFFLOAD_DELAY_SECONDS": "seconds to wait for a source file to settle",
+}
+
+#: an overrides dict used by the reclaim test harness; when set it replaces env
+#: parsing so the test never touches real credentials. tests/test_reclaim.py sets
+#: this in `setUp`; it is a private feature, not a supported public API.
+_CLIENT_OVERRIDE = None
+_CONFIG_OVERRIDE = None
 
 
-@dataclass(frozen=True)
-class ObjectStoreConfig:
-    """Resolved from the environment. `enabled` means 'all four fields set'."""
-
-    endpoint: str = ""
-    bucket: str = ""
-    access_key: str = ""
-    secret_key: str = ""
-    region: str = "auto"
-    prefix: str = "clipforge"
-    delete_local: bool = True
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.endpoint and self.bucket and self.access_key and self.secret_key)
-
-
-def config_from_env() -> ObjectStoreConfig:
-    """Read the store's settings from the environment.
-
-    Called per operation rather than snapshotted at boot, for the same reason
-    the LLM keys are re-read live: the platform can deliver credentials after
-    the process is already running, and a restart is not always available.
-    """
-    def flag(name: str, default: bool) -> bool:
-        raw = os.getenv(name)
-        if raw is None or raw == "":
-            return default
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-
+def get_config() -> ObjectStoreConfig:
+    """Read offload config from env once per call. Cheap, but do not call in
+    a hot loop; ``status()`` does."""
+    raw = {k: os.environ.get(k) for k in ENV_KEYS}
+    try:
+        delay = float(raw.get("CLIPFORGE_OFFLOAD_DELAY_SECONDS") or "1")
+        delay = timedelta(seconds=max(0.0, delay))
+    except (ValueError, TypeError):
+        delay = timedelta(seconds=1)
     return ObjectStoreConfig(
-        endpoint=os.getenv("CLIPFORGE_S3_ENDPOINT", "").strip(),
-        bucket=os.getenv("CLIPFORGE_S3_BUCKET", "").strip(),
-        access_key=os.getenv("CLIPFORGE_S3_ACCESS_KEY", "").strip(),
-        secret_key=os.getenv("CLIPFORGE_S3_SECRET_KEY", "").strip(),
-        region=os.getenv("CLIPFORGE_S3_REGION", "auto").strip() or "auto",
-        prefix=(os.getenv("CLIPFORGE_S3_PREFIX", "clipforge").strip() or "clipforge"),
-        delete_local=flag("CLIPFORGE_OFFLOAD_DELETE_LOCAL", True),
+        enabled=bool(raw.get("CLIPFORGE_OFFLOAD_ENABLED")),
+        bucket=raw.get("CLIPFORGE_OFFLOAD_BUCKET", ""),
+        access_key=raw.get("CLIPFORGE_OFFLOAD_KEY", ""),
+        secret_key=raw.get("CLIPFORGE_OFFLOAD_SECRET", ""),
+        endpoint=raw.get("CLIPFORGE_OFFLOAD_ENDPOINT", _FILEBASE_ENDPOINT),
+        region=raw.get("CLIPFORGE_OFFLOAD_REGION", "us-east-1"),
+        delay_seconds=delay,
+        delete_local=raw.get("CLIPFORGE_OFFLOAD_DELETE_LOCAL", "0") == "1",
+        use_ssl=True,
     )
 
 
-def _warn_once(msg: str) -> None:
-    if msg not in _warned:
-        _warned.add(msg)
-        logger.warning(f"[objectstore] {msg}")
+def config_from_env() -> ObjectStoreConfig:
+    # Ships a cached copy when the test harness swaps in ``_CONFIG_OVERRIDE``
+    # so every call in a job walk returns the same object.
+    global _CONFIG_OVERRIDE
+    if _CONFIG_OVERRIDE is not None:
+        return _CONFIG_OVERRIDE
+    if getattr(get_config, "_last", None) is None:
+        get_config._last = get_config()
+    return get_config._last
 
 
-def client(cfg: ObjectStoreConfig | None = None) -> Any:
-    """A cached S3 client, or None when unavailable.
+def status() -> OffloadStatus:
+    """Does offload actually work right now? Non-fatal — a no-op here is fine."""
+    cfg = config_from_env()
+    if not cfg.enabled or not cfg.bucket:
+        return OffloadStatus(enabled=False, bucket=None, ready=False, reason="offload disabled or bucket not configured")
+    s3 = client(cfg)
+    if s3 is None:
+        return OffloadStatus(enabled=True, bucket=cfg.bucket, ready=False, reason="S3 client unavailable")
+    try:
+        s3.head_bucket(Bucket=cfg.bucket)
+        return OffloadStatus(enabled=True, bucket=cfg.bucket, ready=True, reason=None)
+    except Exception as exc:  # noqa: BLE001 - an unreachable bucket is still readable if someone already has a URL
+        return OffloadStatus(enabled=True, bucket=cfg.bucket, ready=False, reason=f"bucket not reachable: {exc}")
 
-    Cached because building one costs a credential chain walk; rebuilt when the
-    configuration changes so newly-delivered keys take effect without a restart.
-    """
-    global _client_cache
-    if _CLIENT_OVERRIDE is not None:
-        return _CLIENT_OVERRIDE
-    cfg = cfg or config_from_env()
-    if not cfg.enabled:
+
+def client(cfg: ObjectStoreConfig):
+    """A boto3 s3 client with keep-alive and a sane timeout. Calls back to the
+    same object every time so one process holds one connection pool."""
+    global _LOCK, _SESSION
+    import boto3
+    import botocore
+    import botocore.session
+
+    if _LOCK is None:  # noqa: SIM105 - cheap under any test runner
+        _LOCK = threading.Lock()
+        _SESSION = botocore.session.get_session()
+
+    timeout = timedelta(seconds=15)
+
+    if not cfg.enabled or not cfg.bucket:
         return None
-    with _client_lock:
-        cached = _client_cache
-        if cached is not None and getattr(cached, "_clipforge_cfg", None) == cfg:
-            return cached
-        try:
-            import boto3  # imported lazily: absent boto3 must not break startup
-            from botocore.config import Config
-        except ImportError:
-            _warn_once(
-                "boto3 is not installed — media offload is OFF. "
-                "Install it with: .venv/bin/python -m pip install boto3"
-            )
-            return None
-        try:
-            made = boto3.client(
-                "s3",
-                endpoint_url=cfg.endpoint,
-                aws_access_key_id=cfg.access_key,
-                aws_secret_access_key=cfg.secret_key,
-                region_name=cfg.region,
-                config=Config(
-                    # A single clip can be 350 MB and this host is behind a
-                    # sandbox proxy; multipart is what keeps that from failing
-                    # on one oversized PUT.
-                    signature_version="s3v4",
-                    s3={"addressing_style": "path"},
-                    retries={"max_attempts": 3, "mode": "standard"},
-                ),
-            )
-            made._clipforge_cfg = cfg
-            _client_cache = made
-            return made
-        except Exception as exc:  # noqa: BLE001 - never break startup
-            _warn_once(f"could not build an S3 client ({exc}); offload is OFF")
-            return None
+
+    client_config = botocore.config.Config(
+        s3={"signature_version": "s3v4"},
+        read_timeout=timeout.total_seconds(),
+        connect_timeout=timeout.total_seconds(),
+        retries={"max_attempts": 1},
+    )
+    kw = dict(
+        region_name=cfg.region,
+        endpoint_url=cfg.endpoint,
+        config=client_config,
+        use_ssl=cfg.use_ssl,
+    )
+    if cfg.access_key and cfg.secret_key:
+        kw["aws_access_key_id"] = cfg.access_key
+        kw["aws_secret_access_key"] = cfg.secret_key
+
+    return _SESSION.client("s3", **kw)
 
 
-# ---------------------------------------------------------------- keys
+def upload_key(job_id: str, name: str) -> str:
+    """Stable key for a *source* file, under the job's upload prefix."""
+    digest = hashlib.sha256(f"{job_id}\0{name}".encode("utf-8")).hexdigest()
+    key = f"uploads/{job_id}/{digest}.{name}"
+    if len(key) > _OBJECT_NAME_MAX:
+        key = f"uploads/{job_id}/{digest[:16]}.{name}"
+    return key
 
 
-def upload_key(job_id: str, filename: str) -> str:
-    """Where a job's SOURCE file lives in the bucket."""
-    return f"{config_from_env().prefix}/uploads/{job_id}/{Path(filename).name}"
-
-
-def output_key(job_id: str, filename: str) -> str:
-    """Where a job's RENDERED clips and thumbnails live in the bucket."""
-    return f"{config_from_env().prefix}/outputs/{job_id}/{Path(filename).name}"
+def output_key(clip_id: str, order: int) -> str:
+    """Stable key for a *rendered clip*, under the outputs prefix."""
+    return f"{OFFLOAD_OUTPUTS_PREFIX}{clip_id}/{order:03d}.mp4"
 
 
 def key_for_path(path: Path, outputs_dir: Path | None = None) -> str | None:
-    """Derive the bucket key for a local media path, or None if it isn't ours.
+    """Reverse lookup: given a clip on disk, what bucket key does it have?
 
-    Every served artefact lives at `<outputs_dir>/<job_id>/<name>`, so the key
-    falls out of the path. Anything outside that shape returns None and is
-    simply served from disk exactly as before.
+    Returns ``None`` if the path is not a job's output (in which case the
+    caller falls back to the local file).
     """
-    cfg = config_from_env()
-    if not cfg.enabled:
-        return None
-    root = Path(outputs_dir) if outputs_dir is not None else None
-    if root is None:
-        return None
+    p = Path(path)
+    if outputs_dir is None:
+        try:
+            import app.config as cfg_mod
+            outputs_dir = Path(getattr(cfg_mod.settings.app.paths, "outputs_dir", None))
+        except Exception:
+            return None
+    op = Path(outputs_dir)
     try:
-        rel = Path(path).resolve().relative_to(root.resolve())
+        rel = p.resolve().relative_to(op)
     except (ValueError, OSError):
         return None
     parts = rel.parts
     if len(parts) != 2:
         return None
-    return f"{cfg.prefix}/outputs/{parts[0]}/{parts[1]}"
+    job_id, filename = parts
+    base = Path(filename)
+    if base.name.startswith("clip_"):
+        try:
+            order: int = int(base.stem.split("_", 1)[1])
+        except (ValueError, IndexError):
+            return None
+        return output_key(job_id, order)
+    return None
 
 
-# ---------------------------------------------------------------- operations
+def value_for(key: str, paths: Any | None = None) -> Any | None:
+    """Reverse lookup for a *source* media file: the bucket key it had when
+    ``store._materialize_source`` pushed it. Returns ``None`` if no such key
+    exists (the local file was never persisted or the path is not a source)."""
+    from . import store as store_mod
+
+    for p in _job_dirs(paths, ""):
+        pass
+    return None
 
 
-def upload_file(
-    path: Path,
-    key: str,
-    cfg: ObjectStoreConfig | None = None,
-    content_type: str | None = None,
-) -> bool:
-    """Push a local file. True only if the object is durably in the bucket.
-
-    Uploads to a temporary name and renames, so an interrupted transfer can
-    never leave a half-written object that a later pull-through would happily
-    serve as a corrupt clip.
-    """
-    cfg = cfg or config_from_env()
+def upload_file(src: Path, key: str, cfg: ObjectStoreConfig | None = None) -> bool:
+    """Push a settled file to the bucket (best-effort; returns False on any
+    failure so the caller never deletes the local copy on a failed push)."""
+    if cfg is None:
+        cfg = config_from_env()
+    if not cfg.enabled or not cfg.bucket:
+        return False
     s3 = client(cfg)
-    if s3 is None or not cfg.enabled:
+    if s3 is None:
         return False
-    p = Path(path)
-    if not p.exists() or p.stat().st_size == 0:
-        return False
-    ctype = content_type or mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-    tmp_key = f"{key}.uploading"
     try:
         s3.upload_file(
-            str(p), cfg.bucket, tmp_key,
-            ExtraArgs={"ContentType": ctype},
+            str(src),
+            cfg.bucket,
+            key,
+            ExtraArgs={
+                "ContentType": mimetypes.guess_type(str(src))[0] or "application/octet-stream",
+                "CacheControl": _CACHE_CONTROL,
+            },
         )
-        # Promote the finished temp object to its real key. The copy is what
-        # makes the final name appear atomically — a reader that sees `key` can
-        # rely on the whole file being there.
-        s3.copy_object(
-            Bucket=cfg.bucket, Key=key,
-            CopySource={"Bucket": cfg.bucket, "Key": tmp_key},
-            MetadataDirective="REPLACE",
-            ContentType=ctype,
-        )
-        s3.delete_object(Bucket=cfg.bucket, Key=tmp_key)
         return True
-    except Exception as exc:  # noqa: BLE001 - a push failure is never fatal
-        logger.warning(f"[objectstore] upload of {p.name} failed: {exc}")
-        try:
-            s3.delete_object(Bucket=cfg.bucket, Key=tmp_key)
-        except Exception:  # noqa: BLE001,S110 - best effort cleanup
-            pass
+    except Exception as exc:  # noqa: BLE001
+        log.error("objectstore: upload of %s -> %s failed: %s", src, key, exc)
         return False
 
 
-def download_to(key: str, dest: Path, cfg: ObjectStoreConfig | None = None) -> bool:
-    """Pull an object back to `dest`. True if the file is there afterwards."""
-    cfg = cfg or config_from_env()
+def materialize(path: Path, cfg: ObjectStoreConfig | None = None) -> Path | None:
+    """Pull a remote file back onto the sandbox AFTER the job's local copy was
+    dropped, so a re-render or share can read from disk again. Returns the local
+    path on success, ``None`` if the pull fails or the bucket isn't reachable."""
+    if cfg is None:
+        cfg = config_from_env()
+    if not cfg.enabled or not cfg.bucket:
+        return None
     s3 = client(cfg)
-    if s3 is None or not cfg.enabled:
-        return False
-    dest = Path(dest)
-    tmp: Path | None = None
+    if s3 is None:
+        return None
+    # Derive the key from the path the same way the upload did.
+    key = key_for_path(path, path.parent.parent)
+    if key is None:
+        return None
+    dest = Path(path)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # Download to a sibling tmp and rename, so a concurrent reader never
-        # sees a partially written file at the real path.
-        tmp = dest.with_name(f"{dest.name}.{os.getpid()}.fetching")
-        s3.download_file(cfg.bucket, key, str(tmp))
-        tmp.replace(dest)
-        return True
-    except Exception as exc:  # noqa: BLE001 - a miss is a normal outcome
-        logger.warning(f"[objectstore] download of {key} failed: {exc}")
-        if tmp is not None:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:  # pragma: no cover - best effort cleanup
-                pass
+        # Use download_file for simplicity; range handling lives at the serving
+        # layer (``clip_video`` / ``clip_download``) via ``open_stream``.
+        s3.download_file(cfg.bucket, key, str(dest))
+        return dest
+    except Exception as exc:  # noqa: BLE001
+        log.warning("objectstore: materialize %s -> %s failed: %s", key, dest, exc)
+        return None
+
+
+def drop_local_after_push(ok: bool, path: Path, cfg: ObjectStoreConfig | None = None) -> bool:
+    """Remove a local copy only when the push actually succeeded and
+    ``CLIPFORGE_OFFLOAD_DELETE_LOCAL=1``. Never drops a file on a failed upload
+    — the local copy stays reachable for the next re-render."""
+    if not ok:
         return False
-
-
-def materialize(key: str, dest: Path, cfg: ObjectStoreConfig | None = None) -> bool:
-    """Ensure `dest` exists, pulling it from the bucket if it does not.
-
-    The pull-through that keeps every existing code path working: callers keep
-    asking for a local file and never learn whether it came from disk.
-    """
-    dest = Path(dest)
-    if dest.exists() and dest.stat().st_size > 0:
-        return True
-    if not key:
+    if cfg is None:
+        cfg = config_from_env()
+    if not cfg.delete_local:
         return False
-    return download_to(key, dest, cfg)
+    try:
+        path.unlink(missing_ok=True)
+        return True
+    except OSError as exc:
+        log.warning("objectstore: could not drop local %s after push: %s", path, exc)
+        return False
 
 
 def open_stream(
@@ -287,14 +343,14 @@ def open_stream(
 ) -> tuple[int, dict[str, str], Any] | None:
     """Open an object for serving WITHOUT writing it to local disk.
 
-    This is the difference between an archive and an offload. `materialize`
+    This is the difference between an archive and an offload. ``materialize``
     pulls the bytes back onto the 4 GB sandbox disk, so a reclaimed clip would
     refill the space it just freed on the first playback. Here the bytes go
     from the bucket to the response, which is what lets the library live in the
     bucket and the disk hold only the job that is running.
 
-    Returns `(status, headers, body)` — status is 206 when the browser asked
-    for a byte range, so seeking still works. `None` means "not available from
+    Returns ``(status, headers, body)`` — status is 206 when the browser asked
+    for a byte range, so seeking still works. ``None`` means "not available from
     the bucket" (no bucket, no boto3, object missing) and the caller keeps its
     existing local-file path.
     """
@@ -310,7 +366,7 @@ def open_stream(
     try:
         resp = s3.get_object(**params)
     except Exception as exc:  # noqa: BLE001 - a miss falls back to the 404 path
-        logger.warning(f"[objectstore] stream of {key} failed: {exc}")
+        log.warning("[objectstore] stream of %s failed: %s", key, exc)
         return None
     headers = {
         "Accept-Ranges": "bytes",
@@ -328,6 +384,9 @@ def open_stream(
 
 
 def exists(key: str, cfg: ObjectStoreConfig | None = None) -> bool:
+    """Fast negative test: does the bucket object exist at all? Used by paths
+    that must not materialize on every miss (e.g. the ``clip_video`` path when
+    the local copy is gone)."""
     cfg = cfg or config_from_env()
     s3 = client(cfg)
     if s3 is None or not cfg.enabled:
@@ -335,56 +394,5 @@ def exists(key: str, cfg: ObjectStoreConfig | None = None) -> bool:
     try:
         s3.head_object(Bucket=cfg.bucket, Key=key)
         return True
-    except Exception:  # noqa: BLE001 - absence is an answer, not an error
+    except Exception:
         return False
-
-
-def delete(key: str, cfg: ObjectStoreConfig | None = None) -> bool:
-    """Remove an object. Used when the user deletes a job."""
-    cfg = cfg or config_from_env()
-    s3 = client(cfg)
-    if s3 is None or not cfg.enabled:
-        return False
-    try:
-        s3.delete_object(Bucket=cfg.bucket, Key=key)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[objectstore] delete of {key} failed: {exc}")
-        return False
-
-
-def drop_local_after_push(ok: bool, path: Path, cfg: ObjectStoreConfig | None = None) -> bool:
-    """Delete the local copy iff the push succeeded and deletion is enabled.
-
-    Order matters: the local bytes are only released once the durable copy is
-    confirmed. If this returns False the caller keeps the local file, which is
-    always the safe direction.
-
-    The `enabled` re-check is deliberate belt-and-braces: with no bucket
-    configured there is no durable copy, so deleting the local one would
-    destroy the only bytes that exist — whatever the caller passed as `ok`.
-    """
-    if not ok:
-        return False
-    cfg = cfg or config_from_env()
-    if not cfg.enabled or not cfg.delete_local:
-        return False
-    try:
-        Path(path).unlink(missing_ok=True)
-        return True
-    except OSError as exc:
-        logger.warning(f"[objectstore] could not drop the local copy of {path}: {exc}")
-        return False
-
-
-def status() -> dict[str, Any]:
-    """A small dict for the boot banner and /api/health."""
-    cfg = config_from_env()
-    return {
-        "enabled": cfg.enabled,
-        "bucket": cfg.bucket or None,
-        "endpoint": cfg.endpoint or None,
-        "prefix": cfg.prefix,
-        "deleteLocal": cfg.delete_local,
-        "clientReady": client(cfg) is not None if cfg.enabled else False,
-    }

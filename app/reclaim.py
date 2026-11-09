@@ -25,6 +25,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+log = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 #: Files worth moving. Anything else in a job's folders (a lock, a partial
@@ -50,12 +51,13 @@ def _free_bytes(paths: Any) -> int | None:
 
 def _job_dirs(paths: Any, job_id: str) -> list[Path]:
     """The three folders a job's media can live in (missing ones are fine)."""
-    source_dirs = getattr(paths, "job_source_dirs", None)
-    sources = list(source_dirs(job_id)) if callable(source_dirs) else [
-        getattr(paths, "uploads_dir", paths.data_dir / "uploads") / job_id,
-        paths.downloads_dir / job_id,
-    ]
-    return [paths.outputs_dir / job_id, *sources]
+    from . import store as store_mod
+
+    try:
+        source_dirs = tuple(store_mod._job_source_dirs(paths, job_id))
+    except Exception:
+        source_dirs = ()
+    return [Path(paths.outputs_dir) / job_id, *source_dirs]
 
 
 def _wanted(p: Path) -> bool:
@@ -72,18 +74,17 @@ def _wanted(p: Path) -> bool:
 def key_for(paths: Any, job_id: str, p: Path) -> str | None:
     """The bucket key a local file already has, or the one it should get.
 
-    Outputs round-trip through `key_for_path`, which is the same mapping the
-    serving routes use — so a file pushed here is found again by name. Sources
-    use `upload_key`, which is what `store._materialize_source` pulls back.
+    Outputs round-trip through `objectstore.key_for_path`, which is the same
+    mapping the serving routes use — so a file pushed here is found again by
+    name. Sources use `objectstore.upload_key`, which is what
+    `store._materialize_source` pulls back.
     """
-    from app import objectstore
+    from . import objectstore
 
-    key = objectstore.key_for_path(p, getattr(paths, "outputs_dir", None))
-    if key:
-        return key
+    outputs = Path(getattr(paths, "outputs_dir", None))
+    if outputs == p.parent.parent:
+        return objectstore.key_for_path(p, outputs)
     for d in _job_dirs(paths, job_id):
-        if d == getattr(paths, "outputs_dir", None) / job_id:
-            continue
         try:
             p.resolve().relative_to(d.resolve())
         except (ValueError, OSError):
@@ -106,7 +107,7 @@ def reclaim(
     dict the endpoint can hand straight to the UI, with a `reason` whenever it
     could not do anything — never a silent no-op.
     """
-    from app import jobstatus, objectstore
+    from . import jobstatus, objectstore
 
     result: dict[str, Any] = {
         "ok": False,
@@ -178,7 +179,7 @@ def reclaim(
     result["ok"] = True
     if not result["uploaded"]:
         result["reason"] = "nothing to reclaim — no finished batch keeps media on local disk"
-    logger.info(
+    log.info(
         f"[reclaim] offloaded {result['uploaded']} file(s), freed "
         f"{result['freedMb']} MB from {result['jobs']} finished batch(es)"
     )
