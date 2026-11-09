@@ -280,6 +280,53 @@ def materialize(key: str, dest: Path, cfg: ObjectStoreConfig | None = None) -> b
     return download_to(key, dest, cfg)
 
 
+def open_stream(
+    key: str,
+    range_header: str | None = None,
+    cfg: ObjectStoreConfig | None = None,
+) -> tuple[int, dict[str, str], Any] | None:
+    """Open an object for serving WITHOUT writing it to local disk.
+
+    This is the difference between an archive and an offload. `materialize`
+    pulls the bytes back onto the 4 GB sandbox disk, so a reclaimed clip would
+    refill the space it just freed on the first playback. Here the bytes go
+    from the bucket to the response, which is what lets the library live in the
+    bucket and the disk hold only the job that is running.
+
+    Returns `(status, headers, body)` — status is 206 when the browser asked
+    for a byte range, so seeking still works. `None` means "not available from
+    the bucket" (no bucket, no boto3, object missing) and the caller keeps its
+    existing local-file path.
+    """
+    cfg = cfg or config_from_env()
+    s3 = client(cfg)
+    if s3 is None or not cfg.enabled:
+        return None
+    params: dict[str, Any] = {"Bucket": cfg.bucket, "Key": key}
+    if range_header:
+        # Passed through verbatim: a malformed range is S3's to reject, and
+        # translating it here would only invent a second, weaker parser.
+        params["Range"] = range_header
+    try:
+        resp = s3.get_object(**params)
+    except Exception as exc:  # noqa: BLE001 - a miss falls back to the 404 path
+        logger.warning(f"[objectstore] stream of {key} failed: {exc}")
+        return None
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Type": resp.get("ContentType") or mimetypes.guess_type(key)[0]
+        or "application/octet-stream",
+    }
+    if resp.get("ContentLength") is not None:
+        headers["Content-Length"] = str(resp["ContentLength"])
+    if resp.get("ContentRange"):
+        headers["Content-Range"] = str(resp["ContentRange"])
+        status = 206
+    else:
+        status = 200
+    return status, headers, resp["Body"]
+
+
 def exists(key: str, cfg: ObjectStoreConfig | None = None) -> bool:
     cfg = cfg or config_from_env()
     s3 = client(cfg)

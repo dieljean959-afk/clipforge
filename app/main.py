@@ -25,6 +25,7 @@ from fastapi.responses import (
     JSONResponse,
     RedirectResponse,
     Response,
+    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -2994,7 +2995,7 @@ SHARE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
 @app.api_route("/api/clips/{clip_id}/video", methods=["GET", "HEAD"])
-def clip_video(clip_id: str) -> FileResponse:
+def clip_video(clip_id: str, request: Request) -> Response:
     """Stream the rendered clip for <video> playback.
 
     Content-Disposition stays inline — 'attachment' makes browsers refuse to
@@ -3016,6 +3017,11 @@ def clip_video(clip_id: str) -> FileResponse:
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
+    # Reclaimed clips have no local bytes: stream them from the bucket instead
+    # of downloading them back onto the disk that was just freed.
+    streamed = _clip_bucket_stream(clip, request)
+    if streamed is not None:
+        return streamed
     p = _clip_media(clip, "video")
     if p is None:
         raise HTTPException(404, "clip file missing on disk")
@@ -3133,6 +3139,76 @@ def _clip_media(clip: dict, kind: str) -> Path | None:
             except Exception as exc:  # noqa: BLE001 - serving matters, healing is a bonus
                 logger.warning(f"[api] could not persist healed {field}: {exc}")
         return cand
+    return None
+
+
+def _serve_from_bucket(
+    p: Path,
+    request: Request,
+    *,
+    filename: str | None = None,
+) -> Response | None:
+    """Stream a media file from the bucket, or None to use the local path.
+
+    Reclaimed clips have no local bytes by design (see `app/reclaim.py`), and
+    the old answer — pull the file back with `materialize` — refilled the very
+    disk the reclaim had just freed. Here the bytes go bucket -> response, so
+    playback and download cost no local space and the batch still works after
+    a sandbox rebuild.
+
+    `Range` is forwarded to the bucket, which answers 206 with Content-Range,
+    so `<video>` seeking behaves exactly as it does for a local file. A HEAD
+    gets the headers with no body.
+    """
+    from app import objectstore
+
+    key = objectstore.key_for_path(p, settings.app.paths.outputs_dir)
+    if not key:
+        return None
+    opened = objectstore.open_stream(key, request.headers.get("range"))
+    if opened is None:
+        return None
+    status, headers, body = opened
+    headers["Cache-Control"] = MEDIA_CACHE_CONTROL
+    if filename:
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    else:
+        headers["Content-Disposition"] = f'inline; filename="{p.name}"'
+    if request.method == "HEAD":
+        return Response(status_code=status, headers=headers)
+    chunks = body.iter_chunks(256 * 1024) if hasattr(body, "iter_chunks") else body
+    return StreamingResponse(chunks, status_code=status, headers=headers)
+
+
+def _clip_bucket_stream(
+    clip: dict, request: Request, *, filename: str | None = None
+) -> Response | None:
+    """Serve an evicted clip from the bucket before any local-file lookup.
+
+    Only kicks in when the clip is NOT on disk: a local file keeps the exact
+    FileResponse path (ETag, Range, 304s) it always had.
+    """
+    if request.method not in ("GET", "HEAD"):
+        return None
+    candidates: list[Path] = []
+    raw = clip.get("videoPath")
+    if raw:
+        candidates.append(Path(raw))
+    job_id = str(clip.get("jobId") or "")
+    if job_id:
+        candidates.append(
+            settings.app.paths.outputs_dir / job_id / f"clip_{int(clip.get('order') or 0):03d}.mp4"
+        )
+    for cand in candidates:
+        try:
+            if cand.exists() and cand.stat().st_size > 0:
+                return None
+        except OSError:
+            pass
+        served = _serve_from_bucket(cand, request, filename=filename)
+        if served is not None:
+            logger.info(f"[api] clip {clip.get('_id')}: served from durable storage")
+            return served
     return None
 
 
@@ -3531,14 +3607,18 @@ def clip_thumb(clip_id: str) -> FileResponse:
 
 
 @app.api_route("/api/clips/{clip_id}/download", methods=["GET", "HEAD"])
-def clip_download(clip_id: str) -> FileResponse:
+def clip_download(clip_id: str, request: Request) -> Response:
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
+    safe = "".join(ch for ch in clip.get("title", "clip") if ch.isalnum() or ch in " -_")[:40] or "clip"
+    filename = f"{clip['order'] + 1:02d}-{safe}.mp4"
+    streamed = _clip_bucket_stream(clip, request, filename=filename)
+    if streamed is not None:
+        return streamed
     p = _clip_media(clip, "video")
     if p is None:
         raise HTTPException(404, "clip file missing on disk")
-    safe = "".join(ch for ch in clip.get("title", "clip") if ch.isalnum() or ch in " -_")[:40] or "clip"
     return FileResponse(
         p,
         media_type="video/mp4",
