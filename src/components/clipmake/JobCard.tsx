@@ -422,7 +422,7 @@ export function JobCard({
               {job.unitsDone !== undefined && job.unitsDone !== null &&
               job.unitsTotal !== undefined && job.unitsTotal !== null
                 ? `${fmtUnits(job.unitLabel ?? undefined, job.unitsDone)} of ${fmtUnits(job.unitLabel ?? undefined, job.unitsTotal)}`
-                : job.queuePosition != null
+                : job.status === "queued" && job.queuePosition != null
                   ? queuedLabel(job.queuePosition)
                   : "Starting on the server worker…"}
             </span>

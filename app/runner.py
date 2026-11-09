@@ -225,19 +225,6 @@ def main(argv: list[str]) -> int:
         })
         store.write_job(job)
         store.append_job_log(job_id, "Stage: fetch — starting")
-    # Stage 1 (fetch) starts RIGHT HERE, before anything else.
-    # The worker's supervisor reads this event to turn the Fetching chip
-    # active; without it every job shows four grey chips.
-    job = store.get_job(job_id)
-    if job is not None:
-        job.update({
-            "stage": "fetch",
-            "stageStartedAt": int(time.time() * 1000),
-            "progress": 0,
-            "progressDetail": "Stage: fetch — starting",
-        })
-        store.write_job(job)
-        store.append_job_log(job_id, "Stage: fetch — starting")
     # Keep large native allocations from pushing the process into swap-less
     # OOM territory where the kernel picks a victim.
     #

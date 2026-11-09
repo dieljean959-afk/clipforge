@@ -215,7 +215,20 @@ def _boot() -> None:
         logger.warning(f"[boot] share-link backfill skipped: {exc}")
 
     recoverable = {"grabbing", "transcribing", "finding", "rendering", "queued"}
+    # Jobs a runner is busy with RIGHT NOW. Recovery must not touch these: this
+    # loop rewrites the job to stage=queued / progress=0 and enqueues it again,
+    # so every API restart turned a live 15-clip export into "Queued… 0%" for
+    # as long as that stage went between progress writes, and left a duplicate
+    # queue entry that could never start while the only worker slot was still
+    # busy with that very job. Ask the daemon which pids are alive, don't guess
+    # from the stage word: "exporting" looks exactly like a dead job.
+    try:
+        running_now = set(worker.active_pids() or {})
+    except Exception:  # noqa: BLE001 - no daemon answer means nothing of ours is running
+        running_now = set()
     for job in store.list_jobs():
+        if job.get("_id") in running_now:
+            continue
         # A job can be stamped stage=failed by a LATER attempt after a good
         # batch was already delivered — e.g. redetect re-running detection,
         # getting rate-limited, and overwriting a finished job. The clips are

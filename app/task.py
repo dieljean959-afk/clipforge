@@ -519,6 +519,11 @@ class Pipeline:
                 logger.info(f"[job {job_id}] clearing stale error on stage change -> {stage}")
             job["error"] = None
             job["errorDetail"] = None
+            # This job is RUNNING now, so it is not waiting behind anything. A
+            # re-queue that raced a live run left `queuePosition` set on a job
+            # that was busy, and the card renders that as a queue message beside
+            # a moving progress bar.
+            job["queuePosition"] = None
         if prior_eta_sec is not None:
             self._prior_eta_sec = float(prior_eta_sec)
 

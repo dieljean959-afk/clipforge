@@ -281,6 +281,24 @@ class InProcessWorker:
             if job_id in self._pending:
                 logger.info(f"[worker] job {job_id} is already queued — not enqueuing again")
                 return len(self._pending)
+            # A job whose child process is ALIVE is not something to queue. The
+            # entry could not start until that same slot finished, and it would
+            # then run the job a second time from stage one. This is how a
+            # boot-time re-queue of a running job jammed the queue: every API
+            # restart added an entry behind a job that was already on the only
+            # slot. `retry()` kills the process BEFORE it calls this, so a
+            # deliberate retry still gets through.
+            live_proc = self._active.get(job_id)
+            if live_proc is None and self._current_job == job_id:
+                live_proc = self._current_proc
+            running_pid = (
+                live_proc.pid if live_proc is not None and live_proc.poll() is None else None
+            )
+        if running_pid is not None:
+            logger.info(
+                f"[worker] job {job_id} is already running (pid {running_pid}) — not enqueuing again"
+            )
+            return len(self._pending)
         self._queue.put(job_id)
         with self._lock:
             self._pending.append(job_id)
@@ -489,6 +507,8 @@ class InProcessWorker:
     # ------------------------------------------------------------------
 
     def _run(self) -> None:
+        from app import jobstatus  # local: avoids an import cycle at module load
+
         while not self._stop.is_set():
             try:
                 job_id = self._queue.get(timeout=0.5)
@@ -501,8 +521,21 @@ class InProcessWorker:
             # The job may have been deleted while it sat in the queue. Spawning
             # a process for it wastes a worker slot and a process launch on
             # work nobody is waiting for.
-            if self.store.get_job(job_id) is None:
+            job = self.store.get_job(job_id)
+            if job is None:
                 logger.info(f"[worker] dropping queued job {job_id} — no longer exists")
+                with self._lock:
+                    if self._current_job == job_id:
+                        self._current_job = None
+                self._queue.task_done()
+                continue
+            # A stale entry can outlive the run it was queued for (a re-queue
+            # that raced the finish). Starting it would download and render a
+            # batch whose files are already on disk, so drop it instead.
+            if jobstatus.is_terminal(job):
+                logger.info(
+                    f"[worker] dropping queued job {job_id} — already {job.get('stage')}"
+                )
                 with self._lock:
                     if self._current_job == job_id:
                         self._current_job = None
