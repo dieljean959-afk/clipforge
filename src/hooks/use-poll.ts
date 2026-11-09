@@ -163,6 +163,26 @@ export function useJobs(intervalMs = 2000) {
     }
   }, [applyFailure, applySuccess, limit]);
 
+  /**
+   * Drop deleted batches from the list the instant the delete is confirmed.
+   *
+   * `refresh` merges each page over what is already on screen and keeps any
+   * job that page did not mention. It has to: the list is paged, so a batch
+   * the reader scrolled past is not gone merely because the newest page does
+   * not repeat it.
+   *
+   * The cost of that merge was a delete that looked like it did nothing —
+   * the server answered 200, the toast said "deleted", and the very next
+   * poll (2s) put the pill straight back. A deletion is the one case where
+   * absence IS authoritative, so it is applied directly here instead of
+   * waiting for a page that by design cannot prove it.
+   */
+  const forget = useCallback((ids: string | string[]) => {
+    const drop = new Set(Array.isArray(ids) ? ids : [ids]);
+    if (drop.size === 0) return;
+    setJobs((prev) => (prev ? prev.filter((j) => !drop.has(j._id)) : prev));
+  }, []);
+
   // One more page. Not a conditional hook, so it is an explicit call from the
   // scroll sentinel AND from the button — either one works.
   const loadMore = useCallback(() => {
@@ -193,7 +213,7 @@ export function useJobs(intervalMs = 2000) {
     }
   }, [applyFailure, applySuccess]);
 
-  return { jobs, error, stale, refresh, checkOne, loadMore, hasMore, total };
+  return { jobs, error, stale, refresh, forget, checkOne, loadMore, hasMore, total };
 }
 
 export function useClips(jobId: string | null, intervalMs = 2000) {

@@ -47,7 +47,10 @@ export function CleanupJunkDialog({
   onDeleted,
   className,
 }: {
-  onDeleted?: () => void;
+  /** Receives every id that is now gone from the server (deleted here, or
+   *  already missing), so the dashboard can drop them from the list it is
+   *  showing instead of waiting for a paged poll to stop repeating them. */
+  onDeleted?: (deletedIds: string[]) => void;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -143,6 +146,9 @@ export function CleanupJunkDialog({
     try {
       let removed = 0;
       const missing: string[] = [];
+      // Everything this call made disappear server-side — deleted now, plus
+      // ids the server reported as already absent. Both must leave the list.
+      const gone: string[] = [];
       // Chunked so a long history cannot exceed the server's per-request cap
       // and fail the whole cleanup on one oversized body.
       for (let i = 0; i < targets.length; i += MAX_PER_REQUEST) {
@@ -150,6 +156,7 @@ export function CleanupJunkDialog({
         const res = await api.bulkDeleteJobs(chunk.map((job) => job._id));
         removed += res.deleted.length;
         missing.push(...res.missing);
+        gone.push(...res.deleted, ...res.missing);
       }
       setOpen(false);
       setJunk([]);
@@ -163,7 +170,7 @@ export function CleanupJunkDialog({
       if (missing.length > 0) {
         toast.warning(`${missing.length} batch(es) were already gone.`);
       }
-      onDeleted?.();
+      onDeleted?.(gone);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Cleanup failed.");
     } finally {

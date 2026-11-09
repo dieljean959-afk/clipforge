@@ -85,6 +85,7 @@ export default function Dashboard() {
     error: apiError,
     stale: apiStale,
     refresh: refreshJobs,
+    forget: forgetJobs,
     checkOne,
     loadMore,
     hasMore,
@@ -118,6 +119,21 @@ export default function Dashboard() {
       ? selectedJobId
       : (doneJobs[0]?._id ?? null);
   const selectedJob = doneJobs.find((j) => j._id === effectiveJobId) ?? null;
+
+  /**
+   * Every "batch was deleted" lands here.
+   *
+   * The poller deliberately keeps a job it has already shown until the server
+   * repeats it, so a delete had to be applied to the list itself: without
+   * this the batch came back on the next 2-second poll and the button read as
+   * broken even though the server had already removed it.
+   */
+  const handleDeleted = (ids: string | string[]) => {
+    forgetJobs(ids);
+    const gone = new Set(Array.isArray(ids) ? ids : [ids]);
+    if (selectedJobId !== null && gone.has(selectedJobId)) setSelectedJobId(null);
+    void refreshJobs();
+  };
   const { clips, loaded: clipsLoaded, error: clipsError } = useClips(effectiveJobId, 2000);
   // The worker's real silence budget. A stall banner that quotes a number
   // invented in the frontend will drift from the server the moment
@@ -413,7 +429,7 @@ export default function Dashboard() {
                   key={job._id}
                   job={job}
                   stallTimeoutSec={health?.stallTimeoutSec}
-                  onDeleted={refreshJobs}
+                  onDeleted={handleDeleted}
                   onCheckNow={async (jobId) => {
                     // "Check now" forces an immediate poll of THIS job instead
                     // of waiting out the 2s interval. The server reconciles
@@ -468,10 +484,7 @@ export default function Dashboard() {
               {allJobs.length > 0 && (
                 <CleanupJunkDialog
                   className="cursor-pointer gap-1.5 text-xs"
-                  onDeleted={() => {
-                    if (selectedJobId !== null) setSelectedJobId(null);
-                    void refreshJobs();
-                  }}
+                  onDeleted={handleDeleted}
                 />
               )}
             </div>
@@ -536,13 +549,7 @@ export default function Dashboard() {
                   Re-render captions
                 </Button>
                 <ExportDialog job={selectedJob} clips={clips} />
-                <ConfirmDeleteJob
-                  job={selectedJob}
-                  onDeleted={(id) => {
-                    if (selectedJobId === id) setSelectedJobId(null);
-                    void refreshJobs();
-                  }}
-                />
+                <ConfirmDeleteJob job={selectedJob} onDeleted={handleDeleted} />
               </div>
             )}
           </div>
@@ -590,10 +597,7 @@ export default function Dashboard() {
                       job={job}
                       iconOnly
                       className="mr-1.5"
-                      onDeleted={(id) => {
-                        if (selectedJobId === id) setSelectedJobId(null);
-                        void refreshJobs();
-                      }}
+                      onDeleted={handleDeleted}
                     />
                   </span>
                 ))}

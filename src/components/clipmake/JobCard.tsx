@@ -128,7 +128,9 @@ export function JobCard({
   stallTimeoutSec,
 }: {
   job: JobDoc;
-  onDeleted?: () => void;
+  /** Handed the deleted job's id, so the list can drop it instead of
+   *  waiting to be told by a paged poll that will keep repeating it. */
+  onDeleted?: (jobId: string) => void;
   onCheckNow?: (jobId: string) => Promise<void> | void;
   /** The server's real silence budget, from health. Falls back to the
    *  worker's own default until health answers. */
@@ -258,7 +260,7 @@ export function JobCard({
             View logs
           </Button>
           {complete && (
-            <ConfirmDeleteJob job={job} onDeleted={() => onDeleted?.()} />
+            <ConfirmDeleteJob job={job} onDeleted={(id) => onDeleted?.(id)} />
           )}
           {/* A failed job ALWAYS carries an `error` string, so the old
               `job.error === undefined` guard hid this button on exactly the
