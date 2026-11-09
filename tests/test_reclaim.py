@@ -252,6 +252,33 @@ def test_watchdog_reclaims_once_the_disk_is_tight(bucket, monkeypatch):
     assert not clip.exists()
 
 
+def test_finishing_offloads_immediately_when_the_disk_is_tight(bucket, monkeypatch):
+    """A batch that just finished must not sit on the disk waiting for the
+    watchdog: it is the reason the next run fails for lack of space."""
+    clip = _write(bucket.paths.outputs_dir / "job42" / "clip_000.mp4")
+    source = _write(bucket.paths.uploads_dir / "job42" / "source.mp4")
+    monkeypatch.setattr(reclaim, "_free_bytes", lambda paths: 200 * 1024 * 1024)
+
+    reclaim.offload_job(_store(_job("job42")), bucket.paths, "job42")
+
+    # Inline, so the files are already gone when the call returns.
+    assert not clip.exists() and not source.exists()
+    assert "clipforge/outputs/job42/clip_000.mp4" in bucket.fake.objects
+
+
+def test_finishing_offloads_a_batch_with_room_to_spare_too(bucket, monkeypatch):
+    clip = _write(bucket.paths.outputs_dir / "job42" / "clip_000.mp4")
+    monkeypatch.setattr(reclaim, "_free_bytes", lambda paths: 3000 * 1024 * 1024)
+
+    reclaim.offload_job(_store(_job("job42")), bucket.paths, "job42")
+
+    for t in __import__("threading").enumerate():
+        if t.name == "offload-finished":
+            t.join(timeout=5.0)
+    assert not clip.exists()
+    assert "clipforge/outputs/job42/clip_000.mp4" in bucket.fake.objects
+
+
 def test_destination_for_a_clip_matches_what_the_route_serves(bucket):
     """reclaim's key must be the one `clip_video` asks for, or a reclaimed clip
     is pushed to a name nothing ever reads and the file vanishes for real."""

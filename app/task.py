@@ -335,6 +335,17 @@ class Pipeline:
             if chunk_dir.is_dir():
                 for p in chunk_dir.glob("*.tmp"):
                     p.unlink(missing_ok=True)
+                # The 16 kHz mono copy of the whole source is the biggest file
+                # the ASR stage leaves behind — 41 MB for a 22-minute video,
+                # left on disk for the life of the batch. `words.json` is the
+                # transcript that resume reads, so the audio itself is scratch.
+                for p in chunk_dir.glob("*.wav"):
+                    freed = p.stat().st_size if p.exists() else 0
+                    p.unlink(missing_ok=True)
+                    logger.info(
+                        f"[job {job_id}] removed ASR audio {p.name} "
+                        f"({freed / 1048576:.0f} MB)"
+                    )
         except Exception as exc:
             logger.warning(f"[job {job_id}] could not clean transcript tmp files: {exc}")
 
@@ -1132,7 +1143,40 @@ class Pipeline:
         self.store.write_job(job)
         ws.write_json("fetch", "meta.json", {"path": str(src), **meta})
         ws.mark_done("fetch", artifacts=["fetch/meta.json"], path=str(src), **meta)
+        # Uploads were the only sources that ever reached the bucket; a URL
+        # fetch wrote straight to the disk and stayed there. So a host restart
+        # mid-run had to pull the whole video down again (445 MB for a 22-min
+        # source on this box), and the batch had no durable copy until the
+        # completion reclaim pushed one. The local file stays — the renderer
+        # cuts from it — but the bucket copy now exists from the first minute.
+        self._push_source(job_id, src)
         return src
+
+    def _push_source(self, job_id: str, src: Path) -> None:
+        """Copy a fetched source into durable storage; keep the local file.
+
+        Best effort by design: a storage outage must not fail a job whose video
+        is on disk and perfectly usable.
+        """
+        from app import objectstore
+
+        try:
+            cfg = objectstore.config_from_env()
+            if not cfg.enabled or not src.exists():
+                return
+            key = objectstore.upload_key(job_id, src.name)
+            if not objectstore.upload_file(src, key, cfg):
+                self._log(job_id, "durable copy of the source failed — it stays local")
+                return
+            job = self.store.get_job(job_id) or {}
+            job["sourceRemote"] = True
+            self.store.write_job(job)
+            self._log(
+                job_id,
+                f"source copied to durable storage ({src.stat().st_size / 1048576:.0f} MB)",
+            )
+        except Exception as exc:  # noqa: BLE001 - never fail a fetch over a copy
+            logger.warning(f"[job {job_id}] source push to durable storage failed: {exc}")
 
     # ------------------------------------------------------------------
     # stage 2: transcribe (incremental, resumable)
@@ -2066,6 +2110,17 @@ class Pipeline:
         self.store.write_job(job)
         self.store.append_job_log(job_id, f"COMPLETE in {elapsed_sec:.1f}s")
         logger.info(f"[job {job_id}] COMPLETE in {elapsed_sec:.1f}s")
+        # The batch is done, so its media is dead weight: push it to the bucket
+        # and drop the local copies now. Deferring this to the watchdog is what
+        # left a finished 445 MB source sitting on a 4 GB disk until the next
+        # batch ran out of room, and it is the reason "the bucket" looked
+        # connected while every video still lived on the disk.
+        try:
+            from app import reclaim
+
+            reclaim.offload_job(self.store, self.settings.app.paths, job_id)
+        except Exception as exc:  # noqa: BLE001 - completion must still succeed
+            logger.warning(f"[job {job_id}] post-completion offload skipped: {exc}")
 
 
 # ------------------------------------------------------------------

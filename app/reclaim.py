@@ -207,6 +207,44 @@ def reclaim(
 
 
 # --------------------------------------------------------------------------- #
+# the moment a batch finishes
+# --------------------------------------------------------------------------- #
+
+_offload_lock = threading.Lock()
+
+
+def offload_job(store: Any, paths: Any, job_id: str) -> None:
+    """Move one just-finished batch into the bucket and free its local bytes.
+
+    Called from the pipeline's completion path, not from a request. When the
+    disk is already tight it runs inline — a batch that just finished is holding
+    several hundred MB it no longer needs, and waiting for the watchdog (up to a
+    minute) or for the user to press a button is how the NEXT batch fails for
+    lack of space. With room to spare it runs in the background so completion
+    is never held up by an upload.
+    """
+    free = _free_bytes(paths)
+    tight = isinstance(free, int) and free < LOW_DISK_BYTES
+
+    def run() -> None:
+        with _offload_lock:
+            try:
+                res = reclaim(store, paths, job_ids=[job_id])
+                if res.get("uploaded"):
+                    logger.info(
+                        f"[reclaim] job {job_id}: {res['uploaded']} file(s) "
+                        f"({res['freedMb']} MB) moved to the bucket after completion"
+                    )
+            except Exception as exc:  # noqa: BLE001 - never fail a finished job
+                logger.warning(f"[reclaim] post-completion offload for {job_id} failed: {exc}")
+
+    if tight:
+        run()
+        return
+    threading.Thread(target=run, name="offload-finished", daemon=True).start()
+
+
+# --------------------------------------------------------------------------- #
 # watchdog: make the bucket the default, not a button nobody presses
 # --------------------------------------------------------------------------- #
 
@@ -223,15 +261,26 @@ def tick(store: Any, paths: Any, low_mb: int = LOW_DISK_BYTES // _MB) -> dict[st
     free = _free_bytes(paths)
     if not isinstance(free, int) or free >= low_mb * _MB:
         return None
-    logger.warning(
-        f"[reclaim] only {round(free / _MB)} MB free — moving finished batches "
-        f"into the bucket"
-    )
-    return reclaim(
+    out = reclaim(
         store,
         paths,
         target_free_bytes=max(TARGET_FREE_BYTES, low_mb * _MB * 2),
     )
+    # A running batch cannot be reclaimed, so "low and nothing to do" is the
+    # normal state while a render is in flight — say it once per pass at info
+    # level instead of warning every minute about a situation that resolves
+    # itself when the batch finishes (see `offload_job`).
+    if out.get("uploaded"):
+        logger.warning(
+            f"[reclaim] only {round(free / _MB)} MB free — moved "
+            f"{out['freedMb']} MB of finished batches into the bucket"
+        )
+    else:
+        logger.info(
+            f"[reclaim] only {round(free / _MB)} MB free, but nothing finished "
+            "to reclaim yet — the running batch still needs its source on disk"
+        )
+    return out
 
 
 def _loop(store: Any, paths: Any, interval: float, low_mb: int) -> None:
