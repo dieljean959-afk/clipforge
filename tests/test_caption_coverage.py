@@ -157,6 +157,45 @@ def test_a_window_no_model_can_decode_fails_loudly(monkeypatch, tmp_path):
     assert "refusing a transcript with a hole" in str(err.value)
 
 
+def test_a_silent_window_is_not_a_hole(monkeypatch, tmp_path):
+    """The real failure: a 9.9 s silent outro window killed a 46-window batch.
+
+    Job a8a17efe75e34cb097470209f57f9ca7 (21:37 source) failed at window
+    1288.0-1297.9 s, where Silero measured 0.00 s of voiced audio and every
+    model correctly returned no words. That is silence, not a caption hole.
+    """
+    monkeypatch.setattr(asr_accurate.asr_quality, "DecodeProcess", _AlwaysEmpty)
+    wav = _wav(tmp_path / "speech16k.wav")
+    regions = [speech_vad.Region(0.0, 10.0)]  # nothing voiced in 20-30 s
+    with _WavReader(wav) as reader:
+        words, cycles, _attempts, _model, _lang, _peak = asr_accurate._decode_windows(
+            reader, [(20.0, 30.0)], languages=["en"],
+            prompt_base=("Title", "desc"), cache_dir=None, tmp_dir=tmp_path,
+            should_pause=None, on_progress=None, on_chunk=None, on_detail=None,
+            duration=30.0, regions=regions,
+        )
+
+    assert cycles[-1]["silent"] is True
+    assert cycles[-1]["words"] == []
+    assert words == []
+
+
+def test_a_speaking_window_no_model_can_decode_still_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(asr_accurate.asr_quality, "DecodeProcess", _AlwaysEmpty)
+    wav = _wav(tmp_path / "speech16k_noisy.wav")
+    regions = [speech_vad.Region(20.0, 30.0)]  # Silero hears 10 s of talking
+    with _WavReader(wav) as reader:
+        with pytest.raises(TranscribeError) as err:
+            asr_accurate._decode_windows(
+                reader, [(20.0, 30.0)], languages=["en"],
+                prompt_base=("Title", "desc"), cache_dir=None, tmp_dir=tmp_path,
+                should_pause=None, on_progress=None, on_chunk=None, on_detail=None,
+                duration=30.0, regions=regions,
+            )
+    assert "refusing a transcript with a hole" in str(err.value)
+    assert "10.0s of speech" in str(err.value)
+
+
 def test_an_empty_checkpoint_is_not_resumed(monkeypatch, tmp_path):
     """A stored window with zero words is re-decoded, not trusted."""
     regions = [speech_vad.Region(5.0, 20.0)]  # Silero says this window has speech

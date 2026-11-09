@@ -617,6 +617,11 @@ def _decode_windows(
     language = languages[0] if languages and languages[0] not in ("auto", "") else None
     ladder = model_ladder(language)
     model = ladder[0]
+    #: The model that actually produced words. `model` is the CURRENT rung and
+    #: ends on the lightest one tried, so a silent tail window that every rung
+    #: refuses would otherwise label the whole transcript with the smallest
+    #: model on the ladder.
+    used_model = ""
     detected: str | None = None
     peak = 0.0
     proc: asr_quality.DecodeProcess | None = None
@@ -646,6 +651,8 @@ def _decode_windows(
                         peak = max(peak, float(data.get("peak_rss_mb") or 0.0))
                         last_sentence = (data.get("words") or [{}])[-1].get("word", "") if data.get("words") else ""
                         resumed += 1
+                        if data.get("words"):
+                            used_model = str(data.get("model") or "") or used_model
                         if on_progress and duration > 0:
                             on_progress(min(1.0, w_end / duration))
                         if on_chunk is not None:
@@ -725,12 +732,60 @@ def _decode_windows(
                     break
                 reply = None
             if reply is None:
+                # An empty window is only a HOLE when Silero also hears speech
+                # in it. The last window of this job (1288.0-1297.9 s of a
+                # 21:37 source) is the silent outro: 0.00 s of voiced audio,
+                # so every model correctly returned nothing — and the batch
+                # was thrown away after 46 windows had already been decoded
+                # and checkpointed. Silence is an ANSWER, not a failure.
+                silent_sec = (
+                    None if regions is None
+                    else _window_speech_sec(w_start, w_end, regions)
+                )
+                if silent_sec is not None and silent_sec < COVERAGE_MIN_GAP_SEC:
+                    # `start_model`, not `model`: a resume takes the model
+                    # from the checkpoint, and the rung this window stepped
+                    # DOWN to must not become the starting point afterwards.
+                    cycle = {
+                        "start": w_start, "end": w_end, "model": start_model,
+                        "params": params, "words": [], "segments": [],
+                        "language": None, "peak_rss_mb": 0.0, "silent": True,
+                    }
+                    cycles.append(cycle)
+                    # Checkpoint it, so "Run again" resumes AFTER this window
+                    # instead of paying for the same three models again.
+                    # `_checkpoint_usable` accepts an empty window exactly
+                    # when Silero is this quiet, so a resume reuses it.
+                    if cache_file is not None:
+                        tmp = cache_file.with_suffix(".json.tmp")
+                        tmp.write_text(json.dumps(cycle, ensure_ascii=False), encoding="utf-8")
+                        tmp.replace(cache_file)
+                    logger.info(
+                        f"[accurate] chunk {idx + 1}/{len(windows)} "
+                        f"({w_start:.1f}-{w_end:.1f}s) has {silent_sec:.2f}s of "
+                        f"speech — silent window, no hole"
+                    )
+                    if on_progress and duration > 0:
+                        on_progress(min(1.0, w_end / duration))
+                    if on_chunk is not None:
+                        on_chunk(idx, len(windows), phase="done")
+                    try:
+                        wav.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    continue
                 # NEVER continue with a hole. A transcript missing a window
                 # must fail visibly at this stage, not render clips with the
                 # speech silently cut out of them.
                 raise TranscribeError(
                     f"window {w_start:.1f}-{w_end:.1f}s could not be transcribed by any local "
-                    f"model ({', '.join(ladder)}); refusing a transcript with a hole"
+                    f"model ({', '.join(ladder)}); "
+                    + (
+                        "refusing a transcript with a hole"
+                        if silent_sec is None
+                        else f"{silent_sec:.1f}s of speech with no words — "
+                        "refusing a transcript with a hole"
+                    )
                 )
             if detected is None and reply.get("language"):
                 detected = str(reply["language"])
@@ -764,6 +819,7 @@ def _decode_windows(
             }
             cycles.append(cycle)
             if words:
+                used_model = model
                 tail = " ".join(str(w["word"]) for w in words[-12:])
                 last_sentence = tail[-160:]
             if cache_file is not None:
@@ -787,7 +843,7 @@ def _decode_windows(
         [w for c in cycles for w in c.get("words") or []],
         cycles,
         attempts,
-        model,
+        used_model or model,
         detected,
         peak,
     )
@@ -815,6 +871,10 @@ def _second_pass(
     proc: asr_quality.DecodeProcess | None = None
     try:
         for cycle in cycles:
+            if cycle.get("silent"):
+                # Pure silence: a second opinion would only spend a model load
+                # to return nothing again.
+                continue
             segs = cycle.get("segments") or []
             worst = min((float(s.get("avg_logprob", 0.0)) for s in segs), default=0.0)
             hot = any(float(s.get("temperature") or 0.0) > 0.0 for s in segs)
