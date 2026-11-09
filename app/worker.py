@@ -1465,10 +1465,19 @@ class InProcessWorker:
             )
         try:
             free = _hosting.disk_stats(self.settings.app.paths.data_dir).get("freeBytes")
-            if free is not None and int(free) < 100 * 1024 * 1024:
+            # 100 MB was too little to survive one job: a 21-minute source is a
+            # 166 MB download plus ~60 MB of rendered clips and a 40 MB audio
+            # copy. Starting under that leaves the run to die on ENOSPC, and the
+            # retry re-downloads into the same full disk — the loop that read as
+            # "it keeps redoing the job until there is no space left". Refusing
+            # before the runner starts makes it one honest, terminal message.
+            floor_mb = 400
+            if free is not None and int(free) < floor_mb * 1024 * 1024:
                 problems.append(
-                    f"only {int(free) // (1024 * 1024)} MB of disk free — free space "
-                    "(delete finished jobs) and retry; the render needs at least 100 MB"
+                    f"only {int(free) // (1024 * 1024)} MB of disk free — a render "
+                    f"needs about {floor_mb} MB. Delete finished batches (Clean up) "
+                    f"or free space on the server, then Retry; the video, transcript "
+                    f"and finished clips are kept, so nothing is redone."
                 )
         except Exception:
             pass

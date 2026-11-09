@@ -55,6 +55,9 @@ class LocalStore:
     per process/thread and read-modify-write paths hold an advisory file lock.
     """
 
+    # 'View logs' reads the tail; a longer array only costs disk on every write.
+    MAX_JOB_LOGS = 600
+
     def __init__(self, paths: Paths) -> None:
         self._paths = paths
         self._lock = threading.RLock()
@@ -469,6 +472,12 @@ class LocalStore:
             if not isinstance(logs, list):
                 logs = []
             logs.append(message)
+            # The job document is rewritten on every append, so an unbounded
+            # log array is disk and bandwidth, not history: one 21-minute
+            # source reached 3 500 lines / 600 KB and every poll shipped it.
+            # The last MAX_JOB_LOGS lines are what 'View logs' actually reads.
+            if len(logs) > self.MAX_JOB_LOGS:
+                logs = logs[-self.MAX_JOB_LOGS:]
             job["logs"] = logs
             self.save_job(job)
 
