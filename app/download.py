@@ -9,9 +9,11 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -20,6 +22,111 @@ from app.config import Settings
 
 class DownloadError(Exception):
     """Fetch failed — carries the exact yt-dlp error text for the UI."""
+
+
+#: How long an exported cookie jar is trusted before it is called stale.
+#: YouTube's auth cookies are long-lived but rotate; a jar older than this
+#: still DOWNLOADS, right up until the day it silently stops, so the warning
+#: has to come before the failure, not after it.
+COOKIES_STALE_DAYS = 30
+
+
+#: Hosts whose bot check is client-specific (see the alternate-client ladder).
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def is_youtube_url(url: str) -> bool:
+    """True for any YouTube URL form, not just the one with "youtube" in it.
+
+    The alternate-client retry used to be gated on `"youtube" in url.lower()`,
+    which is FALSE for every youtu.be short link — the form the dashboard's own
+    share URLs and most pasted links use. So the retry that exists to get past
+    the bot wall never ran for exactly the URLs most people paste.
+    """
+    try:
+        host = urlparse(url).netloc.lower().split(":")[0].split("@")[-1]
+    except ValueError:
+        host = url.lower()
+    return any(host == h or host.endswith("." + h) for h in _YOUTUBE_HOSTS)
+
+
+def cookie_health(path: str | Path | None) -> dict[str, Any]:
+    """What is actually in the Netscape cookie jar, or why it cannot help.
+
+    A cookies.txt is the single lever that gets this kind of host past
+    YouTube's "Sign in to confirm you're not a bot" wall, and the way it fails
+    is quiet: the file is still there, still named right, and every request
+    that needs it starts bouncing. So the file is inspected rather than
+    assumed — missing, empty, not-Netscape, session-only (a jar exported
+    without expiry dies the moment the browser session does) and simply old
+    are five different problems that all read the same in a yt-dlp error.
+
+    Age is the file's mtime, which is when it was exported. It is the only
+    clock available: the jar carries per-cookie expiry dates in the past by
+    the time it is used, so reading those would call every working export
+    expired.
+    """
+    info: dict[str, Any] = {
+        "present": False,
+        "path": str(path) if path else None,
+        "ageDays": None,
+        "stale": False,
+        "cookieCount": 0,
+        "sessionOnly": False,
+        "problem": None,
+    }
+    if not path:
+        info["problem"] = "no cookies file configured"
+        return info
+    p = Path(path).expanduser()
+    if not p.is_file():
+        info["problem"] = "cookies file is missing on disk"
+        return info
+    info["present"] = True
+    try:
+        age_days = max(0.0, (time.time() - p.stat().st_mtime) / 86400.0)
+        info["ageDays"] = round(age_days, 1)
+        info["stale"] = age_days > COOKIES_STALE_DAYS
+        raw = p.read_text(errors="replace")[:200_000]
+    except OSError as exc:
+        info["problem"] = f"cookies file is unreadable ({exc})"
+        return info
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        info["problem"] = "cookies file is empty"
+        return info
+    if "netscape http cookie file" not in raw.lower():
+        info["problem"] = (
+            "cookies file is not a Netscape cookies.txt export "
+            "(re-export it as cookies.txt, not JSON)"
+        )
+        return info
+    rows = [ln for ln in lines if not ln.startswith("#")]
+    info["cookieCount"] = len(rows)
+    # Field 5 is the expiry epoch; 0 means "session cookie". A jar made only of
+    # those is valid for the browser that exported it and useless here.
+    expiries = []
+    for ln in rows:
+        parts = ln.split("\t")
+        if len(parts) >= 7:
+            try:
+                expiries.append(int(float(parts[4])))
+            except ValueError:
+                continue
+    info["sessionOnly"] = bool(expiries) and all(e == 0 for e in expiries)
+    if rows and info["sessionOnly"]:
+        info["problem"] = (
+            "every cookie in the jar is a session cookie — export it from a "
+            "logged-in browser session and keep \"session cookies\" enabled"
+        )
+    elif not rows:
+        info["problem"] = "cookies file has no cookie rows"
+    elif info["stale"]:
+        info["problem"] = (
+            f"cookies are {info['ageDays']:.0f} days old — YouTube will reject "
+            "them soon; export a fresh cookies.txt"
+        )
+    return info
 
 
 def _pip_self_update() -> str:
@@ -169,7 +276,15 @@ def download_url(
     if settings.download.cookies_from_browser:
         ydl_opts["cookiesfrombrowser"] = (settings.download.cookies_from_browser,)
     cookies_file = getattr(settings.download, "cookies_file", "") or ""
-    if cookies_file and Path(cookies_file).expanduser().is_file():
+    cookies = cookie_health(cookies_file)
+    if cookies["present"] and cookies["problem"]:
+        # Said BEFORE the download, not after it fails: the job log is where a
+        # reader looks when a URL dies, and "your cookies were six weeks old"
+        # is worth reading while the fetch is still running.
+        logger.warning(f"[download] cookies: {cookies['problem']}")
+        if on_log:
+            on_log(f"cookies.txt: {cookies['problem']} (continuing with it)")
+    if cookies["present"]:
         # Netscape cookies.txt. This is the one lever that gets a datacenter
         # IP past YouTube's "Sign in to confirm you're not a bot" page, which
         # otherwise makes every YouTube URL fail from this host.
@@ -307,7 +422,25 @@ def download_url(
             marker in last_error.lower()
             for marker in ("not a bot", "sign in to confirm", "login required", "confirm your age")
         )
-        if bot_block and "youtube" in url.lower() and not cookies_file:
+        # The plaster for an expired cookies.txt.
+        #
+        # Two things were wrong with the cookie path. The alternative-client
+        # retry was skipped whenever a cookie jar was configured — i.e. exactly
+        # on the hosts where the jar had gone stale, which is the one case the
+        # retry exists for. And once a jar was present, no attempt was ever
+        # made without it, although a rotated jar does not merely stop helping:
+        # yt-dlp sends the dead cookies, YouTube answers as if the session is
+        # invalid, and the request fails harder than it would have with no jar
+        # at all.
+        #
+        # So the ladder is: alternate clients WITH the jar, then alternate
+        # clients WITHOUT it, and only then a message that names the jar and
+        # its age instead of telling the reader to export cookies they already
+        # exported.
+        if bot_block and is_youtube_url(url):
+            jar_poisoned = cookies["present"] and (
+                cookies["problem"] is not None or cookies["stale"]
+            )
             if on_log:
                 on_log("YouTube asked for a sign-in — retrying with alternate clients")
             ydl_opts["extractor_args"] = {
@@ -320,7 +453,51 @@ def download_url(
                 logger.warning(f"[download] alternate client failed: {last_error[:300]}")
             finally:
                 ydl_opts.pop("extractor_args", None)
+            if jar_poisoned:
+                # Same clients, no jar: the fallback that makes an expired
+                # cookies.txt cost a retry instead of the whole job.
+                if on_log:
+                    on_log(
+                        "retrying without cookies.txt — a stale jar can fail "
+                        "harder than no jar at all"
+                    )
+                saved_jar = ydl_opts.pop("cookiefile", None)
+                ydl_opts["extractor_args"] = {
+                    "youtube": {"player_client": ["ios", "mweb", "web_safari"]}
+                }
+                try:
+                    source = _run_fetch("youtube without cookies")
+                    if on_log:
+                        on_log(
+                            "that worked without cookies — refresh cookies.txt so the "
+                            "next URL does not have to fall back"
+                        )
+                    return source
+                except Exception as exc:
+                    last_error = str(exc)
+                    logger.warning(f"[download] cookieless retry failed: {last_error[:300]}")
+                finally:
+                    ydl_opts.pop("extractor_args", None)
+                    if saved_jar:
+                        ydl_opts["cookiefile"] = saved_jar
         if bot_block:
+            age = cookies.get("ageDays")
+            if cookies["present"] and age is not None:
+                # "Will reject them soon" is the wrong tense here: the block
+                # just happened. Say what was refused and how old it is.
+                why = (
+                    f"the jar is {age:.0f} days old and YouTube has stopped "
+                    "accepting it"
+                    if cookies["stale"]
+                    else (cookies["problem"] or f"the jar is {age:.0f} days old")
+                )
+                raise DownloadError(
+                    "This site asked this server to sign in before it would serve "
+                    f"the video, and the cookies.txt on this server was refused ({why}). "
+                    "Re-export cookies.txt from a logged-in browser and save it over "
+                    "the existing file, or attach the video file directly — it is "
+                    "not a ClipForge bug."
+                )
             raise DownloadError(
                 "This site asked this server to sign in before it would serve the "
                 "video (YouTube: \"Sign in to confirm you're not a bot\"). Export "

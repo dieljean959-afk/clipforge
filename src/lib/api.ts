@@ -401,6 +401,17 @@ export interface HealthDto {
     downloadsDir?: string | null;
   } | null;
   tailnetIp?: string | null;
+  /** The yt-dlp cookie jar: exported when, how many cookies, and whether the
+   *  server already considers it stale/broken. Absent when no jar is set. */
+  cookies?: {
+    present: boolean;
+    path?: string | null;
+    ageDays?: number | null;
+    stale?: boolean;
+    cookieCount?: number;
+    sessionOnly?: boolean;
+    problem?: string | null;
+  } | null;
   limits?: { maxSourceMin?: number; retentionHours?: number } | null;
   /** Durable media offload (S3/R2) state, present once /api/health answers. */
   storage?: {
@@ -526,6 +537,18 @@ async function errorText(res: Response): Promise<string> {
     return `HTTP ${res.status} (no response body)`;
   }
   if (raw) {
+    // An HTML body is not this API talking: every route answers JSON. A page
+    // here came from a hop IN FRONT of the API — the preview proxy or the
+    // CDN edge answering 502/504 while the sandbox was restarting. Pasting
+    // 200 characters of `<!DOCTYPE html>` into a toast is how "Delete does
+    // not work" was reported: the reader was shown the error page's source
+    // instead of the one thing they needed to know.
+    if (/^\s*(<!doctype|<html)/i.test(raw)) {
+      return (
+        `The server was restarting and its proxy answered HTTP ${res.status} ` +
+        "with an error page instead of the API. Nothing was changed — try again in a few seconds."
+      );
+    }
     try {
       const body = JSON.parse(raw) as {
         detail?: unknown;
@@ -754,6 +777,24 @@ export const api = {
     const id = encodeURIComponent(jobId);
     const routeMissing = (msg: string) =>
       /^not found$/i.test(msg) || /method not allowed/i.test(msg);
+    /*
+     * Transient = the request never got a considered answer: the sandbox was
+     * mid-restart, the proxy in front of it served its own 5xx page, or the
+     * fetch itself threw. A delete that fails that way has, as far as anyone
+     * knows, not happened — so it is retried instead of reported.
+     *
+     * This is the difference between "Delete does not work" and a delete that
+     * works: the API answered correctly the whole time, but a single tap that
+     * landed in a restart window surfaced the proxy's HTML error page.
+     */
+    const transient = (err: unknown): boolean => {
+      const msg = err instanceof Error ? err.message : "";
+      // No status at all: fetch threw (offline, DNS, origin dropped).
+      if (!/HTTP \d{3}/.test(msg)) return true;
+      if (/API restarting|instead of the API/i.test(msg)) return true;
+      const status = /HTTP (\d{3})/.exec(msg)?.[1];
+      return status !== undefined && status.startsWith("5");
+    };
     const withRetry = async (url: string, init: RequestInit): Promise<DeleteResult> => {
       try {
         return await request<DeleteResult>(url, init);
@@ -763,19 +804,34 @@ export const api = {
         return await request<DeleteResult>(url, init);
       }
     };
-    try {
-      return await withRetry(`/api/jobs/${id}/delete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keepSource }),
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "";
-      if (routeMissing(msg)) {
-        return await withRetry(`/api/jobs/${id}`, { method: "DELETE" });
+    const attemptOnce = async (): Promise<DeleteResult> => {
+      try {
+        return await withRetry(`/api/jobs/${id}/delete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keepSource }),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "";
+        if (routeMissing(msg)) {
+          return await withRetry(`/api/jobs/${id}`, { method: "DELETE" });
+        }
+        throw err;
       }
-      throw err;
+    };
+    // Three tries, 1s/2s apart: long enough to outlast a restart blip, short
+    // enough that the button's spinner still feels like an answer.
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await attemptOnce();
+      } catch (err) {
+        lastError = err;
+        if (!transient(err) || attempt === 2) throw err;
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
     }
+    throw lastError instanceof Error ? lastError : new Error("Delete failed.");
   },
   /** Failed batches with nothing delivered — the deletable ones. */
   listJunkJobs: () => request<{ jobs: JunkJobDto[] }>("/api/jobs/junk"),

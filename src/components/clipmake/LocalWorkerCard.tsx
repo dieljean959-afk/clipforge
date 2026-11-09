@@ -11,6 +11,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Stethoscope } from "lucide-react";
 import {
+  Cookie,
   Cpu,
   Eye,
   EyeOff,
@@ -198,6 +199,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const ytdlpVersion = tools?.ytdlp ?? null;
   const ffmpegVersion = tools?.ffmpeg ?? null;
   const mediaDir = tools?.mediaDir ?? null;
+  // The yt-dlp cookie jar: present?, how old, and whether the server already
+  // considers it unusable. Its failure mode is silent (the file is still there
+  // and every YouTube URL just starts bouncing), so its age is on screen.
+  const cookies = health?.cookies ?? null;
+  const cookiesSuspect = cookies?.present === true && (cookies.stale === true || !!cookies.problem);
 
   const dispatch = health?.dispatch;
   const remoteOnline =
@@ -536,6 +542,24 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               {" · "}
               {ffmpegVersion ? ffmpegVersion.split(" ").slice(0, 3).join(" ") : "ffmpeg unavailable"}
             </StatLine>
+            {cookies && cookies.present && (
+              <StatLine
+                icon={Cookie}
+                className={cn(
+                  "text-[10px]",
+                  cookiesSuspect ? "text-amber-300" : "text-muted-foreground",
+                )}
+                title={
+                  cookies.problem ??
+                  "cookies.txt exported from a logged-in browser — gets this host past YouTube's bot check"
+                }
+              >
+                {cookiesSuspect && <TriangleAlert className="size-3" />}
+                cookies.txt {Math.round(cookies.ageDays ?? 0)}d old ·{" "}
+                {cookies.cookieCount ?? 0} cookies
+                {cookiesSuspect ? " · refresh it" : ""}
+              </StatLine>
+            )}
             {mediaDir && (
               <StatLine icon={Film} className="font-mono text-[10px]" title="Where rendered clips are written">
                 media {mediaDir}

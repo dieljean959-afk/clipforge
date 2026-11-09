@@ -43,6 +43,7 @@ from app import (
     sharelink,
     subtitle,
 )
+from app import download as download_mod
 from app import encode as encode_mod
 from app.hosting import disk_stats
 from app import llm as llm_mod
@@ -1106,6 +1107,15 @@ def health() -> dict:
             },
         ),
         "tailnetIp": hosting.tailnet_ip(),
+        # The cookie jar's real state, so an expiring export is a visible
+        # warning before it becomes a URL that will not download. Reading a
+        # small text file is cheap; a yt-dlp probe is not, and is not done here.
+        "cookies": _block(
+            "cookies",
+            lambda: download_mod.cookie_health(
+                getattr(settings.download, "cookies_file", "") or None
+            ),
+        ),
         "limits": {
             "maxSourceMin": settings.hosted.max_source_min,
             "retentionHours": settings.hosted.retention_hours,
