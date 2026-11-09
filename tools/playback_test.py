@@ -36,10 +36,10 @@ from app.config import (  # noqa: E402
     ffmpeg_bin,
     ffprobe_bin,
 )
+from app.encode import EncoderChoice  # noqa: E402
 from app.store import LocalStore  # noqa: E402
 from app.video import (  # noqa: E402
     AUDIO_ARGS,
-    MP4_MOVFLAGS,
     VIDEO_PROFILE_ARGS,
     browser_safe_args,
 )
@@ -71,11 +71,18 @@ def test_render_args() -> None:
     print("\n[1] every render branch carries faststart + a pinned profile")
     body = src("app/video.py")
 
-    check(
-        "faststart is declared",
-        MP4_MOVFLAGS == ["-movflags", "+faststart"],
-        str(MP4_MOVFLAGS),
-    )
+    # `-movflags +faststart` moved into EncoderChoice.ffmpeg_codec_args(), where
+    # each encoder has its own branch. Check every branch, because one that
+    # forgets faststart leaves the moov atom at the end of the file — the exact
+    # shape that will not start playing until it has downloaded whole.
+    for name in ("libx264", "h264_nvenc", "h264_vaapi", "h264_qsv"):
+        args = EncoderChoice(encoder="" if name == "libx264" else name).ffmpeg_codec_args()
+        at = args.index("-movflags") if "-movflags" in args else -1
+        check(
+            f"faststart is declared for {name}",
+            at >= 0 and args[at + 1] == "+faststart",
+            " ".join(args),
+        )
     check(
         "profile/level are High 4.0",
         VIDEO_PROFILE_ARGS == ["-profile:v", "high", "-level:v", "4.0"],
@@ -97,11 +104,15 @@ def test_render_args() -> None:
     check("no branch is still on the old 160k audio", '"-b:a", "160k"' not in body)
 
     args = browser_safe_args("")
-    check("browser_safe_args keeps faststart", "-movflags" in args and "+faststart" in args)
+    # faststart is no longer this helper's job — it lives in
+    # EncoderChoice.ffmpeg_codec_args(), which section 1 checks on every
+    # encoder branch. What must still hold here is the pinned profile.
+    check("browser_safe_args does not duplicate faststart",
+          "-movflags" not in args, str(args))
     check("browser_safe_args pins the profile", "-profile:v" in args and "-level:v" in args)
     vaapi = browser_safe_args("h264_vaapi")
     check("VAAPI is exempted from profile/level (its muxer rejects them)",
-          "+faststart" in " ".join(vaapi) and "-profile:v" not in vaapi, str(vaapi))
+          vaapi == [], str(vaapi))
 
 
 # --------------------------------------------------------------------------- #
@@ -164,8 +175,13 @@ def test_served_file() -> None:
             static_dir=tmp / "static",
         )
         store = LocalStore(paths)
-        job = store.create_job("upload", "x.mp4")
-        clips = store.create_clips(job["_id"], [{"start": 0.0, "end": 3.0, "title": "c"}], "src")
+        job = store.create_job(source_type="upload", source="x.mp4")
+        # create_clips() answers the summary blob, not the documents; the
+        # documents are read back from the store.
+        store.create_clips(
+            job["_id"], [{"start": 0.0, "end": 3.0, "title": "c"}], detected_source="src"
+        )
+        clips = store.list_clips(job["_id"])
         clips[0]["videoPath"] = str(good)
         clips[0]["renderState"] = "done"
         store.write_clip(clips[0])
@@ -237,7 +253,7 @@ def test_backfill() -> None:
 
 def test_frontend() -> None:
     print("\n[4] the <video> element asks for the right things")
-    body = src("src/components/clipforge/ClipPreview.tsx")
+    body = src("src/components/clipmake/ClipPreview.tsx")
 
     check('preload="metadata" is set', 'preload="metadata"' in body)
     check("playsInline is set", "playsInline" in body)

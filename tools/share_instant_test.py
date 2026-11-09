@@ -204,7 +204,7 @@ def test_invalidation() -> None:
 
 def test_tap_path_is_synchronous() -> None:
     section("3. the tap path awaits nothing (the 300 ms acceptance target)")
-    btn = _ts_code("src/components/clipforge/ShareButton.tsx")
+    btn = _ts_code("src/components/clipmake/ShareButton.tsx")
     handler = btn[btn.find("const onShare"):btn.find("const pct =")]
     check("the click handler exists", "const onShare" in btn)
 
@@ -236,7 +236,7 @@ def test_tap_path_is_synchronous() -> None:
 
 def test_abort_is_not_an_error() -> None:
     section("4. cancelling the sheet is silent, real failures are not")
-    btn = _ts_code("src/components/clipforge/ShareButton.tsx")
+    btn = _ts_code("src/components/clipmake/ShareButton.tsx")
     check("AbortError is recognised", "AbortError" in btn)
     check("AbortError returns before any toast",
           re.search(r"if \(isAbort\(err\)\) return;", btn) is not None)
@@ -360,7 +360,7 @@ def test_spinner_terminates() -> None:
                     task) is not None
           and "daemon=True" in task)
 
-    btn = _ts_code("src/components/clipforge/ShareButton.tsx")
+    btn = _ts_code("src/components/clipmake/ShareButton.tsx")
     ms = re.search(r"const READY_TIMEOUT_MS = ([\d_]+);", btn)
     check("the preparing ring gives up on a human timescale", ms is not None)
     if ms:

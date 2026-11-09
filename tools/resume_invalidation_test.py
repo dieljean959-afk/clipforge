@@ -82,10 +82,14 @@ def main() -> int:
         store.write_job({"_id": job_id, "source": "x", "title": "t", "stage": "rendering"})
 
         # ---- 1. identical cuts: the render must survive ----------------
-        docs = store.create_clips(job_id, [candidate(142.1, 165.57)], "groq")
+        # create_clips() answers the summary blob, so the documents under test
+        # are read back from the store — that is also the state a resume sees.
+        store.create_clips(job_id, [candidate(142.1, 165.57)], detected_source="groq")
+        docs = store.list_clips(job_id)
         store.write_clip({**docs[0], **rendered_doc()})
 
-        same = store.create_clips(job_id, [candidate(142.1, 165.57)], "groq")
+        store.create_clips(job_id, [candidate(142.1, 165.57)], detected_source="groq")
+        same = store.list_clips(job_id)
         check(len(store.list_clips(job_id)) == 1, "resume reuses one clip doc, not a new one")
         check(same[0].get("renderState") == "done", "unchanged cut keeps renderState=done")
         check(same[0].get("videoPath") == "/outputs/clip_01.mp4", "unchanged cut keeps videoPath")
@@ -98,11 +102,13 @@ def main() -> int:
         )
 
         # ---- 2. sub-frame float noise must NOT invalidate --------------
-        noise = store.create_clips(job_id, [candidate(142.100001, 165.570001)], "groq")
+        store.create_clips(job_id, [candidate(142.100001, 165.570001)], detected_source="groq")
+        noise = store.list_clips(job_id)
         check(noise[0].get("renderState") == "done", "float noise (<20ms) still resumes")
 
         # ---- 3. the cut MOVED: the render must be invalidated ----------
-        moved = store.create_clips(job_id, [candidate(440.23, 486.22)], "groq")
+        store.create_clips(job_id, [candidate(440.23, 486.22)], detected_source="groq")
+        moved = store.list_clips(job_id)
         check(moved[0].get("renderState") == "pending", "moved start invalidates the render")
         for field in ("videoPath", "thumbPath", "mediaBytes", "mediaWidth",
                       "mediaHeight", "mediaDurationSec", "renderMs", "cropBox",
@@ -117,30 +123,34 @@ def main() -> int:
 
         # ---- 4. only the tail moved: still invalid ---------------------
         store.write_clip({**moved[0], **rendered_doc()})
-        tail = store.create_clips(job_id, [candidate(440.23, 500.0)], "groq")
+        store.create_clips(job_id, [candidate(440.23, 500.0)], detected_source="groq")
+        tail = store.list_clips(job_id)
         check(tail[0].get("renderState") == "pending", "moved end invalidates the render")
 
         # ---- 5. a failed render is retried -----------------------------
         store.write_clip({**tail[0], **rendered_doc(renderState="failed", mediaError="boom")})
-        again = store.create_clips(job_id, [candidate(440.23, 500.0)], "groq")
+        store.create_clips(job_id, [candidate(440.23, 500.0)], detected_source="groq")
+        again = store.list_clips(job_id)
         check(again[0].get("renderState") == "pending", "failed render stays retryable")
         check(again[0].get("mediaError") is None, "retry clears the old media error")
 
         # ---- 6. a stuck 'running' render is retried --------------------
         store.write_clip({**again[0], **rendered_doc(renderState="running")})
-        stuck = store.create_clips(job_id, [candidate(440.23, 500.0)], "groq")
+        store.create_clips(job_id, [candidate(440.23, 500.0)], detected_source="groq")
+        stuck = store.list_clips(job_id)
         check(stuck[0].get("renderState") == "pending", "interrupted 'running' render is retried")
 
         # ---- 7. fewer candidates than before: extras are dropped -------
         store.write_clip({**stuck[0], **rendered_doc()})
-        shrunk = store.create_clips(job_id, [candidate(1.0, 5.0)], "groq")
+        store.create_clips(job_id, [candidate(1.0, 5.0)], detected_source="groq")
+        shrunk = store.list_clips(job_id)
         check(len(shrunk) == 1, "candidate list is authoritative for clip count")
         kept = [c for c in store.list_clips(job_id)]
         check(all(c.get("order") == 0 for c in kept), "no orphan clip docs keep a stale order")
 
         # ---- 8. persistence: the invalidation survives a reload --------
         store.write_clip({**shrunk[0], **rendered_doc()})
-        store.create_clips(job_id, [candidate(999.0, 1010.0)], "groq")
+        store.create_clips(job_id, [candidate(999.0, 1010.0)], detected_source="groq")
         reloaded = store.list_clips(job_id)[0]
         check(reloaded.get("renderState") == "pending", "invalidation is persisted to disk")
         check(reloaded.get("videoPath") is None, "persisted doc has no stale videoPath")

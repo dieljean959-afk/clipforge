@@ -442,7 +442,7 @@ check("downloadClipMp4 still streams from the API", "/download" in export_src)
 check("buildClipSrt untouched", "export function buildClipSrt" in export_src)
 check("captions.txt builder untouched", "export function buildCaptionsTxt" in export_src)
 
-card = (ROOT / "src" / "components" / "clipforge" / "ClipCard.tsx").read_text()
+card = (ROOT / "src" / "components" / "clipmake" / "ClipCard.tsx").read_text()
 check("MP4 button still present", "downloadMp4" in card)
 check("SRT button still present", "buildClipSrt" in card)
 check("Copy caption still present", "copyClipMeta" in card)
@@ -515,9 +515,15 @@ check(
     "PostMenu renders after the download button",
     card.index("<PostMenu") > card.index("void downloadMp4()"),
 )
-check("all three primary actions on one row", primary_row.count("<Button") == 3)
+# Three primary actions, plus a 4th that exists only while a clip is failed
+# ("Retry render"). Counting a flat 3 would fail the moment that repair action
+# is visible; counting the conditional too still rejects a permanent 4th.
+check(
+    "all three primary actions on one row",
+    primary_row.count("<Button") == 3 + ("{failed && (" in primary_row),
+)
 
-ts_src = (ROOT / "src" / "lib" / "clipforge.ts").read_text()
+ts_src = (ROOT / "src" / "lib" / "clipmake.ts").read_text()
 check("TS discovery tags match Python", '"#fyp", "#foryou", "#viral"' in ts_src)
 check("TS max tags match Python", "MAX_TAGS = 7" in ts_src)
 check("TS min tags match Python", "MIN_TAGS = 5" in ts_src)
@@ -528,7 +534,7 @@ check("TS caption cap matches Python", "MAX_CAPTION_CHARS = 150" in ts_src)
 # --------------------------------------------------------------------------- #
 # Share via... vs Post to... — two different things, two different words.
 # --------------------------------------------------------------------------- #
-menu = (ROOT / "src" / "components" / "clipforge" / "PostMenu.tsx").read_text()
+menu = (ROOT / "src" / "components" / "clipmake" / "PostMenu.tsx").read_text()
 share_row = div_block_from(menu, "Share link...", "button")
 # JSX wraps prose across lines, so match against a whitespace-collapsed copy:
 # "share\n  sheet" is the same sentence a reader sees as "share sheet".
@@ -563,7 +569,7 @@ check(
 # a SMALL (<=3 MB) copy of the same render into IndexedDB so navigator.share()
 # can be called synchronously on tap. The 1080p master is still what the MP4
 # button downloads, unchanged.
-_share_btn = (ROOT / "src" / "components" / "clipforge" / "ShareButton.tsx").read_text()
+_share_btn = (ROOT / "src" / "components" / "clipmake" / "ShareButton.tsx").read_text()
 _share_cache = (ROOT / "src" / "lib" / "clip-share-cache.ts").read_text()
 check("the share path uses the clip's own /share endpoint",
       "api.clipShareUrl(clip._id)" in _share_btn or "clipShareUrl(" in _share_btn)
@@ -581,9 +587,9 @@ check("PostMenu no longer downloads the clip on a share tap",
 # --------------------------------------------------------------------------- #
 # Delete a batch: one path, one confirmation, nothing else touched.
 # --------------------------------------------------------------------------- #
-delete_ui = (ROOT / "src" / "components" / "clipforge" / "ConfirmDeleteJob.tsx").read_text()
+delete_ui = (ROOT / "src" / "components" / "clipmake" / "ConfirmDeleteJob.tsx").read_text()
 dash = (ROOT / "src" / "pages" / "Dashboard.tsx").read_text()
-jobcard = (ROOT / "src" / "components" / "clipforge" / "JobCard.tsx").read_text()
+jobcard = (ROOT / "src" / "components" / "clipmake" / "JobCard.tsx").read_text()
 check("a confirmation dialog exists", "AlertDialogContent" in delete_ui)
 check("the dialog asks before deleting",
       "This permanently deletes" in delete_ui and "cannot be undone" in delete_ui)

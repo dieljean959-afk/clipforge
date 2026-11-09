@@ -111,7 +111,7 @@ def main() -> int:
     # the real config paths. Patching an in-process module attribute would not
     # be visible to it — the clip has to exist where the real store looks.
     store = LocalStore(settings.app.paths)
-    job = store.create_job("upload", "demo.mp4", title="Playback probe")
+    job = store.create_job(source_type="upload", source="demo.mp4", title="Playback probe")
     clips = store.create_clips(job["_id"], [{"start": 0.0, "end": 4.0, "title": "probe"}], "src")
     clips[0].update({"videoPath": str(clip_file), "renderState": "done",
                      "thumbPath": None, "mediaBytes": size})

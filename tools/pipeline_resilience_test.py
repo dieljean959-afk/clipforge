@@ -368,7 +368,7 @@ def test_missing_source_is_honest() -> None:
 # ---------------------------------------------------------------- 6
 def test_site_is_intact() -> None:
     section("6. nothing on the site was removed, renamed or reordered")
-    card = (ROOT / "src" / "components" / "clipforge" / "JobCard.tsx").read_text(encoding="utf-8")
+    card = (ROOT / "src" / "components" / "clipmake" / "JobCard.tsx").read_text(encoding="utf-8")
     for needle, why in [
         ("STAGE_LABELS", "the stage stepper"),
         ("Progress", "the progress bar"),
@@ -383,9 +383,9 @@ def test_site_is_intact() -> None:
     ]:
         check(f"JobCard still renders {why}", needle in card, needle)
 
-    card2 = (ROOT / "src" / "lib" / "clipforge.ts").read_text(encoding="utf-8")
+    card2 = (ROOT / "src" / "lib" / "clipmake.ts").read_text(encoding="utf-8")
     for needle in ("QUIET_THRESHOLD_MS", "silenceMs", "fmtAgo", "isActiveJob", "sourceLabel"):
-        check(f"clipforge.ts still exports {needle}", needle in card2, needle)
+        check(f"clipmake.ts still exports {needle}", needle in card2, needle)
 
     backup = ROOT / ".pipeline-backup" / "src"
     if backup.is_dir():
@@ -400,7 +400,7 @@ def test_site_is_intact() -> None:
                    if p.is_file() and not (ROOT / "src" / p.relative_to(backup)).exists()]
         check("no source file was deleted", not removed, str(removed))
         check("only the two approved frontend files changed",
-              set(changed) <= {"components/clipforge/JobCard.tsx", "lib/clipforge.ts"},
+              set(changed) <= {"components/clipmake/JobCard.tsx", "lib/clipmake.ts"},
               str(changed))
         check("no new frontend file appeared",
               not [c for c in changed if not (backup / c).exists()], str(changed))

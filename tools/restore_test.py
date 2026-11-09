@@ -54,7 +54,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         store = make_store(tmp)
-        job = store.create_job("url", "https://example.com/old")
+        job = store.create_job(source_type="url", source="https://example.com/old")
         job["stage"] = "complete"
         # 10 days ago, long finished
         old_ms = 10 * 24 * 3600 * 1000
@@ -94,7 +94,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         store = make_store(tmp)
-        job = store.create_job("upload", "clip.mp4", title="My batch")
+        job = store.create_job(source_type="upload", source="clip.mp4", title="My batch")
         clips = store.create_clips(job["_id"], [{"start": 0.0, "end": 4.0, "title": "c1"}], "src")
 
         # A rendered clip on disk, at the path the app would serve it from.
@@ -144,7 +144,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         store = make_store(tmp)
-        job = store.create_job("url", "https://example.com/x")
+        job = store.create_job(source_type="url", source="https://example.com/x")
         store.delete_job(job["_id"])
         # simulate trash having been cleared out by hand
         for d in (tmp / "data" / "trash").glob("*"):

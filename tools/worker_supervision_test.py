@@ -36,7 +36,7 @@ def main() -> int:
     settings = load_config(quiet=True)
     store = LocalStore(settings.app.paths)
     worker = InProcessWorker(settings, store)
-    job = store.create_job("upload", "sample.mp4")
+    job = store.create_job(source_type="upload", source="sample.mp4")
     job_id = job["_id"]
 
     # Keep the first two stages complete and prove the first incomplete stage

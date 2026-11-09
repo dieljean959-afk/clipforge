@@ -1,4 +1,4 @@
-// Tests for the whole-pipeline status indicator (src/lib/clipforge.ts).
+// Tests for the whole-pipeline status indicator (src/lib/clipmake.ts).
 //
 // The property that matters: a job must read as DONE only when the server
 // says stage === "complete", and must read as FAILED (never "stuck"/running)
@@ -18,7 +18,7 @@ import {
   overallStatus,
   silenceMs,
   type JobDoc,
-} from "../src/lib/clipforge";
+} from "../src/lib/clipmake";
 
 let failures: string[] = [];
 

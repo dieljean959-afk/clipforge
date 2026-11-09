@@ -5,7 +5,7 @@ The pipeline resumes by re-queuing jobs that a host restart interrupted
 `stage` at whatever stage it died in and `progress` at its last value.
 
 The dashboard derives its whole status from those two fields
-(`overallStatus()` in src/lib/clipforge.ts), so the result was a job that was
+(`overallStatus()` in src/lib/clipmake.ts), so the result was a job that was
 sitting in a queue — possibly behind two others — presented as "Stage 3 of 4
 — Detecting, 99%". Indistinguishable from real work, and worse than a plain
 error because it never resolves: the user watches a spinner that means nothing.
@@ -36,7 +36,7 @@ from app.task import Pipeline  # noqa: E402
 FAILS: list[str] = []
 CHECKS = 0
 
-# Mirrors src/lib/clipforge.ts overallStatus()
+# Mirrors src/lib/clipmake.ts overallStatus()
 STAGE_LABELS = {
     "grabbing": "Fetching video",
     "transcribing": "Transcribing audio",
@@ -169,11 +169,15 @@ def main() -> int:
         # recovered from. The invariant is: a job that is not stage="failed"
         # carries no error.
         task_src = (Path(__file__).resolve().parents[1] / "app" / "task.py").read_text(encoding="utf-8")
-        prog_body = task_src.split("def _progress(", 1)[-1].split("\n    def ", 1)[0]
+        # `_progress` only walks to the job lock now; the mutation — and so the
+        # error-clearing — lives in `_apply_progress`. Grep the body that
+        # actually clears it, so splitting the method again cannot turn this
+        # into a false failure for behaviour that is still there.
+        prog_body = task_src.split("def _apply_progress(", 1)[-1].split("\n    def ", 1)[0]
         finish_body = task_src.split("def _finish(", 1)[-1].split("\n    def ", 1)[0]
         check(
             prog_body.count('job["error"] = None') >= 1,
-            "_progress clears a stale error when the stage changes",
+            "_apply_progress clears a stale error when the stage changes",
         )
         check('"error": None' in finish_body, "_finish clears the error on success")
         check(
@@ -190,7 +194,10 @@ def main() -> int:
         # red banner was a phantom with no action behind it.
         from app.worker import InProcessWorker as _W  # noqa: E402
 
-        media = root / "outputs" / "jclip"
+        # `clips_delivered` counts media in outputs/<job_id>/, so the fixture
+        # has to write it there too: under a differently-named folder every
+        # "rendered" count below was 0 and the four checks tested nothing.
+        media = root / "outputs" / "j"
         media.mkdir(parents=True, exist_ok=True)
         for i in range(3):
             (media / f"clip_{i}.mp4").write_bytes(b"\x00" * 16)
@@ -201,7 +208,7 @@ def main() -> int:
                  "videoPath": str(media / f"clip_{i}.mp4")}
                 for i in range(3)
             ],
-            "groq",
+            detected_source="groq",
         )
         # create_clips() writes the DETECTION fields; the media path is stamped
         # later by the encode stage, so mirror that here rather than pretending
@@ -287,7 +294,7 @@ def section_no_stale_writes(store, pipeline) -> None:
     clip-count annotation was written back from the stale dict each time.
     """
     print("\n-- stage writes never resurrect a stale job --")
-    job = store.create_job("upload", "stale.mp4")
+    job = store.create_job(source_type="upload", source="stale.mp4")
     jid = job["_id"]
     # This is exactly what run() hands to every stage.
     handed_down = store.get_job(jid)
@@ -321,7 +328,7 @@ def section_no_stale_writes(store, pipeline) -> None:
     # A resumed job reuses the cached candidates, so the "N found / M above the
     # floor" explanation has to be rebuilt from them. It was left blank, which
     # hid exactly the number a user needs to decide whether to move the cap.
-    job2 = store.create_job("upload", "resume.mp4")
+    job2 = store.create_job(source_type="upload", source="resume.mp4")
     jid2 = job2["_id"]
     pipeline._patch_job(jid2, durationSec=3273.0)
     cached = [
@@ -394,7 +401,7 @@ def section_no_stale_writes(store, pipeline) -> None:
 
     # Same rule on the frontend: the fallback copy is provider-neutral.
     ts = (Path(__file__).resolve().parents[1] / "src" / "lib"
-          / "clipforge.ts").read_text(encoding="utf-8")
+          / "clipmake.ts").read_text(encoding="utf-8")
     loading = ts.split("STAGE_LOADING")[1].split("};")[0]
     loading_code = "\n".join(ln for ln in loading.splitlines()
                              if not ln.lstrip().startswith("//") and

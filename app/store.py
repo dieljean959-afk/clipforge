@@ -592,8 +592,14 @@ class LocalStore:
         *,
         detected_source: str | None = None,
         words: list[dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Record the AI-detected candidate clips for a job.
+
+        Returns the lightweight SUMMARY blob (``jobId``, ``candidateCount``,
+        ``clipCount``, ``detectedSource``, ``detectedAt``, ``clipIds``) — not the
+        clip documents. This said ``list[dict]`` for a while, so callers that
+        trusted the annotation indexed the summary and raised ``KeyError: 0``;
+        read the documents back with ``list_clips(job_id)``.
 
         Called after the detection stage finishes. Persists one clip document
         per candidate under ``data/clips/<job_id>/<clip_id>.json`` so the

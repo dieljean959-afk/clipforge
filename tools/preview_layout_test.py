@@ -186,7 +186,7 @@ def test_existing_clips() -> None:
 
 def test_taps_reach_the_video() -> None:
     print("\n[3] taps reach the <video>, not an invisible overlay")
-    card = src("src/components/clipforge/ClipCard.tsx")
+    card = src("src/components/clipmake/ClipCard.tsx")
     # The old overlay: an absolutely-positioned button covering the media area.
     check("ClipCard has no absolutely-positioned overlay button over the frame",
           'absolute inset-x-2 top-2' not in card)
@@ -194,14 +194,14 @@ def test_taps_reach_the_video() -> None:
           "bottom-12 cursor-pointer rounded-t-xl" not in card)
     check("the title still opens the detail dialog",
           "onClick={() => onOpen?.(clip)}" in card)
-    preview = src("src/components/clipforge/ClipPreview.tsx")
+    preview = src("src/components/clipmake/ClipPreview.tsx")
     check("the <video> itself handles the tap",
           "onClick={() => void togglePlay()}" in preview)
 
 
 def test_fills_the_card() -> None:
     print("\n[4] the frame fills its 9:16 box")
-    body = src("src/components/clipforge/ClipPreview.tsx")
+    body = src("src/components/clipmake/ClipPreview.tsx")
     check("the container declares 9:16", 'aspect-[9/16]' in body)
     check("the video is display:block (no inline baseline gap)",
           'className="block h-full w-full object-cover"' in body)
@@ -215,7 +215,7 @@ def test_fills_the_card() -> None:
 
 def test_playback_wiring() -> None:
     print("\n[5] play, pause, seek and mute are real")
-    body = src("src/components/clipforge/ClipPreview.tsx")
+    body = src("src/components/clipmake/ClipPreview.tsx")
     check("play() is awaited inside the click handler", "await v.play()" in body)
     check("the play() promise is handled", ".catch(" in body or "catch (err)" in body)
     check("a refused play is surfaced", "setVideoFailed(true)" in body)
@@ -237,8 +237,8 @@ def test_playback_wiring() -> None:
 
 def test_only_one_plays() -> None:
     print("\n[6] starting one clip pauses the others")
-    body = src("src/components/clipforge/ClipPreview.tsx")
-    check("a play broadcast exists", "clipforge:clip-play" in body)
+    body = src("src/components/clipmake/ClipPreview.tsx")
+    check("a play broadcast exists", "clipmake:clip-play" in body)
     check("playing dispatches it", "new CustomEvent(PLAY_EVENT" in body)
     check("receivers pause the other element", "other.pause()" in body)
     check("receivers ignore their own element", "other !== videoRef.current" in body)
@@ -248,7 +248,7 @@ def test_only_one_plays() -> None:
 
 def test_lightbox() -> None:
     print("\n[7] the review modal")
-    body = src("src/components/clipforge/ClipPreview.tsx")
+    body = src("src/components/clipmake/ClipPreview.tsx")
     check("an expand control exists", "Maximize2" in body and "setExpanded(true)" in body)
     check("it is a modal dialog", 'role="dialog"' in body and 'aria-modal="true"' in body)
     check("it is portalled to the body (transform-safe)",
@@ -266,18 +266,20 @@ def test_lightbox() -> None:
 
 def test_caption_preview() -> None:
     print("\n[8] the burned-in caption is visible while previewing")
-    body = src("src/components/clipforge/ClipPreview.tsx")
+    body = src("src/components/clipmake/ClipPreview.tsx")
     check("a cue lookup helper exists", "function cueAt" in body)
     check("cues are matched against currentTime", "cueAt(clip, t)" in body)
     check("the cue is rendered as an overlay", "pointer-events-none absolute" in body)
+    # Legibility is set as an inline style object now, so it is `textShadow`.
     check("the overlay is legible on any frame",
-          "text-shadow" in body)
-    check("the overlay only shows during playback", 'controls && cue !== ""' in body)
+          "textShadow" in body)
+    # cueAt() answers null for "no cue", so the gate is a null check.
+    check("the overlay only shows during playback", "controls && cue !== null" in body)
 
 
 def test_resilient_loading() -> None:
     print("\n[9] a flaky connection does not permanently kill a clip")
-    body = src("src/components/clipforge/ClipPreview.tsx")
+    body = src("src/components/clipmake/ClipPreview.tsx")
 
     # THE bug this section exists for: the retry rode AFTER the '#', so it was
     # part of the fragment, which never reaches the server and is not part of
@@ -312,7 +314,7 @@ def test_resilient_loading() -> None:
 
 def test_controls_fit_a_phone() -> None:
     print("\n[10] the control bar survives a 2-up phone grid")
-    body = src("src/components/clipforge/ClipPreview.tsx")
+    body = src("src/components/clipmake/ClipPreview.tsx")
     # The seek track collapsed to zero width on a narrow card, so its 12px
     # thumb rendered on top of the mute button and the time was clipped.
     check("the seek track has a minimum width", "min-w-8" in body)

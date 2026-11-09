@@ -42,8 +42,8 @@ def src(rel: str) -> str:
 # --------------------------------------------------------------------------- #
 
 def _fmt_duration_long_js() -> str:
-    """Extract fmtDurationLong from clipforge.ts and run it under node."""
-    body = src("src/lib/clipforge.ts")
+    """Extract fmtDurationLong from clipmake.ts and run it under node."""
+    body = src("src/lib/clipmake.ts")
     m = re.search(
         r"export function fmtDurationLong\([^)]*\)[^{]*\{.*?\n\}", body, re.DOTALL
     )
@@ -56,7 +56,7 @@ def _fmt_duration_long_js() -> str:
 def test_duration_formatting() -> None:
     print("\n[BUG 3] durations render as mm:ss / h:mm:ss, rounded")
     fn = _fmt_duration_long_js()
-    check("fmtDurationLong exists in clipforge.ts", bool(fn))
+    check("fmtDurationLong exists in clipmake.ts", bool(fn))
     if not fn:
         return
     cases = [
@@ -91,7 +91,7 @@ console.log(JSON.stringify(out));
         check(f"fmtDurationLong({got_in}) == {want!r}", got == want, f"got {got!r}")
 
     # The exact string from the bug report must not survive anywhere.
-    for rel in ("src/pages/Dashboard.tsx", "src/components/clipforge/JobCard.tsx"):
+    for rel in ("src/pages/Dashboard.tsx", "src/components/clipmake/JobCard.tsx"):
         body = src(rel)
         check(f"{rel} no longer interpolates a raw float",
               not re.search(r"\{[^}]*totalClipsSec[^}]*\}s", body),
@@ -105,7 +105,7 @@ console.log(JSON.stringify(out));
 
 def test_batch_label() -> None:
     print("\n[BUG 5] batches are identified by title or video ID, not bare host")
-    body = src("src/lib/clipforge.ts")
+    body = src("src/lib/clipmake.ts")
     check("batchLabel exists", "export function batchLabel" in body)
     check("sourceId exists", "export function sourceId" in body)
 
@@ -147,7 +147,7 @@ console.log(JSON.stringify(cases.map(([s,u]) => [s, sourceId({{source: s, isUplo
     check("Dashboard pill shows the date", "fmtDate(job.createdAt)" in dash)
     check("Dashboard no longer slices sourceLabel into the pill",
           "sourceLabel(job).slice(" not in dash)
-    card = src("src/components/clipforge/JobCard.tsx")
+    card = src("src/components/clipmake/JobCard.tsx")
     check("JobCard header uses batchLabel", "batchLabel(job)" in card)
 
 
@@ -157,14 +157,16 @@ console.log(JSON.stringify(cases.map(([s,u]) => [s, sourceId({{source: s, isUplo
 
 def test_friendly_error() -> None:
     print("\n[BUG 4] a short message up front, traceback behind a disclosure")
-    card = src("src/components/clipforge/JobCard.tsx")
+    card = src("src/components/clipmake/JobCard.tsx")
     check("FailureNotice component exists", "function FailureNotice" in card)
     check("the failed block uses it", "<FailureNotice job={job} />" in card)
     check("the traceback is NOT rendered inline",
           not re.search(r"\{job\.errorDetail\}\s*</p>", card),
           "errorDetail still rendered as plain text")
+    # A native <details>/<summary> disclosure announces its own expanded state,
+    # so there is no aria-expanded to add here; the disclosure is the element.
     check("details are behind a disclosure",
-          "Show details" in card and "aria-expanded" in card)
+          "Show details" in card and "<details" in card and "<summary" in card)
     check("details are scrollable, not page-widening",
           "overflow-auto" in card and "whitespace-pre-wrap" in card)
     # The specific overflow bug was long unbreakable paths.
@@ -235,11 +237,11 @@ def test_single_source_of_truth() -> None:
     check("Dashboard no longer re-derives from stage",
           'j.stage !== "complete" && j.stage !== "failed"' not in dash)
 
-    card = src("src/components/clipforge/JobCard.tsx")
+    card = src("src/components/clipmake/JobCard.tsx")
     check("JobCard keys off status", 'job.status === "failed"' in card)
     check("JobCard uses activeStage for the stepper", "job.activeStage" in card)
     check("live progress gated on terminal state",
-          "const watching = !job.isTerminal" in card)
+          "const watching = !isTerminal" in card)
     # The exact contradiction: a live block rendered for a failed job. Gated
     # on `watching` (the backend's verdict), NOT on stage equality — that is
     # the structural change, so assert the gate is not the old one.

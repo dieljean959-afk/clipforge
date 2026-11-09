@@ -52,7 +52,7 @@ def has_all(haystack: str, needles: list[str], label: str) -> None:
 # a 360px viewport and cut off on the right.
 # --------------------------------------------------------------------------- #
 print("[1] PostMenu share sheet stays inside the viewport")
-sheet = classes_of("components/clipforge/PostMenu.tsx")
+sheet = classes_of("components/clipmake/PostMenu.tsx")
 has_all(
     sheet,
     ["w-full", "max-w-[100vw]", "box-border", "overflow-x-hidden", "p-4"],
@@ -65,7 +65,7 @@ has_all(
     ["whitespace-normal", "[overflow-wrap:anywhere]", "break-words"],
     "caption + title wrap (no nowrap, arbitrary break allowed)",
 )
-postmenu_all = read("components/clipforge/PostMenu.tsx")
+postmenu_all = read("components/clipmake/PostMenu.tsx")
 check("whitespace-nowrap" not in postmenu_all, "no nowrap anywhere in PostMenu")
 
 # Every action row inside the sheet needs min-w-0 on the flex rows so a long
@@ -87,7 +87,7 @@ for i, row in enumerate(rows):
 # The platform cards: label squeezed to one word per line beside the buttons.
 # --------------------------------------------------------------------------- #
 print("\n[2] SocialAccounts cards fill the row on mobile")
-sa = read("components/clipforge/SocialAccounts.tsx")
+sa = read("components/clipmake/SocialAccounts.tsx")
 check("flex-col" in sa and "sm:flex-row" in sa,
       "cards stack vertically on mobile, row from sm")
 check("min-w-0" in sa, "card content is allowed to fill the row (min-w-0)")
@@ -107,7 +107,7 @@ check(
 )
 check(dash.count("min-w-0") >= 3, "grid children opt out of intrinsic width (min-w-0)")
 
-lwc = read("components/clipforge/LocalWorkerCard.tsx")
+lwc = read("components/clipmake/LocalWorkerCard.tsx")
 check("min-w-0" in lwc, "status card can shrink below its content width")
 
 # --------------------------------------------------------------------------- #

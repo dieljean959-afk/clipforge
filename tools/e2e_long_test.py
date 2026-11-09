@@ -56,7 +56,7 @@ def cmd_submit() -> int:
     if jid and store.get_job(jid):
         print(f"already submitted: {jid} ({store.get_job(jid)['stage']})")
         return 0
-    job = store.create_job("url", SOURCE_URL)
+    job = store.create_job(source_type="url", source=SOURCE_URL)
     jid = job["_id"]
     store.append_job_log(jid, f"e2e test submitted: {SOURCE_URL}")
     STATE.write_text(json.dumps({"jobId": jid, "source": SOURCE_URL}), encoding="utf-8")

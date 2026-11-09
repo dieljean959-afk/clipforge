@@ -232,7 +232,7 @@ def section_queue(tmp: Path) -> None:
     # without pretending this constrained host can run three model instances.
     worker.concurrency = 3
 
-    job_ids = [store.create_job("upload", "missing.mp4")["_id"] for _ in range(3)]
+    job_ids = [store.create_job(source_type="upload", source="missing.mp4")["_id"] for _ in range(3)]
     for job_id in job_ids:
         worker.enqueue(job_id)
 
@@ -277,7 +277,7 @@ def section_queue(tmp: Path) -> None:
 
     # Retry must kill a live old process before enqueueing a new attempt. This
     # uses a fake process so the check never starts a second real model load.
-    retry_job = store.create_job("upload", "missing-retry.mp4")["_id"]
+    retry_job = store.create_job(source_type="upload", source="missing-retry.mp4")["_id"]
     class FakeProcess:
         pid = 424242
         def poll(self):
@@ -363,7 +363,7 @@ def section_eta(tmp: Path) -> None:
     os.environ["CLIPFORGE_DATA_DIR"] = str(tmp / "data")
     settings = load_config(quiet=True)
     pipeline = Pipeline(settings, LocalStore(settings.app.paths))
-    job = pipeline.store.create_job("upload", "missing.mp4")
+    job = pipeline.store.create_job(source_type="upload", source="missing.mp4")
     job["durationSec"] = 600.0
     pipeline.store.write_job(job)
     pipeline._progress(job["_id"], "transcribing", 0.0, "test",
