@@ -131,10 +131,13 @@ export interface JobDto {
   /** Authoritative status from the backend's single derivation. Prefer this
    *  over inferring one from `stage` + `progress` — those two disagreeing is
    *  exactly what produced "Failed" beside "61% overall, running". */
-  status: "queued" | "running" | "paused" | "failed" | "complete";
+  status: "queued" | "running" | "paused" | "failed" | "complete" | "deleting";
   /** True once no further progress is possible. When true, every running-only
    *  field (stagePlan, units, ETAs, queuePosition) is absent from the payload. */
   isTerminal: boolean;
+  /** Present while a delete is being purged in the background. `error` is the
+   *  last step that failed, kept so a stuck purge is visible, never silent. */
+  deleting?: { error?: string | null; attempts?: number; removed?: number } | null;
   /** The stage a RUNNING job is on, or null. Never set for a dead job. */
   activeStage?: string | null;
   /** Human name of the stage this job is on, or died in. */
@@ -544,10 +547,11 @@ async function errorText(res: Response): Promise<string> {
     // not work" was reported: the reader was shown the error page's source
     // instead of the one thing they needed to know.
     if (/^\s*(<!doctype|<html)/i.test(raw)) {
-      return (
-        `The server was restarting and its proxy answered HTTP ${res.status} ` +
-        "with an error page instead of the API. Nothing was changed — try again in a few seconds."
-      );
+      // Short message the reader can act on, with the real status kept in
+      // parentheses. Never the page source: this body came from a hop in
+      // FRONT of the API (the proxy/CDN answering 502/504 while the sandbox
+      // restarted), not from any route in this app.
+      return `Server is restarting, retrying… (HTTP ${res.status}, proxy error page — not the API)`;
     }
     try {
       const body = JSON.parse(raw) as {
@@ -771,73 +775,77 @@ export const api = {
       body: fd,
     });
   },
-  /** Delete one batch. */
+  /**
+   * Mark one batch for deletion. The server answers 202 immediately and
+   * finishes removing files/objects in the background, so this call must NOT
+   * wait for a purge — it waits only for the acknowledgement, and it is safe
+   * to repeat (marking an already-`deleting` batch is idempotent).
+   *
+   * Retry budget is ~30 s (1+2+4+8+15), because that is how long a sandbox
+   * restart or a load-balancer failover takes; the old 3 s budget expired
+   * inside the outage and reported a failure for every tap. Only 502/503/504,
+   * a proxy error page, and a fetch that never reached an HTTP status are
+   * retried — a 400/401/403 is a real answer and is surfaced at once.
+   */
   deleteJob: async (jobId: string, keepSource = false) => {
-    type DeleteResult = { deleted: boolean; cancelled: "queued" | "running" | "absent"; keptSource?: boolean };
+    type DeleteResult = {
+      deleting: boolean;
+      jobId: string;
+      status: "deleting";
+      keptSource?: boolean;
+      deleted?: boolean;
+      cancelled?: "queued" | "running" | "absent";
+    };
     const id = encodeURIComponent(jobId);
     const routeMissing = (msg: string) =>
       /^not found$/i.test(msg) || /method not allowed/i.test(msg);
-    /*
-     * Transient = the request never got a considered answer: the sandbox was
-     * mid-restart, the proxy in front of it served its own 5xx page, or the
-     * fetch itself threw. A delete that fails that way has, as far as anyone
-     * knows, not happened — so it is retried instead of reported.
-     *
-     * This is the difference between "Delete does not work" and a delete that
-     * works: the API answered correctly the whole time, but a single tap that
-     * landed in a restart window surfaced the proxy's HTML error page.
-     */
     const transient = (err: unknown): boolean => {
       const msg = err instanceof Error ? err.message : "";
       // No status at all: fetch threw (offline, DNS, origin dropped).
       if (!/HTTP \d{3}/.test(msg)) return true;
-      if (/API restarting|instead of the API/i.test(msg)) return true;
+      if (/API restarting|proxy error page|instead of the API/i.test(msg)) return true;
       const status = /HTTP (\d{3})/.exec(msg)?.[1];
-      return status !== undefined && status.startsWith("5");
+      return status === "502" || status === "503" || status === "504";
     };
-    const withRetry = async (url: string, init: RequestInit): Promise<DeleteResult> => {
+    const waits = [1000, 2000, 4000, 8000, 15000];
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt <= waits.length; attempt++) {
       try {
-        return await request<DeleteResult>(url, init);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "";
-        if (routeMissing(msg) || !/^HTTP 4\d\d/.test(msg)) throw err;
-        return await request<DeleteResult>(url, init);
-      }
-    };
-    const attemptOnce = async (): Promise<DeleteResult> => {
-      try {
-        return await withRetry(`/api/jobs/${id}/delete`, {
+        return await request<DeleteResult>(`/api/jobs/${id}/delete`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ keepSource }),
         });
       } catch (err) {
+        lastError = err;
         const msg = err instanceof Error ? err.message : "";
         if (routeMissing(msg)) {
-          return await withRetry(`/api/jobs/${id}`, { method: "DELETE" });
+          // This server only has the DELETE verb (an older build): same
+          // operation, same idempotence, so the fallback is safe.
+          try {
+            return await request<DeleteResult>(`/api/jobs/${id}`, { method: "DELETE" });
+          } catch (inner) {
+            lastError = inner;
+            const innerMsg = inner instanceof Error ? inner.message : "";
+            if (routeMissing(innerMsg) || !transient(inner)) throw inner;
+          }
+        } else if (!transient(err)) {
+          throw err;
         }
-        throw err;
-      }
-    };
-    // Three tries, 1s/2s apart: long enough to outlast a restart blip, short
-    // enough that the button's spinner still feels like an answer.
-    let lastError: unknown = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        return await attemptOnce();
-      } catch (err) {
-        lastError = err;
-        if (!transient(err) || attempt === 2) throw err;
-        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        if (attempt === waits.length) break;
+        await new Promise((r) => setTimeout(r, waits[attempt]));
       }
     }
-    throw lastError instanceof Error ? lastError : new Error("Delete failed.");
+    const msg = lastError instanceof Error ? lastError.message : "Delete failed.";
+    throw new Error(
+      `${msg} — gave up after about 30 s of retries. The batch is still there; try again.`,
+    );
   },
   /** Failed batches with nothing delivered — the deletable ones. */
   listJunkJobs: () => request<{ jobs: JunkJobDto[] }>("/api/jobs/junk"),
-  /** Delete many batches in one call (max 200 ids per request). */
+  /** Mark many batches for deletion in one call (max 200 ids per request). */
   bulkDeleteJobs: (jobIds: string[]) =>
-    request<{ deleted: string[]; missing: string[] }>("/api/jobs/bulk-delete", {
+    request<{ deleting: string[]; deleted: string[]; missing: string[] }>("/api/jobs/bulk-delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jobIds }),

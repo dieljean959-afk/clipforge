@@ -23,7 +23,7 @@ disagree by construction.
 What the derivation guarantees
 ------------------------------
 `describe()` returns a single record with:
-  * `status`      — queued | running | paused | failed | complete
+  * `status`      — queued | running | paused | failed | complete | deleting
   * `isTerminal`  — true once no further progress is possible
   * `active`      — the stage a RUNNING job is on, else None
   * `progress`    — 0-100, and forced to 100 for a terminal job so a dead job
@@ -50,7 +50,13 @@ ACTIVE_STAGES: frozenset[str] = frozenset({
 })
 
 #: Terminal stages. Nothing further can happen to a job in one of these.
-TERMINAL_STAGES: frozenset[str] = frozenset({"complete", "failed", "paused"})
+#:
+#: `deleting` belongs here for a hard reason: the stale-heartbeat reconciler
+#: re-queues any live-looking stage with no worker behind it, and re-queuing a
+#: batch that is being purged would run the pipeline on files the purge is
+#: removing. A batch in `deleting` is settled — `app/purge.py` is finishing it,
+#: in the background, with no worker involved.
+TERMINAL_STAGES: frozenset[str] = frozenset({"complete", "failed", "paused", "deleting"})
 
 #: The pipeline stages a user is shown, in order. Used to name the stage a
 #: failed job died in when the raw stage name is an internal alias.
@@ -202,6 +208,7 @@ _TERMINAL_DETAIL: dict[str, str] = {
     "failed": "Stopped — this job is not running.",
     "paused": "Paused — resume to continue from the last checkpoint.",
     "complete": "Done — the clips are ready.",
+    "deleting": "Deleting — removing this batch's files in the background.",
 }
 
 

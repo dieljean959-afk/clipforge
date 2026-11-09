@@ -288,7 +288,25 @@ export function JobCard({
               looking unfinished to a reader when the list only hands back a stale
               snapshot, so this card names the real situation rather than borrowing
               a status word that means something else in another part of the code. */}
-      {overall.state === "done" ? (
+      {job.status === "deleting" ? (
+        // The server marks the batch and purges it in the background. This
+        // card is what a reload sees while that is still running — and, if a
+        // purge step fails, it is the only place the reason is visible.
+        <div
+          data-testid="job-deleting"
+          className="mt-3 flex items-start gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-sm"
+        >
+          <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
+          <div className="min-w-0">
+            <div className="font-semibold">Deleting…</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {job.deleting?.error
+                ? `Retrying — ${String(job.deleting.error).slice(0, 160)}`
+                : "Removing this batch's files in the background. It leaves this list when the last one is gone."}
+            </div>
+          </div>
+        </div>
+      ) : overall.state === "done" ? (
         <div
           data-testid="job-done"
           className="mt-3 flex items-center gap-2 rounded-lg border border-primary/50 bg-primary/10 px-3 py-2.5 text-sm font-semibold text-primary"

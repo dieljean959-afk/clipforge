@@ -1116,6 +1116,12 @@ class InProcessWorker:
         for job in self.store.list_jobs():
             if job.get("_id") in live:
                 continue
+            # A batch being purged is not stale, it is being removed. Never
+            # re-queue it (that would run the pipeline on files the purge is
+            # deleting) and never stamp a failure on it — `app/purge.py` owns
+            # that document until the last of its files is gone.
+            if job.get("deleting"):
+                continue
             from app import jobstatus  # local: avoids an import cycle at module load
 
             if jobstatus.is_terminal(job):

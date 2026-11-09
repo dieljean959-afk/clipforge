@@ -49,6 +49,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
+[tool.pytest.ini_options]
+# Only `tests/` is a pytest suite. `tools/` holds standalone drill scripts
+# that call `sys.exit()` at import time, so collecting them made a bare
+# `pytest -q` die with an INTERNALERROR before running a single test.
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

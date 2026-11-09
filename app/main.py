@@ -39,6 +39,7 @@ from app import (
     hostlimits,
     jobstatus,
     objectstore,
+    purge,
     share_video,
     sharelink,
     subtitle,
@@ -605,6 +606,18 @@ def _start_worker() -> None:
         )
     except Exception as exc:  # noqa: BLE001 - never make the API unavailable
         logger.error(f"[boot] worker daemon did not start: {exc}")
+    # Finishes any batch a restart interrupted mid-delete. Runs on its own
+    # thread and in small steps, so a half-deleted batch is completed at boot
+    # instead of sitting in the list forever — and never in a request.
+    try:
+        purge.start(
+            store,
+            settings.app.paths,
+            cancel=worker.cancel,
+            remote=_purge_remote_job,
+        )
+    except Exception as exc:  # noqa: BLE001 - a purge must not keep the API down
+        logger.warning(f"[boot] delete purge did not start: {exc}")
     retention.start()
     # Sweep ONCE at boot, not just on the daemon's first 30-minute tick.
     #
@@ -2309,7 +2322,12 @@ def list_junk_jobs() -> dict:
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
     job = store.get_job(job_id)
-    if job is None:
+    # `get_job` answers {} for a missing document, not None. Testing only for
+    # None made every deleted batch answer 200 with an empty document, which
+    # `describe` labelled "queued" — the deleted batch appearing to come back
+    # as a fresh queued job. A purge deletes the document, so this is also what
+    # tells the UI that it is finally gone.
+    if not job:
         raise HTTPException(404, "job not found")
     # "Check now" hits this route, so it must reconcile too — otherwise the
     # button that exists to tell the truth is the one place that cannot.
@@ -2320,7 +2338,39 @@ def get_job(job_id: str) -> dict:
     return jobstatus.describe(job)
 
 
-@app.delete("/api/jobs/{job_id}")
+def _start_delete(job_id: str, *, keep_source: bool) -> dict:
+    """Mark one batch `deleting` and return; the purge is not done here.
+
+    The synchronous delete used to do four slow things inside the request — a
+    worker cancel over a unix socket (30 s timeout, retried once), a record
+    delete, a full media-tree walk, and a bucket listing/delete. On a 1 vCPU
+    host with a restarting worker daemon that request outlived the proxy's
+    timeout, the edge answered with its own HTML 502 page, and the batch was
+    still there. So the request now writes ONE document (status: deleting) and
+    answers 202; `app/purge.py` removes the files, the bucket objects and the
+    records in small retryable steps. Nothing here needs a live worker.
+    """
+    if not purge.valid_job_id(job_id):
+        raise HTTPException(400, "invalid job id")
+    try:
+        marked = purge.mark(store, job_id, keep_source=keep_source)
+    except ValueError:
+        raise HTTPException(400, "invalid job id") from None
+    if marked is None:
+        raise HTTPException(404, "job not found")
+    logger.info(
+        f"[api] delete: {job_id} marked `deleting` "
+        f"(keepSource={keep_source}) — purge continues in the background"
+    )
+    return {
+        "deleting": True,
+        "jobId": job_id,
+        "status": purge.STATUS,
+        "keptSource": keep_source,
+    }
+
+
+@app.delete("/api/jobs/{job_id}", status_code=202)
 def delete_job(job_id: str, keepSource: bool = False) -> dict:
     """Delete a batch and everything it wrote to disk.
 
@@ -2328,37 +2378,15 @@ def delete_job(job_id: str, keepSource: bool = False) -> dict:
     the job record, workspace artifacts (transcript, detections, cuts) and
     rendered clips. The checkbox in the confirm dialog backs this: the source
     is the one artifact that costs real bytes, so the reader decides.
+
+    Answers 202 as soon as the batch is marked; the files and bucket objects go
+    in the background (`app/purge.py`), so this route behaves the same whether
+    the worker is running, wedged or absent.
     """
-    # Stop the work FIRST. Deleting the record while a child is still
-    # downloading/transcribing/rendering just burns CPU and LLM calls on a job
-    # nobody is waiting for — and the child would then write its state back.
-    cancelled = worker.cancel(job_id)
-    ok = store.delete_job(job_id)
-    if not ok:
-        raise HTTPException(404, "job not found")
-    # Everything that job wrote to disk. The downloaded source (hundreds of MB
-    # for a long video) and the rendered clips are NOT in the job store, so
-    # without this a manual delete only freed a few KB of JSON and the disk
-    # stayed full — the retention sweeper already does exactly this.
-    remove_workspace(settings.app.paths.data_dir, job_id)
-    unlink_model_dirs(settings.app.paths.data_dir, job_id)
-    if keepSource:
-        # Remove only the per-stage workspace + outputs, keep the source file.
-        # `remove_workspace` already covered data/work/<id>; the source lives
-        # under the per-job source dirs, so removing them now would destroy
-        # the file the reader asked us to keep.
-        shutil.rmtree(settings.app.paths.outputs_dir / job_id, ignore_errors=True)
-    else:
-        for d in settings.app.paths.job_source_dirs(job_id) + (
-            settings.app.paths.outputs_dir / job_id,
-        ):
-            shutil.rmtree(d, ignore_errors=True)
-    hosting_mod.invalidate_disk_cache()
-    _purge_remote_job(job_id)
-    return {"deleted": True, "cancelled": cancelled, "keptSource": keepSource}
+    return _start_delete(job_id, keep_source=keepSource)
 
 
-@app.post("/api/jobs/{job_id}/delete")
+@app.post("/api/jobs/{job_id}/delete", status_code=202)
 def delete_job_post(job_id: str, body: DeleteJobBody | None = None) -> dict:
     """The same delete, over POST.
 
@@ -2371,10 +2399,10 @@ def delete_job_post(job_id: str, body: DeleteJobBody | None = None) -> dict:
     it and this route is the one the dashboard calls. The DELETE route stays
     for anything scripted against the API.
     """
-    return delete_job(job_id, keepSource=bool(body and body.keepSource))
+    return _start_delete(job_id, keep_source=bool(body and body.keepSource))
 
 
-@app.post("/api/jobs/bulk-delete")
+@app.post("/api/jobs/bulk-delete", status_code=202)
 def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
     """Delete many batches in one call — the test-batch janitor.
 
@@ -2391,28 +2419,24 @@ def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
         raise HTTPException(400, "no job ids given")
     if len(body.jobIds) > 200:
         raise HTTPException(400, "too many ids in one request (max 200)")
-    deleted: list[str] = []
+    deleting: list[str] = []
     missing: list[str] = []
     for job_id in body.jobIds:
-        if not worker.cancel(job_id) and store.get_job(job_id) is None:
+        try:
+            marked = purge.mark(store, job_id)
+        except ValueError:
+            marked = None
+        if marked is None:
             missing.append(job_id)
             continue
-        if not store.delete_job(job_id):
-            missing.append(job_id)
-            continue
-        remove_workspace(settings.app.paths.data_dir, job_id)
-        unlink_model_dirs(settings.app.paths.data_dir, job_id)
-        for d in settings.app.paths.job_source_dirs(job_id) + (
-            settings.app.paths.outputs_dir / job_id,
-        ):
-            shutil.rmtree(d, ignore_errors=True)
-        hosting_mod.invalidate_disk_cache()
-        _purge_remote_job(job_id)
-        deleted.append(job_id)
+        deleting.append(job_id)
     logger.info(
-        f"[api] bulk delete: {len(deleted)} removed, {len(missing)} not found"
+        f"[api] bulk delete: {len(deleting)} marked `deleting`, "
+        f"{len(missing)} not found — purged in the background"
     )
-    return {"deleted": deleted, "missing": missing}
+    # `deleted` is kept alongside `deleting` for older clients of this route;
+    # both name batches that will be gone from the next listing page.
+    return {"deleting": deleting, "deleted": deleting, "missing": missing}
 
 
 @app.post("/api/jobs/{job_id}/restore")

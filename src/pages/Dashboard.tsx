@@ -105,8 +105,14 @@ export default function Dashboard() {
   // every running-only field on a terminal job, so filtering here cannot put
   // the same job in two lists. Keyed off `isTerminal`/`status` rather than
   // `stage` so a job can never read as both failed and running.
+  // A batch being purged rides with the active ones on purpose: it is not
+  // done, not failed, and must stay VISIBLE while its files are going — a
+  // purge that fails leaves it here with the reason on the card instead of
+  // silently dropping out of every section.
   const activeJobs = allJobs.filter(
-    (j) => !j.isTerminal && (j.status === "running" || j.status === "queued"),
+    (j) =>
+      j.status === "deleting" ||
+      (!j.isTerminal && (j.status === "running" || j.status === "queued")),
   );
   const doneJobs = allJobs.filter((j) => j.status === "complete");
   const failedJobs = allJobs.filter((j) => j.status === "failed");

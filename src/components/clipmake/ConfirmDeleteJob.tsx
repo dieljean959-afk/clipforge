@@ -55,10 +55,14 @@ export function ConfirmDeleteJob({
     setBusy(true);
     try {
       await api.deleteJob(job._id);
+      // The server answered 202: the batch is marked `deleting` and the files
+      // are removed in the background. Saying "deleted" here would be a claim
+      // about a purge that has not finished (or, if one of its steps fails,
+      // never finishes) — so say what actually happened.
       toast.success(
         clips > 0
-          ? `Deleted “${sourceLabel(job).slice(0, 32)}” and its ${clips} clip${clips === 1 ? "" : "s"}.`
-          : "Batch deleted.",
+          ? `Deleting “${sourceLabel(job).slice(0, 32)}” and its ${clips} clip${clips === 1 ? "" : "s"} — this finishes in the background.`
+          : "Deleting this batch — this finishes in the background.",
       );
       setOpen(false);
       onDeleted?.(job._id);
@@ -70,7 +74,7 @@ export function ConfirmDeleteJob({
       if (/not found|404/i.test(msg)) {
         setOpen(false);
         onDeleted?.(job._id);
-        toast.success("Batch deleted.");
+        toast.success("This batch was already deleted.");
         return;
       }
       toast.error(msg);

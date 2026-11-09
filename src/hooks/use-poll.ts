@@ -146,7 +146,14 @@ export function useJobs(intervalMs = 2000) {
         if (!prev) return page.jobs;
         const known = new Set(prev.map((j) => j._id));
         const fresh = new Map(page.jobs.map((j) => [j._id, j]));
-        const merged = prev.map((j) => fresh.get(j._id) ?? j);
+        // ...but a batch the server is PURGING is an exception: it is shown
+        // while the server still reports `deleting`, and dropped the moment it
+        // stops appearing, because absence is exactly the proof that the purge
+        // finished. Without this the temporary "Deleting…" card outlived the
+        // batch forever — the same merge, opposite direction.
+        const merged = prev
+          .filter((j) => !(j.status === "deleting" && !fresh.has(j._id)))
+          .map((j) => fresh.get(j._id) ?? j);
         for (const j of page.jobs) {
           if (!known.has(j._id)) merged.push(j);
         }
