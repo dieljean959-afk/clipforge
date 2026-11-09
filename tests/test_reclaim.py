@@ -1,0 +1,261 @@
+"""Tests for `app/reclaim.py` — moving finished batches into the bucket.
+
+The point of every test here is the same: a local file may only disappear once
+the bucket really has it, and only for a job that has settled. A reclaim that
+drops a file before the push, or that touches a running batch, is worse than no
+reclaim at all — it destroys the only copy of a render.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from app import objectstore, reclaim
+
+
+class FakeS3:
+    """Minimal S3 stand-in: uploads land in `objects`, and every failure mode
+    the real client has (a rejected push) can be forced with `fail_uploads`."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.fail_uploads = False
+        self.calls: list[str] = []
+
+    def upload_file(self, path: str, bucket: str, key: str, ExtraArgs=None):  # noqa: N803
+        if self.fail_uploads:
+            raise RuntimeError("bucket rejected the upload")
+        self.calls.append(f"upload {key}")
+        self.objects[key] = Path(path).read_bytes()
+
+    def copy_object(self, **kw):
+        self.calls.append(f"copy {kw['Key']}")
+        self.objects[kw["Key"]] = self.objects.pop(kw["CopySource"]["Key"])
+
+    def delete_object(self, **kw):
+        self.objects.pop(kw["Key"], None)
+
+    def head_object(self, **kw):
+        if kw["Key"] not in self.objects:
+            raise KeyError(kw["Key"])
+        return {"ContentLength": len(self.objects[kw["Key"]])}
+
+    def get_object(self, **kw):
+        body = self.objects[kw["Key"]]
+        header = kw.get("Range")
+        if header:
+            span = header.split("=")[1]
+            first, _, last = span.partition("-")
+            start = int(first)
+            end = int(last) if last else len(body) - 1
+            chunk = body[start : end + 1]
+            return {
+                "Body": chunk,
+                "ContentLength": len(chunk),
+                "ContentRange": f"bytes {start}-{end}/{len(body)}",
+                "ContentType": "video/mp4",
+            }
+        return {"Body": body, "ContentLength": len(body), "ContentType": "video/mp4"}
+
+
+@pytest.fixture()
+def bucket(monkeypatch, tmp_path):
+    """A configured store whose client is the fake, and a sandbox tree."""
+    fake = FakeS3()
+    monkeypatch.setattr(objectstore, "_CLIENT_OVERRIDE", fake)
+    monkeypatch.setenv("CLIPFORGE_S3_ENDPOINT", "https://example.r2.cloudflarestorage.com")
+    monkeypatch.setenv("CLIPFORGE_S3_BUCKET", "clipforge-clips")
+    monkeypatch.setenv("CLIPFORGE_S3_ACCESS_KEY", "AKIA-test")
+    monkeypatch.setenv("CLIPFORGE_S3_SECRET_KEY", "secret")
+    monkeypatch.setenv("CLIPFORGE_S3_PREFIX", "clipforge")
+    monkeypatch.setenv("CLIPFORGE_OFFLOAD_DELETE_LOCAL", "1")
+
+    paths = SimpleNamespace(
+        data_dir=tmp_path / "data",
+        outputs_dir=tmp_path / "outputs",
+        uploads_dir=tmp_path / "data" / "uploads",
+        downloads_dir=tmp_path / "downloads",
+    )
+    for d in (paths.data_dir, paths.outputs_dir, paths.uploads_dir, paths.downloads_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    return SimpleNamespace(fake=fake, paths=paths)
+
+
+def _job(job_id: str, stage: str = "complete", **extra) -> dict:
+    return {"_id": job_id, "stage": stage, **extra}
+
+
+def _store(*jobs: dict) -> SimpleNamespace:
+    return SimpleNamespace(list_jobs=lambda: list(jobs))
+
+
+def _write(p: Path, data: bytes = b"rendered mp4 bytes") -> Path:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    return p
+
+
+def test_finished_batch_is_pushed_and_the_local_copy_is_freed(bucket):
+    job_id = "job42"
+    clip = _write(bucket.paths.outputs_dir / job_id / "clip_000.mp4")
+    source = _write(bucket.paths.uploads_dir / job_id / "source.mp4")
+
+    out = reclaim.reclaim(_store(_job(job_id)), bucket.paths)
+
+    assert out["ok"] is True
+    assert out["uploaded"] == 2
+    assert out["jobs"] == 1
+    assert out["freedBytes"] > 0
+    assert not clip.exists() and not source.exists()
+    assert "clipforge/outputs/job42/clip_000.mp4" in bucket.fake.objects
+    assert "clipforge/uploads/job42/source.mp4" in bucket.fake.objects
+
+
+def test_a_failed_push_never_deletes_the_local_file(bucket):
+    job_id = "job42"
+    clip = _write(bucket.paths.outputs_dir / job_id / "clip_000.mp4")
+    bucket.fake.fail_uploads = True
+
+    out = reclaim.reclaim(_store(_job(job_id)), bucket.paths)
+
+    assert out["uploaded"] == 0
+    assert out["freedBytes"] == 0
+    assert clip.exists(), "the only copy of a render must survive a storage outage"
+
+
+def test_a_running_batch_is_never_touched(bucket):
+    running = _write(bucket.paths.outputs_dir / "live" / "clip_000.mp4")
+    deleting = _write(bucket.paths.outputs_dir / "gone" / "clip_000.mp4")
+    paused = _write(bucket.paths.outputs_dir / "paused" / "clip_000.mp4")
+
+    out = reclaim.reclaim(
+        _store(
+            _job("live", stage="render"),
+            _job("gone", stage="deleting"),
+            _job("paused", stage="paused"),
+        ),
+        bucket.paths,
+    )
+
+    assert out["uploaded"] == 0
+    assert running.exists() and deleting.exists() and paused.exists()
+    assert bucket.fake.objects == {}
+
+
+def test_keep_source_leaves_the_original_upload_alone(bucket):
+    job_id = "job42"
+    source = _write(bucket.paths.uploads_dir / job_id / "source.mp4")
+    clip = _write(bucket.paths.outputs_dir / job_id / "clip_000.mp4")
+
+    out = reclaim.reclaim(_store(_job(job_id, keepSource=True)), bucket.paths)
+
+    assert out["uploaded"] == 1
+    assert source.exists(), "keepSource means the source stays on disk"
+    assert not clip.exists()
+
+
+def test_offload_off_reports_why_and_does_nothing(bucket, monkeypatch):
+    clip = _write(bucket.paths.outputs_dir / "job42" / "clip_000.mp4")
+    monkeypatch.delenv("CLIPFORGE_S3_BUCKET")
+
+    out = reclaim.reclaim(_store(_job("job42")), bucket.paths)
+
+    assert out["ok"] is False
+    assert out["reason"]
+    assert clip.exists()
+    assert bucket.fake.objects == {}
+
+
+def test_keep_local_mode_reports_why_and_does_nothing(bucket, monkeypatch):
+    clip = _write(bucket.paths.outputs_dir / "job42" / "clip_000.mp4")
+    monkeypatch.setenv("CLIPFORGE_OFFLOAD_DELETE_LOCAL", "0")
+
+    out = reclaim.reclaim(_store(_job("job42")), bucket.paths)
+
+    assert out["ok"] is False
+    assert "DELETE_LOCAL" in out["reason"]
+    assert clip.exists()
+
+
+def test_partial_transfers_and_non_media_are_skipped(bucket):
+    job_id = "job42"
+    tmp = _write(bucket.paths.outputs_dir / job_id / "clip_000.mp4.uploading")
+    partial = _write(bucket.paths.outputs_dir / job_id / "clip_001.mp4.part")
+    lock = _write(bucket.paths.outputs_dir / job_id / "job.lock")
+
+    out = reclaim.reclaim(_store(_job(job_id)), bucket.paths)
+
+    assert out["uploaded"] == 0
+    assert tmp.exists() and partial.exists() and lock.exists()
+
+
+def test_reclaiming_nothing_says_so(bucket):
+    out = reclaim.reclaim(_store(), bucket.paths)
+
+    assert out["ok"] is True
+    assert out["uploaded"] == 0
+    assert out["reason"]
+
+
+def test_streaming_reads_the_bucket_without_writing_to_disk(bucket, tmp_path):
+    """What the serving routes do for a reclaimed clip: bytes go bucket -> the
+    response, so playback does not refill the disk the reclaim just freed."""
+    key = "clipforge/outputs/job42/clip_000.mp4"
+    bucket.fake.objects[key] = b"0123456789" * 100
+
+    full = objectstore.open_stream(key)
+    assert full is not None
+    status, headers, body = full
+    assert status == 200
+    assert headers["Content-Length"] == str(1000)
+    assert body == b"0123456789" * 100
+
+    ranged = objectstore.open_stream(key, "bytes=100-199")
+    assert ranged is not None
+    status, headers, body = ranged
+    assert status == 206
+    assert headers["Content-Range"] == "bytes 100-199/1000"
+    assert body == b"0123456789" * 10
+
+    assert list(tmp_path.rglob("*.fetching")) == []
+
+
+def test_streaming_misses_return_none_so_the_404_path_is_kept(bucket):
+    assert objectstore.open_stream("clipforge/outputs/nope/clip_000.mp4") is None
+
+
+def test_watchdog_does_nothing_while_there_is_room(bucket, monkeypatch):
+    clip = _write(bucket.paths.outputs_dir / "job42" / "clip_000.mp4")
+    monkeypatch.setattr(reclaim, "_free_bytes", lambda paths: 900 * 1024 * 1024)
+
+    assert reclaim.tick(_store(_job("job42")), bucket.paths) is None
+    assert clip.exists()
+    assert bucket.fake.objects == {}
+
+
+def test_watchdog_reclaims_once_the_disk_is_tight(bucket, monkeypatch):
+    clip = _write(bucket.paths.outputs_dir / "job42" / "clip_000.mp4")
+    # Two tight readings first — the watchdog's own check, then reclaim's
+    # initial measurement — then comfortable ones, which are what stop the walk.
+    tight = 300 * 1024 * 1024
+    readings = iter([tight, tight] + [2000 * 1024 * 1024] * 10)
+    monkeypatch.setattr(reclaim, "_free_bytes", lambda paths: next(readings))
+
+    out = reclaim.tick(_store(_job("job42")), bucket.paths)
+
+    assert out is not None
+    assert out["uploaded"] == 1
+    assert "clipforge/outputs/job42/clip_000.mp4" in bucket.fake.objects
+    assert not clip.exists()
+
+
+def test_destination_for_a_clip_matches_what_the_route_serves(bucket):
+    """reclaim's key must be the one `clip_video` asks for, or a reclaimed clip
+    is pushed to a name nothing ever reads and the file vanishes for real."""
+    clip = _write(bucket.paths.outputs_dir / "job42" / "clip_003.mp4")
+    pushed_key = reclaim.key_for(bucket.paths, "job42", clip)
+    route_key = objectstore.key_for_path(clip, bucket.paths.outputs_dir)
+    assert pushed_key == route_key == "clipforge/outputs/job42/clip_003.mp4"

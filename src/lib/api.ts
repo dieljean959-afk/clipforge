@@ -900,6 +900,24 @@ export const api = {
         body: JSON.stringify(keys),
       },
     ),
+  /**
+   * Move every finished batch's media into the bucket and free local disk.
+   *
+   * Clip playback streams back out of the bucket, so this is what makes the
+   * 4 GB disk survivable: the library lives in the 5 GB bucket and only the
+   * batch that is running needs local space.
+   */
+  reclaimStorage: () =>
+    request<{
+      ok: boolean;
+      freedBytes: number;
+      freedMb: number;
+      uploaded: number;
+      scanned: number;
+      jobs: number;
+      freeBytes: number | null;
+      reason: string;
+    }>("/api/storage/reclaim", { method: "POST" }),
   /** Delete the S3/R2 credentials. Region and prefix (non-secret) survive. */
   deleteStorageKeys: () =>
     request<{ enabled: boolean; clientReady: boolean; bucket: string | null; endpoint: string | null; prefix: string; deleteLocal: boolean; linesRemoved: number }>(

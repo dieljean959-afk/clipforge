@@ -29,7 +29,6 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
-from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -43,6 +42,7 @@ from app import (
     jobstatus,
     objectstore,
     purge,
+    reclaim,
     share_video,
     sharelink,
     subtitle,
@@ -621,6 +621,14 @@ def _start_worker() -> None:
         )
     except Exception as exc:  # noqa: BLE001 - a purge must not keep the API down
         logger.warning(f"[boot] delete purge did not start: {exc}")
+    # Keeps the 4 GB disk usable without anyone pressing a button: when free
+    # space drops toward the worker's 400 MB floor, finished batches move into
+    # the bucket and their local copies go. Off the request path on purpose —
+    # a slow PUT inside a page load is what turned deletes into CDN 502s.
+    try:
+        reclaim.start_watchdog(store, settings.app.paths)
+    except Exception as exc:  # noqa: BLE001 - never let cleanup break boot
+        logger.warning(f"[boot] media reclaim watchdog did not start: {exc}")
     retention.start()
     # Sweep ONCE at boot, not just on the daemon's first 30-minute tick.
     #
@@ -1773,6 +1781,32 @@ def remove_s3_key(confirm: bool = False) -> dict:
     )
     status = objectstore.status()
     return {**status, "linesRemoved": removed, "envDropped": dropped}
+
+
+@app.post("/api/storage/reclaim")
+def reclaim_storage() -> dict:
+    """Move every FINISHED batch's media into the bucket and free the disk.
+
+    The 4 GB sandbox cannot hold a library and a render at the same time. Before
+    this, the bucket was only an archive: an uploaded source was pushed and
+    dropped, but a URL source stayed on disk for the life of the batch, and
+    playing a clip whose local copy was gone pulled it back — so reading
+    refilled what a cleanup freed. Now finished batches can live in the bucket
+    (`app/reclaim.py`), clip playback streams from it (`_serve_from_bucket`),
+    and this endpoint is the button that does it.
+
+    Deliberately synchronous and manual: a reclaim is a handful of PUTs, and
+    running it inside submit/preflight is exactly the pattern that turned a
+    slow request into a CDN 502. Running batches are skipped — their files are
+    being written.
+    """
+    out = reclaim.reclaim(store, settings.app.paths)
+    logger.info(
+        f"[api] storage reclaim: {out.get('uploaded')} file(s), "
+        f"{out.get('freedMb')} MB freed"
+        + (f" — {out['reason']}" if out.get("reason") else "")
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------

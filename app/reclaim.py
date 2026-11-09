@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,23 @@ MEDIA_SUFFIXES = {
 SKIP_MARKERS = (".uploading", ".fetching", ".tmp", ".part")
 
 _MB = 1024 * 1024
+
+#: Which job stages may be moved into the bucket. Deliberately NOT
+#: `jobstatus.is_terminal`: that set includes `deleting` (being removed) and
+#: `paused` (resumable, and a resume reads the source from disk).
+RECLAIMABLE_STAGES = frozenset({"complete", "failed"})
+
+#: Free space below which the watchdog offloads finished batches on its own.
+#: The submit gate wants 100 MB and the worker's preflight wants 400 MB, so this
+#: sits just above the worker floor: reclaim while there is still room to work,
+#: not after a render has already failed for lack of it.
+LOW_DISK_BYTES = 480 * _MB
+#: How far a watchdog pass frees: comfortably above the floor, so one pass lasts
+#: several batches instead of firing on every tick.
+TARGET_FREE_BYTES = 1200 * _MB
+#: Seconds between watchdog passes. Slow on purpose — this is a safety net under
+#: a manual button, not a hot loop.
+WATCH_INTERVAL = 60.0
 
 
 def _free_bytes(paths: Any) -> int | None:
@@ -143,9 +161,11 @@ def reclaim(
         jid = str(job.get("_id") or "")
         if not jid or (wanted_ids is not None and jid not in wanted_ids):
             continue
-        if job.get("deleting") or not jobstatus.is_terminal(job):
-            # A running batch is writing those files right now; deleting them
-            # mid-render is indistinguishable from a corrupt disk.
+        # Only a settled batch may be moved. A running one is writing those
+        # files right now; `deleting` is on its way out and must not be raced,
+        # and `paused` can be resumed (a resume expects its source on disk).
+        status = jobstatus.status_of(job)
+        if status not in RECLAIMABLE_STAGES or job.get("deleting"):
             continue
         result["jobs"] += 1
         keep_source = bool(job.get("keepSource"))
@@ -184,3 +204,74 @@ def reclaim(
         f"{result['freedMb']} MB from {result['jobs']} finished batch(es)"
     )
     return result
+
+
+# --------------------------------------------------------------------------- #
+# watchdog: make the bucket the default, not a button nobody presses
+# --------------------------------------------------------------------------- #
+
+_thread: threading.Thread | None = None
+_stop = threading.Event()
+
+
+def tick(store: Any, paths: Any, low_mb: int = LOW_DISK_BYTES // _MB) -> dict[str, Any] | None:
+    """One watchdog pass: reclaim only if the disk is actually tight.
+
+    Returns the reclaim result, or None when there was room and nothing was
+    attempted. Separate from the loop so it can be tested without threads.
+    """
+    free = _free_bytes(paths)
+    if not isinstance(free, int) or free >= low_mb * _MB:
+        return None
+    logger.warning(
+        f"[reclaim] only {round(free / _MB)} MB free — moving finished batches "
+        f"into the bucket"
+    )
+    return reclaim(
+        store,
+        paths,
+        target_free_bytes=max(TARGET_FREE_BYTES, low_mb * _MB * 2),
+    )
+
+
+def _loop(store: Any, paths: Any, interval: float, low_mb: int) -> None:
+    while not _stop.is_set():
+        try:
+            tick(store, paths, low_mb)
+        except Exception as exc:  # noqa: BLE001 - the loop must not die
+            logger.warning(f"[reclaim] watchdog pass failed: {exc}")
+        if _stop.wait(interval):
+            break
+
+
+def start_watchdog(
+    store: Any,
+    paths: Any,
+    *,
+    interval: float = WATCH_INTERVAL,
+    low_mb: int = LOW_DISK_BYTES // _MB,
+) -> threading.Thread:
+    """Keep the 4 GB disk useful without anyone pressing anything.
+
+    Runs in the API process like the purge loop: off every request path, so a
+    slow PUT to the bucket can never become a proxy timeout on a page load.
+    Does nothing at all while there is free space.
+    """
+    global _thread
+    if _thread is not None and _thread.is_alive():
+        return _thread
+    _stop.clear()
+    _thread = threading.Thread(
+        target=_loop,
+        args=(store, paths, interval, low_mb),
+        name="media-reclaim",
+        daemon=True,
+    )
+    _thread.start()
+    return _thread
+
+
+def stop_watchdog() -> None:
+    _stop.set()
+    if _thread is not None:
+        _thread.join(timeout=5.0)
