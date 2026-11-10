@@ -339,3 +339,76 @@ def test_completed_batches_expire_and_running_ones_never_do(bucket, monkeypatch)
 
     assert out["expired"] == ["old"]
     assert "running" not in out["expired"]
+
+
+def test_housekeeping_runs_retention_and_budget_when_due(bucket, monkeypatch):
+    """The 80/90% guard and retention are only real if something calls them.
+
+    They used to exist as functions with no caller: the bucket could pass 90%
+    and nothing ever trimmed it, and an expired batch stayed until a request
+    happened to land. The watchdog now runs this pass.
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(reclaim, "_last_housekeeping", 0.0)
+    monkeypatch.setattr(objectstore, "configured", lambda *a, **k: True)
+    monkeypatch.setattr(objectstore, "reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        reclaim, "sweep_expired",
+        lambda store, paths, hours: seen.append(f"sweep:{hours}") or
+        {"expired": ["old"], "objectsRemoved": 2, "jobsRemoved": 1},
+    )
+    monkeypatch.setattr(
+        reclaim, "enforce_budget",
+        lambda store, paths, **k: seen.append(f"budget:{k.get('retention_hours')}") or
+        {"usedPercent": 41.0, "warned": False, "pruned": [], "swept": None},
+    )
+
+    out = reclaim.housekeeping(_store(), bucket.paths, retention_hours=48, force=True)
+
+    assert seen == ["sweep:48", "budget:48"]
+    assert out["jobsRemoved"] == 1 and out["usedPercent"] == 41.0
+
+
+def test_housekeeping_throttles_itself_between_passes(bucket, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(reclaim, "_last_housekeeping", 0.0)
+    monkeypatch.setattr(objectstore, "configured", lambda *a, **k: True)
+    monkeypatch.setattr(objectstore, "reachable", lambda *a, **k: True)
+    monkeypatch.setattr(reclaim, "sweep_expired", lambda *a, **k: calls.append("sweep") or
+                        {"expired": [], "objectsRemoved": 0, "jobsRemoved": 0})
+    monkeypatch.setattr(reclaim, "enforce_budget", lambda *a, **k: calls.append("budget") or
+                        {"usedPercent": 1.0, "warned": False, "pruned": [], "swept": None})
+
+    reclaim.housekeeping(_store(), bucket.paths, retention_hours=48, force=True)
+    out = reclaim.housekeeping(_store(), bucket.paths, retention_hours=48)
+
+    assert out["skipped"] == "not due"
+    assert calls == ["sweep", "budget"]
+
+
+def test_an_unreachable_bucket_blocks_retention_deletes(bucket, monkeypatch):
+    """A bucket that cannot answer a listing must not turn "expired" into "gone"."""
+    calls: list[str] = []
+    monkeypatch.setattr(reclaim, "_last_housekeeping", 0.0)
+    monkeypatch.setattr(objectstore, "configured", lambda *a, **k: True)
+    monkeypatch.setattr(objectstore, "reachable", lambda *a, **k: False)
+    monkeypatch.setattr(reclaim, "sweep_expired", lambda *a, **k: calls.append("sweep") or {})
+    monkeypatch.setattr(reclaim, "enforce_budget", lambda *a, **k: calls.append("budget") or {})
+
+    out = reclaim.housekeeping(_store(), bucket.paths, retention_hours=12, force=True)
+
+    assert out["skipped"] == "bucket unreachable"
+    assert calls == []
+
+
+def test_reachable_reports_false_instead_of_raising_when_the_bucket_is_down(bucket):
+    """The liveness probe must fail closed — it is what authorises deletes.
+
+    This branch used to log through a name that does not exist in
+    `objectstore`, so an unreachable bucket raised NameError inside the very
+    guard meant to protect retention deletes.
+    """
+    assert objectstore.reachable() is False
+
+    bucket.fake.list_objects_v2 = lambda **kw: {"Contents": []}
+    assert objectstore.reachable() is True

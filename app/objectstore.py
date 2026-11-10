@@ -666,6 +666,38 @@ def test_roundtrip(cfg: ObjectStoreConfig | None = None) -> dict[str, Any]:
     return out
 
 
+def configured(cfg: ObjectStoreConfig | None = None) -> bool:
+    """True when an install actually has a bucket wired (not just defaults)."""
+    cfg = cfg or config_from_env()
+    return bool(cfg.enabled and cfg.bucket)
+
+
+def reachable(cfg: ObjectStoreConfig | None = None) -> bool:
+    """Cheap liveness probe: can we list one key right now?
+
+    Retention and budget pruning DELETE things, so the automatic sweep asks
+    this first — a bucket that is down must never turn "expired" into "gone".
+    """
+    cfg = cfg or config_from_env()
+    if not configured(cfg):
+        return False
+    s3 = client(cfg)
+    if s3 is None:
+        return False
+    try:
+        s3.list_objects_v2(Bucket=cfg.bucket, Prefix=f"{cfg.prefix}/", MaxKeys=1)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        from loguru import logger as _logger
+
+        try:
+            why = explain_error(exc)
+        except Exception:  # noqa: BLE001 - explaining must never mask the probe
+            why = f"{type(exc).__name__}: {exc}"
+        _logger.warning(f"[objectstore] not reachable: {why}")
+        return False
+
+
 def status() -> dict[str, Any]:
     """A small dict for the boot banner, /api/health and the bucket dialog.
 

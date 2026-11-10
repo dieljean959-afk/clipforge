@@ -302,6 +302,10 @@ def _loop(store: Any, paths: Any, interval: float, low_mb: int) -> None:
             tick(store, paths, low_mb)
         except Exception as exc:  # noqa: BLE001 - the loop must not die
             logger.warning(f"[reclaim] watchdog pass failed: {exc}")
+        try:
+            housekeeping(store, paths)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[reclaim] housekeeping pass failed: {exc}")
         if _stop.wait(interval):
             break
 
@@ -551,6 +555,56 @@ def enforce_budget(
         pct = 100.0 * use["bytes"] / budget
         out["usedPercent"] = round(pct, 1)
     return out
+
+
+HOUSEKEEPING_INTERVAL = 300.0
+_last_housekeeping = 0.0
+
+
+def housekeeping(
+    store: Any, paths: Any, *, retention_hours: int | None = None, force: bool = False,
+) -> dict[str, Any]:
+    """The periodic "keep the plan tidy" pass: retention + 80/90% budget.
+
+    Runs off the watchdog thread every few minutes, because a rule that only
+    fires inside a request is a rule that never fires: with no job starting,
+    nothing was ever expiring and the 5 GB plan would fill up silently.
+
+    It refuses to do anything unless the bucket answers a listing — deleting a
+    batch because it is "expired" while the bucket is unreachable is how media
+    disappears without ever being stored anywhere.
+    """
+    global _last_housekeeping
+    import time as _time
+
+    from . import objectstore
+
+    now = _time.time()
+    if not force and now - _last_housekeeping < HOUSEKEEPING_INTERVAL:
+        return {"skipped": "not due"}
+    if not objectstore.configured():
+        return {"skipped": "no bucket"}
+    if not objectstore.reachable():
+        return {"skipped": "bucket unreachable"}
+    _last_housekeeping = now
+    if retention_hours is None:
+        try:
+            from .config import load_config
+
+            retention_hours = int(load_config().hosted.retention_hours)
+        except Exception:  # noqa: BLE001
+            retention_hours = 48
+    swept = sweep_expired(store, paths, retention_hours)
+    budget = enforce_budget(store, paths, retention_hours=retention_hours)
+    if swept["jobsRemoved"] or budget["pruned"]:
+        objectstore.invalidate_usage()
+    return {
+        "retentionHours": retention_hours,
+        "expired": swept["expired"],
+        "jobsRemoved": swept["jobsRemoved"],
+        "usedPercent": budget["usedPercent"],
+        "pruned": budget["pruned"],
+    }
 
 
 def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
