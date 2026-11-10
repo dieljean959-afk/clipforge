@@ -619,8 +619,13 @@ def _load_faster_whisper(
     # thrashes the single available core and multiplies CTranslate2's per-thread
     # buffers until the container is OOM-killed.
     threads = hostlimits.inference_threads()
+    # Weights come from the bucket: this restores them for the decode and they
+    # are removed from disk again once the batch is done.
+    from app import modelstore  # noqa: PLC0415
+
+    model_ref = modelstore.resolve(model_name, on_log)
     try:
-        model = WhisperModel(model_name, device=device, compute_type=compute, cpu_threads=threads)
+        model = WhisperModel(model_ref, device=device, compute_type=compute, cpu_threads=threads)
     except Exception as exc:
         raise AsrError(
             f"Whisper model load failed ({model_name} on {device}/{compute}, {threads} threads): {exc}"

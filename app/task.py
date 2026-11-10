@@ -41,6 +41,7 @@ from app import (
     reframe,
     eta,
     llm,
+    modelstore,
     source_stream,
     subtitle,
     translate,
@@ -1078,6 +1079,20 @@ class Pipeline:
 
         transcript = _run_stage("transcribe", lambda: self._stage_transcribe(job, src, ws))
         self._transcript_size_note(len(transcript.words))
+        # The weights are the single largest thing a batch puts on the disk and
+        # nothing after transcription reads them: give them back now. The
+        # bucket keeps the copy, so the next batch restores instead of
+        # downloading.
+        try:
+            freed = modelstore.release_all(lambda m: self._log(job_id, m))
+            if freed.get("freed"):
+                self._log(
+                    job_id,
+                    f"[disk] model weights back to the bucket: "
+                    f"{freed['freed'] / 1048576:.0f} MB freed after transcription",
+                )
+        except Exception as exc:  # noqa: BLE001 - never fail a good batch over this
+            self._log(job_id, f"[disk] could not release model weights: {exc}")
 
         self._checkpoint(job_id, "transcribing")
         candidates = _run_stage("detect", lambda: self._stage_detect(job, transcript, ws))
@@ -1113,6 +1128,12 @@ class Pipeline:
             # (transcript chunks, cuts) and re-fetches the video from the
             # bucket when it needs it again.
             self._cleanup_job_scratch(job_id, full=False)
+            # A model is never kept warm on the disk between runs, failed or
+            # not: the bucket copy is the source of truth for the next one.
+            try:
+                modelstore.release_all(lambda m: self._log(job_id, m))
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _detail(exc: BaseException) -> str:

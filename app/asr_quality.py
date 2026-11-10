@@ -287,8 +287,12 @@ def _child(argv: list[str]) -> int:
     try:
         from faster_whisper import WhisperModel
 
+        from app import modelstore  # noqa: PLC0415
+
+        # Bucket-backed weights: restored for this decode, released at batch end.
         model = WhisperModel(
-            model_name, device="cpu", compute_type=str(cfg.get("compute") or "int8"),
+            modelstore.resolve(model_name), device="cpu",
+            compute_type=str(cfg.get("compute") or "int8"),
             cpu_threads=max(1, int(cfg.get("threads") or 1)), num_workers=1,
         )
     except Exception as exc:  # noqa: BLE001 - the parent decides what to do

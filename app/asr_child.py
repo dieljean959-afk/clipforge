@@ -130,8 +130,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from faster_whisper import WhisperModel
 
+        from app import modelstore  # noqa: PLC0415
+
+        # Loaded from the bucket-backed copy when one exists; the disk copy is
+        # transient and is released when the batch ends.
         model = WhisperModel(
-            model_name, device="cpu", compute_type=compute,
+            modelstore.resolve(model_name), device="cpu", compute_type=compute,
             cpu_threads=max(1, threads), num_workers=1,
         )
     except Exception as exc:  # noqa: BLE001 - reported, the parent escalates
