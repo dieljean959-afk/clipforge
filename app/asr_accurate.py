@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import time
@@ -144,6 +145,23 @@ def plan_windows(duration: float) -> list[tuple[float, float]]:
         out.append((t, min(t + WINDOW_SEC, duration)))
         t += step
     return out
+
+
+def checkpoint(cache_file: Path, payload: dict[str, Any], idx: int) -> None:
+    """Write a window checkpoint atomically, from any thread.
+
+    The old code shared one `win_00034.json.tmp` name per window, so two
+    writers racing on the same window made the loser fail with ENOENT on its
+    own temp file, and losing the directory took the whole batch down. A
+    per-writer name plus an ensured parent cannot do either.
+    """
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{idx}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(cache_file)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _write_span(reader: _WavReader, path: Path, start: float, end: float) -> Path:
@@ -757,9 +775,7 @@ def _decode_windows(
                     # `_checkpoint_usable` accepts an empty window exactly
                     # when Silero is this quiet, so a resume reuses it.
                     if cache_file is not None:
-                        tmp = cache_file.with_suffix(".json.tmp")
-                        tmp.write_text(json.dumps(cycle, ensure_ascii=False), encoding="utf-8")
-                        tmp.replace(cache_file)
+                        checkpoint(cache_file, cycle, idx)
                     logger.info(
                         f"[accurate] chunk {idx + 1}/{len(windows)} "
                         f"({w_start:.1f}-{w_end:.1f}s) has {silent_sec:.2f}s of "
@@ -823,9 +839,7 @@ def _decode_windows(
                 tail = " ".join(str(w["word"]) for w in words[-12:])
                 last_sentence = tail[-160:]
             if cache_file is not None:
-                tmp = cache_file.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(cycle, ensure_ascii=False), encoding="utf-8")
-                tmp.replace(cache_file)
+                checkpoint(cache_file, cycle, idx)
             if on_progress and duration > 0:
                 on_progress(min(1.0, w_end / duration))
             if on_chunk is not None:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
 import re
 import subprocess
 import threading
@@ -1135,17 +1136,23 @@ def _transcribe_legacy(
 
             # persist the chunk BEFORE moving on (incremental resume)
             if cache_file is not None:
-                tmp = cache_file.with_suffix(".json.tmp")
-                tmp.write_text(
-                    json.dumps(
-                        {"w_start": w_start, "w_end": w_end,
-                         "model": decoded.model, "peak_rss_mb": decoded.peak_rss_mb,
-                         "words": [w.as_dict() for w in abs_words]},
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
-                )
-                tmp.replace(cache_file)
+                # Per-writer temp name: a shared `.json.tmp` lets two writers
+                # race, and the loser dies with ENOENT on its own temp file.
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{idx}.tmp")
+                try:
+                    tmp.write_text(
+                        json.dumps(
+                            {"w_start": w_start, "w_end": w_end,
+                             "model": decoded.model, "peak_rss_mb": decoded.peak_rss_mb,
+                             "words": [w.as_dict() for w in abs_words]},
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                    tmp.replace(cache_file)
+                finally:
+                    tmp.unlink(missing_ok=True)
 
             if on_progress and duration > 0:
                 on_progress(min(1.0, w_end / duration))

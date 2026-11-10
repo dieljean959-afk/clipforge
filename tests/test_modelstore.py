@@ -98,3 +98,23 @@ def test_release_all_clears_the_transient_root(store, tmp_path):
     modelstore.resolve("small")
     modelstore.release_all()
     assert not modelstore._root().exists()
+
+
+def test_release_takes_the_shared_blob_with_it(store, tmp_path):
+    """A released model must not leave its weights in the shared blobs tree."""
+    import os
+
+    hub = tmp_path / "hub"
+    blob = hub / "blobs" / "42" / "deadbeef"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"w" * 8192)
+    blob.with_name("deadbeef.refs").write_text("models--Systran--faster-whisper-small/blobs/x")
+    old = blob.stat().st_mtime - 3600
+    os.utime(blob, (old, old))
+    _snapshot(tmp_path)
+    modelstore.adopt("small", wait_s=0.1)
+
+    out = modelstore.release("small")
+
+    assert out["ok"] and out["freed"] >= 8192
+    assert not blob.exists()

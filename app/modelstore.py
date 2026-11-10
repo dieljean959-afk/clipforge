@@ -206,6 +206,9 @@ def adopt(
     return {"ok": True, "uploaded": uploaded, "bytes": total, "path": str(snap)}
 
 
+_ADOPTS: dict[str, threading.Thread] = {}
+
+
 def _adopt_async(name: str, log: Callable[[str], None] | None) -> None:
     """Push a fresh download to the bucket without blocking the decode."""
 
@@ -215,7 +218,29 @@ def _adopt_async(name: str, log: Callable[[str], None] | None) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[models] could not store {name} in the bucket: {exc}")
 
-    threading.Thread(target=_run, name=f"models-adopt-{name}", daemon=True).start()
+    thread = threading.Thread(target=_run, name=f"models-adopt-{name}", daemon=True)
+    _ADOPTS[name] = thread
+    thread.start()
+
+
+def _late_release(name: str, log: Callable[[str], None] | None) -> None:
+    """Remove a model as soon as its bucket upload lands, off the job thread.
+
+    `release` refuses to delete without a verified bucket copy, so a model whose
+    462 MB upload is still in flight would otherwise sit on the disk until the
+    next batch. This waits for that upload and then drops it.
+    """
+
+    def _run() -> None:
+        thread = _ADOPTS.get(name)
+        if thread is not None:
+            thread.join(timeout=1800.0)
+        try:
+            release(name, log)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[models] late release of {name} failed: {exc}")
+
+    threading.Thread(target=_run, name=f"models-release-{name}", daemon=True).start()
 
 
 def release(name: str, log: Callable[[str], None] | None = None) -> dict[str, Any]:
@@ -254,9 +279,53 @@ def release(name: str, log: Callable[[str], None] | None = None) -> dict[str, An
         for path in (local_dir(name), *[p for p in _hf_repos(name)]):
             freed += _tree_bytes(path)
             shutil.rmtree(path, ignore_errors=True)
+        freed += _prune_orphan_blobs()
         if log is not None:
             log(f"[models] {name} removed from disk ({freed / 1048576:.0f} MB) — kept in the bucket")
     return {**frozen, "freed": freed}
+
+
+def _prune_orphan_blobs() -> int:
+    """Drop cached weights whose repository directory is gone.
+
+    Newer huggingface_hub keeps one shared `blobs/` tree with a `.refs` sidecar
+    per file, so deleting a repo directory leaves the bytes behind: 462 MB of a
+    released model once survived its own release that way.
+    """
+    freed = 0
+    root = _hf_cache_root()
+    blobs = root / "blobs"
+    if not blobs.is_dir():
+        return 0
+    for path in sorted(blobs.glob("*/*")):
+        if not path.is_file() or path.suffix in {".refs", ".lock"}:
+            continue
+        refs = path.with_name(path.name + ".refs")
+        keep = False
+        try:
+            for line in refs.read_text(encoding="utf-8").splitlines():
+                repo = line.strip().split("/", 1)[0]
+                if repo and (root / repo).is_dir():
+                    keep = True
+                    break
+        except OSError:
+            keep = False
+        if keep:
+            continue
+        # A download in flight has no refs yet; never race it.
+        try:
+            if not refs.exists() and time.time() - path.stat().st_mtime < 600:
+                continue
+        except OSError:
+            continue
+        try:
+            freed += path.stat().st_size
+            path.unlink()
+            refs.unlink(missing_ok=True)
+            path.with_name(path.name + ".lock").unlink(missing_ok=True)
+        except OSError:
+            pass
+    return freed
 
 
 def _hf_repos(name: str) -> list[Path]:
@@ -319,6 +388,7 @@ def release_all(log: Callable[[str], None] | None = None) -> dict[str, Any]:
         names.discard(name)
     if wasted and log is not None:
         log(f"[models] dropped {wasted / 1048576:.0f} MB of weights this host cannot load")
+    wasted += _prune_orphan_blobs()
     out = {name: release(name, log) for name in sorted(names)}
     if root.is_dir():
         for leftover in root.iterdir():
@@ -328,10 +398,20 @@ def release_all(log: Callable[[str], None] | None = None) -> dict[str, Any]:
         root.rmdir()
     except OSError:
         pass
+    # Uploads still in flight: hand them to a waiter instead of leaving the
+    # weights on the disk for the rest of the batch.
+    pending = [
+        n for n, v in out.items()
+        if not v.get("ok") and (_ADOPTS.get(n) is not None and _ADOPTS[n].is_alive())
+    ]
+    for n in pending:
+        _late_release(n, log)
+    if log is not None and pending:
+        log(f"[models] {len(pending)} model(s) still uploading — removed from the disk when it lands")
     freed = wasted + sum(int(v.get("freed") or 0) for v in out.values())
     if log is not None and freed:
         log(f"[models] {freed / 1048576:.0f} MB of model weight released from the disk")
-    return {"released": out, "freed": freed, "unusable": wasted}
+    return {"released": out, "freed": freed, "unusable": wasted, "pending": pending}
 
 
 def status() -> dict[str, Any]:
