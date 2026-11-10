@@ -643,9 +643,23 @@ def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
                 out["bytesFreed"] += size
             except OSError:
                 continue
+    # A RUNNING job writes `.tmp` files on purpose: the ASR checkpoints each
+    # window through `win_000NN.json.tmp` and then renames it, so sweeping
+    # every `.tmp` under data/ pulls the file out from under a live decoder
+    # (FileNotFoundError mid-transcribe). Only temp files in folders that do
+    # not belong to a live job are debris.
+    live = {
+        str(j.get("_id")) for j in jobs.values()
+        if str(j.get("status")) not in RECLAIMABLE_STAGES
+    }
     for pattern in ("**/*.fetching", "**/*.part", "**/*.uploading", "**/*.tmp"):
         for stale in list(Path(paths.data_dir).glob(pattern)):
             try:
+                owner = next(
+                    (p.name for p in stale.parents if p.name in live), None
+                )
+                if owner is not None:
+                    continue
                 out["bytesFreed"] += stale.stat().st_size
                 stale.unlink(missing_ok=True)
                 out["filesRemoved"] += 1
