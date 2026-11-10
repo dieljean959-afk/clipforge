@@ -1325,6 +1325,11 @@ class HostedConfig:
     # what you made, short enough that the disk stays usable. Override with
     # CLIPFORGE_RETENTION_HOURS; 0 disables the sweeper entirely.
     retention_hours: int = 96
+    #: Cap on the whole scratch tree (data/work + outputs + downloads) for the
+    #: one batch that is allowed to run at a time. The bucket is the library;
+    #: the disk only ever holds the batch in flight, and this is the number that
+    #: keeps a 22-minute source from starving a render on a 4 GB sandbox.
+    scratch_cap_mb: int = 1536
     # Remote worker dispatch: when set (e.g. http://100.x.y.z:8765), the API
     # sends jobs to the user's home machine over Tailscale instead of running
     # the pipeline locally in the sandbox.
@@ -1519,6 +1524,13 @@ def _load_openai_provider(
             1000, int(section.get("daily_token_limit", defaults.daily_token_limit))
         ),
     )
+
+
+def _clamp_retention(hours: int) -> int:
+    """Keep retention inside the supported 12-96 h window; 0 still means never."""
+    if hours <= 0:
+        return 0
+    return max(12, min(96, hours))
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1871,8 +1883,15 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         # nothing, and the sweeper stayed off because the file said 0. Every
         # other tunable in this block already reads `os.getenv(...) or
         # h.get(...)` — this one line was the odd one out.
-        retention_hours=max(0, _env_int(
-            "CLIPFORGE_RETENTION_HOURS", h.get("retention_hours", 96)
+        # Clamped to the supported 12-96 h window: 12 h so a batch survives a
+        # night, 96 h so a "library" cannot silently turn into a disk filler.
+        retention_hours=_clamp_retention(
+            max(0, _env_int(
+                "CLIPFORGE_RETENTION_HOURS", h.get("retention_hours", 48)
+            ))
+        ),
+        scratch_cap_mb=max(256, _env_int(
+            "CLIPFORGE_SCRATCH_CAP_MB", h.get("scratch_cap_mb", 1536)
         )),
         worker_url=(os.getenv("WORKER_URL") or h.get("worker_url", "") or "").strip().rstrip("/"),
         worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),

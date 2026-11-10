@@ -11,6 +11,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Stethoscope } from "lucide-react";
 import {
+  CloudUpload,
   Cookie,
   Cpu,
   Eye,
@@ -126,6 +127,10 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const [savingStorage, setSavingStorage] = useState(false);
   const [confirmStorageDelete, setConfirmStorageDelete] = useState(false);
   const [reclaiming, setReclaiming] = useState(false);
+  const [testingStorage, setTestingStorage] = useState(false);
+  const [storageTest, setStorageTest] = useState<Awaited<
+    ReturnType<typeof api.testStorage>
+  > | null>(null);
 
   const storage = health?.storage;
   // "Not known yet" is not "off". This row renders outside the health-gated
@@ -442,6 +447,28 @@ export function LocalWorkerCard({ className }: { className?: string }) {
     }
   };
 
+  const runStorageTest = async () => {
+    setTestingStorage(true);
+    setStorageTest(null);
+    try {
+      const res = await api.testStorage();
+      setStorageTest(res);
+      if (res.ok) {
+        toast.success(
+          `Bucket test passed in ${res.elapsedMs} ms — put, HEAD, ranged GET and delete all worked.`,
+        );
+      } else {
+        const hint = res.error?.hint || res.error?.message || "unknown error";
+        toast.error(`Bucket test failed: ${res.error?.code ?? "error"} — ${hint}`);
+      }
+      void refreshHealth();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not reach the server.");
+    } finally {
+      setTestingStorage(false);
+    }
+  };
+
   const removeStorage = async () => {
     setSavingStorage(true);
     try {
@@ -544,6 +571,27 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             {memUsed !== null && memTotal !== null && memTotal > 0 && (
               <StatLine icon={MemoryStick}>
                 RAM {fmtBytes(memUsed)} / {fmtBytes(memTotal)}
+              </StatLine>
+            )}
+            {/* The plan, next to the disk: media lives in the bucket, so this
+                is the number that actually fills up. Amber at 80%, red at 90%
+                — the two thresholds the budget guard acts on. */}
+            {storage?.enabled && typeof storage.usedPercent === "number" && (
+              <StatLine
+                icon={CloudUpload}
+                className={
+                  storage.usedPercent >= 90
+                    ? "text-red-400"
+                    : storage.usedPercent >= 80
+                      ? "text-amber-300"
+                      : undefined
+                }
+                title="Sum of every object in the bucket, cached for 60 s. At 80% the expiry sweep runs early; at 90% the oldest finished batches are deleted first."
+              >
+                {storage.usedPercent >= 80 && <TriangleAlert className="size-3" />}
+                Bucket {(storage.usageGb ?? 0).toFixed(2)} GB of{" "}
+                {(storage.budgetGb ?? 5).toFixed(0)} GB
+                {typeof storage.usageBytes === "number" ? "" : ""}
               </StatLine>
             )}
             {diskFree !== null && (
@@ -851,9 +899,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
           {!storageKnown
             ? "Media offload — checking…"
             : storageOn
-              ? storage?.clientReady
+              ? storage?.ready
                 ? `Media offload on — ${storage?.bucket ?? ""}`
-                : "Offload configured, but boto3 is missing"
+                : storage?.clientReady
+                  ? "Bucket not verified — run Test bucket"
+                  : "Offload configured, but boto3 is missing"
               : "Media offload off"}
         </span>
         <button
@@ -956,6 +1006,52 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               dash.cloudflare.com
             </a>
           </p>
+
+          {/* Does the bucket actually work? The four fields being filled in is
+              not the same thing as the keys being right, so this runs a REAL
+              put/HEAD/ranged-GET/delete and names the step that failed. */}
+          <div className="rounded-md border border-border/60 p-2 text-[11px]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">
+                {storage?.verified
+                  ? "Round-trip verified: put, HEAD, ranged GET, delete"
+                  : "Not verified yet — jobs will not start until this passes"}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer gap-1.5"
+                disabled={testingStorage || !storage?.enabled}
+                onClick={() => void runStorageTest()}
+              >
+                {testingStorage ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <ShieldCheck className="size-3.5" />
+                )}
+                Test bucket
+              </Button>
+            </div>
+            {storage?.hasAccessKey && (
+              <p className="mt-1 text-muted-foreground">
+                Key ID {storage.accessKeyFirst4}… stored · secret{" "}
+                {storage.hasSecret ? "stored" : "MISSING"}
+              </p>
+            )}
+            {storageTest && (
+              <ul className="mt-1 space-y-0.5 font-mono text-[10px] text-muted-foreground">
+                {storageTest.steps.map((s) => (
+                  <li key={s.step} className={s.ok ? "text-emerald-400" : "text-red-400"}>
+                    {s.ok ? "ok" : "FAIL"} · {s.step} · {s.ms} ms
+                    {s.code ? ` · ${s.code}` : ""}
+                  </li>
+                ))}
+                {storageTest.error?.hint && (
+                  <li className="text-red-400">{storageTest.error.hint}</li>
+                )}
+              </ul>
+            )}
+          </div>
 
           <DialogFooter className="flex-row flex-wrap items-center gap-2">
             <Button

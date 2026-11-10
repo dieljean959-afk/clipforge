@@ -286,3 +286,56 @@ def test_destination_for_a_clip_matches_what_the_route_serves(bucket):
     pushed_key = reclaim.key_for(bucket.paths, "job42", clip)
     route_key = objectstore.key_for_path(clip, bucket.paths.outputs_dir)
     assert pushed_key == route_key == "clipforge/outputs/job42/clip_003.mp4"
+
+
+def test_pushing_a_clip_verifies_it_and_then_releases_the_disk(bucket):
+    """The core rule: stored means HEAD-verified, and only then local goes."""
+    clip = _write(bucket.paths.outputs_dir / "j1" / "clip_000.mp4")
+    thumb = _write(bucket.paths.outputs_dir / "j1" / "clip_000.thumb.jpg")
+
+    res = reclaim.push_clip_and_thumb("j1", clip, thumb)
+
+    assert res["ok"] is True
+    assert res["dropped"] is True
+    assert "clipforge/outputs/j1/clip_000.mp4" in bucket.fake.objects
+    assert not clip.exists()
+    assert not thumb.exists()
+
+
+def test_a_failed_upload_keeps_the_clip_on_disk(bucket, monkeypatch):
+    """A finished clip is never lost to a flaky link — it stays and is retried."""
+    from app import objectstore
+
+    clip = _write(bucket.paths.outputs_dir / "j1" / "clip_000.mp4")
+    monkeypatch.setattr(objectstore, "upload_file", lambda *a, **k: False)
+
+    res = reclaim.push_clip_and_thumb("j1", clip, None)
+
+    assert res["ok"] is False
+    assert res["dropped"] is False
+    assert clip.exists() and clip.stat().st_size > 0
+
+
+def test_completed_batches_expire_and_running_ones_never_do(bucket, monkeypatch):
+    import time as _time
+
+    now_ms = int(_time.time() * 1000)
+    jobs = [
+        {"_id": "old", "status": "complete", "completedAt": now_ms - 60 * 3600 * 1000},
+        {"_id": "running", "status": "running", "completedAt": now_ms - 60 * 3600 * 1000},
+    ]
+    calls: list[str] = []
+
+    class _S:
+        def list_jobs(self, limit=1000):
+            return jobs
+
+        def delete_job(self, job_id):
+            calls.append(job_id)
+
+    monkeypatch.setattr(reclaim, "delete_job_objects", lambda job_id: calls.append(f"obj:{job_id}") or 0)
+
+    out = reclaim.sweep_expired(_S(), bucket.paths, 48)
+
+    assert out["expired"] == ["old"]
+    assert "running" not in out["expired"]

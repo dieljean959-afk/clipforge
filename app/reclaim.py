@@ -235,6 +235,19 @@ def offload_job(store: Any, paths: Any, job_id: str) -> None:
                         f"[reclaim] job {job_id}: {res['uploaded']} file(s) "
                         f"({res['freedMb']} MB) moved to the bucket after completion"
                     )
+                # The source is only needed while the batch runs: once every clip
+                # is in the bucket, its copy is dead weight in a 5 GB plan. The
+                # rules keep it while a batch is running/paused so Retry and Run
+                # again still work, and a later re-render re-fetches from the
+                # URL (telling the user first) when it is gone.
+                job = store.get_job(job_id) or {}
+                if job.get("status") == "complete":
+                    dropped = delete_source_objects(job_id)
+                    if dropped:
+                        logger.info(
+                            f"[reclaim] job {job_id}: {dropped} source object(s) "
+                            "deleted now that the batch is finished"
+                        )
             except Exception as exc:  # noqa: BLE001 - never fail a finished job
                 logger.warning(f"[reclaim] post-completion offload for {job_id} failed: {exc}")
 
@@ -324,3 +337,298 @@ def stop_watchdog() -> None:
     _stop.set()
     if _thread is not None:
         _thread.join(timeout=5.0)
+
+
+# --------------------------------------------------------------------------- #
+# the bucket as the library: verified pushes, retention, budget, crash sweep
+# --------------------------------------------------------------------------- #
+
+_GB = 1024**3
+
+
+def push_verified(path: Path, key: str) -> dict[str, Any]:
+    """Upload one file and require a HEAD with the exact size before trusting it.
+
+    The rule the whole offload rests on: nothing local is deleted, and nothing
+    is reported as stored, until the bucket confirms the byte count. A PUT that
+    was accepted but truncated (common on a flaky link) is caught here.
+    """
+    from . import objectstore
+
+    p = Path(path)
+    try:
+        size = p.stat().st_size
+    except OSError:
+        return {"ok": False, "key": key, "error": "missing locally"}
+    if size <= 0:
+        return {"ok": False, "key": key, "error": "empty file"}
+    if not objectstore.upload_file(p, key):
+        return {"ok": False, "key": key, "error": "upload failed"}
+    if not objectstore.verify(key, size):
+        return {"ok": False, "key": key, "error": "HEAD size mismatch after upload"}
+    return {"ok": True, "key": key, "bytes": size}
+
+
+def push_clip_and_thumb(job_id: str, clip_path: Path, thumb_path: Path | None) -> dict[str, Any]:
+    """Verified push for one finished clip (+ its thumbnail), then drop local.
+
+    Returns the clip's keys and whether the local copy was removed. On ANY
+    failure the local files stay and the caller marks the clip \"upload
+    pending\" and retries with backoff — a finished clip is never lost.
+    """
+    from . import objectstore
+
+    video = push_verified(clip_path, objectstore.output_key(job_id, clip_path.name))
+    if not video["ok"]:
+        return {"ok": False, "video": video, "thumb": None, "dropped": False}
+    thumb_res = None
+    if thumb_path is not None and Path(thumb_path).exists():
+        thumb_res = push_verified(thumb_path, objectstore.output_key(job_id, Path(thumb_path).name))
+    dropped = False
+    if video["ok"]:
+        cfg = objectstore.config_from_env()
+        if objectstore.drop_local_after_push(True, clip_path, cfg):
+            dropped = True
+        if thumb_res and thumb_res.get("ok"):
+            objectstore.drop_local_after_push(True, thumb_path, cfg)
+    return {"ok": True, "video": video, "thumb": thumb_res, "dropped": dropped}
+
+
+def delete_source_objects(job_id: str) -> int:
+    """Drop a finished batch's source from the bucket (its clips stay)."""
+    from . import objectstore
+
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled:
+        return 0
+    return objectstore.delete_prefix(f"{cfg.prefix}/uploads/{job_id}/", cfg)
+
+
+def delete_job_objects(job_id: str) -> int:
+    """Remove every bucket object belonging to one batch (source + outputs)."""
+    from . import objectstore
+
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled:
+        return 0
+    removed = 0
+    for prefix in (
+        f"{cfg.prefix}/uploads/{job_id}/",
+        f"{cfg.prefix}/outputs/{job_id}/",
+    ):
+        removed += objectstore.delete_prefix(prefix, cfg)
+    return removed
+
+
+def retention_countdown(job: dict[str, Any], retention_hours: int) -> int | None:
+    """Hours until this finished batch expires, or None when it never will."""
+    if retention_hours <= 0 or job.get("status") not in RECLAIMABLE_STAGES:
+        return None
+    done_ms = int(job.get("completedAt") or 0)
+    if not done_ms:
+        return None
+    import time as _time
+
+    left = done_ms / 1000.0 + retention_hours * 3600 - _time.time()
+    return max(0, int(left // 3600))
+
+
+def sweep_expired(store: Any, paths: Any, retention_hours: int) -> dict[str, Any]:
+    """Delete batches finished longer than the retention window.
+
+    Bucket first, local second, and only for COMPLETE/FAILED batches — a
+    running, paused or deleting job keeps everything it is using.
+    """
+    import time as _time
+
+    out = {"expired": [], "objectsRemoved": 0, "jobsRemoved": 0}
+    if retention_hours <= 0:
+        return out
+    cutoff = _time.time() - retention_hours * 3600
+    try:
+        jobs = store.list_jobs(limit=1000)
+    except Exception:  # noqa: BLE001
+        return out
+    for job in jobs:
+        if job.get("status") not in RECLAIMABLE_STAGES:
+            continue
+        done_ms = int(job.get("completedAt") or 0)
+        if not done_ms or done_ms / 1000.0 > cutoff:
+            continue
+        job_id = str(job.get("_id") or "")
+        if not job_id:
+            continue
+        removed = delete_job_objects(job_id)
+        for d in _job_dirs(paths, job_id):
+            shutil.rmtree(d, ignore_errors=True)
+        try:
+            store.delete_job(job_id)
+            out["jobsRemoved"] += 1
+        except Exception:  # noqa: BLE001
+            pass
+        out["expired"].append(job_id)
+        out["objectsRemoved"] += removed
+        logger.info(
+            f"[retention] job {job_id} finished more than {retention_hours}h ago — "
+            f"removed {removed} object(s) and its local media"
+        )
+    return out
+
+
+def refresh_status() -> dict[str, Any]:
+    """Bucket usage as GB/percent of the plan, for every status payload."""
+    from . import objectstore
+
+    use = objectstore.usage()
+    budget = int(use.get("budgetBytes") or 0)
+    return {
+        "usageBytes": use["bytes"],
+        "usageGb": round(use["bytes"] / _GB, 2),
+        "usageObjects": use["objects"],
+        "budgetGb": round(budget / _GB, 2),
+        "usedPercent": round(100.0 * use["bytes"] / budget, 1) if budget else 0.0,
+    }
+
+
+def enforce_budget(
+    store: Any, paths: Any, *, warn_at: float = 0.8, prune_at: float = 0.9,
+    retention_hours: int = 48,
+) -> dict[str, Any]:
+    """Keep the 5 GB plan from becoming a failed render.
+
+    * >=80%: say so and run the expiry sweep early (that is free space the user
+      already agreed to give up).
+    * >=90%: delete the OLDEST finished batches until back under the line —
+      never a job that is queued, running, paused or deleting.
+    """
+    from . import objectstore
+
+    out = {"usedPercent": 0.0, "warned": False, "pruned": [], "swept": None}
+    use = objectstore.usage()
+    budget = int(use.get("budgetBytes") or 0)
+    if not budget:
+        return out
+    pct = 100.0 * use["bytes"] / budget
+    out["usedPercent"] = round(pct, 1)
+    if pct < warn_at * 100:
+        return out
+    out["warned"] = True
+    logger.warning(
+        f"[budget] bucket is {out['usedPercent']}% of the {round(budget / _GB, 2)} GB plan "
+        f"({round(use['bytes'] / _GB, 2)} GB used)"
+    )
+    swept = sweep_expired(store, paths, retention_hours)
+    out["swept"] = swept
+    if swept["expired"]:
+        objectstore.invalidate_usage()
+        use = objectstore.usage(refresh=True)
+        pct = 100.0 * use["bytes"] / budget
+        out["usedPercent"] = round(pct, 1)
+    if pct < prune_at * 100:
+        return out
+    finished = [
+        j for j in store.list_jobs(limit=1000)
+        if j.get("status") in RECLAIMABLE_STAGES and j.get("completedAt")
+    ]
+    finished.sort(key=lambda j: int(j.get("completedAt") or 0))
+    for job in finished:
+        if pct < prune_at * 100:
+            break
+        job_id = str(job.get("_id") or "")
+        removed = delete_job_objects(job_id)
+        for d in _job_dirs(paths, job_id):
+            shutil.rmtree(d, ignore_errors=True)
+        try:
+            store.delete_job(job_id)
+        except Exception:  # noqa: BLE001
+            pass
+        out["pruned"].append(job_id)
+        logger.warning(
+            f"[budget] over 90% — removed oldest finished batch {job_id} "
+            f"({removed} object(s)); running jobs untouched"
+        )
+        use = objectstore.usage(refresh=True)
+        pct = 100.0 * use["bytes"] / budget
+        out["usedPercent"] = round(pct, 1)
+    return out
+
+
+def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
+    """Clean what a crash or a kill -9 left behind, before any job sees the disk.
+
+    Two kinds of leftovers: scratch folders whose job no longer exists (or is
+    already finished), and half-written temp files (`.fetching`, `.part`,
+    `.uploading`). Bucket objects are never dropped here — a push is verified
+    before its local copy is removed, so anything still local is the only copy.
+    """
+    out = {"dirsRemoved": 0, "filesRemoved": 0, "bytesFreed": 0}
+    try:
+        jobs = {str(j.get("_id")): j for j in store.list_jobs(limit=1000)}
+    except Exception:  # noqa: BLE001
+        jobs = {}
+    roots = [
+        Path(paths.outputs_dir),
+        Path(paths.data_dir) / "work",
+        Path(paths.data_dir) / "uploads",
+        Path(paths.data_dir) / "downloads",
+    ]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            try:
+                if not child.is_dir():
+                    continue
+                job = jobs.get(child.name)
+                finished = job is None or job.get("status") in RECLAIMABLE_STAGES
+                if not finished:
+                    continue
+                size = sum(p.stat().st_size for p in child.rglob("*") if p.is_file())
+                shutil.rmtree(child, ignore_errors=True)
+                out["dirsRemoved"] += 1
+                out["bytesFreed"] += size
+            except OSError:
+                continue
+    for pattern in ("**/*.fetching", "**/*.part", "**/*.uploading", "**/*.tmp"):
+        for stale in list(Path(paths.data_dir).glob(pattern)):
+            try:
+                out["bytesFreed"] += stale.stat().st_size
+                stale.unlink(missing_ok=True)
+                out["filesRemoved"] += 1
+            except OSError:
+                continue
+    if out["dirsRemoved"] or out["filesRemoved"]:
+        logger.info(
+            f"[sweep] crash leftovers removed: {out['dirsRemoved']} folder(s), "
+            f"{out['filesRemoved']} temp file(s), {round(out['bytesFreed'] / _MB, 1)} MB"
+        )
+    return out
+
+
+def reconcile(store: Any) -> dict[str, Any]:
+    """Bucket vs DB: objects whose batch no longer exists, and batches with none."""
+    from . import objectstore
+
+    live = {str(j.get("_id")): j for j in store.list_jobs(limit=1000)}
+    orphans: list[dict[str, Any]] = []
+    by_job: dict[str, int] = {}
+    for obj in objectstore.list_prefix():
+        key = str(obj.get("key") or "")
+        parts = key.split("/")
+        job_id = parts[2] if len(parts) > 2 and parts[1] in {"uploads", "outputs"} else ""
+        if not job_id:
+            continue
+        by_job[job_id] = by_job.get(job_id, 0) + obj["size"]
+        if job_id not in live:
+            orphans.append({"key": key, "size": obj["size"]})
+    empty = [
+        jid for jid in live
+        if jid not in by_job and live[jid].get("status") == "complete"
+    ]
+    return {
+        "bucketObjects": sum(by_job.values()),
+        "orphanObjects": len(orphans),
+        "orphanBytes": sum(o["size"] for o in orphans),
+        "orphans": orphans[:200],
+        "completedBatchesWithNoObjects": empty,
+    }

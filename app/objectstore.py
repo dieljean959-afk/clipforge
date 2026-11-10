@@ -45,6 +45,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,13 @@ class ObjectStoreConfig:
     region: str = "auto"
     prefix: str = "clipforge"
     delete_local: bool = True
+    #: "path" (works on Filebase/R2/MinIO), "virtual" (bucket.endpoint) or
+    #: "auto" (let botocore decide). Filebase accepts path-style, and a
+    #: virtual-host style request against a bucket whose DNS is not set up is
+    #: the classic silent 400 — so path stays the default and is overridable.
+    addressing: str = "path"
+    #: The plan the user is paying for, used by the budget guard.
+    budget_bytes: int = 5 * 1024**3
 
     @property
     def enabled(self) -> bool:
@@ -93,6 +101,12 @@ def config_from_env() -> ObjectStoreConfig:
             return default
         return raw.strip().lower() in {"1", "true", "on", "yes"}
 
+    addressing = os.getenv("CLIPFORGE_S3_ADDRESSING", "path").strip().lower()
+    budget_gb = os.getenv("CLIPFORGE_BUCKET_BUDGET_GB", "5").strip()
+    try:
+        budget_bytes = max(1, int(float(budget_gb) * 1024**3))
+    except ValueError:
+        budget_bytes = 5 * 1024**3
     return ObjectStoreConfig(
         endpoint=os.getenv("CLIPFORGE_S3_ENDPOINT", "").strip(),
         bucket=os.getenv("CLIPFORGE_S3_BUCKET", "").strip(),
@@ -101,6 +115,8 @@ def config_from_env() -> ObjectStoreConfig:
         region=os.getenv("CLIPFORGE_S3_REGION", "auto").strip() or "auto",
         prefix=os.getenv("CLIPFORGE_S3_PREFIX", "clipforge").strip() or "clipforge",
         delete_local=flag("CLIPFORGE_OFFLOAD_DELETE_LOCAL", True),
+        addressing=addressing if addressing in {"path", "virtual", "auto"} else "path",
+        budget_bytes=budget_bytes,
     )
 
 
@@ -144,8 +160,12 @@ def client(cfg: ObjectStoreConfig | None = None):
                 region_name=cfg.region,
                 config=Config(
                     signature_version="s3v4",
-                    s3={"addressing_style": "path"},
+                    s3={"addressing_style": cfg.addressing},
                     retries={"max_attempts": 3, "mode": "standard"},
+                    # A hung endpoint must surface as "bucket unavailable" in
+                    # seconds, not hold a render for a minute per call.
+                    connect_timeout=10,
+                    read_timeout=60,
                 ),
             )
             # Stashed on the client so a config change is detected by identity,
@@ -224,6 +244,7 @@ def upload_file(
             ContentType=ctype,
         )
         s3.delete_object(Bucket=cfg.bucket, Key=tmp_key)
+        invalidate_usage()
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[objectstore] upload of {p.name} failed: {exc}")
@@ -294,6 +315,7 @@ def delete(key: str, cfg: ObjectStoreConfig | None = None) -> bool:
         return False
     try:
         s3.delete_object(Bucket=cfg.bucket, Key=key)
+        invalidate_usage()
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[objectstore] delete of {key} failed: {exc}")
@@ -360,14 +382,316 @@ def drop_local_after_push(ok: bool, path: str | Path, cfg: ObjectStoreConfig | N
         return False
 
 
+# --------------------------------------------------------------------------- #
+# verification, listing, budget, presigning, and the real "Test bucket"
+# --------------------------------------------------------------------------- #
+
+#: Usage is a full listing, so it is cached for a minute — the dashboard polls
+#: health every few seconds and a listing per poll would be silly.
+_USAGE_TTL_SEC = 60.0
+_usage_cache: tuple[float, int, int] | None = None  # (monotonic, bytes, objects)
+_usage_lock = threading.Lock()
+
+
+def invalidate_usage() -> None:
+    """Forget the cached usage figure (after an upload or a delete)."""
+    global _usage_cache
+    _usage_cache = None
+
+
+def head(key: str, cfg: ObjectStoreConfig | None = None) -> dict[str, Any] | None:
+    """Object metadata, or None when it is not there.
+
+    The difference between "uploaded" and "verified": `upload_file` returning
+    True says the PUT was accepted, this says the object is really in the
+    bucket with the size we expect.
+    """
+    cfg = cfg or config_from_env()
+    s3 = client(cfg)
+    if s3 is None or not cfg.enabled:
+        return None
+    try:
+        resp = s3.head_object(Bucket=cfg.bucket, Key=key)
+        return {
+            "key": key,
+            "size": int(resp.get("ContentLength") or 0),
+            "contentType": resp.get("ContentType"),
+            "etag": str(resp.get("ETag") or "").strip('"'),
+            "lastModified": resp.get("LastModified"),
+        }
+    except Exception:  # noqa: BLE001 - a miss is a legitimate answer
+        return None
+
+
+def verify(key: str, expect_bytes: int, cfg: ObjectStoreConfig | None = None) -> bool:
+    """HEAD the object and require the exact byte count. Never a guess."""
+    meta = head(key, cfg)
+    return bool(meta is not None and int(meta.get("size") or -1) == int(expect_bytes))
+
+
+def list_prefix(
+    prefix: str | None = None, cfg: ObjectStoreConfig | None = None,
+) -> list[dict[str, Any]]:
+    """Every object under a prefix, with sizes. Paginated: 1000 per call."""
+    cfg = cfg or config_from_env()
+    s3 = client(cfg)
+    if s3 is None or not cfg.enabled:
+        return []
+    prefix = f"{cfg.prefix}/" if prefix is None else prefix
+    out: list[dict[str, Any]] = []
+    token: str | None = None
+    try:
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": cfg.bucket, "Prefix": prefix, "MaxKeys": 1000}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = s3.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []) or []:
+                out.append({
+                    "key": obj.get("Key"),
+                    "size": int(obj.get("Size") or 0),
+                    "lastModified": obj.get("LastModified"),
+                })
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+            if not token:
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[objectstore] listing {prefix} failed: {exc}")
+        return out
+    return out
+
+
+def usage(cfg: ObjectStoreConfig | None = None, *, refresh: bool = False) -> dict[str, Any]:
+    """Bytes and objects in the bucket, cached for 60 s.
+
+    Summing a listing is the only portable way to know usage: Filebase and R2
+    both expose it, but with different endpoints and units, and a listing is
+    also what the reconcile/orphan sweep needs.
+    """
+    global _usage_cache
+    cfg = cfg or config_from_env()
+    if not cfg.enabled:
+        return {"bytes": 0, "objects": 0, "budgetBytes": cfg.budget_bytes, "cached": False}
+    with _usage_lock:
+        now = time.monotonic()
+        if not refresh and _usage_cache is not None and now - _usage_cache[0] < _USAGE_TTL_SEC:
+            return {
+                "bytes": _usage_cache[1],
+                "objects": _usage_cache[2],
+                "budgetBytes": cfg.budget_bytes,
+                "cached": True,
+            }
+        objs = list_prefix(cfg=cfg)
+        total = sum(o["size"] for o in objs)
+        _usage_cache = (now, total, len(objs))
+    return {"bytes": total, "objects": len(objs), "budgetBytes": cfg.budget_bytes, "cached": False}
+
+
+def delete_prefix(prefix: str, cfg: ObjectStoreConfig | None = None) -> int:
+    """Delete every object under a prefix. Returns how many were removed."""
+    cfg = cfg or config_from_env()
+    s3 = client(cfg)
+    if s3 is None or not cfg.enabled:
+        return 0
+    objs = list_prefix(prefix, cfg)
+    removed = 0
+    for i in range(0, len(objs), 1000):
+        batch = [{"Key": o["key"]} for o in objs[i : i + 1000]]
+        try:
+            s3.delete_objects(Bucket=cfg.bucket, Delete={"Objects": batch, "Quiet": True})
+            removed += len(batch)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[objectstore] batch delete under {prefix} failed: {exc}")
+            for obj in batch:
+                if delete(obj["Key"], cfg):
+                    removed += 1
+    if removed:
+        invalidate_usage()
+    return removed
+
+
+def presign(
+    key: str,
+    *,
+    expires: int = 3600,
+    download_name: str | None = None,
+    cfg: ObjectStoreConfig | None = None,
+) -> str | None:
+    """A presigned GET URL.
+
+    Presigned rather than proxied so the browser talks to the bucket directly:
+    HTTP Range requests then work natively (mobile seeking), the 4 GB box never
+    touches the bytes, and a slow viewer cannot occupy a worker slot.
+    """
+    cfg = cfg or config_from_env()
+    s3 = client(cfg)
+    if s3 is None or not cfg.enabled:
+        return None
+    params: dict[str, Any] = {"Bucket": cfg.bucket, "Key": key}
+    if download_name:
+        safe = download_name.replace('"', "").replace("\\", "").strip() or "clip.mp4"
+        params["ResponseContentDisposition"] = f'attachment; filename="{safe}"'
+    try:
+        return s3.generate_presigned_url("get_object", Params=params, ExpiresIn=expires)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[objectstore] could not presign {key}: {exc}")
+        return None
+
+
+#: Turning a botocore exception into the sentence that actually fixes it. The
+#: whole point of "Test bucket" is that a 403 never leaves the user guessing
+#: between a bad secret, a wrong region and a bucket that does not exist.
+_ERROR_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("SignatureDoesNotMatch",), "403 signature mismatch — the secret access key does not match this access key id"),
+    (("InvalidAccessKeyId",), "invalid access key id — it does not exist on this provider"),
+    (("NoSuchBucket", "NotFound"), "the bucket does not exist (check the exact name and the endpoint/account)"),
+    (("PermanentRedirect", "AuthorizationHeaderMalformed", "IllegalLocationConstraintException"),
+     "wrong region — this bucket lives in another region (us-east-1 is the usual answer for Filebase)"),
+    (("AccessDenied", "Forbidden"), "403 access denied — this key cannot put/get/delete in this bucket"),
+    (("InvalidBucketName",), "the bucket name is not valid for S3"),
+    (("EndpointConnectionError", "ConnectTimeout", "ConnectionError"),
+     "could not connect to the endpoint (timeout or DNS) — check the endpoint URL"),
+    (("ReadTimeout", "RequestTimeout"), "the endpoint timed out — the bucket is reachable but very slow"),
+    (("SSLError",), "TLS error talking to the endpoint — check the scheme (https://) and the host"),
+    (("InvalidRegion", "InvalidEndpoint"), "the endpoint or region is not one this provider accepts"),
+)
+
+
+def explain_error(exc: BaseException) -> dict[str, str]:
+    """(code, message) for a storage failure, in words that name the cause."""
+    code = ""
+    detail = str(exc)
+    resp = getattr(exc, "response", None) or {}
+    err = (resp.get("Error") or {}) if isinstance(resp, dict) else {}
+    code = str(err.get("Code") or "") or type(exc).__name__
+    status = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode") if isinstance(resp, dict) else None
+    message = str(err.get("Message") or detail)[:300]
+    for codes, hint in _ERROR_HINTS:
+        if code in codes:
+            return {"code": code, "status": str(status or ""), "message": message, "hint": hint}
+    return {"code": code, "status": str(status or ""), "message": message, "hint": ""}
+
+
+def test_roundtrip(cfg: ObjectStoreConfig | None = None) -> dict[str, Any]:
+    """A REAL put → head → ranged get → delete against the configured bucket.
+
+    Configuration that is merely complete is not configuration that works. The
+    access key id field rendered empty while the secret said "saved", so
+    nothing in the UI could tell a correct pair from a half-saved one. This does
+    what the pipeline does, on one tiny object, and reports the first step that
+    failed with the provider's own error code.
+    """
+    cfg = cfg or config_from_env()
+    started = time.monotonic()
+    out: dict[str, Any] = {
+        "ok": False,
+        "bucket": cfg.bucket or None,
+        "endpoint": cfg.endpoint or None,
+        "region": cfg.region,
+        "addressing": cfg.addressing,
+        "steps": [],
+    }
+    missing = [
+        label
+        for label, value in (
+            ("endpoint", cfg.endpoint),
+            ("bucket", cfg.bucket),
+            ("access key id", cfg.access_key),
+            ("secret access key", cfg.secret_key),
+        )
+        if not value
+    ]
+    if missing:
+        out["error"] = {"code": "IncompleteConfig", "message": f"missing: {', '.join(missing)}"}
+        out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        return out
+    s3 = client(cfg)
+    if s3 is None:
+        out["error"] = {"code": "NoClient", "message": "boto3 could not build a client — check the endpoint URL"}
+        out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        return out
+
+    payload = b"clipforge bucket test\n"
+    key = f"{cfg.prefix}/_healthcheck/{int(time.time())}-{os.getpid()}.txt"
+
+    def step(name: str, fn: Any) -> bool:
+        t0 = time.monotonic()
+        try:
+            fn()
+            out["steps"].append({"step": name, "ok": True, "ms": int((time.monotonic() - t0) * 1000)})
+            return True
+        except BaseException as exc:  # noqa: BLE001 - the whole point is reporting it
+            info = explain_error(exc)
+            out["steps"].append({"step": name, "ok": False, **info, "ms": int((time.monotonic() - t0) * 1000)})
+            out["error"] = info
+            return False
+
+    if not step("put", lambda: s3.put_object(Bucket=cfg.bucket, Key=key, Body=payload, ContentType="text/plain")):
+        out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        return out
+    try:
+        meta = s3.head_object(Bucket=cfg.bucket, Key=key)
+        size_ok = int(meta.get("ContentLength") or -1) == len(payload)
+        out["steps"].append({"step": "head", "ok": size_ok, "ms": 0, "bytes": int(meta.get("ContentLength") or 0)})
+        if not size_ok:
+            out["error"] = {"code": "SizeMismatch", "message": "the object came back with a different size"}
+            s3.delete_object(Bucket=cfg.bucket, Key=key)
+            out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+            return out
+    except BaseException as exc:  # noqa: BLE001
+        info = explain_error(exc)
+        out["steps"].append({"step": "head", "ok": False, **info, "ms": 0})
+        out["error"] = info
+        out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        return out
+
+    def ranged_get() -> None:
+        resp = s3.get_object(Bucket=cfg.bucket, Key=key, Range="bytes=0-3")
+        body = resp["Body"].read()
+        if body != payload[:4]:
+            raise RuntimeError(f"ranged GET returned {body!r}, expected {payload[:4]!r}")
+
+    if not step("ranged get (HTTP Range)", ranged_get):
+        s3.delete_object(Bucket=cfg.bucket, Key=key)
+        out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        return out
+    if not step("delete", lambda: s3.delete_object(Bucket=cfg.bucket, Key=key)):
+        out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        return out
+    out["ok"] = True
+    out["elapsedMs"] = int((time.monotonic() - started) * 1000)
+    invalidate_usage()
+    return out
+
+
 def status() -> dict[str, Any]:
-    """A small dict for the boot banner and /api/health."""
+    """A small dict for the boot banner, /api/health and the bucket dialog.
+
+    `hasAccessKey`/`hasSecret` are separate on purpose: the dialog showed
+    "saved" for the secret while the id field looked empty, which is
+    indistinguishable from a half-saved credential pair.
+    """
     cfg = config_from_env()
+    use = usage(cfg)
     return {
         "enabled": cfg.enabled,
         "bucket": cfg.bucket or None,
         "endpoint": cfg.endpoint or None,
         "prefix": cfg.prefix,
+        "region": cfg.region,
+        "addressing": cfg.addressing,
         "deleteLocal": cfg.delete_local,
         "clientReady": cfg.enabled and client(cfg) is not None,
+        "hasEndpoint": bool(cfg.endpoint),
+        "hasBucket": bool(cfg.bucket),
+        "hasAccessKey": bool(cfg.access_key),
+        "accessKeyFirst4": cfg.access_key[:4],
+        "accessKeyLength": len(cfg.access_key),
+        "hasSecret": bool(cfg.secret_key),
+        "secretLength": len(cfg.secret_key),
+        "usageBytes": use["bytes"],
+        "usageObjects": use["objects"],
+        "budgetBytes": cfg.budget_bytes,
     }

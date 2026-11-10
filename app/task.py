@@ -235,6 +235,7 @@ class Pipeline:
         the WHOLE batch will fit, only whether the host is already in trouble.
         """
         from app import hostlimits
+        from app.hosting import mb_from_bytes, wait_for_space
 
         path = self.settings.app.paths.data_dir
         lim = hostlimits.describe()
@@ -249,18 +250,44 @@ class Pipeline:
             return
         if free is None:
             return
-        if free < 200 * 1024 * 1024:
+        # Waiting instead of failing: a render that needs ~400 MB on a 4 GB box
+        # is a scheduling problem, not a reason to throw away a finished
+        # transcript. The wait runs the reclaim on every tick, so space that a
+        # finished batch still holds is released first, and only then does the
+        # job pause with "Waiting for disk space".
+        from app import reclaim as _reclaim
+
+        def _on_wait(reason: str, free_b: int, scratch_b: int) -> None:
+            self._progress(
+                job_id, "waiting", 0,
+                f"Waiting for disk space — {reason}",
+            )
+            self._log(job_id, f"waiting for disk space: {reason}")
+            try:
+                _reclaim.reclaim(self.store, self.settings.app.paths)
+            except Exception:  # noqa: BLE001 - reclaim is best effort
+                pass
+
+        need = 400 * 1024 * 1024 if source_duration_sec > 0 else 200 * 1024 * 1024
+        ok, reason = wait_for_space(
+            self.settings.app.paths,
+            need,
+            cap_bytes=int(getattr(self.settings.hosted, "scratch_cap_mb", 1536)) * 1024 * 1024,
+            timeout_sec=1800.0,
+            on_wait=_on_wait,
+        )
+        if not ok:
             raise video.RenderError(
-                f"not enough free disk ({lim}) — less than 200 MB free on "
-                f"{path}. The download and transcript are still cached; Retry "
-                f"will resume from the last completed stage once space is cleared."
+                f"not enough free disk ({lim}) — {reason} on {path}. The "
+                f"download and transcript are still cached; Retry will resume "
+                f"from the last completed stage once space is cleared."
             )
         if source_duration_sec > 0:
             est = source_duration_sec * 0.05
             if est and free < est + 500 * 1024 * 1024:
                 logger.warning(
-                    f"[job {job_id}] low disk headroom: {free // (1024*1024)} MB free, "
-                    f"~{est:.0f} MB estimated render footprint for a "
+                    f"[job {job_id}] low disk headroom: {mb_from_bytes(free)} MB "
+                    f"free, ~{est:.0f} MB estimated render footprint for a "
                     f"{source_duration_sec / 60:.0f} min source"
                 )
 
@@ -1059,6 +1086,25 @@ class Pipeline:
                     "file' for a local upload."
                 )
             url = url.strip()
+            # The source object is deleted from the bucket when a batch finishes
+            # (it is the largest thing in a 5 GB plan). A re-render of a
+            # finished batch therefore has to pull it again — say so BEFORE
+            # doing it, because that is a fresh download of a video the user
+            # thinks is already handled.
+            if job.get("completedAt") or ws.is_done("fetch"):
+                host = url.split("//")[-1].split("/")[0] if "//" in url else url[:40]
+                self._log(
+                    job_id,
+                    f"the source is no longer stored (it is deleted when a batch "
+                    f"finishes) — fetching it again from {host}; the transcript "
+                    f"and finished clips are kept",
+                )
+                self._progress(
+                    job_id, "grabbing", 0,
+                    f"Source expired from the bucket — fetching it again from {host}",
+                )
+                self._patch_job(job_id, sourceRefetched=True)
+
             def on_progress(frac: float, _eta: float | None) -> None:
                 self._progress(job_id, "grabbing", frac, "Clippy is grabbing the video...")
 
@@ -1934,12 +1980,16 @@ class Pipeline:
             # bounded-runner path re-enters this loop from clip 0 each time.
             existing_doc = self.store.get_clip_doc(clip_id)
             existing_file = dest / f"clip_{i:03d}.mp4"
+            # A clip that lives in the bucket counts as rendered: the local file
+            # is deleted after a verified push, so requiring it here would
+            # re-render (and re-upload) every clip on every resume.
+            file_ok = existing_file.exists() and existing_file.stat().st_size > 0
+            remote_ok = bool(existing_doc and existing_doc.get("mediaRemote"))
             if (
                 existing_doc is not None
                 and existing_doc.get("renderState") == "done"
                 and existing_doc.get("styleId") == style_id
-                and existing_file.exists()
-                and existing_file.stat().st_size > 0
+                and (file_ok or remote_ok)
             ):
                 self._log(job_id, f"resume: clip {i + 1} already rendered at this style, skipping")
                 continue
@@ -2068,6 +2118,14 @@ class Pipeline:
                     },
                     job_id=job_id,
                 )
+            # ---- the bucket is the store; the disk is only a workbench ------
+            # Push THIS clip (and its thumb), HEAD-verify both, and release the
+            # local bytes immediately. Nothing is deleted before the bucket has
+            # confirmed the size, and a failure leaves the file alone and marks
+            # the clip "upload pending" so the completion sweep retries it.
+            self._store_clip_media(
+                job_id, clip_id, dest / f"clip_{i:03d}.mp4", thumb_path, meta,
+            )
             total_sec += meta["durationSec"]
             rendered += 1
 
@@ -2080,6 +2138,82 @@ class Pipeline:
             clipCount=rendered,
             totalClipsSec=round(total_sec, 3),
             renderFailures=len(failed),
+        )
+
+    def _store_clip_media(
+        self,
+        job_id: str,
+        clip_id: str,
+        clip_path: Path,
+        thumb_path: Path | None,
+        meta: dict[str, Any],
+    ) -> None:
+        """Push one finished clip to the bucket, verify it, then free the disk.
+
+        Retried with backoff (2s, 4s, 8s) because the failure mode that matters
+        is a flaky link, not a wrong bucket — and a clip that cannot be stored
+        must stay on disk rather than disappear. `mediaRemote` is only ever set
+        after a HEAD reports the exact byte count.
+        """
+        from app import objectstore, reclaim
+
+        cfg = objectstore.config_from_env()
+        if not cfg.enabled:
+            return
+        duration = float(meta.get("durationSec") or 0.0)
+        # 1080x1920 is capped at ~3.7 Mbps by the encoder's own ceiling, so this
+        # is what the file SHOULD weigh; the dashboard shows it next to the real
+        # `mediaBytes` and the difference is the honesty check.
+        estimated = int(duration * 3_732_000 / 8) if duration else None
+        delay = 2.0
+        last_error = ""
+        for attempt in range(3):
+            try:
+                res = reclaim.push_clip_and_thumb(job_id, clip_path, thumb_path)
+            except Exception as exc:  # noqa: BLE001 - a push must not fail the clip
+                res = {"ok": False, "video": {"error": str(exc)[:200]}}
+            if res.get("ok"):
+                bytes_sent = int((res.get("video") or {}).get("bytes") or 0)
+                self.store.write_clip(
+                    clip_id,
+                    {
+                        "mediaRemote": True,
+                        "uploadPending": False,
+                        "uploadError": None,
+                        "videoKey": (res.get("video") or {}).get("key"),
+                        "thumbKey": (res.get("thumb") or {}).get("key"),
+                        "localDropped": bool(res.get("dropped")),
+                        "estimatedBytes": estimated,
+                    },
+                    job_id=job_id,
+                )
+                self._log(
+                    job_id,
+                    f"clip {int(meta.get('index') or 0) if meta.get('index') else clip_id[:6]}: "
+                    f"{bytes_sent / 1048576:.1f} MB stored and HEAD-verified "
+                    f"(est {(estimated or 0) / 1048576:.1f} MB), local copy released",
+                )
+                return
+            last_error = str((res.get("video") or {}).get("error") or "upload failed")[:200]
+            if attempt < 2:
+                self._log(job_id, f"upload attempt {attempt + 1} failed ({last_error}) — retrying in {delay:.0f}s")
+                time.sleep(delay)
+                delay *= 2
+        self.store.write_clip(
+            clip_id,
+            {
+                "mediaRemote": False,
+                "uploadPending": True,
+                "uploadError": last_error,
+                "localDropped": False,
+                "estimatedBytes": estimated,
+            },
+            job_id=job_id,
+        )
+        self._log(
+            job_id,
+            f"clip kept on local disk — upload pending ({last_error}); "
+            "the batch completion sweep retries it, nothing is lost",
         )
 
     # ------------------------------------------------------------------

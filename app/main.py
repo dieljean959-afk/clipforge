@@ -629,6 +629,20 @@ def _start_worker() -> None:
         reclaim.start_watchdog(store, settings.app.paths)
     except Exception as exc:  # noqa: BLE001 - never let cleanup break boot
         logger.warning(f"[boot] media reclaim watchdog did not start: {exc}")
+    # Crash leftovers: a kill -9 (or a sandbox snapshot) leaves scratch folders
+    # for jobs that no longer exist and half-written `.fetching` files. Clear
+    # them before any job can measure the disk, so one bad crash does not need
+    # a human with a terminal.
+    try:
+        swept = reclaim.sweep_startup(store, settings.app.paths)
+        if swept.get("dirsRemoved") or swept.get("filesRemoved"):
+            logger.info(
+                f"[boot] crash sweep: {swept['dirsRemoved']} folder(s), "
+                f"{swept['filesRemoved']} temp file(s), "
+                f"{round(swept['bytesFreed'] / (1024 * 1024), 1)} MB freed"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[boot] crash sweep did not run: {exc}")
     retention.start()
     # Sweep ONCE at boot, not just on the daemon's first 30-minute tick.
     #
@@ -1114,7 +1128,10 @@ def health() -> dict:
         # Whether clips are pushed to durable storage. `enabled` needs all four
         # CLIPFORGE_S3_* values, and config_from_env() re-reads per call, so this
         # turns ON by itself once the keys land — no restart, nothing to guess at.
-        "storage": _block("storage", objectstore.status),
+        # Verified-ness travels with the storage block: "Media offload on" in
+        # the dashboard is only shown for a bucket that answered a real
+        # put/head/get/delete, never for one whose fields merely look filled.
+        "storage": _block("storage", _bucket_gate),
         "encode": _block("encode", lambda: encode_mod.as_dict(encode_mod.choose(settings))),
         "disk": _block("disk", lambda: disk_stats(settings.app.paths.data_dir)),
         # The status card reports the pipeline's real toolchain and where it
@@ -1806,7 +1823,172 @@ def reclaim_storage() -> dict:
         f"{out.get('freedMb')} MB freed"
         + (f" — {out['reason']}" if out.get("reason") else "")
     )
-    return out
+    refresh = reclaim.refresh_status()
+    return {**out, "bucket": refresh}
+
+
+# --------------------------------------------------------------------------- #
+# bucket health: a real round-trip, and the figure the budget guard uses
+# --------------------------------------------------------------------------- #
+#: Where the last passing test is remembered. Not a credential: bucket name,
+#: timestamp and outcome only — the keys never leave the environment.
+STORAGE_TEST_FILE = "storage_test.json"
+
+
+def _storage_test_state() -> dict:
+    p = Path(settings.app.paths.data_dir) / STORAGE_TEST_FILE
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - absent/unreadable means "never tested"
+        return {}
+
+
+def _write_storage_test_state(state: dict) -> None:
+    p = Path(settings.app.paths.data_dir) / STORAGE_TEST_FILE
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning(f"[storage] could not persist the bucket test result: {exc}")
+
+
+def _bucket_gate() -> dict:
+    """Is media offload configured AND proven working on this exact bucket?
+
+    Configuration that merely looks complete is what let a half-saved
+    credential pair pass for a working bucket. "On" requires a real
+    put/head/get/delete against the bucket that is configured right now, so a
+    later key rotation turns it off again instead of failing at clip 7.
+    """
+    st = objectstore.status()
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled:
+        return {
+            **st,
+            "verified": False,
+            "ready": False,
+            "reason": "the bucket is not configured — set endpoint, bucket and both keys",
+        }
+    last = _storage_test_state()
+    verified = bool(
+        last.get("ok")
+        and last.get("bucket") == cfg.bucket
+        and last.get("endpoint") == cfg.endpoint
+        and last.get("accessKeyFirst4") == cfg.access_key[:4]
+    )
+    return {
+        **st,
+        "verified": verified,
+        "ready": verified and bool(st.get("clientReady")),
+        "lastTestAt": last.get("testedAt"),
+        "lastTestError": last.get("error"),
+        "reason": "" if verified else "the bucket has not passed a Test bucket round-trip",
+    }
+
+
+@app.get("/api/storage/status")
+def storage_status(refresh: bool = False) -> dict:
+    """Bucket state, usage against the plan, retention and scratch figures."""
+    gate = _bucket_gate()
+    use = objectstore.usage(refresh=refresh)
+    scratch = hosting.scratch_report(settings.app.paths)
+    return {
+        **gate,
+        "usageBytes": use["bytes"],
+        "usageGb": hosting.gb_from_bytes(use["bytes"]),
+        "usageObjects": use["objects"],
+        "budgetBytes": use["budgetBytes"],
+        "budgetGb": hosting.gb_from_bytes(use["budgetBytes"]),
+        "usedPercent": round(100.0 * use["bytes"] / use["budgetBytes"], 1) if use["budgetBytes"] else 0.0,
+        "retentionHours": settings.hosted.retention_hours,
+        "scratchCapMb": settings.hosted.scratch_cap_mb,
+        "scratch": scratch,
+    }
+
+
+@app.post("/api/storage/test")
+def storage_test() -> dict:
+    """A REAL put → head → ranged get → delete. Proves the keys, not the form."""
+    result = objectstore.test_roundtrip()
+    cfg = objectstore.config_from_env()
+    _write_storage_test_state({
+        "ok": bool(result.get("ok")),
+        "bucket": cfg.bucket,
+        "endpoint": cfg.endpoint,
+        "accessKeyFirst4": cfg.access_key[:4],
+        "region": cfg.region,
+        "addressing": cfg.addressing,
+        "testedAt": int(time.time() * 1000),
+        "elapsedMs": result.get("elapsedMs"),
+        "error": result.get("error"),
+        "steps": result.get("steps"),
+    })
+    if result.get("ok"):
+        logger.info(
+            f"[storage] bucket test PASSED: {cfg.bucket} @ {cfg.endpoint} "
+            f"(put/head/ranged-get/delete in {result.get('elapsedMs')} ms)"
+        )
+        objectstore.invalidate_usage()
+    else:
+        err = result.get("error") or {}
+        logger.warning(
+            f"[storage] bucket test FAILED at {cfg.bucket!r}: "
+            f"{err.get('code')} {err.get('message')} — {err.get('hint')}"
+        )
+    return {**result, "gate": _bucket_gate()}
+
+
+def _estimate_job_bytes(duration_sec: float, clips: int | None = None) -> int:
+    """What a batch will need in the bucket, from the source's duration.
+
+    Source: the download cap is 720p, measured at ~2.6 Mbps on the 22-minute
+    source that filled this disk (445 MB for 1355 s). Clips: 1080x1920 is
+    capped at `target_bitrate_kbps` (3.7 Mbps today), so a clip costs about
+    duration/60 * 28 MB. Both are ceilings rounded up, never optimistic.
+    """
+    dur = max(0.0, float(duration_sec or 0.0))
+    source = int(dur * 2_600_000 / 8 * 1.05)
+    per_clip = 20.0 * 28 * 1024 * 1024  # a batch's clips average ~20 s each
+    return source + int(max(1, clips or 4) * per_clip)
+
+
+def _refuse_if_bucket_would_overflow(duration_sec: float) -> None:
+    """Fail BEFORE the job starts, never halfway through."""
+    gate = _bucket_gate()
+    if not gate.get("enabled"):
+        return
+    use = objectstore.usage()
+    budget = int(use.get("budgetBytes") or 0)
+    need = _estimate_job_bytes(duration_sec)
+    if budget and use["bytes"] + need > budget:
+        free = max(0, budget - use["bytes"])
+        raise HTTPException(
+            507,
+            f"This batch needs about {hosting.gb_from_bytes(need)} GB and only "
+            f"{hosting.gb_from_bytes(free)} GB of the "
+            f"{hosting.gb_from_bytes(budget)} GB bucket is free — free space "
+            f"(delete old batches, or lower the retention: it is "
+            f"{settings.hosted.retention_hours}h) and try again.",
+        )
+
+
+def _require_bucket_ready() -> None:
+    """Jobs do not start without a bucket that has passed its round-trip."""
+    gate = _bucket_gate()
+    if not gate.get("enabled"):
+        # No bucket at all is the old local-only install: unchanged behaviour.
+        # A CONFIGURED bucket that has not passed is a different thing, and is
+        # refused below, because in that case the disk is not the library.
+        return
+    if gate.get("ready"):
+        return
+    raise HTTPException(
+        409,
+        "Media offload is not verified for this bucket — run “Test bucket” in "
+        "the media bucket dialog first. Jobs do not start until the bucket has "
+        "answered a real put/head/get/delete."
+        + (f" Last error: {gate['lastTestError']}" if gate.get("lastTestError") else ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2050,6 +2232,11 @@ def create_job(body: CreateJobIn) -> dict:
         if info:
             title = info.get("title")
             duration = info.get("duration")
+    # Bucket first: a configured bucket that has not passed its round-trip is
+    # not a place to put this job's media, and the estimate refuses a batch
+    # that cannot fit rather than failing at clip 7.
+    _require_bucket_ready()
+    _refuse_if_bucket_would_overflow(float(duration or 0.0))
     if (
         duration is not None
         and duration > settings.hosted.max_source_min * 60
@@ -2190,6 +2377,12 @@ async def upload_job(
             f"Video is {uploaded_meta['duration'] / 60:.0f} min — this plan "
             f"processes at most {settings.hosted.max_source_min} min. Trim the source and try again.",
         )
+    # Same two gates as a URL job: the bucket must have proven itself, and the
+    # batch must fit the plan's budget. Checked AFTER the duration is known (an
+    # upload's size is only real once the bytes are here) and BEFORE the job is
+    # queued, so a refusal never leaves a half-started batch behind.
+    _require_bucket_ready()
+    _refuse_if_bucket_would_overflow(float(uploaded_meta["duration"]))
     job = store.get_job(job_id) or job
     job["source"] = final.name
     # Push to durable storage BEFORE the job is queued, and before the local
@@ -2278,8 +2471,13 @@ def list_jobs(
     # live queue positions — a job waiting at 0% must be distinguishable from
     # one that is genuinely stuck
     positions = worker.queue_snapshot()
+    retention_h = settings.hosted.retention_hours
     for job in page:
         job["queuePosition"] = positions.get(job["_id"])
+        # "deletes in 31 h" on every finished batch: retention is only fair if
+        # the countdown is visible before the files disappear.
+        job["expiresInHours"] = reclaim.retention_countdown(job, retention_h)
+        job["retentionHours"] = retention_h
     # ONE derivation for every consumer, so the list card and the job card
     # cannot read the same document and reach opposite conclusions.
     return {
@@ -3115,17 +3313,9 @@ def _purge_remote_job(job_id: str) -> None:
         return
     prefix = f"{cfg.prefix}"
     try:
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=cfg.bucket, Prefix=f"{prefix}/"):
-            keys = [
-                {"Key": o["Key"]}
-                for o in page.get("Contents", [])
-                if f"/{job_id}/" in o["Key"]
-            ]
-            for i in range(0, len(keys), 1000):
-                s3.delete_objects(
-                    Bucket=cfg.bucket, Delete={"Objects": keys[i:i + 1000]}
-                )
+        removed = reclaim.delete_job_objects(job_id)
+        if removed:
+            logger.info(f"[storage] job {job_id}: {removed} bucket object(s) deleted")
     except Exception as exc:  # noqa: BLE001 - a stale object is not worth a 500
         logger.warning(f"[objectstore] could not purge remote objects for {job_id}: {exc}")
 
@@ -3201,6 +3391,16 @@ def _serve_from_bucket(
     key = objectstore.key_for_path(p, settings.app.paths.outputs_dir)
     if not key:
         return None
+    # Presigned when asked: the browser then talks to the bucket directly, so
+    # Range seeking is the bucket's own (native on mobile) and these bytes never
+    # pass through the 4 GB box. `?presign=1` keeps the proxy path as the
+    # default for clients that cannot follow a redirect to another host.
+    if request.query_params.get("presign") in {"1", "true", "yes"}:
+        url = objectstore.presign(
+            key, download_name=filename, cfg=objectstore.config_from_env()
+        )
+        if url:
+            return RedirectResponse(url, status_code=307)
     opened = objectstore.open_stream(key, request.headers.get("range"))
     if opened is None:
         return None
@@ -3907,7 +4107,7 @@ def export_zip(body: ZipRequest):
     """ZIP of REAL rendered MP4s + captions.txt — no metadata-only exports."""
     import zipfile
 
-    members: list[tuple[Path, str]] = []
+    members: list[tuple[Path | None, str, str]] = []
     total = 0
     skipped: list[str] = []
     for cid in body.clipIds:
@@ -3916,10 +4116,21 @@ def export_zip(body: ZipRequest):
             skipped.append(cid)
             continue
         p = Path(clip["videoPath"])
-        if not _restore_media(p):
+        key = objectstore.key_for_path(p, settings.app.paths.outputs_dir)
+        if p.exists() and p.stat().st_size > 0:
+            size = p.stat().st_size
+        elif key:
+            # In the bucket and NOT pulled back: `_restore_media` here would
+            # refill the disk this export is supposed to leave alone. The bytes
+            # go bucket -> ZIP directly, one chunk at a time.
+            meta = objectstore.head(key)
+            if meta is None:
+                skipped.append(cid)
+                continue
+            size = int(meta.get("size") or 0)
+        else:
             skipped.append(cid)
             continue
-        size = p.stat().st_size
         if total + size > MAX_EXPORT_BYTES:
             raise HTTPException(
                 413,
@@ -3929,7 +4140,7 @@ def export_zip(body: ZipRequest):
             )
         total += size
         title = str(clip.get("title") or "clip")[:40]
-        members.append((p, f"clips/{int(clip.get('order', 0)) + 1:02d}-{title}.mp4"))
+        members.append((p if p.exists() else None, f"clips/{int(clip.get('order', 0)) + 1:02d}-{title}.mp4", key or ""))
 
     if not members:
         raise HTTPException(404, "no rendered clips to export")
@@ -3939,29 +4150,44 @@ def export_zip(body: ZipRequest):
     job = store.get_job(job_id) if job_id else None
 
     # ZIP_STORED: H.264 is already compressed, so deflating would burn CPU for
-    # ~0% gain. The point of writing to disk is that peak memory stays flat no
-    # matter how large the batch is.
-    fd, tmp_name = tempfile.mkstemp(prefix="clipforge-export-", suffix=".zip")
-    os.close(fd)
-    tmp_path = Path(tmp_name)
+    # ~0% gain. The archive itself is spooled (memory up to 32 MB, then disk) so
+    # the clip files are never staged: each one is either read from local disk
+    # or streamed straight out of the bucket into the archive.
+    spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, suffix=".zip")
     try:
-        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
-            for src, arcname in members:
-                zf.write(src, arcname)
+        with zipfile.ZipFile(spool, "w", zipfile.ZIP_STORED) as zf:
+            for src, arcname, key in members:
+                if src is not None:
+                    zf.write(src, arcname)
+                    continue
+                opened = objectstore.open_stream(key) if key else None
+                if opened is None:
+                    skipped.append(arcname)
+                    continue
+                _status, _headers, body = opened
+                chunks = body.iter_chunks(256 * 1024) if hasattr(body, "iter_chunks") else [body.read()]
+                with zf.open(arcname, "w") as dst:
+                    for chunk in chunks:
+                        dst.write(chunk)
             zf.writestr("captions.txt", (job or {}).get("captionsTxt") or "")
             zf.writestr(
                 "README.txt",
                 "ClipForge export — 9:16 1080x1920 H.264/AAC\n"
                 "Only clip content you own or have permission to use.\n",
             )
-        return FileResponse(
-            tmp_path,
+        spool.seek(0, os.SEEK_END)
+        archive_size = spool.tell()
+        spool.seek(0)
+        return StreamingResponse(
+            iter(lambda: spool.read(256 * 1024), b""),
             media_type="application/zip",
-            filename="clipforge-export.zip",
-            background=BackgroundTask(_unlink_quietly, tmp_path),
+            headers={
+                "Content-Disposition": 'attachment; filename="clipforge-export.zip"',
+                "Content-Length": str(archive_size),
+            },
         )
     except BaseException:
-        _unlink_quietly(tmp_path)
+        spool.close()
         raise
 
 

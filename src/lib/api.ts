@@ -424,6 +424,24 @@ export interface HealthDto {
     endpoint?: string | null;
     prefix?: string;
     deleteLocal?: boolean;
+    /** True only after a real put/head/ranged-get/delete passed. */
+    verified?: boolean;
+    /** verified && clientReady — what "Media offload on" means. */
+    ready?: boolean;
+    hasAccessKey?: boolean;
+    hasSecret?: boolean;
+    accessKeyFirst4?: string;
+    usageBytes?: number;
+    usageGb?: number;
+    budgetGb?: number;
+    usedPercent?: number;
+    /** Why it is not ready, in words the dialog can show. */
+    reason?: string;
+    lastTestError?: {
+      code?: string;
+      message?: string;
+      hint?: string;
+    } | null;
   };
   /** The worker's real silence budget in seconds (drives stall detection). */
   stallTimeoutSec?: number | null;
@@ -907,6 +925,26 @@ export const api = {
    * 4 GB disk survivable: the library lives in the 5 GB bucket and only the
    * batch that is running needs local space.
    */
+  /**
+   * A REAL bucket round-trip: put, HEAD size check, ranged GET, delete.
+   *
+   * The four fields being filled in is not the same as the keys working, and
+   * the dialog could not tell those apart — the access key id rendered empty
+   * while the secret said "saved". This returns the step that failed and the
+   * provider's own code (SignatureDoesNotMatch, NoSuchBucket, wrong region…).
+   */
+  testStorage: () =>
+    request<{
+      ok: boolean;
+      bucket: string | null;
+      endpoint: string | null;
+      region: string;
+      addressing: string;
+      elapsedMs: number;
+      steps: Array<{ step: string; ok: boolean; ms: number; code?: string; hint?: string; message?: string }>;
+      error?: { code?: string; message?: string; hint?: string } | null;
+      gate?: { ready?: boolean; verified?: boolean; reason?: string };
+    }>("/api/storage/test", { method: "POST" }),
   reclaimStorage: () =>
     request<{
       ok: boolean;

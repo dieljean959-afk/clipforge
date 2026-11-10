@@ -664,3 +664,116 @@ class RetentionCleaner:
                 except OSError:
                     continue
         return removed
+
+
+# --------------------------------------------------------------------------- #
+# units, scratch accounting, and the one wait-for-space helper
+# --------------------------------------------------------------------------- #
+#
+# Units are explicit on both sides because this app already shipped a unit bug:
+# a figure printed as MB was computed from bytes divided by 1024, so a 1.5 GB
+# cap read as 1.5 GB while the gate compared it against a byte count. Every
+# function below takes BYTES and says so, and the two converters are the only
+# place a division by 1024 happens.
+
+_MB = 1024 * 1024
+_GB = 1024 * 1024 * 1024
+
+
+def mb_from_bytes(n_bytes: int | float | None) -> float:
+    """Bytes in, megabytes out. One decimal, never a second conversion."""
+    return round(float(n_bytes or 0) / _MB, 1)
+
+
+def gb_from_bytes(n_bytes: int | float | None) -> float:
+    """Bytes in, gigabytes out (two decimals — this is the 5 GB budget)."""
+    return round(float(n_bytes or 0) / _GB, 2)
+
+
+def free_bytes(path: Path) -> int:
+    """Free bytes on the volume that holds `path` (0 when unreadable)."""
+    import shutil as _shutil
+
+    probe = Path(path)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        return int(_shutil.disk_usage(str(probe)).free)
+    except OSError:
+        return 0
+
+
+def tree_bytes(path: Path) -> int:
+    """Sum of file sizes under a directory, ignoring what cannot be stat'ed."""
+    total = 0
+    root = Path(path)
+    if not root.exists():
+        return 0
+    for p in root.rglob("*"):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def scratch_report(paths: Any) -> dict[str, Any]:
+    """What the one running batch is holding on local disk, in bytes and MB.
+
+    `work`, `outputs` and `downloads` are the only places a job's media can
+    live, so their sum IS the scratch footprint — the app itself is a constant.
+    """
+    parts = {
+        "work": tree_bytes(Path(paths.data_dir) / "work"),
+        "outputs": tree_bytes(Path(paths.outputs_dir)),
+        "downloads": tree_bytes(Path(paths.data_dir) / "downloads"),
+    }
+    total = sum(parts.values())
+    return {
+        "bytes": total,
+        "mb": mb_from_bytes(total),
+        **{f"{k}Mb": mb_from_bytes(v) for k, v in parts.items()},
+        "freeBytes": free_bytes(paths.data_dir),
+        "freeMb": mb_from_bytes(free_bytes(paths.data_dir)),
+    }
+
+
+def wait_for_space(
+    paths: Any,
+    need_bytes: int,
+    *,
+    cap_bytes: int = 0,
+    timeout_sec: float = 1800.0,
+    poll_sec: float = 5.0,
+    on_wait: Any = None,
+) -> tuple[bool, str]:
+    """Block until the batch can fit. Returns (ok, reason).
+
+    Two independent limits, checked in order: the filesystem's own free space,
+    and the scratch cap (`cap_bytes`, 0 = no cap). The caller is expected to
+    pass a reclaim callback via `on_wait` so the first check has something to
+    do besides sleeping — waiting is only correct while something is being
+    freed.
+    """
+    deadline = time.time() + max(0.0, timeout_sec)
+    while True:
+        free = free_bytes(paths.data_dir)
+        scratch = scratch_report(paths)["bytes"]
+        over_cap = bool(cap_bytes) and (scratch - int(need_bytes)) + int(need_bytes) > cap_bytes
+        if free >= need_bytes and not over_cap:
+            return True, ""
+        reason = (
+            f"{mb_from_bytes(free)} MB free, need {mb_from_bytes(need_bytes)} MB"
+            if free < need_bytes
+            else f"scratch {mb_from_bytes(scratch)} MB would pass the "
+            f"{mb_from_bytes(cap_bytes)} MB cap"
+        )
+        if time.time() >= deadline:
+            return False, reason
+        if on_wait is not None:
+            try:
+                on_wait(reason, free, scratch)
+            except Exception:  # noqa: BLE001 - a reclaim failure must not crash the wait
+                pass
+        time.sleep(poll_sec)
