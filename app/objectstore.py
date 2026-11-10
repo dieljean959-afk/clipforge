@@ -231,27 +231,24 @@ def upload_file(
     if not p.exists() or p.stat().st_size == 0:
         return False
     ctype = content_type or mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-    tmp_key = f"{key}.uploading"
+    # ONE PUT, streaming the file from disk. Not `upload_file`, and not a
+    # tmp-key+copy either: Filebase's free plan rejects any MULTIPART upload of
+    # video above 25 MB ("Free accounts are limited to 25MB video uploads"),
+    # while the same bytes go through a single PUT unchanged. `upload_file`
+    # switches to multipart at 8 MB, so every real clip — and every source
+    # section — was hitting that limit. A single PUT is atomic on S3: the key
+    # only exists once the whole body has been stored, so the old tmp+copy
+    # dance bought nothing anyway.
     try:
-        s3.upload_file(str(p), cfg.bucket, tmp_key, ExtraArgs={"ContentType": ctype})
-        # copy_object with MetadataDirective=REPLACE publishes the finished
-        # object atomically: key never exists in a partial state.
-        s3.copy_object(
-            Bucket=cfg.bucket,
-            Key=key,
-            CopySource={"Bucket": cfg.bucket, "Key": tmp_key},
-            MetadataDirective="REPLACE",
-            ContentType=ctype,
-        )
-        s3.delete_object(Bucket=cfg.bucket, Key=tmp_key)
+        with p.open("rb") as fh:
+            s3.put_object(
+                Bucket=cfg.bucket, Key=key, Body=fh, ContentType=ctype,
+                ContentLength=p.stat().st_size,
+            )
         invalidate_usage()
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[objectstore] upload of {p.name} failed: {exc}")
-        try:
-            s3.delete_object(Bucket=cfg.bucket, Key=tmp_key)
-        except Exception:  # noqa: BLE001 - best-effort cleanup
-            pass
         return False
 
 

@@ -31,6 +31,16 @@ class FakeS3:
         self.calls.append(f"upload {key}")
         self.objects[key] = Path(path).read_bytes()
 
+    def put_object(self, **kw):
+        """The real upload path: ONE PUT, file streamed from disk."""
+        if self.fail_uploads:
+            raise RuntimeError("bucket rejected the upload")
+        body = kw.get("Body")
+        data = body.read() if hasattr(body, "read") else bytes(body or b"")
+        self.calls.append(f"put {kw['Key']}")
+        self.objects[kw["Key"]] = data
+        return {}
+
     def copy_object(self, **kw):
         self.calls.append(f"copy {kw['Key']}")
         self.objects[kw["Key"]] = self.objects.pop(kw["CopySource"]["Key"])

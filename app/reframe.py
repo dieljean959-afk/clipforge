@@ -279,9 +279,21 @@ def find_cuts(
     cuts: list[dict] = []
     total = len(clips)
 
+    # A bucket source has no single file to analyse: it is either one object or
+    # a list of 150 s sections. `url_for_span` resolves a timestamp to the
+    # object that holds it plus the offset inside that object, so face sampling
+    # reads the RIGHT section for each clip instead of seeking past the end of
+    # the first one and silently falling back to a centered crop.
+    resolver = getattr(video_path, "url_for_span", None)
+
     # Scene cuts are shared across the whole source; reframe so each clip can
-    # snap at the nearest boundary.
-    scene_cuts = _video.detect_scene_cuts(video_path)
+    # snap at the nearest boundary. With sections there is no whole-source
+    # pass to be had (each section is its own container), so this is skipped
+    # rather than reading 150 s and pretending it covers 20 minutes.
+    scene_cuts = [] if resolver is not None else _video.detect_scene_cuts(video_path)
+    if resolver is not None and total > 1:
+        if on_log:
+            on_log("[framing] sectioned bucket source — shot boundaries detected per clip")
 
     for i, clip in enumerate(clips):
         if should_pause and should_pause():
@@ -294,10 +306,18 @@ def find_cuts(
         # and the reason, visible in the job log so the operator can spot a
         # wrong FIT/FILL call without guessing.
         shot_stats: list[dict] = []
+        clip_src = src
+        offset = 0.0
+        if resolver is not None:
+            clip_src, offset = resolver(start)
+            clip_src = clip_src or src
         windows, used_mp = face_crop_windows(
-            video_path=src,
-            clip_start=start,
-            clip_end=end,
+            video_path=clip_src,
+            # Times are relative to the object being read; they are shifted
+            # back to absolute source seconds below, which is what the cut and
+            # the render expect.
+            clip_start=start - offset,
+            clip_end=end - offset,
             src_width=src_width,
             src_height=src_height,
             target_aspect=target_aspect,
@@ -305,6 +325,12 @@ def find_cuts(
             scene_cuts=scene_cuts,
             shot_stats=shot_stats,
         )
+        if offset:
+            for w in windows:
+                w["t"] = float(w.get("t", 0.0)) + offset
+            for s in shot_stats:
+                s["start"] = float(s.get("start", start - offset)) + offset
+                s["end"] = float(s.get("end", end - offset)) + offset
         for s in shot_stats:
             if on_log:
                 on_log(

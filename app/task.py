@@ -35,11 +35,13 @@ from app import (
     asr_accurate,
     asr_iso,
     clipcount,
+    diskwatch,
     download,
     encode,
     reframe,
     eta,
     llm,
+    source_stream,
     subtitle,
     translate,
     video,
@@ -154,6 +156,85 @@ class Pipeline:
         # live child. Persisted by _set_stage_status / _fail so a recovered job
         # carries its heartbeat history.
         self._heartbeat_at: int | None = None
+        # Disk ledger for the CURRENT run. Set in _stages, read by stages that
+        # want a stage-scoped measurement, always cleared in the finally.
+        self._ledger: diskwatch.JobLedger | None = None
+
+    # ------------------------------------------------------------------
+    # disk bookkeeping
+    # ------------------------------------------------------------------
+
+    def _scratch_roots(self, job_id: str) -> list[Path]:
+        """The directories that belong to ONE job (never .venv/node_modules)."""
+        paths = self.settings.app.paths
+        roots = [
+            paths.downloads_dir / job_id,
+            paths.data_dir / "work" / job_id,
+            paths.outputs_dir / job_id,
+        ]
+        roots.extend(paths.job_source_dirs(job_id))
+        seen: list[Path] = []
+        for r in roots:
+            if r not in seen:
+                seen.append(r)
+        return seen
+
+    def _cleanup_job_scratch(self, job_id: str, *, full: bool) -> None:
+        """Delete this job's local scratch. `full` also drops resume state.
+
+        Partial (failed/paused): the source copy and every decoded audio file
+        go; the small JSON markers stay so a retry resumes instead of paying
+        for the download and the transcript again.
+        """
+        ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
+        try:
+            self._cleanup_job_temps(job_id, ws)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[job {job_id}] temp cleanup failed: {exc}")
+        # The source copy, the per-clip renders and any section temp: with the
+        # bucket as the library these are reproducible, not precious.
+        for root in self._scratch_roots(job_id):
+            try:
+                if not root.exists():
+                    continue
+                for p in sorted(root.rglob("*")):
+                    if not p.is_file():
+                        continue
+                    # Media is reproducible from the bucket: the source is an
+                    # object, and a clip only exists until its HEAD check. The
+                    # JSON markers are what resume actually reads.
+                    if p.suffix.lower() in {".mp4", ".m4a", ".webm", ".part", ".wav", ".png"}:
+                        p.unlink(missing_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[job {job_id}] could not clean {root}: {exc}")
+        if full:
+            for root in self._scratch_roots(job_id):
+                shutil.rmtree(root, ignore_errors=True)
+        freed = 0
+        try:
+            freed = sum(diskwatch.tree_bytes(r) for r in self._scratch_roots(job_id))
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            f"[job {job_id}] scratch cleanup ({'full' if full else 'partial'}): "
+            f"{diskwatch.mb(freed)} MB still held"
+        )
+
+    def _persist_ledger(
+        self, job_id: str, ledger: diskwatch.JobLedger,
+    ) -> None:
+        """Put the per-stage table and the peak on the job doc (job details)."""
+        try:
+            job = self.store.get_job(job_id)
+            if job is None:
+                return
+            job["disk"] = {
+                **ledger.report(),
+                "scratchCapMb": diskwatch.mb(ledger.cap_bytes),
+            }
+            self.store.write_job(job)
+        except Exception as exc:  # noqa: BLE001 - stats never fail a job
+            logger.warning(f"[job {job_id}] could not persist disk ledger: {exc}")
 
     # ------------------------------------------------------------------
     # resume plumbing: pick up a job from the persisted stageStatus, including
@@ -914,6 +995,20 @@ class Pipeline:
         ws = StageWorkspace(self.settings.app.paths.data_dir, job_id)
         self._check_disk_space(job_id, 0.0)
 
+        # The ledger answers "what does this batch cost on disk?" with numbers,
+        # samples free space every 5 s, and is the thing that stops a runaway at
+        # the 300 MB scratch cap instead of letting `df` reach zero again.
+        ledger = diskwatch.JobLedger(
+            job_id,
+            self._scratch_roots(job_id),
+            data_dir=self.settings.app.paths.data_dir,
+            on_log=lambda line: self._log(job_id, line),
+            cap_bytes=int(getattr(self.settings.hosted, "scratch_cap_bytes", 0) or 0)
+            or diskwatch.SCRATCH_CAP_BYTES,
+        )
+        self._ledger = ledger
+        ledger.start()
+
         # Where does this run actually start? Prefer the persisted
         # stageStatus (the dashboard's authoritative per-stage picture) so a
         # resumed job does not redo finished work; fall back to workspace
@@ -973,7 +1068,8 @@ class Pipeline:
                 job.update(fresh)
             self._mark_stage_running(job_id, stage)
             try:
-                result = fn()
+                with ledger.stage(stage):
+                    result = fn()
             except BaseException:
                 self._mark_stage_failed(job_id, stage, *self._fail_args_for(sys.exc_info()))
                 raise
@@ -991,12 +1087,32 @@ class Pipeline:
         self._render_workload_note(len(candidates), float(job.get("durationSec") or 0.0))
 
         _run_stage("captions", lambda: self._stage_captions(job, transcript, ws))
-        _run_stage("export", lambda: self._stage_export(job, src, ws))
+        try:
+            _run_stage("export", lambda: self._stage_export(job, src, ws))
 
-        self._finish(job_id, time.time() - t_start)
-        self._mark_stage_done(job_id, "export")
-        # Scratch audio is dead weight once the clips exist.
-        self._cleanup_job_temps(job_id, StageWorkspace(self.settings.app.paths.data_dir, job_id))
+            # A finished batch must give the disk back. Clean FIRST, then check
+            # — otherwise the self-check measures its own leftovers.
+            self._cleanup_job_scratch(job_id, full=True)
+            ok, why = ledger.recovered()
+            self._log(job_id, f"[disk] self-check: {why}")
+            if not ok:
+                raise video.RenderError(
+                    "this batch did not return the local disk to where it started "
+                    f"— {why}. Every clip is already in the bucket, so nothing is "
+                    "lost; the batch fails its own disk self-check until the "
+                    "leftover is cleared."
+                )
+            self._finish(job_id, time.time() - t_start)
+            self._mark_stage_done(job_id, "export")
+        finally:
+            ledger.stop()
+            self._persist_ledger(job_id, ledger)
+            self._ledger = None
+            # `finally` cleanup: a crashed or paused run must not leave its
+            # source copy behind either. Resume keeps the cheap artifacts
+            # (transcript chunks, cuts) and re-fetches the video from the
+            # bucket when it needs it again.
+            self._cleanup_job_scratch(job_id, full=False)
 
     @staticmethod
     def _detail(exc: BaseException) -> str:
@@ -1105,6 +1221,15 @@ class Pipeline:
                 )
                 self._patch_job(job_id, sourceRefetched=True)
 
+            # With a bucket configured, the source NEVER lands on this disk:
+            # video-only and audio-only are piped straight into two objects.
+            # There is deliberately no local fallback — a 168 MB source is the
+            # difference between finishing the batch and "only 234 MB free".
+            from app import objectstore
+
+            if objectstore.configured():
+                return self._capture_remote(job, ws, url)
+
             def on_progress(frac: float, _eta: float | None) -> None:
                 self._progress(job_id, "grabbing", frac, "Clippy is grabbing the video...")
 
@@ -1197,6 +1322,94 @@ class Pipeline:
         # cuts from it — but the bucket copy now exists from the first minute.
         self._push_source(job_id, src)
         return src
+
+    def _capture_remote(
+        self, job: dict[str, Any], ws: StageWorkspace, url: str,
+    ) -> "source_stream.RemoteSource":
+        """Stream the URL into the bucket and return the keys, not a file.
+
+        A bucket that is down is waited out, not worked around: retrying with
+        "bucket unavailable" keeps the job and its progress, while falling back
+        to a local copy is what made this box run out of disk in the first
+        place.
+        """
+        job_id = job["_id"]
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                with self._disk_stage("fetch-stream"):
+                    src = source_stream.capture(
+                        url, job_id, self.settings,
+                        on_log=lambda line: self._log(job_id, line),
+                        on_progress=lambda frac: self._progress(
+                            job_id, "grabbing", max(0.0, min(0.95, frac * 0.95)),
+                            "Streaming the video into the bucket...",
+                        ),
+                        should_pause=lambda: self.pause_requested(job_id),
+                    )
+                break
+            except source_stream.StreamError as exc:
+                if not exc.bucket_down or attempts >= 20:
+                    raise download.DownloadError(
+                        f"could not stream the source into the bucket: {exc}"
+                    ) from exc
+                wait = min(60, 5 * attempts)
+                self._progress(
+                    job_id, "waiting", 0,
+                    f"Bucket unavailable, retrying in {wait}s ({attempts}/20)",
+                )
+                self._log(
+                    job_id,
+                    f"[stream] bucket unavailable ({exc}) — retrying in {wait}s, "
+                    "keeping this job's progress; nothing is being stored locally",
+                )
+                time.sleep(wait)
+
+        probe = src.probe or {}
+        if int(probe.get("width") or 0) <= 0 or not probe.get("height"):
+            raise video.RenderError(
+                "the source streamed into the bucket but its geometry could not "
+                "be read back through the presigned URL — the object may be "
+                f"truncated ({src.describe()})"
+            )
+        duration = float(probe.get("duration") or 0.0)
+        max_seconds = self.settings.hosted.max_source_min * 60
+        if duration > max_seconds:
+            raise video.RenderError(
+                f"source is {duration / 60:.0f} min; this plan accepts up to "
+                f"{self.settings.hosted.max_source_min} min"
+            )
+        patch = self._patch_job(
+            job_id,
+            durationSec=duration,
+            downloadSource="bucket-stream",
+            sourceRemote=True,
+            sourceStream=src.describe(),
+        )
+        ws.write_json("fetch", "meta.json", {
+            "remote": True, **src.describe(), **probe,
+        })
+        ws.mark_done(
+            "fetch", artifacts=["fetch/meta.json"], path=src.video_key, **probe,
+        )
+        self._progress(job_id, "grabbing", 100, "Source is in the bucket — no local copy")
+        self._log(
+            job_id,
+            f"source streamed to the bucket: video {src.format_id or '(sections)'} "
+            f"+ audio {src.audio_format or '?'} via {src.method}; "
+            f"local disk holds 0 MB of it"
+            + (f" (job {patch.get('_id')})" if patch else ""),
+        )
+        return src
+
+    def _disk_stage(self, name: str):
+        """Stage-scoped measurement when a ledger exists, else a no-op."""
+        if self._ledger is not None:
+            return self._ledger.stage(name)
+        from contextlib import nullcontext
+
+        return nullcontext({})
 
     def _push_source(self, job_id: str, src: Path) -> None:
         """Copy a fetched source into durable storage; keep the local file.
@@ -1353,15 +1566,49 @@ class Pipeline:
         # when explicit; "auto" keeps the engine's own detection.
         job_language = str(job.get("language") or "auto").strip().lower()
         transcribe_language = None if job_language == "auto" else job_language
-        with self._heartbeat(job_id, "transcribe"):
-            transcript = subtitle.transcribe(
-                src, self.settings, on_progress=on_progress,
-                cache_dir=chunk_cache_dir,
-                should_pause=lambda: self.pause_requested(job_id),
-                on_chunk=on_chunk,
-                language=transcribe_language,
-                on_detail=on_detail,
+        # A bucket source has no local video, and it does not need one: the
+        # audio-only object is 7-19 MB for 20 minutes. It lives on disk only
+        # while the decoder is running, then it is deleted.
+        asr_input: Any = src
+        audio_local: Path | None = None
+        if isinstance(src, source_stream.RemoteSource):
+            with self._disk_stage("transcribe-audio"):
+                audio_local = source_stream.download_audio_local(
+                    src,
+                    ws.stage_dir("transcribe") / "audio.m4a",
+                    cap_bytes=40 * 1024 * 1024,
+                )
+            asr_input = audio_local
+            self._log(
+                job_id,
+                f"transcribing from the audio-only stream "
+                f"({diskwatch.mb(audio_local.stat().st_size)} MB on disk, no video)",
             )
+
+        with self._heartbeat(job_id, "transcribe"):
+            try:
+                transcript = subtitle.transcribe(
+                    asr_input, self.settings, on_progress=on_progress,
+                    cache_dir=chunk_cache_dir,
+                    should_pause=lambda: self.pause_requested(job_id),
+                    on_chunk=on_chunk,
+                    language=transcribe_language,
+                    on_detail=on_detail,
+                )
+            finally:
+                # Deleted even when transcription fails: the audio is one
+                # presigned GET away from being fetched again.
+                if audio_local is not None:
+                    try:
+                        freed = audio_local.stat().st_size if audio_local.exists() else 0
+                        audio_local.unlink(missing_ok=True)
+                        self._log(
+                            job_id,
+                            f"transcription done — removed the audio copy "
+                            f"({diskwatch.mb(freed)} MB)",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._log(job_id, f"could not remove the audio copy: {exc}")
         # Truthful metadata: which rung of the ladder produced these words,
         # and whether the UI must label the transcript as a downshift.
         if transcript.attempts or transcript.label:
@@ -2020,8 +2267,31 @@ class Pipeline:
                     # LOCKED_SPEC §2: the white bar's text, per clip, from the
                     # clip's own content, in the video's language.
                     clip_title, title_source = self._clip_title(job, cut, clip_cues)
+                    # Presigned URLs are minted PER CLIP and expire in 15
+                    # minutes: one long-lived URL would start returning 403 in
+                    # the middle of a batch. The clip is seeked by byte range,
+                    # so ffmpeg fetches the part it renders, not the source.
+                    render_src: Any = src
+                    render_audio: str | None = None
+                    seek_offset: float | None = None
+                    probe_meta: dict[str, Any] | None = None
+                    if isinstance(src, source_stream.RemoteSource):
+                        render_src, seek_offset = src.url_for_span(
+                            float(cut.get("start") or 0.0)
+                        )
+                        render_audio = src.audio_url()
+                        probe_meta = src.probe
+                        self._log(
+                            job_id,
+                            f"clip {i + 1}: cutting from the bucket at "
+                            f"{float(cut.get('start') or 0.0):.1f}s "
+                            f"(seek {seek_offset:.1f}s into "
+                            f"{'section' if src.sections else 'the source'})",
+                        )
+                    if self._ledger is not None:
+                        self._ledger.check(f"export clip {i + 1}")
                     meta = encode.render_clip(
-                        src, cut, dest / f"clip_{i:03d}.mp4", cap_settings,
+                        render_src, cut, dest / f"clip_{i:03d}.mp4", cap_settings,
                         cues=clip_cues,
                         preset_key=str(resolved["presetKey"]),
                         emoji_selection=emoji_track.get("selected") or [],
@@ -2029,6 +2299,9 @@ class Pipeline:
                         # The FIT/FILL choice per shot is carried from the
                         # reframe stage on each cut and logged here.
                         on_log=lambda line: self._log(job_id, line),
+                        audio_src=render_audio,
+                        probe_meta=probe_meta,
+                        start_offset=seek_offset,
                     )
                 except Exception as exc:
                     detail = str(exc)[:500]
@@ -2126,6 +2399,13 @@ class Pipeline:
             self._store_clip_media(
                 job_id, clip_id, dest / f"clip_{i:03d}.mp4", thumb_path, meta,
             )
+            # The title plate PNG and the encoder's temp file belong to THIS
+            # clip only; leaving them would accumulate one small file per clip.
+            for leftover in (
+                dest / f"clip_{i:03d}.title.png",
+                dest / f"clip_{i:03d}.part.mp4",
+            ):
+                leftover.unlink(missing_ok=True)
             total_sec += meta["durationSec"]
             rendered += 1
 

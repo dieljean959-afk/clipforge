@@ -496,6 +496,9 @@ def render_clip(
     emoji_selection: list[dict[str, Any]] | None = None,
     title: str | None = None,
     on_log: Callable[[str], None] | None = None,
+    audio_src: str | None = None,
+    probe_meta: dict[str, Any] | None = None,
+    start_offset: float | None = None,
 ) -> dict[str, Any]:
     """Render one reframe cut into a 9:16 MP4.
 
@@ -513,7 +516,12 @@ def render_clip(
     """
     from app import video as _video
 
-    src = Path(src)
+    # A source can now be a presigned URL (the bucket is the library; the disk
+    # only ever holds the clip being written) or a local Path (uploads). The
+    # render is otherwise identical — same graph, same captions, same title
+    # bar — because ffmpeg reads both through the same `-i` argument.
+    remote = isinstance(src, str) and src.startswith(("http://", "https://"))
+    src = str(src) if remote else Path(src)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -521,22 +529,30 @@ def render_clip(
         on_log(f"Rendering clip {cut.get('order', '?')} — {cut.get('start')}s to {cut.get('end')}s")
 
     # Source-file guard: fail loud with the real file reason before we try to seek.
-    if not src.exists() or not src.is_file():
-        raise _video.RenderError(
-            f"source file for clip {cut.get('order', '?')} is missing: {src}"
-        )
-    try:
-        src_stat = src.stat()
-    except OSError as exc:
-        raise _video.RenderError(
-            f"source file for clip {cut.get('order', '?')} is unreadable: {exc}"
-        ) from exc
-    if src_stat.st_size == 0:
-        raise _video.RenderError(
-            f"source file for clip {cut.get('order', '?')} is empty (0 bytes): {src.name}"
-        )
+    # A remote source has no local file to stat — its integrity was proven by
+    # the HEAD check when it was uploaded, and the HEAD check again below.
+    if not remote:
+        if not src.exists() or not src.is_file():
+            raise _video.RenderError(
+                f"source file for clip {cut.get('order', '?')} is missing: {src}"
+            )
+        try:
+            src_stat = src.stat()
+        except OSError as exc:
+            raise _video.RenderError(
+                f"source file for clip {cut.get('order', '?')} is unreadable: {exc}"
+            ) from exc
+        if src_stat.st_size == 0:
+            raise _video.RenderError(
+                f"source file for clip {cut.get('order', '?')} is empty (0 bytes): {src.name}"
+            )
 
-    probe = _video.probe(src)
+    # Probing a presigned URL costs a round trip per clip; the fetch stage
+    # already probed this exact stream, so reuse its geometry.
+    if remote and probe_meta and int(probe_meta.get("width") or 0) > 0:
+        probe = {"duration": 0.0, "fps": 30.0, **probe_meta}
+    else:
+        probe = _video.probe(src)
     width = int(probe["width"])
     height = int(probe["height"])
     fps = float(probe.get("fps", 30.0) or 30.0)
@@ -761,6 +777,19 @@ def render_clip(
         # ask for emoji take this path; everything else keeps the plain -vf
         # chain, and the static-crop fallback renders without emoji rather than
         # failing the clip over decoration.
+        # Inputs: the video stream, and — for a bucket source — the separate
+        # audio object. Both get their OWN `-ss` so ffmpeg range-fetches only
+        # the clip's bytes from each, instead of reading the file from 0.
+        # `seek` is the position INSIDE the input: for a sectioned source it is
+        # the clip's start minus the section's start, which is why it is not
+        # simply `start`.
+        seek = start if start_offset is None else start_offset
+        inputs = ["-ss", f"{seek:.3f}", "-i", str(src)]
+        audio_map = "0:a:0?"
+        if audio_src:
+            inputs += ["-ss", f"{seek:.3f}", "-i", audio_src]
+            audio_map = "1:a:0?"
+
         if emoji or title_png:
             # ONE pass, ONE input per DISTINCT emoji image.
             #
@@ -775,7 +804,7 @@ def render_clip(
             by_path: dict[str, list[dict]] = {}
             for item in emoji:
                 by_path.setdefault(str(item["path"]), []).append(item)
-            src_idx = 1
+            src_idx = 2 if audio_src else 1
             layer = 0
             for path, items in by_path.items():
                 size = int(items[0].get("size") or 140)
@@ -831,14 +860,13 @@ def render_clip(
             return [
                 ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                 *enc.hw_accel_args(),
-                "-ss", f"{start:.3f}",
-                "-i", str(src),
+                *inputs,
                 *extra,
                 *enc.emoji_threads_args(),
                 "-filter_complex", ";".join(chain),
                 *enc.ffmpeg_codec_args(),
                 "-map", f"[{out_label}]",
-                "-map", "0:a:0?",
+                "-map", audio_map,
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-ar", "44100",
@@ -857,14 +885,15 @@ def render_clip(
             # decoding before the first frame reached the encoder. Crop windows
             # and ASS cues are clip-relative (t=0 at the seek point), so this does
             # not shift the reframe or the captions.
-            "-ss", f"{start:.3f}",
+            "-ss", f"{seek:.3f}",
             "-i", str(src),
+            *(["-ss", f"{seek:.3f}", "-i", audio_src] if audio_src else []),
             "-t", f"{clip_seconds:.3f}",
             *enc.threads_args(),
             "-vf", graph,
             *enc.ffmpeg_codec_args(),
             "-map", "0:v:0",
-            "-map", "0:a:0?",
+            "-map", audio_map,
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",

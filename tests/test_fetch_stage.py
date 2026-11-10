@@ -24,7 +24,13 @@ from app.task import Pipeline
 
 
 @pytest.fixture()
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
+    # These two tests cover the LOCAL fallback, which only runs on an install
+    # with no bucket at all. This machine has one configured, so without this
+    # the fetch stage correctly takes the streaming path instead.
+    from app import objectstore
+
+    monkeypatch.setattr(objectstore, "configured", lambda *a, **k: False)
     base = load_config(quiet=True)
     paths = replace(
         base.app.paths,
