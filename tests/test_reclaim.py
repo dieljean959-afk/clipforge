@@ -8,6 +8,7 @@ reclaim at all — it destroys the only copy of a render.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -480,3 +481,30 @@ def test_all_jobs_handles_both_store_signatures():
     assert reclaim._all_jobs(_local_style_store(jobs)) == jobs
     limited = SimpleNamespace(list_jobs=lambda limit=10: jobs[:limit])
     assert reclaim._all_jobs(limited) == jobs
+
+
+def test_boot_sweep_with_the_real_local_store_keeps_a_running_job(bucket):
+    """The production pair: LocalStore's no-argument list_jobs + boot sweep.
+
+    This is the combination that killed the 20:37 job: the real store raised
+    TypeError on `limit=`, the sweep treated the empty job list as "every
+    folder is an orphan", and the audio file of a transcribing job went with
+    it. Uses the real LocalStore rather than a stand-in so the signature itself
+    is part of what is being tested.
+    """
+    from app.store import LocalStore
+
+    job_id = "live-job-from-a-crash"
+    jobs_dir = bucket.paths.data_dir / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    (jobs_dir / f"{job_id}.json").write_text(
+        json.dumps({"_id": job_id, "status": "running", "stage": "transcribing"}),
+        encoding="utf-8",
+    )
+    audio = _write(bucket.paths.data_dir / "work" / job_id / "transcribe" / "audio.m4a",
+                   b"the 19 MB audio track being decoded")
+
+    out = reclaim.sweep_startup(LocalStore(bucket.paths), bucket.paths)
+
+    assert audio.exists(), "the boot sweep deleted the audio of a running transcribe"
+    assert out["dirsRemoved"] == 0
