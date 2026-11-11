@@ -596,6 +596,17 @@ def housekeeping(
             retention_hours = 48
     swept = sweep_expired(store, paths, retention_hours)
     budget = enforce_budget(store, paths, retention_hours=retention_hours)
+    # The scheduled half of the disk story: once a day, the SAME safe routine
+    # the panel's button calls removes scratch, caches, old logs and the
+    # bucket-backed model copies. This container has no cron or systemd, so the
+    # watchdog thread is the scheduler.
+    try:
+        from . import disksweep
+
+        nightly = disksweep.nightly(store, paths)
+    except Exception as exc:  # noqa: BLE001 - housekeeping must never raise
+        logger.warning(f"[sweep] nightly cleanup skipped: {exc}")
+        nightly = {"skipped": str(exc)[:200]}
     if swept["jobsRemoved"] or budget["pruned"]:
         objectstore.invalidate_usage()
     return {
@@ -604,6 +615,7 @@ def housekeeping(
         "jobsRemoved": swept["jobsRemoved"],
         "usedPercent": budget["usedPercent"],
         "pruned": budget["pruned"],
+        "diskSweep": nightly,
     }
 
 

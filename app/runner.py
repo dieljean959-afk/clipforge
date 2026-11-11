@@ -158,6 +158,16 @@ def _install_process_handlers(job_id: str, store, settings) -> None:
             signal.signal(sig, term_handler)
         except (ValueError, OSError):
             pass
+    # The supervisor SIGUSR1s this process before it kills a stage that blew its
+    # silence budget. faulthandler turns that into every thread's stack on the
+    # stderr the supervisor captures, so "it hung" arrives with the exact line
+    # it hung in instead of no traceback at all (a SIGKILL leaves none).
+    try:
+        import faulthandler as _faulthandler
+
+        _faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+    except (ImportError, ValueError, OSError):
+        pass
 
 
 def _flip143(job: dict[str, object]) -> None:

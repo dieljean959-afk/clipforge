@@ -171,7 +171,13 @@ model = "deepseek-flash"
 # local OpenAI-compatible stub instead of the real API).
 base_url = "https://api.deepseek.com"
 max_retries = 3
-timeout_sec = 180
+# 60 s, not 180: one detection call that hangs for three minutes is
+# indistinguishable from a stalled stage — the watchdog killed a whole
+# pipeline over exactly this. urllib applies this to the connect and to each
+# socket read, so a dead endpoint fails in seconds and a slow-but-real one still
+# has a full minute per chunk. A 402/403-billing answer is not retried at all
+# (see app/llm.py `provider_dead`), so a funded account gets the whole ladder.
+timeout_sec = 60
 # 0.0 disables the per-request floor. Groq NEEDS 2.1s (its free tier is ~30
 # rpm); DeepSeek's ceiling is a 2500-request CONCURRENCY limit, so pacing a
 # 20-chunk run at 2.1s would cost 40 seconds of wall time for nothing.

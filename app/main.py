@@ -104,6 +104,7 @@ from app.social.base import (
     SocialError,
 )
 from app.stages import StageWorkspace, remove_workspace
+from app import disksweep
 from app.slices.cleanup import unlink_model_dirs
 from starlette.background import BackgroundTask
 # Module handle, distinct from the `worker` INSTANCE below. The boot recovery
@@ -1818,13 +1819,28 @@ def reclaim_storage() -> dict:
     being written.
     """
     out = reclaim.reclaim(store, settings.app.paths)
+    # The same button must also clear the things that actually fill this disk
+    # day to day — bytecode, orphaned stage scratch, rotated logs, package
+    # caches and the bucket-backed model copies — not just finished-batch
+    # media, which is usually already gone. One routine, one safe list, per-
+    # category MB so the panel can say what it freed.
+    try:
+        sweep = disksweep.sweep(store, settings.app.paths)
+    except Exception as exc:  # noqa: BLE001 - the offload above already happened
+        logger.warning(f"[api] disk sweep failed: {exc}")
+        sweep = {"ok": False, "freedMb": 0.0, "categories": [], "reason": str(exc)[:200]}
     logger.info(
         f"[api] storage reclaim: {out.get('uploaded')} file(s), "
-        f"{out.get('freedMb')} MB freed"
+        f"{out.get('freedMb')} MB offloaded + {sweep.get('freedMb')} MB swept"
         + (f" — {out['reason']}" if out.get("reason") else "")
     )
     refresh = reclaim.refresh_status()
-    return {**out, "bucket": refresh}
+    return {
+        **out,
+        "freedMb": round(float(out.get("freedMb") or 0.0) + float(sweep.get("freedMb") or 0.0), 1),
+        "sweep": sweep,
+        "bucket": refresh,
+    }
 
 
 # --------------------------------------------------------------------------- #

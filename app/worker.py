@@ -56,6 +56,26 @@ from app.store import LocalStore
 # window, and a stall now earns one automatic retry before the user is told.
 STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "600"))
 
+#: Per-stage silence budgets (seconds). The blanket STALL_TIMEOUT_SEC above is
+#: the backstop for a stage with no progress lines at all; these bound ONE stage
+#: that has gone quiet, because the old single window meant a hung detection
+#: call could only be escaped by restarting the whole pipeline. Measured on the
+#: 20-minute probe: detection sat silent for 125 s while it rediscovered an
+#: exhausted balance chunk by chunk.
+#:
+#:   finding    — AI detection (DeepSeek / fallback provider / local scorer)
+#:   reframing  — render; per clip, and every clip reports progress
+#:   captions/exporting — post-render assembly
+#:
+#: transcribing/grabbing keep the long window: a single decode window on one
+#: core is legitimately quiet for minutes, and the heartbeat covers it.
+STAGE_BUDGET_SEC: dict[str, float] = {
+    "finding": 120.0,
+    "reframing": 300.0,
+    "captions": 300.0,
+    "exporting": 300.0,
+}
+
 # How many times a job killed by an EXTERNAL signal (SIGTERM/SIGKILL — host
 # restart, redeploy, scale-down) is auto-resumed before it is finally failed.
 # Bounded on purpose: a job that cannot survive a restart loop must stop
@@ -1287,15 +1307,32 @@ class InProcessWorker:
                 continue
             if proc.poll() is not None:
                 continue
+            stage_now = str(job.get("stage") or "")
             last = job.get("lastProgressAt") or job.get("stageStartedAt") or job.get("createdAt") or 0
+            # A stage WITH its own budget is judged on PROGRESS only, never on
+            # the liveness heartbeat: the heartbeat fires during a hung call
+            # too (it is a separate thread), so measuring against it would make
+            # every per-stage budget unreachable. A stage without a budget
+            # keeps the old heartbeat-aware window, because a long decode is
+            # legitimately silent.
+            if stage_now in STAGE_BUDGET_SEC:
+                last = job.get("stageProgressAt") or job.get("stageStartedAt") or last
             silent_for = time.time() * 1000 - last
-            if silent_for <= STALL_TIMEOUT_SEC * 1000:
+            budget = STAGE_BUDGET_SEC.get(stage_now, float(STALL_TIMEOUT_SEC))
+            if silent_for <= budget * 1000:
                 continue
 
             logger.error(
                 f"[worker] job {job_id} stalled: no progress for {silent_for / 1000:.0f}s "
-                f"at stage {job.get('stage')} — killing pid {proc.pid}"
+                f"at stage {stage_now} (budget {budget:.0f}s) — dumping stacks, then "
+                f"killing pid {proc.pid}"
             )
+            # Ask the child for its thread stacks FIRST: a killed process leaves
+            # no traceback, and "the stage hung" without a stack is the thing
+            # that made this failure undiagnosable. The runner registers
+            # faulthandler on SIGUSR1 and writes to the stderr the supervisor
+            # already captures, so the dump lands in the job log.
+            self._dump_stacks(proc, job_id)
             self._stalled_job = job_id
             self._stalled_jobs.add(job_id)
             self._kill_process(proc)
@@ -1324,6 +1361,24 @@ class InProcessWorker:
             self._auto_retry(job_id, job, "stall watchdog")
             killed_any = True
         return killed_any
+
+    @staticmethod
+    def _dump_stacks(proc: Any, job_id: str) -> None:
+        """SIGUSR1 the child so faulthandler prints every thread's stack.
+
+        Best-effort by design: a child that never registered the handler just
+        ignores the signal, and the kill below is what actually recovers the
+        slot. The short sleep is the time the dump needs to reach stderr.
+        """
+        try:
+            os.kill(proc.pid, signal.SIGUSR1)
+            time.sleep(0.5)
+            logger.warning(
+                f"[worker] job {job_id}: stack dump requested from pid {proc.pid} "
+                "before the kill (see the job log)"
+            )
+        except OSError as exc:
+            logger.warning(f"[worker] job {job_id}: could not dump stacks: {exc}")
 
     def _watchdog(self) -> None:
         while not self._stop.wait(5.0):

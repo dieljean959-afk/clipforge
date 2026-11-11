@@ -480,7 +480,7 @@ def resolve_candidates(
 
 def chunk_words(
     words: list[dict],
-    target_seconds: float = 120.0,
+    target_seconds: float = 420.0,
     max_chunks: int = MAX_DETECTION_CHUNKS,
 ) -> list[tuple[int, list[dict]]]:
     """Split a word-level transcript into chunks for the detector.
@@ -812,6 +812,45 @@ def _is_billing_exhausted(status: int, detail: str) -> bool:
         return True
     # 402 is Payment Required and means exactly one thing on these APIs.
     return status == 402
+
+
+#: Providers already proven unusable IN THIS PROCESS, with the monotonic stamp
+#: of the proof. A 402/403-billing answer cannot be fixed by asking again, so
+#: one detection run must not pay for it once per chunk: the probe measured ten
+#: chunks of a 20-minute source spending two full minutes re-discovering the
+#: same 402 (plus a 30 s Groq token-budget wait per chunk) while the job card sat
+#: at 99% with no progress — indistinguishable from a hang, and the stall
+#: watchdog then killed the stage. Bounded by a TTL, not permanent, so topping
+#: up the account and hitting Re-detect works without a restart.
+_DEAD_PROVIDERS: dict[str, tuple[float, str]] = {}
+_DEAD_PROVIDER_TTL = 900.0
+
+
+def _billing_dead_text(detail: str) -> bool:
+    """True when an error message describes an exhausted balance/quota."""
+    return bool(_BILLING_EXHAUSTED.search(detail or ""))
+
+
+def provider_dead(which: str) -> str:
+    """Reason string when this backend is known out of credit, else empty."""
+    entry = _DEAD_PROVIDERS.get(str(which))
+    if not entry:
+        return ""
+    at, reason = entry
+    if time.time() - at > _DEAD_PROVIDER_TTL:
+        _DEAD_PROVIDERS.pop(str(which), None)
+        return ""
+    return reason
+
+
+def _mark_provider_dead(which: str, reason: str) -> None:
+    if _DEAD_PROVIDERS.get(str(which), (0.0, ""))[1] == reason:
+        return
+    _DEAD_PROVIDERS[str(which)] = (time.time(), reason[:400])
+    logger.error(
+        f"[llm] {which} is out of credit — skipping it for the rest of this run "
+        f"({_DEAD_PROVIDER_TTL / 60:.0f} min) instead of re-asking per chunk: {reason[:200]}"
+    )
 
 
 def _format_unsupported(detail: str) -> bool:
@@ -1612,19 +1651,48 @@ def call_llm(
     token = _PLAIN_JSON.set(bool(plain_json))
     try:
         active = provider(settings)
+        backup = settings_llm_fallback(settings)
+        can_backup = bool(backup) and backup != active and _provider_ready(backup, settings)
+        dead = provider_dead(active)
+        if dead:
+            # Known out of credit: do not spend a call and a backoff ladder on
+            # it again. Straight to the backup, or a clear error.
+            if can_backup:
+                logger.info(
+                    f"[llm] skipping {active} for this chunk (out of credit) — "
+                    f"using fallback provider {backup!r}"
+                )
+                return _call_provider(backup, chunk_text_prompt, settings)
+            raise LlmError(
+                f"{active} is out of credit — the detection call was not retried "
+                f"because an exhausted balance cannot be fixed by waiting "
+                f"({dead}). Top up the account, or configure a funded "
+                f"[llm] fallback_provider, then hit Re-detect. Clips can still "
+                f"be chosen locally in the meantime."
+            )
         try:
             return _call_provider(active, chunk_text_prompt, settings)
         except (LlmNotConfigured, DetectionPaused):
             raise
         except LlmError as exc:
-            backup = settings_llm_fallback(settings)
-            if not backup or not _provider_ready(backup, settings):
+            if _billing_dead_text(str(exc)):
+                _mark_provider_dead(active, str(exc))
+            if not can_backup:
+                raise
+            if provider_dead(backup):
+                # Both sides are out of credit. Failing now is honest and fast;
+                # the caller turns it into the labelled local fallback.
                 raise
             logger.warning(
                 f"[llm] {active} failed for this chunk ({exc}) — retrying it on the "
                 f"configured fallback provider {backup!r}"
             )
-            return _call_provider(backup, chunk_text_prompt, settings)
+            try:
+                return _call_provider(backup, chunk_text_prompt, settings)
+            except LlmError as exc2:
+                if _billing_dead_text(str(exc2)):
+                    _mark_provider_dead(backup, str(exc2))
+                raise
     finally:
         _PLAIN_JSON.reset(token)
 
@@ -2298,11 +2366,18 @@ def detect_clips(
                     "Re-detect with AI once the provider recovers."
                 )
             if report is not None:
-                report["detectionFallback"] = "transcript_heuristic"
+                # One stable label for "the AI did not pick these" — the UI and
+                # the job log both key off it, so a user can tell a local
+                # fallback from a genuine AI selection at a glance.
+                report["detectionFallback"] = "local"
+                report["detectionFallbackLabel"] = "detection: local fallback"
                 report["detectionFallbackReason"] = (
                     f"{label} returned no valid clip candidates across "
                     f"{len(chunks)} chunk(s)"
                 )
+            logger.warning("[llm] detection: local fallback")
+            if on_log:
+                on_log("detection: local fallback")
             _finish_report()
             return local
         # Nothing to rank either: no transcript AND no duration. Fail, but name

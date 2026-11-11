@@ -1406,6 +1406,25 @@ def transcribe_source(
     finally:
         reader.close()
 
+    # ---- free the decoder BEFORE the finalize pass ------------------------
+    # Everything below is CPU-only word bookkeeping (drop silence, collapse
+    # repeats, snap, dedupe, sync report). Whisper's weights are dead weight
+    # from this line on, and on a 2 GiB host a resident decoder plus a long
+    # finalize is exactly how a stage ends up OOM-killed with no traceback.
+    # Releasing here also hands the bytes back to the bucket before detection
+    # starts, instead of after the whole stage returns.
+    try:
+        from app import modelstore
+
+        freed = modelstore.release_all()
+        if freed.get("freed"):
+            logger.info(
+                f"[accurate] released model weights before finalize: "
+                f"{freed['freed'] / 1048576:.0f} MB freed"
+            )
+    except Exception as exc:  # noqa: BLE001 - never fail a transcript over this
+        logger.warning(f"[accurate] could not release model weights: {exc}")
+
     words, dropped_silence = drop_silence_words(words, regions)
     words, dropped_repeats = collapse_repeats(words)
     words = snap_to_speech(words, regions)

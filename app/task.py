@@ -494,6 +494,9 @@ class Pipeline:
         def apply(job: dict[str, Any]) -> None:
             job["stageStatus"] = dict(self._stage_status)
             job["lastProgressAt"] = now
+            # A stage transition is real progress for that stage: reset its own
+            # clock so the per-stage silence budget starts from here.
+            job["stageProgressAt"] = now
 
         # Same locked read-modify-write as _progress: a whole-document write
         # here could undo a newer stage/progress write that landed meanwhile.
@@ -690,6 +693,11 @@ class Pipeline:
             "etaSource": eta_source,
             "stagePlan": plan,
             "lastProgressAt": now_ms,
+            # Progress-only clock. `lastProgressAt` is also refreshed by the
+            # liveness heartbeat, so it cannot answer "is THIS stage moving?";
+            # the per-stage watchdog budget needs a timestamp nothing but real
+            # progress touches.
+            "stageProgressAt": now_ms,
         })
 
     @contextmanager
@@ -897,6 +905,22 @@ class Pipeline:
         # heartbeat-free flush at the end of the run.
         self._resume_from_store(job_id, job)
         t_start = time.time()
+        # A killed attempt (host restart, SIGKILL) skips its `finally`, so the
+        # model weights it restored can still be sitting in data/models when the
+        # next attempt starts — that is the ~600 MB the disk lost between two
+        # readings of the same job. Clear them before this run touches the disk:
+        # the bucket copy is the source of truth, so the next stage restores
+        # what it needs and nothing is downloaded again.
+        try:
+            stale = modelstore.release_all()
+            if stale.get("freed"):
+                self._log(
+                    job_id,
+                    f"[disk] cleared {stale['freed'] / 1048576:.0f} MB of model weights "
+                    "left behind by an interrupted attempt",
+                )
+        except Exception as exc:  # noqa: BLE001 - never block a run over this
+            logger.warning(f"[job {job_id}] could not clear stale models: {exc}")
         # The heartbeat spans the WHOLE pipeline, not just the encode and the
         # decode. The stall deadline is now 3 minutes, and every stage has a
         # step that legitimately exceeds it while reporting nothing: a Whisper
@@ -1814,6 +1838,20 @@ class Pipeline:
             chunk_cache=_StageChunkCache(ws, model=llm.provider_label(self.settings)),
             should_pause=lambda: self.pause_requested(job_id),
         )
+        # Say WHICH detector produced these clips. A local fallback is still a
+        # finished batch, but labelling it "AI highlights" would be a lie, and
+        # it is the one fact that tells the user whether to top up the account
+        # and hit Re-detect.
+        if report.get("detectionFallback"):
+            self._log(job_id, str(report.get("detectionFallbackLabel") or "detection: local fallback"))
+            self._patch_job(
+                job_id,
+                detectionFallback=str(report.get("detectionFallback")),
+                detectionFallbackLabel=str(
+                    report.get("detectionFallbackLabel") or "detection: local fallback"
+                ),
+                detectionFallbackReason=str(report.get("detectionFallbackReason") or "")[:400],
+            )
         ws.write_json("detect", "candidates.json", candidates)
         # Persist one stage artifact per candidate so a retry can tell which clips
         # were already rendered and which still need the export stage.
