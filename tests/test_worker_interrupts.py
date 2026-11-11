@@ -147,3 +147,25 @@ def test_the_newest_failure_is_still_reported():
         ]
     }
     assert "SIGTERM" in _reason_from_logs(job)
+
+
+# --- a finished batch must never be flipped to failed ---------------------
+
+
+def test_exit0_with_the_childs_completion_line_is_a_success():
+    logs = ["Rendering clip 15", "clip 9f2: 5.1 MB stored", "COMPLETE in 1751.8s"]
+    assert InProcessWorker.completed_despite_exit_code(0, logs)
+
+
+def test_exit0_without_a_completion_line_is_still_incomplete():
+    assert not InProcessWorker.completed_despite_exit_code(0, ["Rendering clip 4"])
+
+
+def test_a_killed_child_is_not_rescued_by_an_old_completion_line():
+    # An interrupted retry can carry COMPLETE from an earlier attempt; a signal
+    # death must still go through the resume path, not be called a success.
+    assert not InProcessWorker.completed_despite_exit_code(143, ["COMPLETE in 90.0s"])
+
+
+def test_the_all_clips_ready_detail_also_counts():
+    assert InProcessWorker.completed_despite_exit_code(0, ["All clips ready"])

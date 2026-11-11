@@ -242,3 +242,16 @@ def test_a_capture_reuses_sections_already_in_the_bucket(monkeypatch, tmp_path):
 def test_section_keys_are_stable():
     assert source_stream.section_key("p", "j", 3) == "p/uploads/j/sections/sec_003.mp4"
     assert source_stream.section_key("p", "j", 3) == source_stream.section_key("p", "j", 3)
+
+
+def test_a_known_duration_beats_an_empty_probe(monkeypatch):
+    """The provider probe can fail; the job's own duration must still size it.
+
+    With `total_sec` at 0 the section planner used the unknown-length default
+    of 48 x 150 s, so a 20:37 source captured ten times the needed sections and
+    kept going past the end of the video.
+    """
+    from app import source_stream
+
+    assert source_stream._section_count(0.0) == source_stream.UNKNOWN_DURATION_SECTIONS
+    assert source_stream._section_count(1237.0) == 9

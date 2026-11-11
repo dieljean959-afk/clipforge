@@ -904,6 +904,31 @@ class InProcessWorker:
             return
         job = self.store.get_job(job_id)
         stage = (job or {}).get("stage")
+        # The child writes `COMPLETE` as its last act and then exits 0. If any
+        # other writer (the log pump, a page poll) re-saved the document from a
+        # snapshot taken before that write, the stage read here is the OLD one
+        # and a finished batch was marked failed: observed as
+        # `COMPLETE in 1751.8s` immediately followed by
+        # `FAILED: The worker exited cleanly (code 0)`. The child's own
+        # completion line is the proof of work; a 0 exit plus that line is a
+        # success, whatever the document looked like a millisecond earlier.
+        if self.completed_despite_exit_code(rc, job.get("logs")):
+            done_ms = int(time.time() * 1000)
+
+            def _mark_complete(j: dict[str, Any]) -> None:
+                j.update({
+                    "stage": "complete", "status": "complete", "progress": 100.0,
+                    "completedAt": j.get("completedAt") or done_ms,
+                    "interrupted": False, "interruptReason": None,
+                    "error": None, "errorDetail": None,
+                })
+
+            self.store.update_job(job_id, _mark_complete)
+            logger.warning(
+                f"[worker] job {job_id} exited 0 after COMPLETE — kept as complete "
+                f"even though the document still showed '{stage}'"
+            )
+            return
         if self._stalled_job == job_id or job_id in self._stalled_jobs:
             # watchdog already failed it with a specific reason
             return
@@ -964,23 +989,54 @@ class InProcessWorker:
         hint = verdict.hint or hostlimits.oom_hint(-sig if sig is not None else rc, stage)
         detail = msg + ("\n" + hint if hint else "") + ("\n" + tail if tail else "\n(no runner output captured)")
         logger.error(f"[worker] {msg} for job {job_id}" + (f" — {hint}" if hint else ""))
-        if job is not None:
-            job.update({
+        # Atomic guard: never rewrite a batch that finished (or was paused)
+        # between the read above and this write. Writing the stale snapshot
+        # back is exactly how a completed job was turned into a failure.
+        applied = {"ok": False}
+        failed_ms = int(time.time() * 1000)
+
+        def _apply_failure(j: dict[str, Any]) -> None:
+            if str(j.get("stage")) in {"complete", "paused"}:
+                return
+            j.update({
                 "stage": "failed",
+                "status": "failed",
                 # keep the stage the child died in, for the dashboard banner
                 "failedStage": stage,
                 # a later hard failure supersedes any earlier interrupt flag
                 "interrupted": False,
                 "error": msg,
                 "errorDetail": detail[:4000],
-                "completedAt": int(time.time() * 1000),
+                "completedAt": failed_ms,
             })
-            self.store.write_job(job)
-        self.store.append_job_log(job_id, f"FAILED: {msg}")
+            applied["ok"] = True
+
+        self.store.update_job(job_id, _apply_failure)
+        if applied["ok"]:
+            self.store.append_job_log(job_id, f"FAILED: {msg}")
 
     # ------------------------------------------------------------------
     # watchdog
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def completed_despite_exit_code(rc: int | None, logs: Any) -> bool:
+        """Did this child finish the batch even though the doc looks unfinished?
+
+        The child writes `COMPLETE in ...` as its last act. Another writer can
+        re-save the job document from a snapshot taken microseconds earlier, so
+        the supervisor's read after the exit can see the previous stage. Exit 0
+        plus the child's own completion line is proof of work; treating it as
+        "exited before the job was done" turned a finished 13-clip batch into a
+        failure.
+        """
+        if rc != 0:
+            return False
+        for line in list(logs or [])[-40:]:
+            text = str(line)
+            if "COMPLETE in" in text or "All clips ready" in text:
+                return True
+        return False
 
     @staticmethod
     def has_signal_failure(job: dict[str, Any]) -> bool:

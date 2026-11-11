@@ -1478,6 +1478,7 @@ class Pipeline:
                             "Streaming the video into the bucket...",
                         ),
                         should_pause=lambda: self.pause_requested(job_id),
+                        expected_seconds=float(job.get("durationSec") or 0.0),
                     )
                 break
             except source_stream.StreamError as exc:

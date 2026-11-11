@@ -531,6 +531,7 @@ def capture(
     on_log: Callable[[str], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
     should_pause: Callable[[], bool] | None = None,
+    expected_seconds: float = 0.0,
 ) -> RemoteSource:
     """Capture video-only + audio-only into the bucket. No local source file."""
     from app import objectstore
@@ -551,7 +552,15 @@ def capture(
         meta = _dl.probe_url(url) or {}
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[stream] probe_url failed ({exc}); continuing blind")
-    total_sec = float(meta.get("duration") or 0.0)
+    # `probe_url` is a network call to the provider and can come back empty
+    # (rate limit, challenge page). Falling through to "unknown" made a 20:37
+    # source capture 48 x 150 s sections instead of 9 — ten times the downloads,
+    # and sections past the real end that can never succeed. The job document
+    # already knows the duration from its first fetch, so use that as the floor.
+    total_sec = float(meta.get("duration") or 0.0) or float(expected_seconds or 0.0)
+    if total_sec:
+        if on_log:
+            on_log(f"[stream] source is {total_sec / 60:.1f} min — planning sections from the known duration")
 
     # ---- audio first: it is tiny and transcription cannot start without it
     audio_key = f"{base}/audio.m4a"
