@@ -2672,9 +2672,17 @@ def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
         raise HTTPException(400, "too many ids in one request (max 200)")
     deleting: list[str] = []
     missing: list[str] = []
+    refused: list[dict[str, str]] = []
     for job_id in body.jobIds:
         try:
-            marked = purge.mark(store, job_id)
+            # require_finished: this is the mass path. A batch that is still
+            # grabbing/transcribing/rendering is not junk, whatever list it
+            # arrived in — marking it deleting cancels its worker and unlinks
+            # the files it is writing.
+            marked = purge.mark(store, job_id, require_finished=True)
+        except purge.JobNotDeletable as exc:
+            refused.append({"jobId": job_id, "reason": str(exc)})
+            continue
         except ValueError:
             marked = None
         if marked is None:
@@ -2683,11 +2691,15 @@ def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
         deleting.append(job_id)
     logger.info(
         f"[api] bulk delete: {len(deleting)} marked `deleting`, "
-        f"{len(missing)} not found — purged in the background"
+        f"{len(missing)} not found, {len(refused)} refused (still running) — "
+        "purged in the background"
     )
     # `deleted` is kept alongside `deleting` for older clients of this route;
-    # both name batches that will be gone from the next listing page.
-    return {"deleting": deleting, "deleted": deleting, "missing": missing}
+    # both name batches that will be gone from the next listing page. `refused`
+    # is additive: a live batch the caller listed but this route would not kill.
+    return {
+        "deleting": deleting, "deleted": deleting, "missing": missing, "refused": refused,
+    }
 
 
 @app.post("/api/jobs/{job_id}/restore")

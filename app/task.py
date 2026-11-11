@@ -1185,9 +1185,26 @@ class Pipeline:
     # stage 1: fetch
     # ------------------------------------------------------------------
 
-    def _stage_fetch(self, job: dict[str, Any], ws: StageWorkspace) -> Path:
+    def _stage_fetch(self, job: dict[str, Any], ws: StageWorkspace) -> Any:
         job_id = job["_id"]
         if ws.is_done("fetch"):
+            # A bucket source has no local path to stat: `done_meta["path"]` is
+            # an OBJECT KEY, so the old `Path(key).exists()` check was always
+            # false and every resume re-streamed the whole video. On a 20:37
+            # source that is nine sections and ~13 minutes re-downloaded after
+            # each host restart, for objects that were still in the bucket.
+            meta = ws.read_json("fetch", "meta.json") or {}
+            if meta.get("remote") and meta.get("videoKey"):
+                remote = self._remote_from_meta(job_id, meta)
+                if remote is not None and self._remote_source_intact(remote, job_id):
+                    held = len(remote.sections) or 1
+                    self._log(
+                        job_id,
+                        f"resume: reusing the source in the bucket ({held} object(s), "
+                        f"{remote.method}) — nothing is downloaded again",
+                    )
+                    self._progress(job_id, "grabbing", 100, "Source reused from the bucket")
+                    return remote
             src = Path((ws.done_meta("fetch") or {}).get("path", ""))
             if src.exists():
                 self._log(job_id, f"resume: reusing downloaded source {src.name}")
@@ -1367,6 +1384,69 @@ class Pipeline:
         # cuts from it — but the bucket copy now exists from the first minute.
         self._push_source(job_id, src)
         return src
+
+    @staticmethod
+    def _remote_from_meta(
+        job_id: str, meta: dict[str, Any],
+    ) -> "source_stream.RemoteSource | None":
+        """Rebuild the RemoteSource a previous attempt captured.
+
+        `fetch/meta.json` is the durable record of the capture: the object
+        keys, the section list with its time spans, and the probe the renderer
+        needs. It is all that is required to keep cutting clips without
+        touching yt-dlp again.
+        """
+        try:
+            return source_stream.RemoteSource(
+                job_id,
+                video_key=str(meta.get("videoKey") or ""),
+                audio_key=str(meta.get("audioKey") or ""),
+                probe={
+                    k: meta[k]
+                    for k in ("duration", "width", "height", "fps")
+                    if meta.get(k) is not None
+                },
+                method=str(meta.get("method") or "sections"),
+                sections=list(meta.get("sections") or []),
+                bytes_total=int(meta.get("bytes") or 0),
+                format_id=str(meta.get("format") or ""),
+                audio_format=str(meta.get("audioFormat") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - a broken meta means re-capture
+            logger.warning(f"[job {job_id}] could not rebuild the bucket source: {exc}")
+            return None
+
+    def _remote_source_intact(
+        self, src: "source_stream.RemoteSource", job_id: str,
+    ) -> bool:
+        """Are the captured objects still in the bucket?
+
+        Checked with HEAD on the video, the first and last section, and the
+        audio track — the objects the later stages actually read. A missing
+        one means the capture has to happen again, which is the honest answer
+        rather than a render that fails halfway through with a 403.
+        """
+        from app import objectstore
+
+        keys = [src.video_key, src.audio_key]
+        if src.sections:
+            keys += [str(s.get("key") or "") for s in (src.sections[0], src.sections[-1])]
+        for key in keys:
+            if not key:
+                return False
+            try:
+                head = objectstore.head(key) or {}
+            except Exception as exc:  # noqa: BLE001 - unknown means re-capture
+                self._log(job_id, f"resume: could not verify the bucket source ({exc})")
+                return False
+            if int(head.get("size") or 0) <= 0:
+                self._log(
+                    job_id,
+                    f"resume: {key.split('/')[-1]} is no longer in the bucket — "
+                    "capturing the source again",
+                )
+                return False
+        return True
 
     def _capture_remote(
         self, job: dict[str, Any], ws: StageWorkspace, url: str,

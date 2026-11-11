@@ -204,15 +204,53 @@ def _prune(root: Path, budget: int) -> tuple[int, bool]:
 # job document
 # --------------------------------------------------------------------------- #
 
-def mark(store: Any, job_id: str, *, keep_source: bool = False) -> dict[str, Any] | None:
+#: A batch may only be DELETED once it has settled. Anything else is work in
+#: flight: its worker is decoding, its files are being written, and the purge
+#: below cancels that worker and unlinks what it was writing.
+DELETABLE_STATUSES = frozenset({"complete", "failed"})
+
+
+class JobNotDeletable(ValueError):
+    """Refused: the batch is still running (or paused), not finished."""
+
+
+def deletable_reason(job: dict[str, Any]) -> str | None:
+    """None when this batch may be deleted, else a sentence for the caller."""
+    status = str(job.get("status") or job.get("stage") or "")
+    if status in DELETABLE_STATUSES or status == STATUS:
+        return None
+    label = str(job.get("stage") or status or "unknown")
+    return (
+        f"this batch is still {label} — it has not finished, so deleting it would "
+        "cancel work in progress. Wait for it (or press Pause), then delete."
+    )
+
+
+def mark(
+    store: Any, job_id: str, *, keep_source: bool = False, require_finished: bool = False,
+) -> dict[str, Any] | None:
     """Mark a batch as deleting. The ONLY work the API does synchronously.
 
     Re-marking an already-deleting batch (a second tap after a failure) keeps
     the phase and the removed counter and clears the retry backoff, so the
     retry is a nudge rather than a restart.
+
+    `require_finished` is what the MASS path ("Clean up dead batches") passes.
+    That dialog asks the server for junk, then sends every id it did not
+    classify — which on a busy dashboard included a batch that was still
+    grabbing. Marking it deleting cancelled its worker and removed 35 files
+    mid-run, so a bulk delete now refuses anything that has not settled while
+    the single, explicitly confirmed delete keeps its old behaviour.
     """
     if not valid_job_id(job_id):
         raise ValueError(f"invalid job id: {job_id!r}")
+    if require_finished:
+        job = store.get_job(job_id) or {}
+        if not job:
+            return None
+        reason = deletable_reason(job)
+        if reason:
+            raise JobNotDeletable(reason)
 
     def mutate(job: dict[str, Any]) -> None:
         prev = dict(job.get("deleting") or {})

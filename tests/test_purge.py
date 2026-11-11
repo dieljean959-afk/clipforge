@@ -267,3 +267,57 @@ def test_keep_source_leaves_the_video_behind(tmp_path):
     assert source.exists(), "keepSource is a promise about the source file"
     assert not (paths.outputs_dir / ("g" * 32)).exists()
     assert store.get_job("g" * 32) == {}
+
+
+# --- the mass path must not delete work in flight -------------------------
+#
+# "Clean up dead batches" asks the server for junk, then sends every id it did
+# not classify as junk. That list included a batch that was still grabbing: it
+# was marked `deleting`, its worker was cancelled, and 35 files went with it
+# while the batch was mid-capture. A bulk delete now refuses anything that has
+# not settled; a single, explicitly confirmed delete keeps its old behaviour.
+
+
+def test_bulk_mark_refuses_a_batch_that_is_still_running(tmp_path):
+    paths = _paths(tmp_path)
+    store = LocalStore(paths)
+    job_id = "still-grabbing"
+    store.write_job({"_id": job_id, "status": "queued", "stage": "grabbing", "source": "s"})
+    audio = paths.data_dir / "work" / job_id / "transcribe" / "audio.m4a"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"being decoded")
+
+    with pytest.raises(purge.JobNotDeletable) as caught:
+        purge.mark(store, job_id, require_finished=True)
+
+    assert "still grabbing" in str(caught.value)
+    job = store.get_job(job_id)
+    assert job["status"] == "queued" and job.get("deleting") is None
+    assert audio.exists(), "the refused delete still touched the batch's files"
+
+
+@pytest.mark.parametrize("status", ["running", "transcribing", "paused", "queued", "grabbing"])
+def test_every_unsettled_status_is_refused(tmp_path, status):
+    paths = _paths(tmp_path)
+    store = LocalStore(paths)
+    store.write_job({"_id": "j", "status": status, "stage": status})
+    with pytest.raises(purge.JobNotDeletable):
+        purge.mark(store, "j", require_finished=True)
+
+
+def test_bulk_mark_still_deletes_finished_batches(tmp_path):
+    paths = _paths(tmp_path)
+    store = LocalStore(paths)
+    for job_id, status in (("done", "complete"), ("dead", "failed")):
+        store.write_job({"_id": job_id, "status": status, "stage": status, "source": "s"})
+        assert purge.mark(store, job_id, require_finished=True) is not None
+        assert store.get_job(job_id)["deleting"]["phase"] == "cancel"
+
+
+def test_the_single_delete_still_takes_a_running_batch(tmp_path):
+    """The per-card delete is explicit: the user pressed it on that batch."""
+    paths = _paths(tmp_path)
+    store = LocalStore(paths)
+    store.write_job({"_id": "j", "status": "running", "stage": "transcribing", "source": "s"})
+    assert purge.mark(store, "j") is not None
+    assert store.get_job("j")["status"] == "deleting"
