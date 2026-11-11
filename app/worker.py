@@ -76,6 +76,25 @@ STAGE_BUDGET_SEC: dict[str, float] = {
     "exporting": 300.0,
 }
 
+
+def stall_reference_ms(job: dict[str, Any]) -> float:
+    """The timestamp a stall check must measure from, per stage.
+
+    A stage WITH its own budget is judged on PROGRESS only (`stageProgressAt`),
+    never on the liveness heartbeat: the heartbeat thread keeps ticking during a
+    hung HTTP call, so measuring against `lastProgressAt` would make every
+    per-stage budget unreachable — the old bug where a 125 s frozen detection
+    call sat inside a 600 s window.
+
+    A stage WITHOUT a budget keeps the heartbeat-aware window, because a single
+    decode window is legitimately quiet for minutes.
+    """
+    stage = str(job.get("stage") or "")
+    last = job.get("lastProgressAt") or job.get("stageStartedAt") or job.get("createdAt") or 0
+    if stage in STAGE_BUDGET_SEC:
+        last = job.get("stageProgressAt") or job.get("stageStartedAt") or last
+    return float(last)
+
 # How many times a job killed by an EXTERNAL signal (SIGTERM/SIGKILL — host
 # restart, redeploy, scale-down) is auto-resumed before it is finally failed.
 # Bounded on purpose: a job that cannot survive a restart loop must stop
@@ -1308,15 +1327,7 @@ class InProcessWorker:
             if proc.poll() is not None:
                 continue
             stage_now = str(job.get("stage") or "")
-            last = job.get("lastProgressAt") or job.get("stageStartedAt") or job.get("createdAt") or 0
-            # A stage WITH its own budget is judged on PROGRESS only, never on
-            # the liveness heartbeat: the heartbeat fires during a hung call
-            # too (it is a separate thread), so measuring against it would make
-            # every per-stage budget unreachable. A stage without a budget
-            # keeps the old heartbeat-aware window, because a long decode is
-            # legitimately silent.
-            if stage_now in STAGE_BUDGET_SEC:
-                last = job.get("stageProgressAt") or job.get("stageStartedAt") or last
+            last = stall_reference_ms(job)
             silent_for = time.time() * 1000 - last
             budget = STAGE_BUDGET_SEC.get(stage_now, float(STALL_TIMEOUT_SEC))
             if silent_for <= budget * 1000:
