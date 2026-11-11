@@ -70,6 +70,7 @@ _PLAN_ALIASES: dict[str, str] = {
 }
 
 _PLAN_LABELS: dict[str, str] = {
+    "queued": "Queued",
     "grabbing": "Fetching video",
     "transcribing": "Transcribing",
     "finding": "AI clip detection",
@@ -105,6 +106,14 @@ def status_of(job: dict[str, Any]) -> str:
     stage = str(job.get("stage") or "queued")
     if stage in TERMINAL_STAGES:
         return stage
+    # An explicit "queued" is the worker saying "this job is waiting for a
+    # slot". The stage field still holds the step it will resume at, so trusting
+    # the stage first made a waiting job look like it was already running it.
+    # `queuedAt` vs `lastProgressAt` is what makes this safe for documents
+    # written by an older build: the moment the pipeline ticks again, progress
+    # is newer than the enqueue and the job is running again.
+    if _waiting_for_slot(job):
+        return "queued"
     if stage in ACTIVE_STAGES:
         # A signalled worker leaves `interrupted` set while the resume runs;
         # it is still running work, just resumed, so it stays "running".
@@ -116,6 +125,22 @@ def status_of(job: dict[str, Any]) -> str:
     # An unknown stage is a real possibility after a bad deploy. Treat it as
     # running rather than inventing a new status the UI cannot render.
     return "running"
+
+
+def _waiting_for_slot(job: dict[str, Any]) -> bool:
+    """Is this job parked in the queue, rather than running the stage it keeps?"""
+    if str(job.get("status") or "") != "queued":
+        return False
+    try:
+        queued_at = int(job.get("queuedAt") or 0)
+    except (TypeError, ValueError):
+        queued_at = 0
+    try:
+        last = int(job.get("lastProgressAt") or 0)
+    except (TypeError, ValueError):
+        last = 0
+    # No enqueue timestamp: this never started, so it is genuinely waiting.
+    return queued_at >= last
 
 
 def is_terminal(job: dict[str, Any]) -> bool:
@@ -146,7 +171,9 @@ def stage_label(job: dict[str, Any]) -> str | None:
         s = plan_stage(raw)
     if not s or s in TERMINAL_STAGES:
         return None
-    return _PLAN_LABELS.get(s, s)
+    # Never hand the card a raw snake_case identifier ("queued" was rendering
+    # next to capitalised labels from the same map).
+    return _PLAN_LABELS.get(s, s.replace("_", " ").capitalize())
 
 
 def describe(job: dict[str, Any]) -> dict[str, Any]:

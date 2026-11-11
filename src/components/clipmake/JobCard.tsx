@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 import {
   STAGES,
   STAGE_LABELS,
+  stageStep,
   QUIET_THRESHOLD_MS,
   FALLBACK_STALL_TIMEOUT_SEC,
   STALL_WARN_FRACTION,
@@ -94,7 +95,9 @@ function useNow(active: boolean): number {
 function useStalled(job: JobDoc, thresholdMs: number): boolean {
   const [stalled, setStalled] = useState(false);
   const active =
-    job.stage !== "complete" && job.stage !== "failed" && job.stage !== "queued";
+    job.stage !== "complete" &&
+    job.stage !== "failed" &&
+    job.stage !== "queued";
   const jobRef = useRef(job);
   useEffect(() => {
     jobRef.current = job;
@@ -144,16 +147,23 @@ export function JobCard({
   const complete = job.status === "complete" || job.stage === "complete";
   const paused = job.status === "paused" || job.stage === "paused";
   const overall = overallStatus(job);
-  const isTerminal = job.isTerminal || failed || complete || paused || overall.isTerminal;
-  // The stage to highlight: for a live job that is its active stage, and for a
-  // dead one the stage it died in, so the stepper marks the right pill rather
-  // than leaving every stage grey.
-  const stepStage = (job.activeStage ?? job.failedStage ?? job.stage) as
-    | (typeof STAGES)[number]
-    | undefined;
-  const activeIdx = stepStage ? STAGES.indexOf(stepStage) : -1;
+  const isTerminal =
+    job.isTerminal || failed || complete || paused || overall.isTerminal;
+  // Which step to mark. Order matters and used to be wrong: `failedStage` was
+  // preferred over the live stage, so a job that had once died while FETCHING
+  // kept "Fetching video" highlighted through its next attempt's transcription.
+  // A live job is on `activeStage ?? stage`; only a settled job may fall back
+  // to the stage it died in. Names are mapped (fetch/detect/export -> the four
+  // visible steps) instead of being indexed raw, which returned -1 and left the
+  // stepper blank for most of a run.
+  const activeIdx =
+    isTerminal && failed
+      ? stageStep(job.failedStage, job.activeStage, job.stage)
+      : stageStep(job.activeStage, job.stage, job.failedStage);
   const stalled = useStalled(job, serverStallSec * 1000 * STALL_WARN_FRACTION);
-  const [busy, setBusy] = useState<null | "pause" | "resume" | "check" | "retry">(null);
+  const [busy, setBusy] = useState<
+    null | "pause" | "resume" | "check" | "retry"
+  >(null);
   // Live ONLY while the backend says the job is live. isTerminal is the
   // backend's single verdict, so this can never show a spinner for a job that
   // has already stopped.
@@ -170,10 +180,15 @@ export function JobCard({
         r.state === "paused"
           ? "Paused. Nothing was mid-write."
           : "Pausing — stopping at the next safe checkpoint.",
-        { description: "Completed chunks and clips are kept; Resume picks up from here." },
+        {
+          description:
+            "Completed chunks and clips are kept; Resume picks up from here.",
+        },
       );
     } catch (e) {
-      toast.error(`Could not pause: ${e instanceof Error ? e.message : "unknown error"}`);
+      toast.error(
+        `Could not pause: ${e instanceof Error ? e.message : "unknown error"}`,
+      );
     } finally {
       setBusy(null);
     }
@@ -187,7 +202,9 @@ export function JobCard({
         description: "Finished chunks and clips are not redone.",
       });
     } catch (e) {
-      toast.error(`Could not resume: ${e instanceof Error ? e.message : "unknown error"}`);
+      toast.error(
+        `Could not resume: ${e instanceof Error ? e.message : "unknown error"}`,
+      );
     } finally {
       setBusy(null);
     }
@@ -245,8 +262,11 @@ export function JobCard({
             {batchLabel(job)}
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {job.isUpload ? "Uploaded file" : "Video URL"} · {fmtDate(job.createdAt)}
-            {job.durationSec !== undefined && job.durationSec !== null && ` · ${fmtClock(job.durationSec)} source`}
+            {job.isUpload ? "Uploaded file" : "Video URL"} ·{" "}
+            {fmtDate(job.createdAt)}
+            {job.durationSec !== undefined &&
+              job.durationSec !== null &&
+              ` · ${fmtClock(job.durationSec)} source`}
           </p>
         </div>
         <div className="flex items-center gap-1.5">
@@ -282,7 +302,8 @@ export function JobCard({
             </Button>
           ) : null}
         </div>
-      </div>          {/* whole-pipeline status: the single answer to "running / done / broken".
+      </div>{" "}
+      {/* whole-pipeline status: the single answer to "running / done / broken".
               "done" is for a job whose every promised unit of work has checked out.
               A job can be "complete" (the backend's terminal status) while still
               looking unfinished to a reader when the list only hands back a stale
@@ -313,10 +334,13 @@ export function JobCard({
         >
           <CheckCircle2 className="size-4 shrink-0" />
           <span>
-            Done — {job.clipCount ?? 0} clip{(job.clipCount ?? 0) === 1 ? "" : "s"} ready
+            Done — {job.clipCount ?? 0} clip
+            {(job.clipCount ?? 0) === 1 ? "" : "s"} ready
           </span>
           <span className="ml-auto font-mono text-[11px] font-normal opacity-80">
-            {job.totalClipsSec ? `· ${fmtClock(job.totalClipsSec)} total` : null}
+            {job.totalClipsSec
+              ? `· ${fmtClock(job.totalClipsSec)} total`
+              : null}
           </span>
           <span className="shrink-0 rounded-full bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
             finished
@@ -336,17 +360,15 @@ export function JobCard({
             <div className="mt-0.5 text-xs text-muted-foreground">
               {/* Clamped: this text comes off the job record, and a derived
                   field must never be able to grow without bound in the card. */}
-              {(job.interruptReason ??
+              {(
+                job.interruptReason ??
                 "The worker was stopped externally, not by a pipeline error. Completed stages are reused, so progress is not lost."
               ).slice(0, 220)}
             </div>
           </div>
         </div>
       ) : overall.state === "failed" ? (
-        <div
-          data-testid="job-failed"
-          className="mt-3"
-        >
+        <div data-testid="job-failed" className="mt-3">
           <FailureNotice job={job} />
         </div>
       ) : (
@@ -367,14 +389,16 @@ export function JobCard({
           <Progress value={overall.percent} className="h-1.5" />
         </div>
       )}
-
       {/* stage stepper */}
       <div className="mt-3 flex items-center gap-1">
         {STAGES.slice(1, 5).map((s, i) => {
           const idx = i + 1; // index within STAGES
           const Icon = STAGE_ICONS[s];
           const done = complete || (activeIdx > idx && activeIdx !== -1);
-          const current = !complete && !failed && idx === activeIdx;
+          // "Current" means the worker is on it NOW. A queued job has an
+          // activeIdx it will start at, but showing a spinner there is the
+          // Fetching-while-queued lie.
+          const current = watching && !failed && idx === activeIdx;
           return (
             <div key={s} className="flex flex-1 items-center gap-1">
               <div
@@ -397,7 +421,6 @@ export function JobCard({
           );
         })}
       </div>
-
       {/* live progress with units + ETA. Gated on `watching` — the backend's
           single verdict — rather than on stage equality, so a job the server
           considers terminal can never render a spinner and a countdown. */}
@@ -407,7 +430,8 @@ export function JobCard({
             <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
               <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
               <span className="truncate">
-                {job.progressDetail ?? `${STAGE_LABELS[job.stage as ClipStage]}...`}
+                {job.progressDetail ??
+                  `${STAGE_LABELS[job.stage as ClipStage]}...`}
               </span>
             </span>
             {/* Liveness: a ticking "last updated Ns ago" so it is possible to
@@ -439,8 +463,10 @@ export function JobCard({
           <Progress value={job.progress} className="h-1.5" />
           <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 text-[11px] text-muted-foreground">
             <span>
-              {job.unitsDone !== undefined && job.unitsDone !== null &&
-              job.unitsTotal !== undefined && job.unitsTotal !== null
+              {job.unitsDone !== undefined &&
+              job.unitsDone !== null &&
+              job.unitsTotal !== undefined &&
+              job.unitsTotal !== null
                 ? `${fmtUnits(job.unitLabel ?? undefined, job.unitsDone)} of ${fmtUnits(job.unitLabel ?? undefined, job.unitsTotal)}`
                 : job.status === "queued" && job.queuePosition != null
                   ? queuedLabel(job.queuePosition)
@@ -507,9 +533,8 @@ export function JobCard({
                updates this field, and the render stage reports per clip, so
                whatever is on screen is the exact thing the worker is doing. */
             <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90">
-              No progress reported for {fmtAgo(silenceMs(job, now))}. The worker is
-              still at{" "}
-              <span className="font-mono">{job.stage}</span>
+              No progress reported for {fmtAgo(silenceMs(job, now))}. The worker
+              is still at <span className="font-mono">{job.stage}</span>
               {typeof job.unitsDone === "number" && job.unitsDone > 0
                 ? ` — ${job.unitsDone} of ${job.unitsTotal ?? "?"} ${job.unitLabel ?? "units"} finished`
                 : ""}
@@ -518,14 +543,15 @@ export function JobCard({
                 {job.progressDetail ?? STAGE_LABELS[job.stage as ClipStage]}
               </span>
               . The server restarts and resumes this job after{" "}
-              {fmtMinutes(serverStallSec)} of silence, picking up from the
-              last finished unit.
+              {fmtMinutes(serverStallSec)} of silence, picking up from the last
+              finished unit.
             </div>
           )}
           {stalled && (
             <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-              <span className="font-semibold">Pipeline stalled</span> — no progress
-              from the worker for {fmtMinutes(serverStallSec * STALL_WARN_FRACTION)} at stage{" "}
+              <span className="font-semibold">Pipeline stalled</span> — no
+              progress from the worker for{" "}
+              {fmtMinutes(serverStallSec * STALL_WARN_FRACTION)} at stage{" "}
               <span className="font-mono">{job.stage}</span>
               {typeof job.unitsDone === "number" && job.unitsDone > 0
                 ? `, stuck after ${job.unitsDone} of ${job.unitsTotal ?? "?"} ${job.unitLabel ?? "units"}`
@@ -534,13 +560,13 @@ export function JobCard({
               <span className="font-semibold">
                 {job.progressDetail ?? STAGE_LABELS[job.stage as ClipStage]}
               </span>
-              . The server kills the worker and retries the job automatically once,
-              resuming from the last finished unit — finished clips are kept.
+              . The server kills the worker and retries the job automatically
+              once, resuming from the last finished unit — finished clips are
+              kept.
             </div>
           )}
         </div>
       )}
-
       {/* How the batch size was decided. "You asked for 10 and got 10" and
           "the detector found 61 moments, 23 of them were highlights, and the
           length-based ceiling was 23" are different stories, and only the
@@ -551,9 +577,7 @@ export function JobCard({
           {job.candidatesDetected === 1 ? "" : "s"} found ·{" "}
           {job.clipsAboveScore ?? job.candidatesDetected} scored above{" "}
           {Math.round(job.clipScoreFloor ?? 0)} ·{" "}
-          <span className="text-foreground">
-            {job.clipCount ?? 0} rendered
-          </span>
+          <span className="text-foreground">{job.clipCount ?? 0} rendered</span>
           {job.clipTarget ? ` (ceiling ${job.clipTarget})` : ""}
           {job.clipTargetReason ? ` — ${job.clipTargetReason}` : ""}
           {typeof job.clipsBelowScore === "number" && job.clipsBelowScore > 0
@@ -561,7 +585,6 @@ export function JobCard({
             : "."}
         </p>
       )}
-
       {/* Manual control: pause/resume a live job, and force a poll so activity
           can be confirmed without reloading the page. A job that the backend has
           already marked terminal does not keep buttons on screen for work it can
@@ -592,7 +615,12 @@ export function JobCard({
               {job.pauseRequested ? "Stopping…" : "Pause"}
             </Button>
           )}
-          <Button size="sm" variant="ghost" onClick={doCheck} disabled={busy !== null}>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={doCheck}
+            disabled={busy !== null}
+          >
             {busy === "check" ? (
               <Loader2 className="mr-1.5 size-3 animate-spin" />
             ) : (
@@ -607,20 +635,24 @@ export function JobCard({
           )}
         </div>
       )}
-
       {complete && (
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span className="font-semibold text-primary">{job.clipCount ?? 0} clips</span>
+          <span className="font-semibold text-primary">
+            {job.clipCount ?? 0} clips
+          </span>
           {job.totalClipsSec !== undefined && job.totalClipsSec !== null && (
             <span>{fmtDurationLong(job.totalClipsSec)} total</span>
           )}
           <span>
-            {job.detectedSource ? `AI-detected via ${job.detectedSource}` : "Detection failed"}
+            {job.detectedSource
+              ? `AI-detected via ${job.detectedSource}`
+              : "Detection failed"}
           </span>
           {job.downloadSource && <span>via {job.downloadSource}</span>}
-          {job.transcriptWordCount !== undefined && job.transcriptWordCount !== null && (
-            <span>{job.transcriptWordCount} words transcribed</span>
-          )}
+          {job.transcriptWordCount !== undefined &&
+            job.transcriptWordCount !== null && (
+              <span>{job.transcriptWordCount} words transcribed</span>
+            )}
           {job.transcriptLabel && (
             <span
               className="rounded-full border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold text-amber-300"
@@ -635,7 +667,6 @@ export function JobCard({
           )}
         </div>
       )}
-
       {/* per-job worker log ("View logs") */}
       <Dialog open={logsOpen} onOpenChange={setLogsOpen}>
         <DialogContent className="max-w-lg">
@@ -651,7 +682,9 @@ export function JobCard({
             ) : (
               logs.map((line, i) => (
                 <p key={i} className="whitespace-pre-wrap">
-                  <span className="text-primary/60">{String(i + 1).padStart(2, "0")}</span>{" "}
+                  <span className="text-primary/60">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>{" "}
                   {line}
                 </p>
               ))
@@ -722,7 +755,10 @@ function FailureNotice({ job }: { job: JobDoc }) {
  * `json_validate_failed` envelope, which reads as gibberish to anyone who
  * did not write the parser.
  */
-function friendlyError(error: string | null | undefined, where?: string | null): string {
+function friendlyError(
+  error: string | null | undefined,
+  where?: string | null,
+): string {
   const raw = String(error ?? "").trim();
   if (!raw) return "This job failed.";
 
@@ -760,10 +796,15 @@ function friendlyError(error: string | null | undefined, where?: string | null):
     return `AI detection failed on chunk ${chunkFirst[1]}/${chunkFirst[2]}.`;
   }
   if (countFirst) {
-    return `AI detection failed on ${countFirst[1]} of ${countFirst[2]} chunks. ` +
-      `The rest of the video was detected normally — hit Re-detect to retry just those.`;
+    return (
+      `AI detection failed on ${countFirst[1]} of ${countFirst[2]} chunks. ` +
+      `The rest of the video was detected normally — hit Re-detect to retry just those.`
+    );
   }
-  if (/chain failed to return valid json/i.test(raw) || /json_validate_failed/i.test(raw)) {
+  if (
+    /chain failed to return valid json/i.test(raw) ||
+    /json_validate_failed/i.test(raw)
+  ) {
     return "The AI model did not return usable JSON for this video. Retrying usually helps.";
   }
   if (/rate limit|daily quota|tokens\/day/i.test(raw)) {
@@ -786,11 +827,15 @@ function friendlyError(error: string | null | undefined, where?: string | null):
   }
   // Name the unit, not just the stage: "Clip 7 failed, retrying 2/3" tells the
   // user exactly how far the batch got and what is being done about it.
-  const clipRetry = /clip\s+(\d+)(?:\s+of\s+(\d+))?[^.]*\b(retrying|retry)\b\s*(\d+\/\d+)/i.exec(raw);
+  const clipRetry =
+    /clip\s+(\d+)(?:\s+of\s+(\d+))?[^.]*\b(retrying|retry)\b\s*(\d+\/\d+)/i.exec(
+      raw,
+    );
   if (clipRetry) {
     return `Clip ${clipRetry[1]}${clipRetry[2] ? ` of ${clipRetry[2]}` : ""} failed — retrying ${clipRetry[4]}.`;
   }
-  const clipSkip = /clip\s+(\d+)(?:\s+of\s+(\d+))?[^.]*\b(skipped|skipped after)/i.exec(raw);
+  const clipSkip =
+    /clip\s+(\d+)(?:\s+of\s+(\d+))?[^.]*\b(skipped|skipped after)/i.exec(raw);
   if (clipSkip) {
     return `Clip ${clipSkip[1]}${clipSkip[2] ? ` of ${clipSkip[2]}` : ""} could not be rendered and was skipped. Every other clip is ready.`;
   }

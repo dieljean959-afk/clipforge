@@ -485,6 +485,27 @@ def as_dict(choice: EncoderChoice) -> dict[str, Any]:
     }
 
 
+def check_geometry(
+    meta: dict[str, Any], out_w: int, out_h: int, name: str = "clip",
+) -> None:
+    """Fail a render whose frames are not the 4:5-safe 9:16 deliverable.
+
+    `verify_output` proves the file is real, playable and the right length; it
+    cannot know which frame size this batch asked for. A graph bug (a fit/fill
+    branch that skipped the final scale) produced files that played and were
+    the wrong shape, and the batch reported them as done.
+    """
+    from app import video as _video  # local: encode and video import each other
+
+    width = int(meta.get("width") or 0)
+    height = int(meta.get("height") or 0)
+    if width != int(out_w) or height != int(out_h):
+        raise _video.RenderError(
+            f"{name} came out {width}x{height}, expected {int(out_w)}x{int(out_h)} "
+            "— the 9:16 crop/scale did not apply"
+        )
+
+
 def render_clip(
     src: Path,
     cut: dict[str, Any],
@@ -963,6 +984,7 @@ def render_clip(
         try:
             cmd, proc = _attempt(graph, enc)
             meta = _video.verify_output(tmp_dest, expected_sec=clip_seconds)
+            check_geometry(meta, out_w, out_h, tmp_dest.name)
             if label != "primary" and on_log:
                 on_log(f"clip {cut.get('order', '?')}: recovered with {label}")
             break

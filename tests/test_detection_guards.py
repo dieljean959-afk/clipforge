@@ -154,3 +154,40 @@ def test_every_budgeted_stage_has_its_own_budget():
     for stage, seconds in worker_mod.STAGE_BUDGET_SEC.items():
         assert 60 <= seconds <= 600, f"{stage} budget {seconds}s is outside the brief"
     assert worker_mod.STAGE_BUDGET_SEC["finding"] <= 120
+
+
+def test_an_oversized_prompt_is_not_re_asked_every_chunk(monkeypatch):
+    """Groq's 8k TPM cannot take a 6-minute window: fail over ONCE, not per clip.
+
+    Each doomed call paid a 30-second pacing wait first, so a 15-clip batch spent
+    seven minutes waiting to be rejected.
+    """
+    monkeypatch.setattr(llm_mod, "_DEAD_PROVIDERS", {})
+    _keys(monkeypatch, {"deepseek": "sk-test-0123456789", "groq": "gsk_test_0123456789"})
+    s = _settings()
+    s.llm.fallback_provider = "groq"
+    too_big = {
+        "error": {
+            "message": "Request too large for model openai/gpt-oss-120b on tokens per "
+                       "minute (TPM): Limit 8000, Requested 10410",
+            "type": "invalid_request_error",
+        }
+    }
+    with _Stub(lambda _b: (400, too_big)) as groq:
+        s.groq.base_url = groq.base_url
+        for _ in range(3):
+            try:
+                llm_mod.call_llm("transcript text", s)
+            except Exception:  # noqa: BLE001 - expected while over budget
+                pass
+        calls = len(groq.requests)
+    assert calls == 1, f"the oversized prompt was sent {calls} times"
+    assert "prompts this large" in llm_mod.provider_dead("groq")
+
+
+def test_billing_and_oversize_are_reported_differently():
+    assert llm_mod._unusable_reason("Insufficient Balance") .startswith("out of credit")
+    assert llm_mod._unusable_reason(
+        "Request too large ... tokens per minute (TPM): Limit 8000"
+    ).startswith("cannot accept prompts this large")
+    assert llm_mod._unusable_reason("502 Bad Gateway") == ""

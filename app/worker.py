@@ -72,7 +72,13 @@ STALL_TIMEOUT_SEC = int(os.getenv("CLIPFORGE_STALL_TIMEOUT_SEC", "600"))
 STAGE_BUDGET_SEC: dict[str, float] = {
     "finding": 120.0,
     "reframing": 300.0,
-    "captions": 300.0,
+    # Captions calls the configured LLM once per clip for that clip's emoji.
+    # A provider that is pacing requests (or a 30 s token-budget wait before it
+    # rejects an oversized prompt) legitimately leaves a single clip's work
+    # silent for minutes; a 300 s cap killed a healthy batch mid-batch. The dead
+    # -provider cache means a provider that cannot serve the run is skipped
+    # after its FIRST failure, so this window is for real work, not for waits.
+    "captions": 600.0,
     "exporting": 300.0,
 }
 
@@ -328,6 +334,12 @@ class InProcessWorker:
                 f"(configured {self.configured_concurrency}, model '{self.model}', "
                 f"{hostlimits.describe()}), consuming the hosted job queue"
             )
+        # The run queue is PROCESS MEMORY. A restart (deploy, crash, the
+        # dashboard's Restart sandbox) empties it while the job documents still
+        # say "queued" — and nothing put those jobs back, so they sat at
+        # "Queued 0%" forever with an idle worker. The documents are the durable
+        # truth; adopt them before any new submission can take the slot.
+        self.adopt_pending()
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -337,6 +349,54 @@ class InProcessWorker:
             self._threads = []
         for thread in threads:
             thread.join(timeout=timeout)
+
+    def adopt_pending(self) -> list[str]:
+        """Put jobs the durable state still marks as pending back on the queue.
+
+        Called at daemon start. Only non-terminal jobs with resume budget left
+        are adopted: a job that has already burned its attempts is left for
+        `reconcile_stale_running`, which fails it with an honest reason instead
+        of spinning a slot on an attempt that cannot finish.
+        """
+        from app import jobstatus  # local: avoids an import cycle at module load
+
+        adopted: list[str] = []
+        try:
+            jobs = self.store.list_jobs()
+        except Exception as exc:  # noqa: BLE001 - an unreadable store must not crash boot
+            logger.warning(f"[worker] could not read the job list at startup: {exc}")
+            return adopted
+        for job in jobs:
+            job_id = str(job.get("_id") or "")
+            if not job_id or job.get("deleting"):
+                continue
+            try:
+                if jobstatus.is_terminal(job):
+                    continue
+            except Exception:  # noqa: BLE001 - unknown state: do not adopt
+                continue
+            if int(job.get("interruptCount") or 0) > INTERRUPT_MAX_RESUMES:
+                continue
+            with self._lock:
+                if job_id in self._pending or job_id in self._active:
+                    continue
+            try:
+                self.enqueue(job_id)
+                adopted.append(job_id)
+            except Exception as exc:  # noqa: BLE001 - one bad doc must not stop the rest
+                logger.warning(f"[worker] could not adopt {job_id} after restart: {exc}")
+        if adopted:
+            logger.warning(
+                f"[worker] adopted {len(adopted)} pending job(s) from the store after a "
+                "restart — resuming from their checkpoints"
+            )
+            for job_id in adopted:
+                self.store.append_job_log(
+                    job_id,
+                    "RESUMED: the worker restarted; this job was picked up from its "
+                    "durable state. Completed chunks and clips are reused.",
+                )
+        return adopted
 
     def enqueue(self, job_id: str) -> int:
         # Never queue the same id twice. Retry, the boot reconciler and the
@@ -376,6 +436,31 @@ class InProcessWorker:
             self._pending.append(job_id)
             depth = len(self._pending)
         self._write_queue_position(job_id, depth - 1)
+        # Waiting for a slot is not the stage the job will resume at: leaving
+        # `stage` at its last value (e.g. "transcribing") made a queued job
+        # render as "Transcribing" with a live spinner while nothing was
+        # running, and made the card highlight a stage it was not on. `status`
+        # is the durable "waiting" flag; the pipeline sets it back to running on
+        # its first progress tick.
+        try:
+            def _mark_waiting(job: dict) -> None:
+                if str(job.get("stage") or "") in {"complete", "failed", "paused", "deleting"}:
+                    return
+                job["status"] = "queued"
+                # The timestamp is what tells a waiting job from a running one
+                # whose document has an older `status` write: progress newer
+                # than this means the pipeline has started again.
+                job["queuedAt"] = int(time.time() * 1000)
+                job["queuePosition"] = max(0, depth - 1)
+                job["progressDetail"] = (
+                    "Queued — starting now on the server worker."
+                    if depth <= 1 else
+                    f"Queued — waiting for a free worker slot ({depth} in line)."
+                )
+
+            self.store.update_job(job_id, _mark_waiting)
+        except Exception as exc:  # noqa: BLE001 - queueing must not fail on a write
+            logger.warning(f"[worker] could not mark {job_id} queued: {exc}")
         logger.info(f"[worker] job {job_id} queued (depth {depth})")
         return depth
 

@@ -831,6 +831,27 @@ def _billing_dead_text(detail: str) -> bool:
     return bool(_BILLING_EXHAUSTED.search(detail or ""))
 
 
+#: "This request is bigger than my per-minute budget." Not a billing failure —
+#: the account may be funded and healthy — but equally unfixable by retrying
+#: the SAME prompt: waiting never makes a 10k-token request fit an 8k-TPM key.
+#: Groq's fallback on a 6-minute detection window hits this on every chunk, and
+#: each attempt used to pay a 30-second pacing wait first.
+_TPM_TOO_LARGE = re.compile(
+    r"request too large|tokens per minute|\bTPM\b|maximum context length",
+    re.IGNORECASE,
+)
+
+
+def _unusable_reason(detail: str) -> str:
+    """Why this backend cannot serve the rest of THIS run, or ""."""
+    text = str(detail or "")
+    if _billing_dead_text(text):
+        return "out of credit: " + text[:300]
+    if _TPM_TOO_LARGE.search(text):
+        return "cannot accept prompts this large: " + text[:300]
+    return ""
+
+
 def provider_dead(which: str) -> str:
     """Reason string when this backend is known out of credit, else empty."""
     entry = _DEAD_PROVIDERS.get(str(which))
@@ -848,7 +869,7 @@ def _mark_provider_dead(which: str, reason: str) -> None:
         return
     _DEAD_PROVIDERS[str(which)] = (time.time(), reason[:400])
     logger.error(
-        f"[llm] {which} is out of credit — skipping it for the rest of this run "
+        f"[llm] {which} cannot serve this run — skipping it for the rest of it "
         f"({_DEAD_PROVIDER_TTL / 60:.0f} min) instead of re-asking per chunk: {reason[:200]}"
     )
 
@@ -1659,15 +1680,15 @@ def call_llm(
             # it again. Straight to the backup, or a clear error.
             if can_backup:
                 logger.info(
-                    f"[llm] skipping {active} for this chunk (out of credit) — "
+                    f"[llm] skipping {active} for this chunk ({dead[:120]}) — "
                     f"using fallback provider {backup!r}"
                 )
                 return _call_provider(backup, chunk_text_prompt, settings)
             raise LlmError(
-                f"{active} is out of credit — the detection call was not retried "
-                f"because an exhausted balance cannot be fixed by waiting "
-                f"({dead}). Top up the account, or configure a funded "
-                f"[llm] fallback_provider, then hit Re-detect. Clips can still "
+                f"{active} cannot serve this run — the detection call was not "
+                f"retried because this is not something waiting fixes ({dead}). "
+                f"Top up the account, or configure a funded [llm] "
+                f"fallback_provider, then hit Re-detect. Clips can still "
                 f"be chosen locally in the meantime."
             )
         try:
@@ -1675,8 +1696,9 @@ def call_llm(
         except (LlmNotConfigured, DetectionPaused):
             raise
         except LlmError as exc:
-            if _billing_dead_text(str(exc)):
-                _mark_provider_dead(active, str(exc))
+            dead_reason = _unusable_reason(str(exc))
+            if dead_reason:
+                _mark_provider_dead(active, dead_reason)
             if not can_backup:
                 raise
             if provider_dead(backup):
@@ -1690,8 +1712,9 @@ def call_llm(
             try:
                 return _call_provider(backup, chunk_text_prompt, settings)
             except LlmError as exc2:
-                if _billing_dead_text(str(exc2)):
-                    _mark_provider_dead(backup, str(exc2))
+                dead_reason2 = _unusable_reason(str(exc2))
+                if dead_reason2:
+                    _mark_provider_dead(backup, dead_reason2)
                 raise
     finally:
         _PLAIN_JSON.reset(token)

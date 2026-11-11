@@ -28,6 +28,42 @@ export const STAGES: ClipStage[] = [
   "complete",
 ];
 
+// The pipeline's REAL stage names, mapped onto the four steps the card shows.
+// `fetch`/`detect`/`reframe`/`captions`/`export` are what the job document
+// actually contains; indexing the card's STAGES array with those names gave -1,
+// so the stepper highlighted nothing (or the wrong step) for most of a run.
+const STAGE_STEP: Record<string, ClipStage> = {
+  queued: "queued",
+  grabbing: "grabbing",
+  fetch: "grabbing",
+  fetching: "grabbing",
+  transcribing: "transcribing",
+  transcribe: "transcribing",
+  finding: "finding",
+  detecting: "finding",
+  detect: "finding",
+  rendering: "rendering",
+  reframe: "rendering",
+  render: "rendering",
+  captions: "rendering",
+  export: "rendering",
+  exporting: "rendering",
+  complete: "complete",
+};
+
+/**
+ * Index in STAGES of the step a job is on, from the most authoritative name to
+ * the least. -1 when nothing matches (an unknown stage renders as all-grey,
+ * which is honest).
+ */
+export function stageStep(...names: Array<string | null | undefined>): number {
+  for (const name of names) {
+    const step = name ? STAGE_STEP[name] : undefined;
+    if (step) return STAGES.indexOf(step);
+  }
+  return -1;
+}
+
 export const STAGE_LABELS: Record<ClipStage, string> = {
   queued: "Queued",
   grabbing: "Fetching video",
@@ -111,9 +147,7 @@ export function overallStatus(job: JobDoc): OverallStatus {
     // `failedStage` (recorded server-side before `stage` is overwritten), or
     // in the backend's own `stageLabel`.
     const raw = job.stageLabel ?? job.failedStage ?? null;
-    const where = raw
-      ? (STAGE_LABELS[raw as ClipStage] ?? raw)
-      : null;
+    const where = raw ? (STAGE_LABELS[raw as ClipStage] ?? raw) : null;
     const idx = PIPELINE_STAGES.indexOf(raw as ClipStage);
     return {
       state: "failed",
@@ -160,9 +194,10 @@ export function overallStatus(job: JobDoc): OverallStatus {
     state: "running",
     stageNumber,
     total,
-    percent: Math.min(99, percent),      label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[live as ClipStage] ?? live}`,
-      isTerminal: false,
-    };
+    percent: Math.min(99, percent),
+    label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[live as ClipStage] ?? live}`,
+    isTerminal: false,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -249,8 +284,11 @@ export const STALL_WARN_MS =
 
 /** True while a job is doing work we can meaningfully watch. */
 export function isActiveJob(job: JobDoc): boolean {
-  if (job.isTerminal !== undefined) return !job.isTerminal && job.status !== "queued";
-  return job.stage !== "complete" && job.stage !== "failed" && job.stage !== "paused";
+  if (job.isTerminal !== undefined)
+    return !job.isTerminal && job.status !== "queued";
+  return (
+    job.stage !== "complete" && job.stage !== "failed" && job.stage !== "paused"
+  );
 }
 
 /** ms since the job last reported progress (falls back through its clocks). */
@@ -304,7 +342,10 @@ export function sourceLabel(job: Pick<JobDoc, "source" | "isUpload">): string {
   if (job.isUpload) return job.source;
   try {
     const url = new URL(job.source);
-    return url.hostname.replace(/^www\./, "") + (url.pathname !== "/" ? url.pathname : "");
+    return (
+      url.hostname.replace(/^www\./, "") +
+      (url.pathname !== "/" ? url.pathname : "")
+    );
   } catch {
     return job.source;
   }
@@ -350,7 +391,9 @@ export function sourceId(job: Pick<JobDoc, "source" | "isUpload">): string {
  * identifies a batch; the date (rendered separately) disambiguates re-runs of
  * the same video.
  */
-export function batchLabel(job: Pick<JobDoc, "source" | "isUpload" | "title">): string {
+export function batchLabel(
+  job: Pick<JobDoc, "source" | "isUpload" | "title">,
+): string {
   const title = (job.title ?? "").trim();
   if (title) return title.length > 60 ? `${title.slice(0, 59)}…` : title;
   const id = sourceId(job);
@@ -405,13 +448,18 @@ export const MAX_CAPTION_CHARS = 150;
 // [llm] provider is omitted is NVIDIA, not DeepSeek.
 export const DEFAULT_PROVIDER = "nvidia";
 
-export function defaultProvider(settings?: { llm?: { provider?: string } }): string {
+export function defaultProvider(settings?: {
+  llm?: { provider?: string };
+}): string {
   return settings?.llm?.provider ?? DEFAULT_PROVIDER;
 }
 
 /** Normalise one tag to a bare lowercase `#word`, or "" if it carries no tag. */
 export function cleanTag(raw: unknown): string {
-  const text = String(raw ?? "").trim().replace(/^#+/, "").toLowerCase();
+  const text = String(raw ?? "")
+    .trim()
+    .replace(/^#+/, "")
+    .toLowerCase();
   const cleaned = text.replace(/[^0-9a-z]+/g, "");
   return cleaned ? `#${cleaned}` : "";
 }
@@ -432,16 +480,21 @@ export function normalizeHashtags(tags: unknown): string[] {
     const tag = cleanTag(raw);
     if (!tag || seen.has(tag)) continue;
     seen.add(tag);
-    (DISCOVERY_TAGS as readonly string[]).includes(tag)
-      ? discovery.push(tag)
-      : content.push(tag);
+    if ((DISCOVERY_TAGS as readonly string[]).includes(tag)) {
+      discovery.push(tag);
+    } else {
+      content.push(tag);
+    }
   }
 
   if (discovery.length > MAX_DISCOVERY) {
     content.unshift(...discovery.splice(MAX_DISCOVERY));
   }
   for (const tag of DISCOVERY_TAGS) {
-    if (discovery.length >= MIN_DISCOVERY && discovery.length + content.length >= MIN_TAGS) {
+    if (
+      discovery.length >= MIN_DISCOVERY &&
+      discovery.length + content.length >= MIN_TAGS
+    ) {
       break;
     }
     if (seen.has(tag)) continue;
@@ -452,8 +505,16 @@ export function normalizeHashtags(tags: unknown): string[] {
 }
 
 /** Collapse to a single line, trimmed on a word boundary. */
-export function shortenCaption(raw: unknown, limit = MAX_CAPTION_CHARS): string {
-  const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+export function shortenCaption(
+  raw: unknown,
+  limit = MAX_CAPTION_CHARS,
+): string {
+  const text = String(raw ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (text.length <= limit) return text;
-  return text.slice(0, limit).replace(/\s+\S*$/, "").replace(/[\s,.;:\-–—]+$/, "");
+  return text
+    .slice(0, limit)
+    .replace(/\s+\S*$/, "")
+    .replace(/[\s,.;:\-–—]+$/, "");
 }

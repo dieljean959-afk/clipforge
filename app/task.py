@@ -602,6 +602,12 @@ class Pipeline:
         prior_eta_sec: float | None = None,
     ) -> None:
         """Mutate `job` with this tick's progress/ETA (caller holds the lock)."""
+        # `status` was written once at creation (`queued`) and never updated, so
+        # a job that was transcribing still said "status: queued" in its own
+        # document. Every view that trusted it (or derived a stage from it) then
+        # disagreed with the stage chips. Progress IS the proof of life: if the
+        # pipeline is writing ticks, the job is running.
+        job["status"] = "running"
         prev_stage = job.get("stage")
         if prev_stage != stage:
             self._prior_eta_sec = None
@@ -1940,7 +1946,7 @@ class Pipeline:
         # via deepseek" instead of a blank "detectedSource". The provider label is
         # already used a few lines above for the chunk cache and the log line, so this
         # keeps all three named the same by construction rather than by coincidence.
-        summary = self.store.create_clips(
+        self.store.create_clips(
             job_id, candidates,
             detected_source=llm.provider_label(self.settings),
             words=words,
@@ -2341,7 +2347,6 @@ class Pipeline:
         dest = self.settings.app.paths.outputs_dir / job_id
         dest.mkdir(parents=True, exist_ok=True)
 
-        src_dur = float(job.get("durationSec") or 0.0)
         total_sec = 0.0
         rendered = 0
         failed: list[tuple[int, str, str]] = []
