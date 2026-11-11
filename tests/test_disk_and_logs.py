@@ -69,10 +69,19 @@ def test_preflight_allows_a_job_with_real_headroom(env, monkeypatch):
     worker = InProcessWorker(settings, store)
     worker._stop.set()
 
-    from app import hosting
+    from types import SimpleNamespace
+
+    from app import hosting, memguard
 
     monkeypatch.setattr(
         hosting, "disk_stats", lambda path: {"freeBytes": 1200 * 1024 * 1024}
+    )
+    # This test is about DISK headroom. The memory admission is answered by
+    # whatever the machine running the suite happens to have free, which made
+    # the assertion fail on a host with 1.2 GB available — the test would go
+    # red while a batch was running and green ten minutes later.
+    monkeypatch.setattr(
+        memguard, "check", lambda *a, **k: SimpleNamespace(ok=True, message="")
     )
     assert worker._preflight_environment(job_id) == []
     assert store.get_job(job_id)["stage"] != "failed"

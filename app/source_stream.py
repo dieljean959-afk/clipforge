@@ -307,6 +307,11 @@ def _split_if_big(path: Path, *, target: int, seconds: float) -> list[tuple[Path
     return out
 
 
+def section_key(prefix: str, job_id: str, index: int) -> str:
+    """The bucket key a section is stored under — stable across restarts."""
+    return f"{prefix}/uploads/{job_id}/sections/sec_{index:03d}.mp4"
+
+
 def _section_count(total_sec: float) -> int:
     """How many 150 s sections to request for a source of `total_sec`.
 
@@ -358,6 +363,31 @@ def _sections(
         for i in range(count):
             start = i * SECTION_SEC
             end = min(start + SECTION_SEC, total_sec) if total_sec > 0 else start + SECTION_SEC
+            # A section is uploaded to a DETERMINISTIC key and verified before
+            # the local copy goes. So a capture that was interrupted by a host
+            # restart can keep the sections that already landed instead of
+            # re-downloading the video from 0:00 — the difference between
+            # finishing a nine-section source and never getting past section 3.
+            planned = section_key(prefix, job_id, i)
+            try:
+                existing = objectstore.head(planned) or {}
+            except Exception:  # noqa: BLE001 - an unreadable bucket means re-capture
+                existing = {}
+            if int(existing.get("size") or 0) > 0:
+                out.append({
+                    "key": planned,
+                    "bytes": int(existing["size"]),
+                    "start": start,
+                    "end": end,
+                })
+                if on_log:
+                    on_log(
+                        f"[stream] section {i + 1}/{count}: {start:.0f}s–{end:.0f}s "
+                        "is already in the bucket — reusing it"
+                    )
+                if on_progress:
+                    on_progress(min(1.0, (i + 1) / count))
+                continue
             cmd = _cli(settings) + [
                 "-f", VIDEO_FORMATS[0],
                 "--download-sections", f"*{start:.0f}-{end:.0f}",

@@ -104,10 +104,32 @@ def stall_reference_ms(job: dict[str, Any]) -> float:
 INTERRUPT_MAX_RESUMES = int(os.getenv("CLIPFORGE_INTERRUPT_MAX_RESUMES", "3"))
 
 # Matches the signalled-death banners this module writes, e.g.
-# "exited unexpectedly (code -15)". Kept deliberately narrow so it cannot match
-# a stray mention of "code" inside an ordinary traceback and cause a bad job to
-# be retried forever.
-_SIGNAL_BANNER = re.compile(r"\(code -\d+\)")
+# "terminated by SIGTERM (code 143)" or "exited unexpectedly (code -15)". The
+# number is parsed and checked with `death_signal()` below, so a stray
+# "(code 1)" inside a traceback cannot mark a bad job retryable forever.
+_SIGNAL_BANNER = re.compile(r"\(code (-?\d+)\)")
+
+#: Signals that mean "something OUTSIDE the pipeline stopped this process".
+#: SIGTERM/SIGINT are a stop, SIGKILL is the OOM killer or a hard stop, SIGHUP
+#: is a dropped session. All of them leave the stage cache on disk intact.
+_EXTERNAL_SIGNALS = frozenset(
+    {int(signal.SIGTERM), int(signal.SIGKILL), int(signal.SIGINT), int(signal.SIGHUP)}
+)
+
+
+def death_signal(rc: int | None) -> int | None:
+    """The signal that ended a child, from EITHER reporting convention.
+
+    `Popen` reports a signalled child as `-N`, while a shell — and this app's
+    own runner, whose SIGTERM handler raises `SystemExit(143)` so its `finally`
+    blocks run — reports `128+N`. Only the negative form was recognised, so the
+    same host restart resumed one job and hard-failed another with "exited
+    unexpectedly (code 143)" while its transcript sat finished on disk.
+    """
+    if rc is None:
+        return None
+    sig = -rc if rc < 0 else (rc - 128 if 128 < rc <= 192 else 0)
+    return sig if sig in _EXTERNAL_SIGNALS else None
 
 SOURCE_LOST_MESSAGE = (
     "Source file was lost, please re-upload. "
@@ -124,6 +146,12 @@ _TERMINAL_STAGES = frozenset({"complete", "failed", "paused"})
 # or the one the supervisor lands from events.jsonl: "FAILED: <reason>".
 _FAILED_LINE = re.compile(r"\bFAILED(?: at [A-Za-z]+)?: (.+)$")
 
+#: The supervisor's own "this was an external kill, it will resume" line. It is
+#: the LAST verdict on an attempt, so it must beat an older FAILED line from a
+#: previous attempt — otherwise a rescued job is re-failed at reconcile using
+#: the reason of the attempt before it.
+_INTERRUPTED_LINE = re.compile(r"\bINTERRUPTED: ")
+
 
 def _reason_from_logs(job: dict[str, Any]) -> str:
     """Recover the runner's last explicit failure from the job log.
@@ -136,7 +164,12 @@ def _reason_from_logs(job: dict[str, Any]) -> str:
     if not isinstance(logs, list):
         return ""
     for line in reversed(logs[-300:]):
-        match = _FAILED_LINE.search(str(line))
+        text = str(line)
+        if _INTERRUPTED_LINE.search(text):
+            # Newest verdict wins: this attempt was interrupted and re-queued,
+            # so any earlier FAILED line belongs to an attempt already retried.
+            return ""
+        match = _FAILED_LINE.search(text)
         if match:
             return match.group(1).strip()[:1000]
     return ""
@@ -798,14 +831,24 @@ class InProcessWorker:
         # resumable. Without this, a host bounce permanently fails work whose
         # expensive stages are already cached on disk.
         # A negative return code means the child was SIGNALLED, not that it
-        if rc is not None and rc < 0 and self._note_interrupted(job, job_id, rc, stage, tail):
+        sig = death_signal(rc)
+        if sig is not None and self._note_interrupted(job, job_id, -sig, stage, tail):
             return
 
-        msg = f"Worker process exited unexpectedly (code {rc}) before the job finished"
-        # A SIGKILL'd child reports no traceback at all — name the OOM kill and
-        # the fix instead of leaving the user with "exited unexpectedly".
-        hint = hostlimits.oom_hint(rc, stage)
-        if hint:
+        if sig is not None:
+            # One sentence for one event, whichever way the code was reported.
+            msg = (
+                f"Worker process was terminated by {signal.Signals(sig).name}"
+                + (f" during {stage}" if stage else "")
+                + f" (code {rc}) — it has already resumed "
+                f"{INTERRUPT_MAX_RESUMES} times, so it is not being resumed again"
+            )
+        else:
+            msg = f"Worker process exited unexpectedly (code {rc}) before the job finished"
+        # A signalled child reports no traceback at all — name the OOM kill and
+        # the fix instead of leaving the user with a bare code.
+        hint = hostlimits.oom_hint(-sig if sig is not None else rc, stage)
+        if hint and sig is None:
             msg = f"Worker process was killed (code {rc})" + (
                 f" during {stage}" if stage else ""
             )
@@ -845,7 +888,10 @@ class InProcessWorker:
         if job.get("stage") != "failed":
             return False
         text = f"{job.get('error') or ''}\n{job.get('errorDetail') or ''}"
-        return bool(_SIGNAL_BANNER.search(text))
+        return any(
+            death_signal(int(m.group(1))) is not None
+            for m in _SIGNAL_BANNER.finditer(text)
+        )
 
     @staticmethod
     def has_delivered_output(job: dict[str, Any], rendered: int, promised: int) -> bool:
@@ -876,6 +922,7 @@ class InProcessWorker:
     AUTO_RETRY_ERRORS = (
         "render deadline",
         "was killed",
+        "was terminated by SIG",
         "stalled",
         "no progress",
         "exceeded its",
@@ -1037,19 +1084,38 @@ class InProcessWorker:
         """
         if job is None:
             return False
-        count = int(job.get("interruptCount") or 0) + 1
+        sig = death_signal(rc)
+        # The budget counts CONSECUTIVE interruptions. A job that restarted,
+        # then finished a stage or moved ten points of progress before being
+        # restarted again used to burn a life each time: three host bounces in
+        # an hour killed a run whose transcript was already on disk. Progress
+        # resets the count; dying in the same place, at the same point, does
+        # not — that is what the bound is for.
+        prev_stage = job.get("interruptStage")
+        prev_progress = float(job.get("interruptProgress") or 0.0)
+        progress = float(job.get("progress") or 0.0)
+        # No recorded baseline means no evidence of progress since the last
+        # interruption (older job docs, a job killed before it ever ran): that
+        # keeps the old "counts as one more strike" behaviour. Requiring the
+        # baseline also keeps a job that never moves from looping forever.
+        advanced = prev_stage is not None and (
+            str(prev_stage) != str(stage) or progress - prev_progress >= 10.0
+        )
+        count = 1 if advanced else int(job.get("interruptCount") or 0) + 1
         if count > INTERRUPT_MAX_RESUMES:
             return False
         try:
-            how = signal.Signals(-rc).name
+            how = signal.Signals(sig or -rc).name
         except ValueError:
-            how = f"signal {-rc}"
+            how = f"signal {sig or -rc}"
         reason = (
             f"Host terminated the worker with {how} during '{stage}' — this is an "
             f"external kill (restart/redeploy), not a pipeline error."
         )
         job.update({
             "interruptCount": count,
+            "interruptStage": stage,
+            "interruptProgress": progress,
             "interrupted": True,
             "interruptReason": reason,
             "error": None,

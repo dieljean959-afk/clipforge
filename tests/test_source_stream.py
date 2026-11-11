@@ -177,3 +177,68 @@ def test_presigned_urls_are_fresh_per_call(bucket):
     a, _ = source.url_for_span(10.0)
     b, _ = source.url_for_span(20.0)
     assert a.startswith("https://bucket.example/") and b.startswith("https://bucket.example/")
+
+
+# --- a capture interrupted by a host restart keeps what already landed -----
+#
+# Sections are uploaded to deterministic keys, so re-downloading the video from
+# 0:00 after every restart is wasted work. On a host that bounces every few
+# minutes a nine-section source never finished at all.
+
+
+def test_a_capture_reuses_sections_already_in_the_bucket(monkeypatch, tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from app import objectstore
+
+    uploaded: dict[str, int] = {
+        source_stream.section_key("clipforge", "job-1", 0): 1000,
+        source_stream.section_key("clipforge", "job-1", 1): 1001,
+    }
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        objectstore, "config_from_env",
+        lambda: SimpleNamespace(prefix="clipforge"),
+    )
+    monkeypatch.setattr(
+        objectstore, "head",
+        lambda key, *a, **k: ({"size": uploaded[key]} if key in uploaded else None),
+    )
+
+    def fake_upload(path, key, *a, **k):
+        uploaded[key] = path.stat().st_size
+        return True
+
+    monkeypatch.setattr(objectstore, "upload_file", fake_upload)
+    monkeypatch.setattr(
+        source_stream, "_split_if_big",
+        lambda local, target, seconds: [(local, seconds)],
+    )
+
+    def fake_run(cmd, **kw):
+        out = cmd[cmd.index("-o") + 1]
+        Path(out).write_bytes(b"x" * 512)
+        calls.append(cmd[cmd.index("--download-sections") + 1])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(source_stream.subprocess, "run", fake_run)
+
+    sections = source_stream._sections(
+        "https://youtu.be/x", "job-1", total_sec=1237.0,
+        settings=SimpleNamespace(),
+    )
+
+    assert len(sections) == 9, sections
+    assert len(calls) == 7, f"re-downloaded {len(calls)} sections instead of 7"
+    assert "*0-150" not in calls, "section 1 was downloaded again"
+    assert sections[0]["key"].endswith("sec_000.mp4")
+    assert sections[0]["bytes"] == 1000
+    assert [s["start"] for s in sections] == [0.0, 150.0, 300.0, 450.0, 600.0, 750.0, 900.0, 1050.0, 1200.0]
+    assert sections[-1]["end"] == 1237.0, "the last span must end at the real duration"
+
+
+def test_section_keys_are_stable():
+    assert source_stream.section_key("p", "j", 3) == "p/uploads/j/sections/sec_003.mp4"
+    assert source_stream.section_key("p", "j", 3) == source_stream.section_key("p", "j", 3)
