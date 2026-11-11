@@ -422,3 +422,61 @@ def test_reachable_reports_false_instead_of_raising_when_the_bucket_is_down(buck
 
     bucket.fake.list_objects_v2 = lambda **kw: {"Contents": []}
     assert objectstore.reachable() is True
+
+
+# --- the boot sweep must never delete a RUNNING job's scratch --------------
+#
+# `sweep_startup` used to call `store.list_jobs(limit=1000)`. LocalStore's
+# `list_jobs()` takes no arguments, so the call raised TypeError, the handler
+# swallowed it, and the job map became {} — at which point EVERY work folder
+# looks orphaned. Every API restart therefore deleted the scratch of jobs that
+# were still running: a 20-minute transcribe died with "cannot probe duration —
+# source file not found: .../transcribe/audio.m4a", because the boot sweep took
+# its audio while the decoder was reading it.
+
+
+def _local_style_store(jobs: list[dict]):
+    """A store whose list_jobs takes NO arguments, exactly like LocalStore."""
+    return SimpleNamespace(list_jobs=lambda: list(jobs))
+
+
+def test_boot_sweep_keeps_the_scratch_of_a_running_job(bucket):
+    live_id, gone_id = "job-live", "job-gone"
+    live = _write(bucket.paths.data_dir / "work" / live_id / "transcribe" / "audio.m4a",
+                  b"audio being decoded")
+    orphan = _write(bucket.paths.data_dir / "work" / gone_id / "transcribe" / "audio.m4a",
+                    b"nobody owns this")
+
+    out = reclaim.sweep_startup(
+        _local_style_store([{"_id": live_id, "status": "running", "stage": "transcribing"}]),
+        bucket.paths,
+    )
+
+    assert live.exists(), "the boot sweep deleted a running job's audio"
+    assert not orphan.exists(), "an orphaned folder was left behind"
+    assert out["dirsRemoved"] == 1
+
+
+def test_boot_sweep_keeps_a_queued_job_too(bucket):
+    queued = _write(bucket.paths.data_dir / "work" / "job-q" / "transcribe" / "audio.m4a", b"x")
+    reclaim.sweep_startup(_local_style_store([{"_id": "job-q", "status": "queued"}]), bucket.paths)
+    assert queued.exists(), "a queued job lost its cached work"
+
+
+def test_boot_sweep_deletes_nothing_when_the_job_list_is_unreadable(bucket):
+    """An unreadable store means \"do not delete\", never \"delete everything\"."""
+    def boom():
+        raise RuntimeError("store is not readable yet")
+
+    keep = _write(bucket.paths.data_dir / "work" / "job-x" / "transcribe" / "audio.m4a", b"x")
+    out = reclaim.sweep_startup(SimpleNamespace(list_jobs=boom), bucket.paths)
+
+    assert keep.exists(), "an unreadable job list turned into a full scratch wipe"
+    assert out["dirsRemoved"] == 0 and out["filesRemoved"] == 0
+
+
+def test_all_jobs_handles_both_store_signatures():
+    jobs = [{"_id": "a"}]
+    assert reclaim._all_jobs(_local_style_store(jobs)) == jobs
+    limited = SimpleNamespace(list_jobs=lambda limit=10: jobs[:limit])
+    assert reclaim._all_jobs(limited) == jobs

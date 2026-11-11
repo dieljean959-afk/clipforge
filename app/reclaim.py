@@ -47,6 +47,25 @@ _MB = 1024 * 1024
 #: `paused` (resumable, and a resume reads the source from disk).
 RECLAIMABLE_STAGES = frozenset({"complete", "failed"})
 
+
+def _all_jobs(store: Any) -> list[dict[str, Any]]:
+    """Every job document, whatever the store's signature.
+
+    `LocalStore.list_jobs()` takes NO arguments while the remote stores take a
+    limit. Calling the wrong one raised TypeError, every caller below caught
+    it and carried on — which quietly turned retention and the bucket budget
+    into no-ops, and turned `sweep_startup`'s job map into `{}`. With no job
+    list every work folder looks orphaned, so a boot sweep deleted the scratch
+    of jobs that were running: a 20-minute transcribe died with
+    "source file not found: .../transcribe/audio.m4a" because the API restarted
+    under it. Raises if the store cannot be read at all — the callers below
+    treat that as "delete nothing", never as "delete everything".
+    """
+    try:
+        return list(store.list_jobs())
+    except TypeError:
+        return list(store.list_jobs(limit=1000))
+
 #: Free space below which the watchdog offloads finished batches on its own.
 #: The submit gate wants 100 MB and the worker's preflight wants 400 MB, so this
 #: sits just above the worker floor: reclaim while there is still room to work,
@@ -450,7 +469,7 @@ def sweep_expired(store: Any, paths: Any, retention_hours: int) -> dict[str, Any
         return out
     cutoff = _time.time() - retention_hours * 3600
     try:
-        jobs = store.list_jobs(limit=1000)
+        jobs = _all_jobs(store)
     except Exception:  # noqa: BLE001
         return out
     for job in jobs:
@@ -531,7 +550,7 @@ def enforce_budget(
     if pct < prune_at * 100:
         return out
     finished = [
-        j for j in store.list_jobs(limit=1000)
+        j for j in _all_jobs(store)
         if j.get("status") in RECLAIMABLE_STAGES and j.get("completedAt")
     ]
     finished.sort(key=lambda j: int(j.get("completedAt") or 0))
@@ -629,9 +648,13 @@ def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
     """
     out = {"dirsRemoved": 0, "filesRemoved": 0, "bytesFreed": 0}
     try:
-        jobs = {str(j.get("_id")): j for j in store.list_jobs(limit=1000)}
-    except Exception:  # noqa: BLE001
-        jobs = {}
+        jobs = {str(j.get("_id")): j for j in _all_jobs(store)}
+    except Exception as exc:  # noqa: BLE001 - unreadable store must not become deletion
+        logger.warning(
+            f"[sweep] cannot read the job list ({exc}) — sweeping nothing: every "
+            "work folder would look orphaned, including a running job's"
+        )
+        return out
     roots = [
         Path(paths.outputs_dir),
         Path(paths.data_dir) / "work",
@@ -689,7 +712,7 @@ def reconcile(store: Any) -> dict[str, Any]:
     """Bucket vs DB: objects whose batch no longer exists, and batches with none."""
     from . import objectstore
 
-    live = {str(j.get("_id")): j for j in store.list_jobs(limit=1000)}
+    live = {str(j.get("_id")): j for j in _all_jobs(store)}
     orphans: list[dict[str, Any]] = []
     by_job: dict[str, int] = {}
     for obj in objectstore.list_prefix():

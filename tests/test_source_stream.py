@@ -128,6 +128,47 @@ def test_a_clip_is_cut_from_the_section_that_contains_it(bucket):
     assert seek0 == pytest.approx(12.0)
 
 
+# --- the length of the SOURCE, not of the object that was probed ---------
+#
+# A sections capture stores 150 s objects and probes ONE of them. Taking that
+# probe as the video's duration reported a 20:37 source as "2:30 source",
+# scaled the auto clip count off 2:30, and stopped detection at the first
+# window — the whole batch worked on the video's head.
+
+
+def test_sections_source_reports_the_whole_video_not_the_first_section():
+    sections = [
+        {"key": "s0", "start": 0.0, "end": 150.0},
+        {"key": "s1", "start": 150.0, "end": 300.0},
+        {"key": "s8", "start": 1200.0, "end": 1237.0},
+    ]
+    got = source_stream.source_duration(probed=150.08, meta_sec=1237.0, sections=sections)
+    assert got == pytest.approx(1237.0), f"20:37 source reported as {got:.0f}s"
+
+
+def test_sections_win_even_when_the_metadata_probe_failed():
+    sections = [{"key": "s0", "start": 0.0, "end": 150.0},
+                {"key": "s1", "start": 150.0, "end": 300.0}]
+    assert source_stream.source_duration(probed=150.0, meta_sec=0.0, sections=sections) == 300.0
+
+
+def test_a_whole_object_probe_is_the_source():
+    assert source_stream.source_duration(probed=1237.4, meta_sec=0.0, sections=[]) == 1237.4
+    assert source_stream.source_duration(probed=0.0, meta_sec=1237.0, sections=[]) == 1237.0
+
+
+def test_an_unknown_length_no_longer_caps_the_capture_at_15_minutes():
+    # 6 x 150 s = 15 min used to be the whole capture for a source whose
+    # metadata could not be read — a 20-minute video silently lost 5 minutes.
+    assert source_stream._section_count(0.0) == source_stream.UNKNOWN_DURATION_SECTIONS
+    assert source_stream.UNKNOWN_DURATION_SECTIONS * source_stream.SECTION_SEC >= 2 * 3600
+
+
+def test_a_known_length_still_asks_for_exactly_what_is_needed():
+    assert source_stream._section_count(1237.0) == 9
+    assert source_stream._section_count(120.0) == 1
+
+
 def test_presigned_urls_are_fresh_per_call(bucket):
     source = source_stream.RemoteSource(
         "j", video_key="clipforge/uploads/j/video.mp4",

@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 
 PART_BYTES = 8 * 1024 * 1024
 SECTION_SEC = 150.0
+
+#: Sections to try when the source's length is UNKNOWN (yt-dlp metadata
+#: failed). 150 s x 48 = 2 h = the largest source this app accepts, so an
+#: unreadable metadata field can no longer cut a long video short: the loop
+#: still stops at the first section past the end of the video.
+UNKNOWN_DURATION_SECTIONS = 48
 #: Filebase's free plan refuses MULTIPART video uploads above 25 MB
 #: ("Free accounts are limited to 25MB video uploads"), while a single PUT of
 #: the same bytes is accepted. Every object that carries video is therefore
@@ -301,6 +307,34 @@ def _split_if_big(path: Path, *, target: int, seconds: float) -> list[tuple[Path
     return out
 
 
+def _section_count(total_sec: float) -> int:
+    """How many 150 s sections to request for a source of `total_sec`.
+
+    Unknown length used to mean "6 sections" = 15 minutes, which silently
+    replaced a 20-minute source with its first three quarters. Ask for the
+    whole allowed maximum instead; `_sections` breaks at the real end.
+    """
+    if total_sec > 0:
+        return max(1, int(-(-total_sec // SECTION_SEC)))
+    return UNKNOWN_DURATION_SECTIONS
+
+
+def source_duration(
+    *, probed: float, meta_sec: float, sections: list[dict[str, Any]],
+) -> float:
+    """Length of the SOURCE, never of the one object that got probed.
+
+    A sections capture probes ONE 150 s object, so ffprobe reports 2:30 for a
+    20:37 video. Storing that as `durationSec` cut the batch to the first two
+    and a half minutes: auto clip count scaled off 2:30 and the detector never
+    looked past the first window. For a whole-object capture the probe IS the
+    source, so it wins.
+    """
+    if sections:
+        return max(0.0, float(sections[-1].get("end") or 0.0))
+    return float(probed or meta_sec or 0.0)
+
+
 def _sections(
     url: str, job_id: str, *, total_sec: float, settings: Any,
     on_log: Callable[[str], None] | None = None,
@@ -317,7 +351,7 @@ def _sections(
     from app import objectstore
 
     prefix = objectstore.config_from_env().prefix
-    count = max(1, int(-(-total_sec // SECTION_SEC))) if total_sec > 0 else 6
+    count = _section_count(total_sec)
     out: list[dict[str, Any]] = []
     tmpdir = Path(tempfile.mkdtemp(prefix=f"sec-{job_id[:8]}-"))
     try:
@@ -589,6 +623,25 @@ def capture(
         }
     if not probe.get("duration") and total_sec:
         probe["duration"] = total_sec
+    # The geometry comes from the probed object, the LENGTH comes from the
+    # source. With sections those are different things, and confusing them is
+    # what made a 20:37 video report "2:30 source" and render only its head.
+    probed_dur = float(probe.get("duration") or 0.0)
+    whole = source_duration(probed=probed_dur, meta_sec=total_sec, sections=sections)
+    if whole > 0 and whole > probed_dur + 1.0:
+        probe["duration"] = whole
+        if on_log:
+            on_log(
+                f"[stream] source is {whole / 60:.1f} min — the probed object only "
+                f"holds {probed_dur:.0f}s ({len(sections)} section(s) captured), "
+                "so the full length is used"
+            )
+    elif sections and total_sec and whole + 1.0 < total_sec:
+        if on_log:
+            on_log(
+                f"[stream] captured {whole / 60:.1f} min of a {total_sec / 60:.1f} min "
+                "source — the batch will work with what was captured"
+            )
 
     source = RemoteSource(
         job_id,
