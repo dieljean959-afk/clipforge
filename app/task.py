@@ -1796,6 +1796,24 @@ class Pipeline:
     # stage 3: detect (Gemini word indices → local timestamps)
     # ------------------------------------------------------------------
 
+    def _release_memory_before_detect(self, job_id: str) -> None:
+        """Drop decoded-audio/word buffers and return freed arenas to the OS."""
+        import gc
+
+        try:
+            import ctypes
+            import resource
+
+            before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+            gc.collect()
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+            self._log(
+                job_id,
+                f"memory: released ASR buffers before detection (peak {before} MB)",
+            )
+        except Exception as exc:  # noqa: BLE001 - never fail detection on a trim
+            logger.debug(f"[job {job_id}] memory release before detection skipped: {exc}")
+
     def _stage_detect(
         self, job: dict[str, Any], transcript: subtitle.Transcript, ws: StageWorkspace
     ) -> list[dict[str, Any]]:
@@ -1832,6 +1850,13 @@ class Pipeline:
                     patch["candidatesDetected"] = len(cached)
                 self._patch_job(job_id, **patch)
                 return cached
+
+        # Whisper on a 20-minute source leaves large native arenas behind. The
+        # ASR itself runs in child processes that already trim on exit, but the
+        # parent still holds decoded-word buffers and numpy arenas; returning
+        # them BEFORE the detection call is what keeps a 2 GiB container from
+        # picking the API process as the OOM victim.
+        self._release_memory_before_detect(job_id)
 
         opts = job.get("options", {}) or {}
         # Name the backend that is ACTUALLY running. These two strings used to

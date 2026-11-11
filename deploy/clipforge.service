@@ -1,0 +1,39 @@
+# ClipForge under systemd (non-container hosts).
+#
+# Two processes are supervised by the app itself: this unit starts the API, and
+# the API spawns `python -m app.workerd` in its own session. That is deliberate:
+# a deploy or an API restart must not kill the job that is mid-render.
+#
+#   sudo cp deploy/clipforge.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now clipforge
+#
+# TimeoutStopSec is the graceful budget. The worker traps SIGTERM, finishes or
+# checkpoints the current unit, writes `interrupted` and exits; 60 s is enough
+# for a decode window to reach its next checkpoint. Anything shorter turns a
+# clean stop into a SIGKILL and a scary "code 137" in the UI.
+[Unit]
+Description=ClipForge (API + worker daemon)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clipforge
+Environment=CLIPFORGE_DATA_DIR=/var/lib/clipforge
+ExecStart=/opt/clipforge/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+# Bounded backoff so a crash loop cannot fork-bomb the host.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+KillMode=mixed
+TimeoutStopSec=60
+KillSignal=SIGTERM
+# The job artifacts are what survive a restart; keep them outside the unit's
+# private tmp so a resume can find its checkpoints.
+ReadWritePaths=/var/lib/clipforge
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

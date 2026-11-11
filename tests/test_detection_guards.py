@@ -44,22 +44,35 @@ def test_a_twenty_minute_source_is_three_windows_not_ten():
     assert len(chunks) == 3, f"got {len(chunks)} calls for 20 min"
 
 
-def test_windows_are_contiguous_and_cover_every_word():
+def test_windows_overlap_and_cover_every_word():
     words = _transcript(1800)
     chunks = llm_mod.chunk_words(words)
-    expected = 0
+    covered = 0
+    prev_end = -1.0
     for start_index, chunk in chunks:
-        assert start_index == expected, "a word would be skipped between windows"
-        expected += len(chunk)
         assert chunk, "empty window"
-    assert expected == len(words), "the tail of the transcript was dropped"
+        # The next window begins inside the previous one (30s of shared tail),
+        # so a highlight straddling the seam is still seen whole.
+        assert start_index <= covered, "a word would be skipped between windows"
+        assert float(chunk[0]["start"]) >= prev_end - 30.5
+        covered = max(covered, start_index + len(chunk))
+        prev_end = float(chunk[-1]["end"])
+    assert covered == len(words), "the tail of the transcript was dropped"
+
+
+def test_neighbouring_windows_share_about_thirty_seconds():
+    words = _transcript(1800)
+    chunks = llm_mod.chunk_words(words)
+    first, second = chunks[0][1], chunks[1][1]
+    shared = float(first[-1]["end"]) - float(second[0]["start"])
+    assert 25.0 <= shared <= 35.0, shared
 
 
 def test_window_length_stays_near_the_six_minute_target():
     words = _transcript(1200)
     for _start, chunk in llm_mod.chunk_words(words):
         span = float(chunk[-1]["end"]) - float(chunk[0]["start"])
-        assert span <= 430.0, f"window of {span:.0f}s is over the 420s target"
+        assert span <= 460.0, f"window of {span:.0f}s is over the 420s+30s overlap target"
 
 
 def test_a_long_source_never_exceeds_the_chunk_cap():

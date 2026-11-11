@@ -15,6 +15,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -700,6 +701,60 @@ def _start_worker() -> None:
 # --------------------------------------------------------------------------- #
 # schemas
 # --------------------------------------------------------------------------- #
+
+def source_ident(url: str) -> str:
+    """A stable identity for a video URL, ignoring per-visit tracking params.
+
+    YouTube hands out ``?si=`` share tokens, so the same video arrives under a
+    different string every time it is copied from the app. Comparing raw URLs
+    therefore never matched, and every share created another batch.
+    """
+    try:
+        parsed = urlsplit(str(url).strip())
+    except ValueError:
+        return str(url).strip().lower()
+    host = (parsed.netloc or "").lower().removeprefix("www.").removeprefix("m.")
+    path = parsed.path.rstrip("/")
+    if host.endswith("youtu.be"):
+        return f"youtube:{path.lstrip('/')}"
+    if "youtube.com" in host:
+        vid = parse_qs(parsed.query).get("v")
+        if vid:
+            return f"youtube:{vid[0]}"
+        if path.startswith("/shorts/") or path.startswith("/embed/"):
+            return f"youtube:{path.rsplit('/', 1)[-1]}"
+    keep = {k: v for k, v in parse_qs(parsed.query).items() if k not in {"si", "feature", "t", "utm_source", "utm_medium", "utm_campaign"}}
+    query = "&".join(f"{k}={v[0]}" for k, v in sorted(keep.items()))
+    return f"{host}{path}" + (f"?{query}" if query else "")
+
+
+def _active_job_for(body: "CreateJobIn") -> dict | None:
+    """The non-terminal job already running this exact source + settings."""
+    want_source = source_ident(body.source)
+    want = (
+        body.minClipSec, body.maxClipSec, body.maxClips, body.language,
+        body.captionPreset, body.emojiEnabled, body.emojiDensity,
+    )
+    terminal = {"complete", "failed", "cancelled", "deleting"}
+    for other in store.list_jobs():
+        if str(other.get("stage") or "") in terminal:
+            continue
+        if other.get("sourceType") != "url":
+            continue
+        if source_ident(str(other.get("source") or other.get("url") or "")) != want_source:
+            continue
+        opts = other.get("options") or {}
+        have = (
+            opts.get("minClipSec"), opts.get("maxClipSec"), opts.get("maxClips"),
+            other.get("language"), other.get("captionPreset"),
+            other.get("emojiEnabled"), other.get("emojiDensity"),
+        )
+        # A field the client omitted is a default, and create_job applies the
+        # same defaults; compare only what both sides actually specify.
+        if all(w is None or h is None or str(w) == str(h) for w, h in zip(want, have)):
+            return other
+    return None
+
 
 class CreateJobIn(BaseModel):
     sourceType: str = Field(pattern="^(url|upload)$")
@@ -2284,6 +2339,25 @@ def create_job(body: CreateJobIn) -> dict:
             f"Server disk is almost full ({free // (1024 * 1024)} MB free) — "
             f"{cleanup}, then try again.",
         )
+    # One ACTIVE job per video + settings. A double-clicked submit, a refresh or
+    # two dashboard tabs used to create two batches for the same source; both
+    # then fetched, transcribed and rendered the same clips under different ids,
+    # which is the "duplicate clips" the dashboard showed. Returning the job
+    # that already exists makes submission idempotent instead of refusing it.
+    if body.sourceType == "url":
+        duplicate = _active_job_for(body)
+        if duplicate is not None:
+            logger.info(
+                "[jobs] %s is already being processed as %s — returning that job",
+                source_ident(body.source), duplicate.get("_id"),
+            )
+            return {
+                "jobId": duplicate["_id"],
+                "title": duplicate.get("title"),
+                "duration": duplicate.get("durationSec"),
+                "deduped": True,
+            }
+
     job = store.create_job(
         source_type=body.sourceType,
         source=body.source,

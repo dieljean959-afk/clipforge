@@ -482,6 +482,7 @@ def chunk_words(
     words: list[dict],
     target_seconds: float = 420.0,
     max_chunks: int = MAX_DETECTION_CHUNKS,
+    overlap_seconds: float = 30.0,
 ) -> list[tuple[int, list[dict]]]:
     """Split a word-level transcript into chunks for the detector.
 
@@ -500,23 +501,39 @@ def chunk_words(
     """
     if not words:
         return []
-    if max_chunks > 0:
-        span = float(words[-1].get("end") or 0.0) - float(words[0].get("start") or 0.0)
-        if span > 0:
-            target_seconds = max(target_seconds, span / float(max_chunks))
+    total = float(words[-1].get("end") or 0.0) - float(words[0].get("start") or 0.0)
+    if max_chunks > 0 and total > 0:
+        # Size the window so that the OVERLAP does not add calls: the new step
+        # is `target - overlap`, and it must still cover the source in at most
+        # `max_chunks` steps.
+        target_seconds = max(target_seconds, total / float(max_chunks) + overlap_seconds)
+    # Windows OVERLAP by `overlap_seconds` so a highlight that begins near a
+    # boundary is still seen whole by one of the two calls. Candidates from the
+    # repeated tail are merged and de-duplicated by time afterwards
+    # (`drop_overlapping`), so the overlap cannot produce a duplicate clip.
     chunks: list[tuple[int, list[dict]]] = []
-    current: list[dict] = []
-    start_index = 0
-    t0 = words[0]["start"]
-    for i, w in enumerate(words):
-        current.append(w)
-        if w["end"] - t0 >= target_seconds:
-            chunks.append((start_index, current))
-            start_index += len(current)
-            current = []
-            t0 = w["end"]
-    if current:
-        chunks.append((start_index, current))
+    n = len(words)
+    i = 0
+    while i < n:
+        t0 = float(words[i]["start"])
+        j = i
+        while j < n and float(words[j]["end"]) - t0 < target_seconds:
+            j += 1
+        j = min(n, max(j, i + 1))
+        # A tail shorter than the overlap is absorbed into this window: spending
+        # a whole API call on the last 2 words is exactly the kind of needless
+        # call the window sizing exists to avoid.
+        if j < n and float(words[-1]["end"]) - float(words[j]["start"]) <= overlap_seconds:
+            j = n
+        chunks.append((i, words[i:j]))
+        if j >= n:
+            break
+        end = float(words[j - 1]["end"])
+        back = j
+        while back > i + 1 and float(words[back - 1]["start"]) >= end - overlap_seconds:
+            back -= 1
+        # Always move forward, or a single very long word would loop forever.
+        i = max(back, i + 1)
     return chunks
 
 

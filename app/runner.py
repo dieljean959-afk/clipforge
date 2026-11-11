@@ -12,17 +12,92 @@ Usage:  python -m app.runner <job_id>
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 from app import memguard
 
 
 def _describe(exc: BaseException) -> str:
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
+
+
+def sender_description(pid: int | None) -> str:
+    """Who sent the signal: pid plus the command line that owns it.
+
+    A SIGTERM with no sender information is indistinguishable from a crash to
+    whoever reads the log, and the first question on every resume is "what
+    killed it?". ``/proc`` answers that as long as the sender is still alive or
+    a zombie (a supervisor waiting on us usually is).
+    """
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid <= 0:
+        return "an unknown process (no siginfo pid)"
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        cmd = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        cmd = ""
+    if pid == 1:
+        return f"pid 1 (the container init: {cmd or 'unknown'})"
+    return f"pid {pid} ({cmd or 'cmdline unavailable'})"[:300]
+
+
+def _install_signal_reporter(job_id: str, store) -> bool:
+    """Log the SENDER of SIGTERM/SIGINT, not just the fact that it arrived.
+
+    Python's signal handler only gets the number, so the log said "SIGTERM"
+    with no way to tell a host recycle from a deploy from our own supervisor.
+    ``sigwaitinfo`` receives the ``siginfo_t``, which carries ``si_pid``. The
+    signals are blocked first, one thread waits on them, records the sender in
+    the job log and on stderr, then re-delivers the signal so the ordinary
+    handler still performs the graceful shutdown.
+    """
+    if not (hasattr(signal, "pthread_sigmask") and hasattr(signal, "sigwaitinfo")):
+        return False
+    sigs = {signal.SIGTERM, signal.SIGINT}
+    try:
+        signal.pthread_sigmask(signal.SIG_BLOCK, sigs)
+    except (OSError, ValueError):
+        return False
+
+    def watch() -> None:
+        try:
+            info = signal.sigwaitinfo(sigs)
+        except (OSError, InterruptedError):
+            return
+        try:
+            name = signal.Signals(info.si_signo).name
+        except ValueError:
+            name = f"signal {info.si_signo}"
+        line = f"SIGNAL {name} from {sender_description(info.si_pid)}"
+        try:
+            store.append_job_log(job_id, line)
+        except Exception:  # noqa: BLE001 - logging the sender must never fail shutdown
+            pass
+        try:
+            sys.stderr.write(f"[runner] {line}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        # Re-deliver through the normal path so SIGTERM still runs the graceful
+        # shutdown (checkpoint, mark interrupted, exit 143).
+        try:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {info.si_signo})
+            os.kill(os.getpid(), info.si_signo)
+        except OSError:
+            os._exit(143)
+
+    threading.Thread(target=watch, name="signal-reporter", daemon=True).start()
+    return True
 
 
 def _install_process_handlers(job_id: str, store, settings) -> None:
@@ -158,6 +233,9 @@ def _install_process_handlers(job_id: str, store, settings) -> None:
             signal.signal(sig, term_handler)
         except (ValueError, OSError):
             pass
+    # Installed AFTER the handler above: the reporter records the sender, then
+    # re-delivers the signal into this handler.
+    _install_signal_reporter(job_id, store)
     # The supervisor SIGUSR1s this process before it kills a stage that blew its
     # silence budget. faulthandler turns that into every thread's stack on the
     # stderr the supervisor captures, so "it hung" arrives with the exact line

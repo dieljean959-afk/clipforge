@@ -805,6 +805,29 @@ class InProcessWorker:
         prefix: list[str] = []
         if sys.platform != "win32" and shutil.which("nice"):
             prefix = ["nice", "-n", "15"]
+        # OOM evidence for the exit classifier: `memory.events` counts are
+        # monotonic, so a delta across the child's lifetime is proof rather than
+        # an assumption about what a -9 meant.
+        from app import membudget as _membudget
+
+        oom_before = _membudget.cgroup_events().get("oom_kill", 0)
+        # A resumed job carries timestamps from its last attempt. Without this
+        # stamp the stall watchdog compared "now" against a stage that last
+        # ticked before the restart, decided the job had been silent for 4791s,
+        # and killed it four seconds after it started — the loop where every
+        # resume was "killed again" before it could make progress.
+        started_ms = int(time.time() * 1000)
+
+        def _fresh(j: dict[str, Any]) -> None:
+            j["stageProgressAt"] = started_ms
+            j["lastProgressAt"] = started_ms
+            j["heartbeatAt"] = started_ms
+
+        try:
+            self.store.update_job(job_id, _fresh)
+        except Exception as exc:  # noqa: BLE001 - never block a start on a write
+            logger.warning(f"[worker] could not stamp the start of {job_id}: {exc}")
+
         proc = subprocess.Popen(
             [*prefix, sys.executable, "-m", "app.runner", job_id],
             cwd=str(ROOT),
@@ -920,23 +943,25 @@ class InProcessWorker:
         if sig is not None and self._note_interrupted(job, job_id, -sig, stage, tail):
             return
 
+        # One vocabulary for every way a child can stop. The class, the sentence
+        # and the hint come from app.exits, so "code 143" and "code -15" are the
+        # same event with the same explanation instead of three mystery numbers.
+        from app import exits as _exits
+
+        oom = _membudget.cgroup_events().get("oom_kill", 0) > oom_before
+        verdict = _exits.classify(
+            rc,
+            stage=stage,
+            oom=oom,
+            traceback_seen="Traceback (most recent call last)" in (tail or ""),
+        )
+        msg = verdict.message
         if sig is not None:
-            # One sentence for one event, whichever way the code was reported.
-            msg = (
-                f"Worker process was terminated by {signal.Signals(sig).name}"
-                + (f" during {stage}" if stage else "")
-                + f" (code {rc}) — it has already resumed "
-                f"{INTERRUPT_MAX_RESUMES} times, so it is not being resumed again"
+            msg += (
+                f" It has already resumed {INTERRUPT_MAX_RESUMES} times without "
+                f"progress, so it is not being resumed again."
             )
-        else:
-            msg = f"Worker process exited unexpectedly (code {rc}) before the job finished"
-        # A signalled child reports no traceback at all — name the OOM kill and
-        # the fix instead of leaving the user with a bare code.
-        hint = hostlimits.oom_hint(-sig if sig is not None else rc, stage)
-        if hint and sig is None:
-            msg = f"Worker process was killed (code {rc})" + (
-                f" during {stage}" if stage else ""
-            )
+        hint = verdict.hint or hostlimits.oom_hint(-sig if sig is not None else rc, stage)
         detail = msg + ("\n" + hint if hint else "") + ("\n" + tail if tail else "\n(no runner output captured)")
         logger.error(f"[worker] {msg} for job {job_id}" + (f" — {hint}" if hint else ""))
         if job is not None:
@@ -1021,6 +1046,8 @@ class InProcessWorker:
         "interrupted",
     )
     AUTO_RETRY_BUDGET = 1
+    # Bounded, jitter-free backoff between automatic resumes (seconds).
+    RETRY_BACKOFF_SEC = (5, 15, 45)
 
     @classmethod
     def _is_retryable(cls, job: dict[str, Any]) -> bool:
@@ -1130,29 +1157,41 @@ class InProcessWorker:
         used = int(job.get("autoRetryCount") or 0)
         if used >= self.AUTO_RETRY_BUDGET or not self._is_retryable(job):
             return False
+        # Keep the last real progress: resetting it to 0 made a resume look like
+        # a fresh start and made "Attempt 2, resumed at rendering clip 6 of 15"
+        # impossible to show. Only the terminal fields are cleared.
+        where = str(job.get("stage") or "")
+        done = job.get("unitsDone")
+        total = job.get("unitsTotal")
+        at = f"{where}" + (f" {done}/{total}" if done is not None and total else "")
+        delay = self.RETRY_BACKOFF_SEC[min(used, len(self.RETRY_BACKOFF_SEC) - 1)]
         job.update({
             "autoRetryCount": used + 1,
             "stage": "queued",
-            "progress": 0,
             "error": None,
             "errorDetail": None,
             "completedAt": None,
-            "interrupted": False,
-            "interruptReason": None,
+            "interrupted": True,
+            "interruptReason": f"Resumed after {reason}.",
             "failedStage": None,
-            "unitLabel": None,
-            "unitsDone": None,
-            "unitsTotal": None,
-            "progressDetail": "Auto-retrying once after a render stall/timeout…",
+            "progressDetail": (
+                f"Attempt {used + 2}, resuming at {at or 'the last checkpoint'} "
+                f"in {delay}s"
+            ),
         })
         self.store.write_job(job)
         self.store.append_job_log(
             job_id,
-            f"AUTO-RETRY 1/1: {reason} — requeueing automatically; the pipeline "
-            f"resumes from the last completed clip.",
+            f"RESUMING: {reason} — attempt {used + 2} in {delay}s at "
+            f"{at or 'the last checkpoint'} (finished work is reused).",
         )
-        logger.warning(f"[worker] auto-retrying job {job_id} after {reason}")
-        self.enqueue(job_id)
+        logger.warning(
+            f"[worker] resuming job {job_id} after {reason} in {delay}s "
+            f"(attempt {used + 2})"
+        )
+        # Bounded backoff: 5s, 15s, then 45s. Never a tight loop, never a wait
+        # long enough to look hung.
+        threading.Timer(delay, lambda: self.enqueue(job_id)).start()
         return True
 
     def _note_interrupted(self, job: dict[str, Any] | None, job_id: str, rc: int,
@@ -1179,12 +1218,23 @@ class InProcessWorker:
         prev_stage = job.get("interruptStage")
         prev_progress = float(job.get("interruptProgress") or 0.0)
         progress = float(job.get("progress") or 0.0)
+        # The user-visible progress counter (chunks, windows or clips finished)
+        # is stronger evidence than a percentage: a job that transcribed chunk
+        # 20 after its last interruption made progress even if the percent
+        # barely moved. Either kind of advance resets the strike count.
+        prev_units = job.get("interruptUnits")
+        units = job.get("unitsDone")
         # No recorded baseline means no evidence of progress since the last
         # interruption (older job docs, a job killed before it ever ran): that
         # keeps the old "counts as one more strike" behaviour. Requiring the
         # baseline also keeps a job that never moves from looping forever.
+        units_advanced = (
+            prev_units is not None and units is not None
+            and float(units) > float(prev_units)
+        )
         advanced = prev_stage is not None and (
-            str(prev_stage) != str(stage) or progress - prev_progress >= 10.0
+            str(prev_stage) != str(stage) or units_advanced
+            or progress - prev_progress >= 10.0
         )
         count = 1 if advanced else int(job.get("interruptCount") or 0) + 1
         if count > INTERRUPT_MAX_RESUMES:
@@ -1201,6 +1251,7 @@ class InProcessWorker:
             "interruptCount": count,
             "interruptStage": stage,
             "interruptProgress": progress,
+            "interruptUnits": units,
             "interrupted": True,
             "interruptReason": reason,
             "error": None,
