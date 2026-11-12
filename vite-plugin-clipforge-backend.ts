@@ -31,6 +31,8 @@ import type { Plugin } from "vite";
 const ROOT = path.resolve(__dirname);
 const HEALTH = "http://127.0.0.1:8000/api/health";
 const LOG_TAG = "[clipforge-backend]";
+const MAX_BACKEND_LOG_BYTES = 4 * 1024 * 1024;
+const KEEP_BACKEND_LOG_BYTES = 2 * 1024 * 1024;
 
 const state = {
   proc: null as ChildProcess | null,
@@ -178,7 +180,22 @@ function openBackendLog(): fs.WriteStream | null {
   try {
     const dir = path.join(ROOT, "data", "logs");
     fs.mkdirSync(dir, { recursive: true });
-    backendLog = fs.createWriteStream(path.join(dir, "backend.log"), { flags: "a" });
+    // Bounded capture: this file is appended to for the life of the web
+    // process and every uvicorn/loguru line lands in it. Unbounded it reached
+    // 27 MB / 247k lines and was a large part of the 93 MB the batch's
+    // free-space self-check then blamed on the render.
+    const logPath = path.join(dir, "backend.log");
+    try {
+      const st = fs.statSync(logPath);
+      if (st.size > MAX_BACKEND_LOG_BYTES) {
+        const keep = fs.readFileSync(logPath).subarray(-KEEP_BACKEND_LOG_BYTES);
+        fs.writeFileSync(logPath, keep);
+        log(`trimmed backend.log from ${Math.round(st.size / 1048576)} MB`);
+      }
+    } catch {
+      /* no file yet */
+    }
+    backendLog = fs.createWriteStream(logPath, { flags: "a" });
     backendLog.on("error", () => {
       backendLog = null;
     });

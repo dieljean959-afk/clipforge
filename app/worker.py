@@ -978,8 +978,11 @@ class InProcessWorker:
             rc,
             stage=stage,
             oom=oom,
+            disk_full=_exits.is_disk_full(tail or ""),
             traceback_seen="Traceback (most recent call last)" in (tail or ""),
         )
+        if verdict.kind == _exits.DISK_FULL and self._disk_retry(job_id, job or {}, stage):
+            return
         msg = verdict.message
         if sig is not None:
             msg += (
@@ -1008,6 +1011,12 @@ class InProcessWorker:
                 "error": msg,
                 "errorDetail": detail[:4000],
                 "completedAt": failed_ms,
+                # The CLASS, so a disk-full is retried after cleanup instead of
+                # being recorded as an unrecoverable fail-fast (which is what
+                # stranded a batch whose clips were all already in the bucket).
+                "errorKind": verdict.kind,
+                "errorAction": verdict.action,
+                "retryable": verdict.retryable,
             })
             applied["ok"] = True
 
@@ -1327,6 +1336,57 @@ class InProcessWorker:
         logger.warning(
             f"[worker] job {job_id} interrupted by {how} during '{stage}' — "
             f"re-queuing (attempt {count}/{INTERRUPT_MAX_RESUMES})"
+        )
+        self.enqueue(job_id)
+        return True
+
+    def _disk_retry(self, job_id: str, job: dict[str, Any], stage: str) -> bool:
+        """Clean up, wait for space, then re-queue a batch that hit ENOSPC.
+
+        A full disk is environmental: the clips that finished are durable in the
+        bucket, so the correct response is cleanup → wait → retry, never a
+        terminal fail-fast. Bounded so a genuinely full host does not spin.
+        """
+        from app import reclaim
+
+        attempts = int(job.get("diskRetryCount") or 0)
+        if attempts >= 3:
+            self.store.append_job_log(
+                job_id,
+                "[disk] gave up after 3 cleanup+retry attempts — free space is "
+                "still below what this stage needs",
+            )
+            return False
+        try:
+            swept = reclaim.sweep_startup(self.store, self.settings.app.paths)
+            freed = round((swept.get("bytesFreed") or 0) / 1048576, 1)
+        except Exception as exc:  # noqa: BLE001 - best effort before retrying
+            freed = 0
+            logger.warning(f"[worker] disk cleanup before retry failed: {exc}")
+        self.store.update_job(
+            job_id,
+            lambda j: j.update({
+                "diskRetryCount": attempts + 1,
+                "stage": "queued",
+                "status": "queued",
+                "progressDetail": (
+                    f"Disk was full during {stage}. Cleaned {freed} MB and "
+                    f"waiting for space before retrying (attempt {attempts + 1}/3)."
+                ),
+                "error": None,
+                "errorDetail": None,
+                "errorKind": "disk_full",
+                "errorAction": "retry_after_cleanup",
+                "retryable": True,
+                "interrupted": False,
+                "failedStage": None,
+                "completedAt": None,
+            }),
+        )
+        self.store.append_job_log(
+            job_id,
+            f"[disk] full during {stage}: cleaned {freed} MB, retrying from the "
+            f"last finished clip (attempt {attempts + 1}/3)",
         )
         self.enqueue(job_id)
         return True

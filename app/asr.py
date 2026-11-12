@@ -654,3 +654,67 @@ def model_cache_dir() -> str:
         return str(HF_HUB_CACHE)
     except Exception:
         return str(os.path.expanduser("~/.cache/huggingface"))
+
+
+def model_status(settings: Any) -> dict[str, Any]:
+    """What will ACTUALLY run, where it lives, and whether it is on disk.
+
+    One honest record for /api/status, the Doctor button and the boot banner.
+    It never loads the model (that is ~1 GiB of RSS in the API process); it
+    reports the resolved model, the label the UI must show, and the mismatch
+    between configured and actual so a downshift can never be silent.
+    """
+    import os
+    from pathlib import Path
+
+    engine, detail = choose_engine(settings)
+    device, compute = _resolve_device(settings)
+    model, note = resolved_model(settings)
+    configured = str(getattr(settings.whisper, "model", "") or "")
+    cache = model_cache_dir()
+    needle = model.replace("/", "--")
+    paths: list[str] = []
+    size = 0
+    try:
+        base = Path(cache)
+        if base.is_dir():
+            for p in base.glob("models--*"):
+                if needle not in p.name:
+                    continue
+                paths.append(str(p))
+                for f in p.rglob("*"):
+                    try:
+                        if f.is_file():
+                            size += f.stat().st_size
+                    except OSError:
+                        continue
+    except Exception:
+        pass
+    threads = None
+    try:
+        from app import hostlimits as _hl  # noqa: PLC0415
+
+        threads = int(_hl.inference_threads())
+    except Exception:
+        threads = None
+    label = f"{model} ({compute})"
+    if note:
+        label = f"{model} ({compute}) — configured {configured} does not fit this host"
+    return {
+        "engine": engine,
+        "engineDetail": detail,
+        "device": device,
+        "computeType": compute,
+        "cpuThreads": threads,
+        "model": model,
+        "configured": configured,
+        "mismatch": note,
+        "label": label,
+        "cacheDir": cache,
+        "paths": paths,
+        "filesPresent": bool(paths),
+        "sizeMb": round(size / 1048576, 1) if size else 0,
+        "batchSize": batch_size(settings),
+        "threads": threads,
+        "usableCpus": os.cpu_count(),
+    }

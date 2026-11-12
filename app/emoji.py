@@ -328,7 +328,6 @@ def keyword_tags(cues: list[dict[str, Any]]) -> list[Tag]:
             tags.append(Tag(i=i, emotion="neutral", reason="no whitelist keyword"))
             continue
         _hits, entry = best
-        words = len(text.split()) or 1
         tags.append(Tag(
             i=i, emotion=entry.emotions[0] if entry.emotions else "neutral",
             intensity=min(0.9, 0.45 + 0.1 * _hits),

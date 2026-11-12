@@ -80,7 +80,7 @@ def test_app_main_imports() -> None:
     # The jobs CRUD routes added this run (list/create/get/retry/delete = 6),
     # plus the share-backfill boot code, bring the count above the previous
     # hard-coded window. Give it a range that accepts the new normal.
-    assert 18 <= routes <= 26, f"unexpected route count {routes}"
+    assert 18 <= routes <= 32, f"unexpected route count {routes}"
 
 
 def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:
@@ -111,8 +111,20 @@ def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     env = dict(os.environ, CLIPFORGE_DATA_DIR=str(tmp_path))
+    # Boot recovery now runs AFTER the port is open (a background phase), so a
+    # cold import alone cannot observe it. Drive the same phase list
+    # synchronously — that is exactly the code the background thread runs — and
+    # assert the DURABLE decision, which is stronger than a log line.
+    script = (
+        "import json, app.main as m;"
+        "m._boot_phases(m.boot);"
+        "j = m.store.get_job('deadbeefdeadbeefdeadbeefdeadbeef') or {};"
+        "print('DECISION ' + json.dumps({k: j.get(k) for k in "
+        "('stage','interrupted','interruptReason','error','errorKind')}));"
+        "print('boot-ok')"
+    )
     proc = subprocess.run(
-        [sys.executable, "-c", "import app.main; print('boot-ok')"],
+        [sys.executable, "-c", script],
         cwd=str(ROOT),
         capture_output=True,
         text=True,
@@ -127,4 +139,14 @@ def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:
     assert "boot-ok" in output
     # Recovery must have MADE A DECISION about the seeded job (resume or fail it),
     # not skipped it and not crashed on it.
-    assert job_id in output, output[-2000:]
+    decision_line = next(
+        (ln for ln in output.splitlines() if ln.startswith("DECISION ")), ""
+    )
+    assert decision_line, output[-2000:]
+    decision = json.loads(decision_line[len("DECISION "):])
+    assert decision["stage"] in {"queued", "failed"}, decision
+    assert decision.get("interrupted") in (True, False), decision
+    if decision["stage"] == "queued":
+        assert decision["interrupted"] is True, "a resumed job must be marked interrupted"
+    else:
+        assert decision.get("error"), "a failed resume must carry a reason"

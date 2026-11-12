@@ -65,14 +65,12 @@ def ready(name: str) -> bool:
 
 
 def _key(name: str, filename: str) -> str:
-    from app.config import load_config  # noqa: PLC0415
 
     prefix = objectstore.config_from_env().prefix
     return f"{prefix}/{PREFIX}/{name}/{filename}" if prefix else f"{PREFIX}/{name}/{filename}"
 
 
 def _bucket_files(name: str) -> list[dict[str, Any]]:
-    from app.config import load_config  # noqa: PLC0415
 
     prefix = objectstore.config_from_env().prefix
     base = f"{prefix}/{PREFIX}/{name}/" if prefix else f"{PREFIX}/{name}/"

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
@@ -29,31 +29,19 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from starlette.background import BackgroundTask
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from app import config
 
 from app import (
-    caption_style,
     clipcount,
-    download,
-    eta,
-    hosting,
-    hostlimits,
-    jobstatus,
     objectstore,
     purge,
     reclaim,
     share_video,
     sharelink,
-    subtitle,
 )
-from app import download as download_mod
-from app import encode as encode_mod
-from app.hosting import disk_stats
-from app import llm as llm_mod
 
 
 from uuid import uuid4 as uuid4
@@ -70,57 +58,40 @@ _STARTED_AT = time.time()
 
 
 from app.config import (
-    S3_CREDENTIAL_VARS,
     ConfigError,
-    Settings,
     boot_banner,
-    delete_env_var,
     ffmpeg_bin,
     ffprobe_bin,
-    live_deepseek_key,
-    live_gemini_key,
-    live_groq_key,
-    live_nvidia_key,
     load_config,
-    sync_deepseek_env_after_save,
-    sync_deepseek_env_for_delete,
-    sync_gemini_env_after_save,
-    sync_gemini_env_for_delete,
-    sync_groq_env_after_save,
-    sync_groq_env_for_delete,
-    sync_nvidia_env_after_save,
-    sync_nvidia_env_for_delete,
-    sync_s3_env_after_save,
-    sync_s3_env_for_delete,
-    write_env_var,
-    delete_env_var,
 )
 from app.store import LocalStore
 from app.social.accounts import AccountStore
 from app.hosting import RetentionCleaner
-from app import subtitle as subtitle_svc
 from app import video as video_svc
-from app import hosting as hosting_mod
-from app import social as social_mod
-from app.social import PLATFORMS, describe_all, describe, redirect_uri
+from app.social import PLATFORMS, describe_all, redirect_uri
 from app.social import base as social_base
 from app.social import post_video as social_post
-from app.config import _LiveKeyState
 from app.social.base import (
     NeedsReconnect,
     NotConfigured,
     PostRejected,
     SocialError,
 )
-from app.stages import StageWorkspace, remove_workspace
-from app import disksweep
-from app.slices.cleanup import unlink_model_dirs
-from starlette.background import BackgroundTask
 # Module handle, distinct from the `worker` INSTANCE below. The boot recovery
 # pass needs `unrecoverable_reason` / `INTERRUPT_MAX_RESUMES` from the module;
 # without this import that pass raised NameError at import time and uvicorn
 # exited before binding port 8000, so the proxy answered a bodiless 500.
 from app import worker as worker_mod
+_lock: InstanceLock | None = None
+
+from app.boot import (
+    Boot,
+    InstanceLock,
+    clear_failure,
+    failure_payload,
+    last_failure,
+    record_fatal,
+)
 from app.worker import InProcessWorker
 from app.workerd import WorkerSupervisor
 # The API process started; used by GET /api/health to report true uptime.
@@ -184,32 +155,80 @@ def _share_backfill() -> dict[str, int]:
 ROOT = Path(__file__).resolve().parent.parent
 
 
+#: Post-listen work. Created in `_boot` (cheap) and filled in by
+#: `_boot_phases()` below, which runs on a daemon thread started from the
+#: lifespan startup handler. Nothing here is allowed to delay the port.
+boot = Boot()
+
+
 def _boot() -> None:
-    global settings, store, worker, retention, accounts
+    """Cheap, synchronous setup: config, store handles, log files, instance lock.
+
+    Everything that reads a lot of disk, talks to the network or waits on a
+    process runs AFTER the port is open (see `_boot_phases`). The rule is that
+    this function must stay under ~500 ms on a cold cache, because uvicorn
+    cannot bind its port until import finishes.
+    """
+    global settings, store, worker, retention, accounts, _lock
     try:
         settings = load_config()
     except ConfigError as exc:
-        logger.error(f"[boot] {exc}")
+        # A config error is a real boot failure: print one line with the cause
+        # and the fix, and record it so the preview can show it.
+        payload = failure_payload(
+            "config",
+            str(exc),
+            "Fix config.toml / the environment variables named above, then restart.",
+            code="bad_config",
+        )
+        record_fatal(payload, _data_dir_hint())
+        print(f"[boot] FATAL config: {exc} → FIX: {payload['fix']}", flush=True)
         raise SystemExit(2) from exc
     boot_banner(settings)
 
-    # fail fast on missing ffmpeg/ffprobe
+    # fail fast on missing ffmpeg/ffprobe (a ffmpeg check is two stats, not a
+    # subprocess: keep it here so a broken host fails in one clear line)
     logger.info(f"[boot] ffmpeg: {ffmpeg_bin()}")
     logger.info(f"[boot] ffprobe: {ffprobe_bin()}")
 
     store = LocalStore(settings.app.paths)
-    # LOCKED_SPEC §4: the pipeline lives in its own process. The supervisor
-    # spawns that daemon (nice 15), adopts it if the API itself was restarted,
-    # and restarts it if it dies. The API only proxies control calls.
     worker = WorkerSupervisor(settings, store)
     retention = RetentionCleaner(settings, store)
     accounts = AccountStore(settings.app.paths.data_dir)
 
+    # --- one instance only ------------------------------------------------
+    # Two uvicorns on one store corrupt job documents; two workers race for the
+    # same clip files. The lock is a pid file, reclaimed when that pid is gone.
+    _lock = InstanceLock(
+        settings.app.paths.data_dir / "api.lock", "api", pid=os.getpid()
+    )
+    if not _lock.acquire():
+        holder = _lock.holder or "another process"
+        payload = failure_payload(
+            "instance-lock",
+            f"another API instance (pid {holder}) already owns this data dir",
+            "Stop the other server (or delete data/api.lock if that pid is gone) "
+            "and restart. Only one API may own the store.",
+            code="port_or_lock_in_use",
+        )
+        # A SERVER must not start a second copy (the port bind also refuses it,
+        # but this is the one that protects the store from two writers). A
+        # test/tool importing this module while the server runs is not a second
+        # server: record it and keep going, or the suite could never import.
+        serving = any("uvicorn" in str(arg) for arg in sys.argv)
+        if serving:
+            record_fatal(payload, settings.app.paths.data_dir)
+            print(
+                f"[boot] FATAL instance-lock: {payload['cause']} → FIX: {payload['fix']}",
+                flush=True,
+            )
+            raise SystemExit(3)
+        logger.warning(
+            f"[boot] {payload['cause']} — continuing read-only (this process is "
+            "not the server)"
+        )
+
     # --- durable logs + native-crash tracebacks ---------------------------
-    # The platform only keeps the web process's stdout for the life of that
-    # process, so a traceback from the failure itself is gone by the time anyone
-    # looks. Write both the app log and the faulthandler dump to files that
-    # survive a restart, under the data dir (never inside the watched app/).
     try:
         log_dir = settings.app.paths.data_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -229,37 +248,154 @@ def _boot() -> None:
     except Exception as exc:  # noqa: BLE001 - logging must never block boot
         logger.warning(f"[boot] file logging unavailable: {exc}")
 
-    # --- crash recovery ---------------------------------------------------
-    # Four things are recoverable, and they are not the same thing:
-    #   1. mid-flight — the process died before it could write a terminal state,
-    #      so the job is simply frozen at its last stage.
-    #   2. interrupted — we knew a host restart killed it.
-    #   3. a FAILURE whose message is a SIGNAL banner, i.e. recorded as failure
-    #      before the interrupted/resumed distinction existed. Those jobs are
-    #      sitting at stage=failed with an intact stage cache, and used to be
-    #      lost permanently.
-    #   4. a job whose clips are ALL on disk. Handled first and separately: it
-    #      is not resumable work, it is a record that is simply wrong (see
-    #      below), and re-queueing it would burn another detection call to
-    #      re-render clips that already exist.
-    # Bounded by INTERRUPT_MAX_RESUMES so a job that cannot survive a restart
-    # loop eventually stops instead of cycling forever.
-    # Share ids are minted at clip creation, so this only mints for clips that
-    # predate the feature. It is cheap (no transcoding) and it runs BEFORE the
-    # job reconciliation below so a restored batch already has its links.
-    try:
-        _share_backfill()
-    except Exception as exc:  # noqa: BLE001 - never block boot
-        logger.warning(f"[boot] share-link backfill skipped: {exc}")
+    # The port is about to open; record how long the synchronous path took.
+    boot.listen_ms = int((time.time() - boot.started_at) * 1000)
+    clear_failure(settings.app.paths.data_dir)
 
+
+def _data_dir_hint() -> Path | None:
+    """The data dir for failure reports, available even when config failed."""
+    try:
+        return settings.app.paths.data_dir  # type: ignore[name-defined]
+    except Exception:
+        return None
+
+
+def _boot_phases(b: Boot) -> None:
+    """Everything heavy, after the port is open. Each phase has its own budget.
+
+    A phase that fails or times out is logged, shown by /api/status and never
+    aborts the ones after it: one broken dependency must not cost the dashboard.
+    """
+    data_dir = settings.app.paths.data_dir
+
+    # ORDER MATTERS: recovery decides what happens to in-flight jobs before the
+    # worker daemon starts. The daemon adopts any job that looks in-flight, so a
+    # recovery pass that runs second finds every job "owned" and writes no
+    # decision at all — the batch then sat at "exporting" forever.
+    def _share() -> dict:
+        started = _share_backfill()
+        return {"detail": f"minted {started.get('minted', 0)} share id(s)"}
+
+    b.run_phase("share_backfill", _share, timeout_ms=30_000)
+
+    def _recover() -> dict:
+        resumed, restored = _recover_jobs()
+        return {"detail": f"{resumed} resumed, {restored} restored from clips"}
+
+    b.run_phase("job_recovery", _recover, timeout_ms=45_000)
+
+    # --- worker daemon ---------------------------------------------------
+    def _spawn() -> dict:
+        start_ms = time.perf_counter()
+        worker.start()
+        st = worker.status()
+        return {
+            "detail": (
+                f"online={st.get('online')} pid={worker.daemon_pid} "
+                f"concurrency={st.get('concurrency')}"
+            ),
+            "spawnMs": int((time.perf_counter() - start_ms) * 1000),
+        }
+
+    b.run_phase("worker_spawn", _spawn, timeout_ms=20_000)
+
+
+    def _purge() -> dict:
+        purge.start(
+            store,
+            settings.app.paths,
+            cancel=worker.cancel,
+            remote=_purge_remote_job,
+        )
+        return {"detail": "delete purge started"}
+
+    b.run_phase("worker_purge", _purge, timeout_ms=5_000)
+
+    def _reclaim() -> dict:
+        reclaim.start_watchdog(store, settings.app.paths)
+        return {"detail": "reclaim watchdog started"}
+
+    b.run_phase("reclaim_watchdog", _reclaim, timeout_ms=5_000)
+
+    def _crash_sweep() -> dict:
+        swept = reclaim.sweep_startup(store, settings.app.paths)
+        mb = round((swept.get("bytesFreed") or 0) / 1048576, 1)
+        return {
+            "detail": (
+                f"{swept.get('dirsRemoved', 0)} folder(s), "
+                f"{swept.get('filesRemoved', 0)} temp file(s), {mb} MB freed"
+            )
+        }
+
+    b.run_phase("crash_sweep", _crash_sweep, timeout_ms=30_000)
+
+    def _warm() -> dict:
+        _do_warmup()
+        return {"detail": warmup.get("current") or "unknown"}
+
+    # A model download can legitimately take minutes; it must never gate boot.
+    b.run_phase("model_preload", _warm, timeout_ms=180_000)
+
+    def _retention() -> dict:
+        retention.start()
+        swept = retention.sweep()
+        return {"detail": f"{swept} expired/orphaned item(s) removed"}
+
+    b.run_phase("retention_sweep", _retention, timeout_ms=30_000)
+
+    def _logs() -> dict:
+        """Bound the log files and release model weights no job needs.
+
+        These are the two things that actually grew during a long render
+        (27 MB supervisor log + rotated api logs + model copies). Doing it in
+        one measured phase means a reboot leaves the disk where it found it,
+        instead of inheriting the previous run's debris.
+        """
+        from app import loghygiene
+
+        return loghygiene.sweep(settings)
+
+    b.run_phase("log_hygiene", _logs, timeout_ms=20_000)
+
+    def _invariants() -> dict:
+        from app import invariants
+
+        report = invariants.check_and_repair(store, settings.app.paths, log=logger.info)
+        return {
+            "detail": (
+                f"{report['checked']} job(s) checked, {report['repaired']} repaired"
+            )
+        }
+
+    b.run_phase("invariants", _invariants, timeout_ms=60_000)
+
+    def _updates() -> dict:
+        # yt-dlp's own update check is a network call. It is allowed to be slow,
+        # never to be un-timed, and never to run before the port is open.
+        from app import download as _dl
+
+        if not hasattr(_dl, "check_for_update"):
+            return {"skipped": True, "detail": "no update check in this build"}
+        res = _dl.check_for_update(timeout=8)
+        return {"detail": str(res)}
+
+    b.run_phase("update_checks", _updates, timeout_ms=15_000)
+
+    b.extra.append  # keep the phase list stable for /api/status
+    clear_failure(data_dir)
+
+
+def _recover_jobs() -> tuple[int, int]:
+    """Re-queue interrupted jobs and restore records whose clips are on disk.
+
+    Returns ``(resumed, restored)``. Split out of the old import-time boot so it
+    can be timed and bounded; the body is unchanged.
+    """
+    resumed = 0
+    restored = 0
     recoverable = {"grabbing", "transcribing", "finding", "rendering", "queued"}
-    # Jobs a runner is busy with RIGHT NOW. Recovery must not touch these: this
-    # loop rewrites the job to stage=queued / progress=0 and enqueues it again,
-    # so every API restart turned a live 15-clip export into "Queued… 0%" for
-    # as long as that stage went between progress writes, and left a duplicate
-    # queue entry that could never start while the only worker slot was still
-    # busy with that very job. Ask the daemon which pids are alive, don't guess
-    # from the stage word: "exporting" looks exactly like a dead job.
+    # Jobs a runner is busy with RIGHT NOW. Recovery must not touch these.
     try:
         running_now = set(worker.active_pids() or {})
     except Exception:  # noqa: BLE001 - no daemon answer means nothing of ours is running
@@ -267,13 +403,6 @@ def _boot() -> None:
     for job in store.list_jobs():
         if job.get("_id") in running_now:
             continue
-        # A job can be stamped stage=failed by a LATER attempt after a good
-        # batch was already delivered — e.g. redetect re-running detection,
-        # getting rate-limited, and overwriting a finished job. The clips are
-        # on disk, so the record is the thing that is wrong. Restoring
-        # stage=complete here (rather than leaving it red) is the difference
-        # between "here are your 10 clips" and a permanent phantom failure
-        # with no action the user can take.
         rendered, promised = store.clips_delivered(job["_id"], job)
         if InProcessWorker.has_delivered_output(job, rendered, promised):
             logger.info(
@@ -296,11 +425,10 @@ def _boot() -> None:
                 f"marked complete at boot: all {rendered} clips were already rendered, "
                 "so the recorded failure had no output to show for it",
             )
+            restored += 1
             continue
         # A finished batch can still carry `interrupted: true` from an earlier
-        # attempt that was killed and then resumed successfully. Re-queueing on
-        # that stale flag flipped a COMPLETE batch back to "queued" after every
-        # restart and sent it through the pipeline again for no output.
+        # attempt that was killed and then resumed successfully.
         if job.get("stage") == "complete" and job.get("interrupted"):
             job["interrupted"] = False
             store.write_job(job)
@@ -314,9 +442,6 @@ def _boot() -> None:
             reason = "recorded as failed, but the cause was an external kill"
         if reason is None:
             continue
-        # A job we cannot possibly resume must not be re-queued. Its upload is
-        # gone, so every restart spent a full pipeline launch rediscovering
-        # that and failing again — the reported "resuming (attempt 2)" loop.
         dead_end = worker_mod.unrecoverable_reason(store, job)
         if dead_end is not None:
             logger.warning(
@@ -342,8 +467,6 @@ def _boot() -> None:
             continue
         was = job.get("stage")
         if was == "failed":
-            # Clear the false terminal state so the resume can proceed; the
-            # stage markers on disk, not this field, decide where it restarts.
             job.update({
                 "error": None,
                 "completedAt": None,
@@ -351,24 +474,13 @@ def _boot() -> None:
                 "interruptReason": "Recovered after an external kill — resuming from cached stages.",
             })
             store.write_job(job)
-        # Now in EVERY recovery path the job is waiting its turn like any other
-        # queued job, so say so. Leaving `stage` at the stage it died in made the
-        # dashboard render a job that was merely in the queue as "Stage 3 of 4
-        # — Detecting, 99%", indistinguishable from real work: the stage markers
-        # on disk (not this field) decide where the runner actually restarts.
         job.update({
             "stage": "queued",
             "progress": 0,
             "progressDetail": "Queued — resuming from cached stages after a restart.",
             "completedAt": None,
-            # The attempt that died left its error behind. A resumed job is not
-            # failing any more, and a queued job advertising "AI detection
-            # failed: HTTP 429" is a contradiction the dashboard would repeat.
             "error": None,
             "errorDetail": None,
-            # Unit counters describe work in the CURRENT attempt. Left over
-            # from the run that died, a queued job rendered "10 of 10 clips"
-            # next to a 0% progress bar.
             "unitLabel": None,
             "unitsDone": None,
             "unitsTotal": None,
@@ -376,10 +488,8 @@ def _boot() -> None:
         store.write_job(job)
         logger.info(f"[boot] re-queuing job {job['_id']} ({reason}, was {was})")
         worker.enqueue(job["_id"])
-
-    # Whisper model pre-download happens in a background thread so /health
-    # responds immediately while the model loads.
-    threading.Thread(target=_do_warmup, name="clipforge-warmup", daemon=True).start()
+        resumed += 1
+    return resumed, restored
 
 
 def _whisper_model_cached(model: str) -> bool:
@@ -502,46 +612,90 @@ async def _resource_monitor() -> None:
 
 @app.get("/api/health")
 def health() -> dict:
-    """A single synchronous endpoint the dashboard polls. All file/process/
-    bucket checks happen here and are measured, so the dashboard can report
-    the true last-known state instead of "restarting" a server that is fine.
+    """Liveness + the boot timeline. Answers from MEMORY, in microseconds.
+
+    This route is polled by the dashboard and by the supervisor. It must never
+    walk the disk, call the worker daemon, hash a key or touch the bucket: each
+    of those has been a cause of a "dead-looking" API while the process was
+    perfectly alive. The measured dependency report lives in /api/status.
     """
-    from app import hosting, objectstore
-    from app.store import LocalStore
-
-    try:
-        paths = hosting.load_paths()
-        store = LocalStore(paths)
-        jobs = [] if store is None else store.list_jobs()
-        jobs_count = len(jobs)
-    except Exception:
-        jobs_count = 0
-
-    payload = {
+    boot.mark_health()
+    return {
         "ok": True,
-        "apiUptimeMs": int((time.time() - HOST_STARTUP_MS) * 1000),
-        "nodeVersion": "node " + str(hosting.NODE_VERSION_MAJOR),
-        "ffmpeg": hosting.FFMPEG_BIN,
-        "appVersion": config.HOSTED_VERSION,
-        "config": {
-            "whisper_model": _whisper_model_cached("small"),
-            "workerDaemonOnline": worker_mod.status().get("online"),
-            "workerPid": worker_mod.daemon_pid(),
-            "concurrency": worker_mod.status().get("concurrency"),
-            "retentionHours": getattr(settings.hosted, "retention_hours", 0) or 0,
-            "diskFreeMb": hosting.disk_stats(paths).get("freeMb") if paths else None,
-            "durableMedia": objectstore.config_from_env().enabled,
-            "jobsOnDisk": jobs_count,
+        "apiUptimeMs": int(time.time() * 1000 - HOST_STARTUP_MS),
+        "appVersion": getattr(config, "HOSTED_VERSION", "1.1.0"),
+        "boot": {
+            "listenMs": boot.listen_ms,
+            "firstHealthMs": boot.first_health_ms,
+            "phasesDone": boot.done,
+            "failedPhases": boot.summary()["failedPhases"],
         },
     }
-    return payload
+
+
+@app.get("/api/status")
+def status() -> dict:
+    """Per-dependency health, each probed separately with its own timeout.
+
+    One slow dependency must not make the whole card red, and a failing one must
+    name itself: the dashboard shows the list, the doctor asserts on it.
+    """
+    from app import doctor
+
+    boot.mark_health()
+    deps = doctor.dependency_status(settings, store, boot)
+    return {
+        "ok": all(d.get("ok") for d in deps),
+        "boot": boot.summary(),
+        "dependencies": deps,
+        "fatal": last_failure(settings.app.paths.data_dir),
+    }
+
+
+@app.get("/api/doctor")
+def doctor_report() -> dict:
+    """The "Doctor" button: one pass/fail report, everything the UI needs.
+
+    Same payload the CLI (tools/doctor.py) prints, so a report pasted from the
+    dashboard and one from a terminal are the same document.
+    """
+    from app import doctor as doctor_mod
+    from app import invariants
+
+    report = doctor_mod.run_doctor(settings)
+    report["dependencies"] = doctor_mod.dependency_status(settings, store, boot)
+    report["boot"] = boot.summary()
+    try:
+        report["invariants"] = invariants.last_report() or invariants.check_and_repair(
+            store, settings.app.paths
+        )
+    except Exception as exc:  # noqa: BLE001 - a report must still render
+        report["invariants"] = {"error": f"{type(exc).__name__}: {exc}"}
+    report["ok"] = bool(report.get("ok")) and all(
+        d.get("ok") for d in report["dependencies"]
+    )
+    return report
+
+
+@app.get("/api/boot")
+def boot_report() -> dict:
+    """The boot phase table alone (used by tools/doctor.py)."""
+    return boot.summary()
 
 
 @app.on_event("startup")
-async def _start_resource_monitor() -> None:
+async def _start_post_listen_work() -> None:
+    """Open the port first, then do the heavy work on a daemon thread.
+
+    uvicorn binds its socket only after lifespan startup returns, so nothing in
+    this handler is allowed to block. Every phase has its own timeout and lands
+    in /api/status; a failure is logged and shown, never fatal.
+    """
     import asyncio
 
     asyncio.create_task(_resource_monitor())
+    boot.start(_boot_phases)
+
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -663,109 +817,6 @@ def _mark_interrupted() -> None:
         logger.warning(f"[shutdown] could not flag in-flight jobs: {exc}")
 
 
-@app.on_event("startup")
-def _start_worker() -> None:
-    # The worker daemon is a separate process now: if it cannot come up, the
-    # API must still serve (every route reports the worker as offline, and the
-    # supervisor keeps retrying). Failing startup here took the whole dashboard
-    # down for a worker-only problem.
-    try:
-        worker.start()
-        st = worker.status()
-        logger.info(
-            f"[boot] worker daemon: online={st.get('online')} "
-            f"pid={worker.daemon_pid} concurrency={st.get('concurrency')} "
-            "(separate process, nice 15 — this API only proxies)"
-        )
-    except Exception as exc:  # noqa: BLE001 - never make the API unavailable
-        logger.error(f"[boot] worker daemon did not start: {exc}")
-    # Finishes any batch a restart interrupted mid-delete. Runs on its own
-    # thread and in small steps, so a half-deleted batch is completed at boot
-    # instead of sitting in the list forever — and never in a request.
-    try:
-        purge.start(
-            store,
-            settings.app.paths,
-            cancel=worker.cancel,
-            remote=_purge_remote_job,
-        )
-    except Exception as exc:  # noqa: BLE001 - a purge must not keep the API down
-        logger.warning(f"[boot] delete purge did not start: {exc}")
-    # Keeps the 4 GB disk usable without anyone pressing a button: when free
-    # space drops toward the worker's 400 MB floor, finished batches move into
-    # the bucket and their local copies go. Off the request path on purpose —
-    # a slow PUT inside a page load is what turned deletes into CDN 502s.
-    try:
-        reclaim.start_watchdog(store, settings.app.paths)
-    except Exception as exc:  # noqa: BLE001 - never let cleanup break boot
-        logger.warning(f"[boot] media reclaim watchdog did not start: {exc}")
-    # Crash leftovers: a kill -9 (or a sandbox snapshot) leaves scratch folders
-    # for jobs that no longer exist and half-written `.fetching` files. Clear
-    # them before any job can measure the disk, so one bad crash does not need
-    # a human with a terminal.
-    try:
-        swept = reclaim.sweep_startup(store, settings.app.paths)
-        if swept.get("dirsRemoved") or swept.get("filesRemoved"):
-            logger.info(
-                f"[boot] crash sweep: {swept['dirsRemoved']} folder(s), "
-                f"{swept['filesRemoved']} temp file(s), "
-                f"{round(swept['bytesFreed'] / (1024 * 1024), 1)} MB freed"
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[boot] crash sweep did not run: {exc}")
-    retention.start()
-    # Sweep ONCE at boot, not just on the daemon's first 30-minute tick.
-    #
-    # The daemon loop is `while not self._stop.wait(interval_min * 60)`, so
-    # the first pass was 30 minutes after startup — meaning every sandbox
-    # restart inherited the previous run's debris and then sat on it for half
-    # an hour. With retention at 0 that accumulated indefinitely: 353 MB of
-    # trashed batches on a 4 GB disk at the time of writing. A boot sweep is
-    # the one moment guaranteed to see the whole picture, so it runs here. It
-    # is the same `sweep()` the daemon calls, so there is no second code path
-    # to keep honest.
-    try:
-        swept = retention.sweep()
-        if swept:
-            logger.info(f"[boot] startup sweep removed {swept} expired/orphaned item(s)")
-    except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
-        logger.warning(f"[boot] startup sweep failed: {exc}")
-    # Clip documents whose job is gone are invisible in the UI but still on
-    # disk (a previous build's deletes left them behind). Reconcile at boot so
-    # the dashboard starts from a consistent set instead of showing phantom
-    # "queued" cards until the 7-day orphan window elapses.
-    try:
-        stats = store.reconcile_clips()
-        if any(stats.values()):
-            logger.info(
-                "[boot] clip reconcile: "
-                + ", ".join(f"{v} {k}" for k, v in stats.items() if v)
-            )
-    except Exception as exc:  # noqa: BLE001 - never block startup on cleanup
-        logger.warning(f"[boot] clip reconcile failed: {exc}")
-    # Clip documents a killed worker left mid-flight: the MP4 is on disk but the
-    # document still says pending/running, so the dashboard shows “queued ·
-    # no fps” and blocks play/download/share on a clip that is actually fine.
-    try:
-        fixed = video_svc.repair_render_states(store)
-        if fixed.get("repaired"):
-            logger.info(
-                f"[boot] render state repaired for {fixed['repaired']} clip(s) "
-                f"({fixed['scanned']} scanned, {fixed['skipped']} skipped)"
-            )
-    except Exception as exc:  # noqa: BLE001 - never block startup on a repair
-        logger.warning(f"[boot] render state repair failed: {exc}")
-    tailnet = hosting.tailnet_ip()
-    logger.info(
-        f"[boot] API up on http://{settings.app.host}:{settings.app.port} "
-        f"(worker: {'remote dispatch' if settings.hosted.worker_url else 'local in-process'})"
-    )
-    if tailnet:
-        logger.info(f"[boot] tailnet IP: {tailnet}")
-    elif settings.hosted.tailscale_only or settings.hosted.worker_url:
-        logger.info("[boot] tailnet IP: not detected (tailscaled not reachable from this process)")
-
-
 # --------------------------------------------------------------------------- #
 # schemas
 # --------------------------------------------------------------------------- #
@@ -834,10 +885,21 @@ def _active_job_for(body: "CreateJobIn") -> dict | None:
     return None
 
 
+def _master_path(clip: dict[str, Any]) -> Path | None:
+    """The clip's rendered master. Never goes through the share copy."""
+    p = Path(clip.get("videoPath") or "")
+    return p if clip.get("videoPath") and p.exists() else None
+
+
 def _clip_media(clip: dict[str, Any], kind: str) -> Path | None:
-    """Path to one of a clip's media files, or None when it does not exist."""
-    if clip.get("shareId") and kind == "video":
-        return _share_copy_for(clip)
+    """Path to one of a clip's media files, or None when it does not exist.
+
+    This used to return the SHARE copy for ``kind="video"``, and the share copy
+    was built by calling this function again — infinite recursion, so every
+    thumbnail and download of a shared clip answered HTTP 500 with
+    ``RecursionError``. Each path now has exactly one meaning: this returns what
+    the clip document names.
+    """
     key = {"video": "videoPath", "thumb": "thumbPath"}.get(kind)
     if not key:
         return None
@@ -847,25 +909,10 @@ def _clip_media(clip: dict[str, Any], kind: str) -> Path | None:
 
 def _clip_for_share_id(raw: str) -> dict[str, Any] | None:
     """Resolve a share id back to the clip document that owns it."""
-    from app import store
     for clip in store.list_all_clips():
         if clip.get("shareId") == raw:
             return clip
     return None
-
-
-def _share_copy_for(clip: dict[str, Any]) -> Path | None:
-    """Where this clip's share-sized MP4 lives, building it if needed."""
-    master = _clip_media(clip, "video")
-    if master is None:
-        return None
-    try:
-        return _JOB_SHARE.get(master)
-    except Exception as exc:
-        # A transient path/lock issue must never turn a share request into a
-        # 503: degrade to the link, and let the lock reap the copy later.
-        logger.warning(f"[share] _share_copy_for failed for {clip.get('_id')}: {exc}")
-        return None
 
 
 def _media_etag(p: Path) -> str:
@@ -878,77 +925,7 @@ def _media_etag(p: Path) -> str:
 
 def _clip_bucket_stream(clip: dict[str, Any], request: Request, filename: str) -> StreamingResponse:
     """Stream a clip's master from the bucket when local media was reclaimed."""
-    from app import objectstore, store
-    if not clip.get("videoPath") or Path(clip["videoPath"]).exists():
-        return clip_download(clip, request, filename)
-    key = objectstore.key_for_path(clip["videoPath"], settings.app.paths.outputs_dir)
-    if not key:
-        return clip_download(clip, request, filename)
-    return StreamingResponse(
-        objectstore.open_stream(key, request),
-        media_type="video/mp4",
-        headers={"Accept-Ranges": "bytes", "Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-def _restore_media(p: Path) -> bool:
-    """Pull one reclaimed source/media file back from the bucket."""
     from app import objectstore
-    if not p.exists():
-        key = objectstore.key_for_path(str(p), settings.app.paths.outputs_dir)
-        if not key:
-            return False
-        if not objectstore.download_to(key, str(p)):
-            return False
-    return True
-
-
-
-def _clip_media(clip: dict[str, Any], kind: str) -> Path | None:
-    """Path to one of a clip's media files, or None when it does not exist."""
-    if clip.get("shareId") and kind == "video":
-        return _share_copy_for(clip)
-    key = {"video": "videoPath", "thumb": "thumbPath"}.get(kind)
-    if not key:
-        return None
-    p = Path(clip.get(key) or "")
-    return p if p.exists() else None
-
-
-def _clip_for_share_id(raw: str) -> dict[str, Any] | None:
-    """Resolve a share id back to the clip document that owns it."""
-    from app import store
-    for clip in store.list_all_clips():
-        if clip.get("shareId") == raw:
-            return clip
-    return None
-
-
-def _share_copy_for(clip: dict[str, Any]) -> Path | None:
-    """Where this clip's share-sized MP4 lives, building it if needed."""
-    master = _clip_media(clip, "video")
-    if master is None:
-        return None
-    try:
-        return _JOB_SHARE.get(master)
-    except Exception as exc:
-        # A transient path/lock issue must never turn a share request into a
-        # 503: degrade to the link, and let the lock reap the copy later.
-        logger.warning(f"[share] _share_copy_for failed for {clip.get('_id')}: {exc}")
-        return None
-
-
-def _media_etag(p: Path) -> str:
-    """A stable etag from real bytes (size + mtime), so changed files 412."""
-    try:
-        return f"{p.stat().st_size}-{int(p.stat().st_mtime)}"
-    except OSError:
-        return ""
-
-
-def _clip_bucket_stream(clip: dict[str, Any], request: Request, filename: str) -> StreamingResponse:
-    """Stream a clip's master from the bucket when local media was reclaimed."""
-    from app import objectstore, store
     if not clip.get("videoPath") or Path(clip["videoPath"]).exists():
         return clip_download(clip, request, filename)
     key = objectstore.key_for_path(clip["videoPath"], settings.app.paths.outputs_dir)
@@ -976,7 +953,7 @@ def _restore_media(p: Path) -> bool:
 
 def _share_copy_for(clip: dict) -> Path | None:
     """Where this clip's share-sized MP4 lives, building it if needed."""
-    master = _clip_media(clip, "video")
+    master = _master_path(clip)
     if master is None:
         return None
     try:
@@ -1110,6 +1087,25 @@ def public_share_page(share_id: str, request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/api/clips")
+def list_clips(jobId: str = "") -> list[dict]:
+    """The clips grid's data source — one job's clips, or one clip by id.
+
+    This route was MISSING while the dashboard's grid fetched it on every
+    render, so a finished batch showed an empty grid (404) even though its clip
+    documents and media were fine. ``jobId`` is the contract the frontend uses;
+    a clip id is also accepted because one caller passes an id in that slot.
+    """
+    if not jobId:
+        return _attach_share_state(store.list_clip_docs_for_list())
+    clips = store.list_clips(jobId)
+    if not clips:
+        single = store.get_clip_doc(jobId)
+        if single:
+            clips = [single]
+    return _attach_share_state(clips)
+
+
 @app.post("/api/clips/{clip_id}/share-link")
 def ensure_share_link(clip_id: str) -> dict:
     """Mint/verify this clip's public link and report its real state.
@@ -1166,7 +1162,6 @@ def _attach_clip_captions(store: LocalStore, doc: dict[str, Any]) -> list[dict[s
     if cues and cues[0] != "":
         return cues
     job_id = str(doc.get("jobId") or "")
-    order = int(doc.get("order") or 0)
     if not job_id:
         return cues
     clips_dir = store._paths.data_dir / "clips"
@@ -1174,7 +1169,7 @@ def _attach_clip_captions(store: LocalStore, doc: dict[str, Any]) -> list[dict[s
     if not json_path.exists():
         return cues
     try:
-        doc_data = json.loads(json_path.read_text(encoding="utf-8"))
+        json.loads(json_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return cues
     for key in ("cues_000.json", "cues_001.json", "cues_002.json", "cues_003.json"):
@@ -1229,10 +1224,20 @@ def clip_thumb(clip_id: str) -> FileResponse:
         raise HTTPException(404, "thumbnail not available")
     p = _clip_media(clip, "thumb")
     if p is None:
+        # Local media is reclaimed to the bucket after verification, so a
+        # missing poster is usually "archived", not "never made". Pull it back
+        # (and, failing that, the master) before giving up.
+        if clip.get("thumbPath"):
+            _restore_media(Path(clip["thumbPath"]))
+            p = _clip_media(clip, "thumb")
+    if p is None:
         # No poster on disk: make one from the clip rather than showing a black
         # card. This is also what heals posters rendered before the
         # non-black-frame selection existed.
-        master = _clip_media(clip, "video") if clip.get("videoPath") else None
+        master = _master_path(clip)
+        if master is None and clip.get("videoPath"):
+            if _restore_media(Path(clip["videoPath"])):
+                master = _master_path(clip)
         if master is None:
             raise HTTPException(404, "thumbnail file missing")
         p = Path(clip["thumbPath"]) if clip.get("thumbPath") else (
@@ -1246,7 +1251,7 @@ def clip_thumb(clip_id: str) -> FileResponse:
             )
         except Exception as exc:  # noqa: BLE001 - a poster is never worth a 500
             raise HTTPException(404, f"thumbnail could not be created: {exc}") from exc
-    master_for_thumb = _clip_media(clip, "video") if clip.get("videoPath") else None
+    master_for_thumb = _master_path(clip)
     if master_for_thumb is not None and video_svc.thumb_needs_rewrite(p):
         try:
             video_svc.render_first_frame_thumb(master_for_thumb, p)
@@ -1443,6 +1448,20 @@ def clip_post(clip_id: str, body: PostClipBody) -> dict:
         )
     except SocialError as exc:
         raise HTTPException(social_error_status(exc), str(exc)) from exc
+
+
+@app.post("/api/clips/{clip_id}/retry-render")
+def retry_clip_render_route(clip_id: str) -> dict:
+    """Re-render ONE failed clip (the "Retry failed clip" button).
+
+    Light enough to run inline: it renders a single clip from the cached cut
+    and caption cues, and the result is pushed to the bucket before returning.
+    """
+    from app import video
+
+    if store.get_clip_doc(clip_id) is None:
+        raise HTTPException(404, "clip not found")
+    return video.retry_clip_render(clip_id)
 
 
 @app.get("/api/clips/{clip_id}/srt")

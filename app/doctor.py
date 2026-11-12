@@ -440,3 +440,165 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# --------------------------------------------------------------------------- #
+# /api/status — per-dependency probes, each independent and time-bounded
+# --------------------------------------------------------------------------- #
+
+def _probe(name: str, fn, timeout_sec: float = 2.0) -> dict:
+    """Run one dependency probe in a helper thread; never block the response."""
+    import threading
+
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - reported as not-ok
+            box["error"] = exc
+
+    th = threading.Thread(target=_run, name=f"probe-{name}", daemon=True)
+    th.start()
+    th.join(timeout_sec)
+    if th.is_alive():
+        return {"name": name, "ok": False, "detail": f"no answer in {timeout_sec}s", "ms": int(timeout_sec * 1000)}
+    if "error" in box:
+        exc = box["error"]
+        return {"name": name, "ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    value = box.get("value")
+    if isinstance(value, dict):
+        out = {"name": name, "ok": bool(value.get("ok", True))}
+        out.update({k: v for k, v in value.items() if k != "ok"})
+        return out
+    return {"name": name, "ok": bool(value), "detail": "" if value else "unavailable"}
+
+
+def dependency_status(settings: Settings, store=None, boot=None) -> list[dict]:
+    """One row per dependency. A slow/failed one names itself, never reddens all.
+
+    The dashboard, the Doctor button and tools/doctor.py all read this, so the
+    row order is stable and each row is JSON-safe.
+    """
+    import time
+
+    from app import asr, objectstore
+    from app.hosting import disk_stats
+    from app.store import LocalStore
+
+    rows: list[dict] = []
+
+    def _state() -> dict:
+        t0 = time.perf_counter()
+        st = store if store is not None else LocalStore(settings.app.paths)
+        jobs = st.list_jobs()
+        return {
+            "ok": True,
+            "detail": f"{len(jobs)} job(s) readable",
+            "ms": int((time.perf_counter() - t0) * 1000),
+        }
+
+    rows.append(_probe("state", _state))
+
+    def _bucket() -> dict:
+        cfg = objectstore.config_from_env()
+        if not cfg.enabled:
+            return {"ok": True, "detail": "disabled (local-only media)"}
+        return {
+            "ok": True,
+            "detail": f"{cfg.bucket} @ {cfg.endpoint}",
+            "durable": True,
+        }
+
+    rows.append(_probe("bucket", _bucket))
+
+    def _model() -> dict:
+        info = asr.model_status(settings)
+        return {
+            "ok": bool(info.get("filesPresent")),
+            "detail": info.get("label") or info.get("model"),
+            "mismatch": info.get("mismatch"),
+            "model": info.get("model"),
+            "computeType": info.get("computeType"),
+            "cpuThreads": info.get("cpuThreads"),
+            "sizeMb": info.get("sizeMb"),
+        }
+
+    rows.append(_probe("whisper", _model, timeout_sec=3.0))
+
+    def _llm() -> dict:
+        # Presence only: never read, compare or log a key's value. A 1-token
+        # call belongs in doctor.py, not in a poll the dashboard runs every 10 s.
+        import os as _os
+
+        names = ("DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "NVIDIA_API_KEY")
+        present = [n for n in names if _os.environ.get(n)]
+        return {
+            "ok": bool(present),
+            "detail": (
+                f"{', '.join(present)} set" if present
+                else "no detection key (jobs fail at detection)"
+            ),
+        }
+
+    rows.append(_probe("deepseek", _llm))
+
+    def _ytdlp() -> dict:
+        try:
+            import yt_dlp
+
+            ver = getattr(getattr(yt_dlp, "version", None), "__version__", None)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        return {"ok": bool(ver), "detail": str(ver or "importable, no version")}
+
+    rows.append(_probe("yt-dlp", _ytdlp))
+
+    def _ffmpeg() -> dict:
+        from app.config import ffmpeg_bin, ffprobe_bin
+
+        return {"ok": True, "detail": f"{ffmpeg_bin()} · ffprobe {ffprobe_bin()}"}
+
+    rows.append(_probe("ffmpeg", _ffmpeg))
+
+    def _disk() -> dict:
+        stats = disk_stats(settings.app.paths.data_dir)
+        free = stats.get("freeMb")
+        return {
+            "ok": (free is None) or free > 200,
+            "detail": f"{free} MB free" if free is not None else "unknown",
+            "freeMb": free,
+        }
+
+    rows.append(_probe("disk", _disk))
+
+    def _worker() -> dict:
+        from app import worker as worker_mod
+
+        live = getattr(worker_mod, "_active_worker", None)
+        if live is None:
+            # The supervisor lives on app.main; importing it here would be a
+            # cycle, so the API hands it over at boot.
+            from app import main as main_mod
+
+            live = getattr(main_mod, "worker", None)
+        st = live.status() if live is not None else {}
+        return {
+            "ok": bool(st.get("online")),
+            "detail": (
+                f"online={st.get('online')} "
+                f"pid={getattr(live, 'daemon_pid', None)} "
+                f"concurrency={st.get('concurrency')}"
+            ),
+        }
+
+    rows.append(_probe("worker", _worker))
+
+    if boot is not None:
+        failed = boot.summary()["failedPhases"]
+        rows.append({
+            "name": "boot",
+            "ok": not failed,
+            "detail": "all phases ok" if not failed else "failed: " + ", ".join(failed),
+        })
+    return rows

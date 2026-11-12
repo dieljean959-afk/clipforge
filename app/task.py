@@ -1135,18 +1135,47 @@ class Pipeline:
         try:
             _run_stage("export", lambda: self._stage_export(job, src, ws))
 
-            # A finished batch must give the disk back. Clean FIRST, then check
-            # — otherwise the self-check measures its own leftovers.
+            # A finished batch must give back ITS OWN scratch. That is the only
+            # hard check: the global free-space delta moves for reasons the
+            # batch does not own (model cache, logs, WAL, other jobs) and using
+            # it as a verdict failed a batch whose verified clips were already
+            # in the bucket. Clean first, then verify the folder is gone.
             self._cleanup_job_scratch(job_id, full=True)
-            ok, why = ledger.recovered()
-            self._log(job_id, f"[disk] self-check: {why}")
+            ok, why = ledger.scratch_check()
+            self._log(job_id, f"[disk] scratch check: {why}")
             if not ok:
-                raise video.RenderError(
-                    "this batch did not return the local disk to where it started "
-                    f"— {why}. Every clip is already in the bucket, so nothing is "
-                    "lost; the batch fails its own disk self-check until the "
-                    "leftover is cleared."
-                )
+                # Safe cleanup, then warn. Never a failure: the clips rendered
+                # and verified, and deleting our own folder cannot lose them.
+                try:
+                    self._cleanup_job_scratch(job_id, full=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[job {job_id}] second cleanup pass failed: {exc}")
+                retry_ok, retry_why = ledger.scratch_check()
+                if retry_ok:
+                    self._log(
+                        job_id,
+                        "[disk] cleanup warning: scratch was left behind, "
+                        "second pass removed it — batch unaffected",
+                    )
+                else:
+                    self._log(
+                        job_id,
+                        f"[disk] cleanup warning: scratch left behind ({retry_why}) "
+                        "— the batch is complete and its clips are in the bucket; "
+                        "a boot sweep will remove it",
+                    )
+                    try:
+                        self.store.update_job(
+                            job_id,
+                            lambda j: j.update({
+                                "diskWarning": f"cleanup left scratch behind: {retry_why}",
+                            }),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(f"[job {job_id}] could not record disk warning: {exc}")
+            # Information only, always logged, never a gate.
+            _within, delta = ledger.global_delta()
+            self._log(job_id, f"[disk] free-space delta (info): {delta}")
             self._finish(job_id, time.time() - t_start)
             self._mark_stage_done(job_id, "export")
         finally:
@@ -2484,17 +2513,30 @@ class Pipeline:
                     )
                     failed.append((i, clip_id, detail))
                     try:
-                        self.store.write_clip(
+                        # Keep the encoder's own stderr on the CLIP, not just in
+                        # the job log. Without it a per-clip failure is
+                        # undiagnosable after the log rotates, and the retry
+                        # button has nothing to tell the user.
+                        stderr = ""
+                        try:
+                            got = getattr(exc, "stderr", None) or getattr(exc, "output", None)
+                            if isinstance(got, bytes):
+                                got = got.decode("utf-8", "replace")
+                            stderr = str(got or "")[-1500:]
+                        except Exception:
+                            stderr = ""
+                        self.store.update_clip(
                             clip_id,
-                            {
+                            lambda c: c.update({
                                 "renderState": "failed",
                                 "mediaError": detail,
+                                "ffmpegStderr": stderr or c.get("ffmpegStderr"),
+                                "failedAt": int(time.time() * 1000),
                                 "jobId": job_id,
-                            },
-                            job_id=job_id,
+                            }),
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001 - the batch continues
+                        logger.warning(f"[job {job_id}] could not record clip failure: {exc}")
                     continue
 
             thumb_path = dest / f"clip_{i:03d}.thumb.jpg"

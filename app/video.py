@@ -26,7 +26,6 @@ from loguru import logger
 from app import encode, hostlimits
 from app import subtitle as subtitle_svc
 from app.config import Settings, ffmpeg_bin, ffprobe_bin, load_config
-from app import store
 
 from fastapi import HTTPException
 
@@ -216,75 +215,179 @@ def _ffmpeg_slots() -> int:
 def retry_clip_render(clip_id: str) -> dict:
     """Re-render ONE clip by id, without re-running detection/transcription.
 
-    The repair path for a single clip whose render.state is "failed": it
-    re-encodes just that clip from the existing cuts, reusing the cached
-    transcript and the (possibly re-translated) caption cues.
+    The repair path for a clip whose ``renderState`` is ``failed``. It reuses
+    everything the batch already paid for:
+
+    * the cut (``reframe/cuts.json`` when the checkpoint survives), else the
+      clip document's own ``start``/``end``;
+    * the caption cues from the clip document (so the burned-in look is
+      identical to the clips that did render);
+    * the preset/style/title from the clip document;
+    * the source, restored from the bucket when the local copy was reclaimed.
+
+    It is safe to call on a batch that is otherwise complete: only this clip's
+    file and document are touched.
     """
-    clip = store.get_clip_doc(clip_id)
+    from app import encode
+    from app.store import LocalStore
+
+    settings = load_config(quiet=True)
+    db = LocalStore(settings.app.paths)
+    clip = db.get_clip_doc(clip_id)
     if clip is None:
         raise HTTPException(404, "clip not found")
-    job_id = clip.get("jobId") or ""
-    job = store.get_job(job_id) if job_id else None
-    if job is None:
+    job_id = str(clip.get("jobId") or "")
+    job = db.get_job(job_id) if job_id else None
+    if not job:
         raise HTTPException(404, "job not found")
-    if job.get("stage") in {"queued", "grabbing", "transcribing", "finding", "rendering", "exporting"}:
+    live = {"queued", "grabbing", "transcribing", "finding", "rendering", "exporting"}
+    if job.get("stage") in live:
         raise HTTPException(409, "this job is still running — wait for it to finish")
-    src = store.find_source_file(job_id)
-    if src is None:
-        raise HTTPException(400, "source file no longer on disk — this clip cannot be re-rendered")
-    # Imported here rather than at module scope: app.stages imports nothing
-    # from video, but keeping the dependency lazy avoids an import cycle if it
-    # ever does. `StageWorkspace` used to be referenced with no import at all,
-    # so this repair path raised NameError the first time anyone called it.
-    from app.stages import StageWorkspace
-
-    # `settings` was never in scope here (this function takes only a clip id),
-    # so the retry path raised NameError instead of re-rendering.
-    settings = load_config(quiet=True)
-    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
-    cuts = ws.read_json("reframe", "cuts.json") or []
-    cut = next((c for c in cuts if f"clip_{c.get('order', 0):03d}" == clip_id), None)
-    if cut is None:
-        try:
-            order = int(clip_id.split("_")[-1])
-        except ValueError:
-            raise HTTPException(400, "could not map clip id to a cut")
-        tmp = [c for c in cuts if int(c.get("order", -1)) == order]
-        cut = tmp[0] if tmp else None
-        if cut is None:
-            raise HTTPException(400, "no cut found for this clip")
+    order = int(clip.get("order") or 0)
     if clip.get("renderState") == "done" and clip.get("videoPath"):
         raise HTTPException(409, "this clip is already rendered")
-    dest = settings.app.paths.outputs_dir / job_id / f"clip_{int(cut.get('order', 0)):03d}.mp4"
+
+    # Source resolution, in the order the pipeline itself uses: a local copy
+    # (upload/restored), then the bucket record the fetch stage captured
+    # (`sourceStream`). Requiring a local file made the retry button fail with
+    # "source no longer available" for every batch whose source had been
+    # offloaded — even though all its sections were durably in the bucket.
+    from app import source_stream
+
+    src: Any = db.find_source_file(job_id)
+    render_src: Any = src
+    render_audio: str | None = None
+    seek_offset: float | None = None
+    probe_meta: dict[str, Any] | None = None
+    cut_start = float(clip.get("start") or 0.0)
+    if src is None:
+        stream_meta = (job.get("sourceStream") or {}) if isinstance(job.get("sourceStream"), dict) else {}
+        if not stream_meta.get("videoKey"):
+            raise HTTPException(
+                400,
+                "this clip's source is neither on disk nor recorded in the bucket — "
+                "it cannot be re-rendered without re-fetching the video",
+            )
+        try:
+            src = source_stream.RemoteSource(
+                job_id,
+                video_key=str(stream_meta.get("videoKey")),
+                audio_key=str(stream_meta.get("audioKey") or ""),
+                probe={k: stream_meta[k] for k in ("duration", "width", "height", "fps")
+                       if stream_meta.get(k) is not None},
+                method=str(stream_meta.get("method") or "sections"),
+                sections=list(stream_meta.get("sections") or []),
+                bytes_total=int(stream_meta.get("bytes") or 0),
+            )
+        except Exception as exc:  # noqa: BLE001 - report the real reason
+            raise HTTPException(400, f"could not rebuild the bucket source: {exc}") from None
+        render_src, seek_offset = src.url_for_span(cut_start)
+        render_audio = src.audio_url()
+        probe_meta = src.probe
+
+    from app.stages import StageWorkspace
+
+    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
+    cuts = ws.read_json("reframe", "cuts.json") or []
+    cut = None
+    for candidate in cuts:
+        if int(candidate.get("order", -1)) == order:
+            cut = candidate
+            break
+    if cut is None:
+        # No checkpoint: rebuild the cut from the clip document. start/end and
+        # the caption track are enough; the crop falls back to the frame centre.
+        cut = {
+            "order": order,
+            "start": float(clip.get("start") or 0.0),
+            "end": float(clip.get("end") or 0.0),
+            "title": clip.get("title"),
+        }
+        if not cut["end"] > cut["start"]:
+            raise HTTPException(400, "this clip has no usable start/end to re-render")
+
+    cues = clip.get("captionCues") or []
+    if not cues:
+        cues = (ws.read_json("captions", f"cues_{order:03d}.json") or {}).get("cues") or []
+    emoji_track = clip.get("emojiTrack") or []
+    selected = [
+        e for e in emoji_track
+        if isinstance(e, dict) and e.get("selected")
+    ] or emoji_track
+
+    dest = settings.app.paths.outputs_dir / job_id / f"clip_{order:03d}.mp4"
+    db.write_clip(clip_id, {"renderState": "running", "mediaError": None}, job_id=job_id)
     try:
-        meta = encode.render_clip(src, cut, dest, settings, on_log=lambda line: store.append_job_log(job_id, line))
+        meta = encode.render_clip(
+            render_src,
+            cut,
+            dest,
+            settings,
+            cues=cues,
+            preset_key=str(clip.get("preset") or "") or None,
+            emoji_selection=selected,
+            title=clip.get("title"),
+            on_log=lambda line: db.append_job_log(job_id, line),
+            audio_src=render_audio,
+            probe_meta=probe_meta,
+            start_offset=seek_offset,
+        )
     except RenderError as exc:
-        store.write_clip(clip_id, {"renderState": "failed", "mediaError": str(exc), "jobId": job_id}, job_id=job_id)
-        raise HTTPException(400, str(exc))
-    # The poster has to be regenerated too: a re-render overwrites the MP4, so
-    # the old poster is a frame from the previous encode. It also used to be
-    # written as "000.thumb.jpg" (no `clip_` prefix), a name nothing serves.
-    thumb_path = dest.parent / f"clip_{int(cut.get('order', 0)):03d}.thumb.jpg"
+        db.write_clip(
+            clip_id,
+            {"renderState": "failed", "mediaError": str(exc)[:500], "jobId": job_id},
+            job_id=job_id,
+        )
+        raise HTTPException(400, str(exc)) from None
+    except Exception as exc:  # noqa: BLE001 - reported to the caller, not a 500
+        db.write_clip(
+            clip_id,
+            {
+                "renderState": "failed",
+                "mediaError": f"{type(exc).__name__}: {exc}"[:500],
+                "jobId": job_id,
+            },
+            job_id=job_id,
+        )
+        raise HTTPException(400, f"re-render failed: {type(exc).__name__}: {exc}") from None
+
+    thumb_path = dest.parent / f"clip_{order:03d}.thumb.jpg"
     try:
         render_first_frame_thumb(dest, thumb_path)
     except Exception as exc:  # noqa: BLE001 - the clip matters, the poster is best-effort
         logger.warning(f"[video] re-render poster failed for {clip_id}: {exc}")
-    store.write_clip(
+    db.update_clip(
         clip_id,
-        {
+        lambda c: c.update({
             "videoPath": meta["videoPath"],
             "thumbPath": str(thumb_path),
             "mediaBytes": meta.get("bytes") or int(dest.stat().st_size),
             "mediaWidth": meta["width"],
             "mediaHeight": meta["height"],
-            "mediaDurationSec": round(float(meta["duration"]), 3),
+            "mediaDurationSec": round(float(meta.get("duration") or meta.get("durationSec") or 0.0), 3),
             "fps": meta.get("fps", 30.0),
             "renderState": "done",
+            "mediaError": None,
+            "failedAt": None,
             "jobId": job_id,
-        },
-        job_id=job_id,
+        }),
     )
-    return {"queued": True, "clipId": clip_id}
+    # Push it to the bucket so the repaired clip survives a sandbox recycle, and
+    # reconcile the batch summary (14 done + 1 failed → 15 ready).
+    try:
+        from app import reclaim as _reclaim
+
+        _reclaim.push_clip_and_thumb(job_id, dest, thumb_path)
+    except Exception as exc:  # noqa: BLE001 - the local copy is still valid
+        logger.warning(f"[video] re-render upload failed for {clip_id}: {exc}")
+    try:
+        from app import invariants
+
+        invariants.check_and_repair(db, settings.app.paths)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[video] invariants after retry skipped: {exc}")
+    return {"queued": False, "clipId": clip_id, "repaired": True}
+
 
 _FFMPEG_SEM: threading.BoundedSemaphore = threading.BoundedSemaphore(_ffmpeg_slots())
 _FFMPEG_LIMIT = _ffmpeg_slots()
@@ -1171,7 +1274,7 @@ def repair_render_states(store_obj: Any, *, limit: int = 512) -> dict[str, int]:
             "mediaError": None,
             "videoPath": str(path),
             "mediaBytes": int(path.stat().st_size),
-            "mediaDurationSec": round(float(meta["duration"]), 3),
+            "mediaDurationSec": round(float(meta.get("duration") or meta.get("durationSec") or 0.0), 3),
             "mediaWidth": int(meta.get("width") or 0),
             "mediaHeight": int(meta.get("height") or 0),
             "fps": float(meta.get("fps") or 30.0),

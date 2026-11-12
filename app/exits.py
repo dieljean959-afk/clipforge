@@ -27,11 +27,13 @@ INCOMPLETE_EXIT = "incomplete_exit"
 APP_ERROR = "app_error"
 STAGE_TIMEOUT = "stage_timeout"
 MISSING_BINARY = "missing_binary"
+DISK_FULL = "disk_full"
 UNKNOWN = "unknown"
 
 # --- automatic responses --------------------------------------------------- #
 
 AUTO_RESUME = "auto_resume"
+RETRY_AFTER_CLEANUP = "retry_after_cleanup"
 RETRY_LIGHTER = "retry_lighter"
 RETRY_STAGE = "retry_stage"
 FAIL_FAST = "fail_fast"
@@ -49,7 +51,15 @@ class Verdict:
 
     @property
     def resumable(self) -> bool:
-        return self.action in {AUTO_RESUME, RETRY_LIGHTER, RETRY_STAGE, CAPTURE_AND_RESUME}
+        return self.action in {
+            AUTO_RESUME, RETRY_LIGHTER, RETRY_STAGE, CAPTURE_AND_RESUME,
+            RETRY_AFTER_CLEANUP,
+        }
+
+    @property
+    def retryable(self) -> bool:
+        """A disk-full is retryable after cleanup; it is never fail-fast."""
+        return self.action != FAIL_FAST
 
 
 # 128 + N is how a shell reports "died from signal N"; Popen reports -N.
@@ -91,8 +101,24 @@ def classify(
     traceback_seen: bool = False,
     timeout: bool = False,
     missing: str = "",
+    disk_full: bool = False,
 ) -> Verdict:
-    """Map one exit to a class, a sentence, a hint and an automatic response."""
+    """Map one exit to a class, a sentence, a hint and an automatic response.
+
+    ``disk_full`` (ENOSPC, or free space below the stage's requirement) is its
+    own class: the correct response is cleanup, wait, retry — not fail-fast.
+    Recording it as fail-fast is what turned a full disk into a permanently
+    dead batch that could not be resumed even after space was freed.
+    """
+    if disk_full:
+        return Verdict(
+            DISK_FULL,
+            f"The disk ran out of space{_stage(stage)} (ENOSPC).",
+            "Finished clips are kept. Scratch and reclaimable media are cleared, "
+            "the batch waits for free space, then retries the stage — it is not "
+            "marked failed by the disk being full.",
+            RETRY_AFTER_CLEANUP,
+        )
     if timeout:
         return Verdict(
             STAGE_TIMEOUT,
@@ -203,3 +229,31 @@ def classify(
         "The full output was captured; the job resumes from its checkpoints.",
         CAPTURE_AND_RESUME,
     )
+
+
+#: Substrings that mean "the filesystem said no", across ffmpeg/Python/OS error
+#: shapes. Kept as one table so the classifier and the job-status layer agree.
+_DISK_FULL_MARKERS = (
+    "no space left on device",
+    "enospc",
+    "errno 28",
+    "disk quota exceeded",
+    "not enough space",
+)
+
+
+def is_disk_full(exc_or_text: object) -> bool:
+    """Does this exception/message describe a full disk (ENOSPC)?"""
+    if exc_or_text is None:
+        return False
+    if isinstance(exc_or_text, OSError) and getattr(exc_or_text, "errno", None) == 28:
+        return True
+    text = str(exc_or_text).lower()
+    return any(marker in text for marker in _DISK_FULL_MARKERS)
+
+
+def classify_error(exc: BaseException, *, stage: str = "") -> Verdict:
+    """Classify a raised exception (as opposed to a process exit code)."""
+    if is_disk_full(exc):
+        return classify(None, stage=stage, disk_full=True)
+    return classify(1, stage=stage, traceback_seen=True)

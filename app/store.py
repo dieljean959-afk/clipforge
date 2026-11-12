@@ -13,7 +13,6 @@ from typing import Any
 
 from loguru import logger
 
-from app import sharelink
 from app.config import Paths
 
 try:  # POSIX advisory locking — guards read-modify-write across processes
@@ -66,31 +65,6 @@ class LocalStore:
     # resumed job can hit the same job document from two processes at once, so
     # this must be a real OS advisory lock (fcntl.flock) rather than a thread
     # lock. A thread lock only serialises threads inside one process.
-    @contextmanager
-    def _file_lock(self, path: Path):
-        """Advisory exclusive lock around a read-modify-write of `path`."""
-        if fcntl is None:  # pragma: no cover - non-POSIX
-            yield
-            return
-        lock_path = path.with_name(path.name + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_path, "a+")
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            yield
-        finally:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            finally:
-                fh.close()
-        self._paths.data_dir.mkdir(parents=True, exist_ok=True)
-        self._paths.outputs_dir.mkdir(parents=True, exist_ok=True)
-        self._paths.downloads_dir.mkdir(parents=True, exist_ok=True)
-        uploads = _uploads_root(self._paths)
-        uploads.mkdir(parents=True, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # cross-process write primitives
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -206,12 +180,13 @@ class LocalStore:
         return self._paths.data_dir / "jobs" / f"{job_id}.json"
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Persist or overwrite a job document (process-safe).
+        """Persist or overwrite a job document atomically (tmp + rename).
 
-        The runner is a child process, so a thread lock cannot guard this:
-        this takes an OS advisory lock around the read-ModifyWrite and writes
-        the document atomically (tmp+rename) so two processes touching the
-        same job can never overwrite each other.
+        This is an UNCONDITIONAL overwrite: a unique tmp file per process+thread
+        is renamed over the target, so no reader ever sees a half-written
+        document and two writers cannot interleave bytes. It does not merge, so
+        a caller holding a stale snapshot must use :meth:`update_job` (locked
+        read-modify-write) instead of writing that snapshot back.
         """
         jid = self.job_id(job)
         path = self._job_path(jid)
@@ -502,23 +477,6 @@ class LocalStore:
         promised = int(job.get("clipTarget") or job.get("clipCount") or 0)
         return rendered, promised
 
-    def list_clips(self, job_id: str) -> list[dict[str, Any]]:
-        """Return metadata for all clips belonging to a job."""
-        out: list[dict[str, Any]] = []
-        clip_dir = self._paths.outputs_dir / job_id
-        if not clip_dir.exists():
-            return out
-        for p in sorted(clip_dir.iterdir()):
-            if p.is_file() and p.suffix in {".mp4", ".mov", ".webm"}:
-                out.append({
-                    "_id": p.stem,
-                    "jobId": job_id,
-                    "path": str(p),
-                    "filename": p.name,
-                    "size": p.stat().st_size,
-                })
-        return out
-
     def get_clip(self, clip_id: str) -> dict[str, Any] | None:
         """Return a clip document by id, or None.
 
@@ -530,16 +488,6 @@ class LocalStore:
         MP4 downloads failed.
         """
         return self.get_clip_doc(clip_id)
-
-    def list_all_clips(self) -> list[dict[str, Any]]:
-        """Return metadata for all clips across all jobs."""
-        out: list[dict[str, Any]] = []
-        if not self._paths.outputs_dir.exists():
-            return out
-        for job_dir in self._paths.outputs_dir.iterdir():
-            if job_dir.is_dir():
-                out.extend(self.list_clips(job_dir.name))
-        return out
 
     def list_clips_for_list(self, job_id: str | None = None) -> list[dict[str, Any]]:
         """Return clips for the clip list endpoint, with share state attached.
@@ -756,6 +704,9 @@ class LocalStore:
         else:
             clip_id = str(clip)
             fields = dict(fields or {})
+        # A brand-new data dir has no clips/ yet; the first clip of the first
+        # batch used to die with FileNotFoundError on its own tmp file.
+        clips_dir.mkdir(parents=True, exist_ok=True)
         clip_path = clips_dir / f"{clip_id}.json"
         if clip_path.exists():
             existing = json.loads(clip_path.read_text(encoding="utf-8"))
@@ -782,7 +733,7 @@ class LocalStore:
         merged = {**existing, **fields}
         merged["_id"] = clip_id
         merged["jobId"] = resolved_job_id
-        tmp = clip_path.with_suffix(".json.tmp")
+        tmp = self._tmp_for(clip_path)
         tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(clip_path)
 
@@ -803,30 +754,82 @@ class LocalStore:
                     pass
         return merged
 
-    def list_clip_docs(self, job_id: str) -> list[dict[str, Any]]:
-        """Return the per-clip ``ClipDto`` documents for one job.
+    def clip_path(self, clip_id: str) -> Path:
+        return self._paths.data_dir / "clips" / f"{clip_id}.json"
 
-        This is the source of truth for ``/api/clips?jobId=...``. It reads the
-        individual ``data/clips/<clip_id>.json`` files (not the summary blob)
-        so every field the render/share/caption stages write is visible.
+    def update_clip(self, clip_id: str, mutate) -> dict[str, Any] | None:
+        """Locked read-modify-write of ONE clip document.
+
+        ``write_clip`` merges the fields it is given onto the CURRENT document,
+        which is safe, but a caller that read the document first and then writes
+        the whole thing back can still lose a concurrent field update. This is
+        the shape the retry/export/share paths should use: read inside the lock,
+        mutate, atomic-write. Returns the new document or None if it vanished.
+        """
+        path = self.clip_path(clip_id)
+        if not path.exists():
+            return None
+        with self._file_lock(path):
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+            if not isinstance(doc, dict):
+                return None
+            mutate(doc)
+            tmp = self._tmp_for(path)
+            tmp.write_text(
+                json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+            return doc
+
+    def list_clip_docs_for_list(self) -> list[dict[str, Any]]:
+        """Every live job's clip documents (the unfiltered /api/clips list)."""
+        out: list[dict[str, Any]] = []
+        for job in self.list_jobs():
+            try:
+                out.extend(self.list_clip_docs(str(job.get("_id") or "")))
+            except Exception:  # noqa: BLE001 - one bad job must not hide the rest
+                continue
+        return out
+
+    def list_clip_docs(self, job_id: str) -> list[dict[str, Any]]:
+        """Return the per-clip documents for one job — the canonical set.
+
+        Two rules, in this order:
+
+        1. **The job document wins.** Its ``clipIds`` / ``clips`` projection is
+           what the dashboard renders and what a resume works from. A stale
+           summary blob in ``data/clips/<jobId>.json`` (written by an earlier
+           detection pass) used to override it, so a batch with 15 delivered
+           clips listed 4 — the exact "the batch shows nothing" bug.
+        2. **One document per order.** Older documents from a previous detection
+           may still exist (their media can still be in the bucket). Returning
+           both made the dashboard show one rendered card and one permanent
+           "not rendered yet" twin, so the rendered one wins.
+
+        Falls back to the summary blob only when the job names no clips at all.
         """
         clips_dir = self._paths.data_dir / "clips"
-        # The job's summary blob is the authoritative set of clips for the
-        # CURRENT detection. Older per-clip documents from a previous run stay
-        # on disk (their media files may still exist), and returning them made
-        # the dashboard show the same title twice — one rendered card and one
-        # permanent "Not rendered yet" twin. Only the summary's ids are shown.
+        job = self.get_job(job_id) or {}
         authoritative: set[str] | None = None
-        summary_path = clips_dir / f"{job_id}.json"
-        if summary_path.exists():
-            try:
-                summary = json.loads(summary_path.read_text(encoding="utf-8"))
-                ids = summary.get("clipIds") if isinstance(summary, dict) else None
-                if isinstance(ids, list) and ids:
-                    authoritative = {str(i) for i in ids}
-            except (json.JSONDecodeError, OSError):
-                authoritative = None
-        out: list[dict[str, Any]] = []
+        for key in ("clipIds", "clips"):
+            value = job.get(key)
+            if isinstance(value, list) and value:
+                ids = {
+                    str(v.get("_id") if isinstance(v, dict) else v) for v in value
+                }
+                ids.discard("")
+                ids.discard("None")
+                if ids:
+                    authoritative = ids
+                    break
+        # No projection on the job at all: the DOCUMENTS are the truth. The
+        # summary blob is only ever a hint, and trusting it is what listed 4
+        # clips for a batch that had 15.
+
+        best: dict[int, tuple[int, dict[str, Any]]] = {}
         for p in sorted(clips_dir.glob("*.json")):
             try:
                 doc = json.loads(p.read_text(encoding="utf-8"))
@@ -836,16 +839,21 @@ class LocalStore:
                 continue
             if doc.get("jobId") != job_id:
                 continue
-            # skip the summary blob (it has candidateCount / clipIds / detectedAt)
             if "candidateCount" in doc or "clipIds" in doc:
-                continue
+                continue  # the summary blob
             if not doc.get("_id"):
                 continue
             if authoritative is not None and str(doc["_id"]) not in authoritative:
                 continue
-            out.append(doc)
-        out.sort(key=lambda d: (int(d.get("order", 0)) if str(d.get("order", 0)).isdigit() else 0, d.get("_id", "")))
-        return out
+            order = int(doc.get("order") or 0)
+            rank = (
+                (4 if doc.get("renderState") == "done" else 0)
+                + (2 if doc.get("videoPath") or doc.get("videoKey") else 0)
+                + (1 if doc.get("shareId") else 0)
+            )
+            if order not in best or rank > best[order][0]:
+                best[order] = (rank, doc)
+        return [doc for _order, (_rank, doc) in sorted(best.items())]
 
     def summary_clip_ids(self, job_id: str) -> list[str]:
         """Clip ids recorded for this job's current detection, in order."""
@@ -1001,7 +1009,7 @@ class LocalStore:
         clip_id = clip_data.get("_id", self.new_job_id())
         clip_path = self._paths.outputs_dir / job_id / f"{clip_id}.json"
         clip_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = clip_path.with_suffix(".json.tmp")
+        tmp = self._tmp_for(clip_path)
         tmp.write_text(json.dumps(clip_data, indent=2), encoding="utf-8")
         tmp.replace(clip_path)
         return clip_data

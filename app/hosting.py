@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import socket
 import threading
 import time
 import uuid
@@ -10,7 +12,6 @@ from typing import Any, Iterable
 
 from loguru import logger
 from app.config import ROOT, Settings
-from app.config import load_config
 from app.store import LocalStore
 
 class RetentionCleaner:
@@ -49,389 +50,55 @@ class RetentionCleaner:
                 logger.exception("[retention] sweep failed")
 
     def sweep(self) -> int:
-        """Delete expired artefacts. Returns count removed."""
-        import shutil
+        """Delete batches past the retention window. Returns jobs removed.
+
+        The POLICY lives in ``reclaim.sweep_expired`` (bucket first, local
+        second, only terminal batches, and an explicit "retention 0 means never"
+        rule). This method is only the periodic driver, so there is no second
+        implementation to drift. An earlier copy of this method re-implemented
+        the policy with ``retention_hours == 0`` interpreted as "expire
+        everything", which is how a 0-hour window turned into a disk wipe.
+        """
         from app import reclaim
 
-        paths = reclaim.load_paths()
-        cutoff = time.time() - (self.settings.hosted.retention_hours or 0) * 3600
-        deleted = 0
-
-        for root in (paths.downloads, paths.outputs):
-            if root is None or not root.exists():
-                continue
-            for p in root.rglob("*"):
-                try:
-                    if p.is_symlink() or not p.exists():
-                        continue
-                    if p.stat().st_mtime < cutoff and reclaim.is_deletable(p):
-                        shutil.rmtree(p.parent if p.is_dir() else p, ignore_errors=True)
-                        deleted += 1
-                except Exception:
-                    pass
-        return deleted
-
-
-
-from app import config as app_config
-#: Hosted release version, e.g. "1.1.0". The dashboard reads this so the UI
-#: can surface the exact build even if the worker/daemon restarts.
-
-
-
-from app.stages import remove_workspace
-
-# --------------------------------------------------------------------------- #
-# system stats (never NaN — None means "unknown", the UI renders it honestly)
-# --------------------------------------------------------------------------- #
-
-_STATS_CACHE: dict[str, Any] = {}
-_STATS_CACHE_AT = 0.0
-_STATS_LOCK = threading.Lock()
-
-
-def _proc_stat_cpu_percent() -> float | None:
-    """Sample /proc/stat twice (0.05s apart) → busy percentage, or None.
-
-    The gap is a blocking sleep inside /api/health (2s cache). 150ms was long
-    enough to push a health poll past the supervisor's probe timeout on a busy
-    1-vCPU host, so it is kept short — the delta is still measurable, and
-    jiffies are 10ms, so 50ms resolves the percentage. """
-    try:
-        def read() -> tuple[int, int]:
-            with open("/proc/stat", encoding="ascii") as fh:
-                line = fh.readline()
-            parts = [int(p) for p in line.split()[1:9]]
-            idle = parts[3] + parts[4]  # idle + iowait
-            return sum(parts), idle
-
-        total0, idle0 = read()
-        time.sleep(0.05)
-        total1, idle1 = read()
-        dt, di = total1 - total0, idle1 - idle0
-        if dt <= 0:
-            return None
-        return round(max(0.0, min(100.0, (1 - di / dt) * 100)), 1)
-    except Exception:
-        return None
-
-
-def system_stats() -> dict[str, Any]:
-    """CPU/RAM of THIS server process's host. Cached 2s to keep /api/health snappy."""
-    global _STATS_CACHE, _STATS_CACHE_AT
-    with _STATS_LOCK:
-        if time.time() - _STATS_CACHE_AT < 2.0 and _STATS_CACHE:
-            return dict(_STATS_CACHE)
-
-        stats: dict[str, Any] = {
-            "cpuPercent": None,
-            "cores": os.cpu_count(),
-            "memTotalBytes": None,
-            "memUsedBytes": None,
-            "load1": None,
-            "pid": os.getpid(),
-        }
-        try:
-            import psutil  # optional dependency
-
-            vm = psutil.virtual_memory()
-            stats["cpuPercent"] = round(psutil.cpu_percent(interval=0.1), 1)
-            stats["cores"] = psutil.cpu_count() or stats["cores"]
-            stats["memTotalBytes"] = vm.total
-            stats["memUsedBytes"] = vm.total - vm.available
-        except ImportError:
-            # stdlib fallback (Linux): /proc/stat + /proc/meminfo + getloadavg
-            stats["cpuPercent"] = _proc_stat_cpu_percent()
-            if hasattr(os, "getloadavg"):
-                try:
-                    stats["load1"] = round(os.getloadavg()[0], 2)
-                except OSError:
-                    pass
-            try:
-                meminfo = {}
-                with open("/proc/meminfo", encoding="ascii") as fh:
-                    for line in fh:
-                        key, _, val = line.partition(":")
-                        meminfo[key.strip()] = int(val.strip().split()[0]) * 1024
-                if meminfo.get("MemTotal"):
-                    stats["memTotalBytes"] = meminfo["MemTotal"]
-                    stats["memUsedBytes"] = meminfo["MemTotal"] - meminfo.get(
-                        "MemAvailable", 0
-                    )
-            except Exception:
-                pass
-        except Exception as exc:  # psutil present but failed — say unknown
-            logger.warning(f"[hosting] psutil failed: {exc}")
-
-        # final guard: no NaN/inf can ever leak to JSON
-        for k, v in stats.items():
-            if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
-                stats[k] = None
-
-        _STATS_CACHE = stats
-        _STATS_CACHE_AT = time.time()
-        return dict(stats)
-
-
-#: How long a measured tree size stays fresh. Walking every job artefact costs
-#: ~230 ms for ~2,000 files, and /api/health is polled every 10 s by the
-#: dashboard, so measuring on every call would spend a quarter of a core
-#: continuously to print a number that barely moves.
-_TREE_CACHE_TTL_SEC = 60.0
-#: node_modules + .venv are ~1 GB and take ~1.8 s to walk, but they are
-#: installed before the app boots and never change while it runs. Re-walking
-#: them every minute would burn ~3% of a core on a 1-vCPU sandbox to produce a
-#: number that cannot have moved. Six hours outlives the sandbox itself.
-_STATIC_CACHE_TTL_SEC = 6 * 3600.0
-_tree_cache: dict[str, tuple[float, int]] = {}
-_static_cache: tuple[float, int] | None = None
-_tree_cache_lock = threading.Lock()
-
-
-def invalidate_disk_cache() -> None:
-    """Forget the measured tree sizes because a delete just changed them.
-
-    /api/health is polled every few seconds and the reader expects "free" to
-    move the moment a batch is removed. The tree measurement is cached for a
-    minute, so without this the card kept showing the pre-delete number and a
-    Clean up looked like it freed nothing.
-    """
-    with _tree_cache_lock:
-        _tree_cache.clear()
-
-
-def _cached_measure(key: str, roots: tuple[Path, ...], ttl: float) -> int:
-    """Measure `roots`, reusing the last answer while it is still fresh."""
-    now = time.monotonic()
-    with _tree_cache_lock:
-        hit = _tree_cache.get(key)
-        if hit is not None and now - hit[0] < ttl:
-            return hit[1]
-    # Measured OUTSIDE the lock: this is filesystem I/O and holding a lock
-    # across it would block /api/health for everyone while one caller walks
-    # 45,000 files. A concurrent caller just does the same work twice.
-    value = _measure_tree_bytes(roots)
-    with _tree_cache_lock:
-        _tree_cache[key] = (now, value)
-    return value
-
-
-def _static_tree_bytes(root: Path) -> int:
-    """Bytes held by the app's own dependencies, cached for hours."""
-    global _static_cache
-    now = time.monotonic()
-    with _tree_cache_lock:
-        if _static_cache is not None and now - _static_cache[0] < _STATIC_CACHE_TTL_SEC:
-            return _static_cache[1]
-    value = _measure_tree_bytes(
-        (root / "node_modules", root / ".venv", root / "dist", root / ".git")
-    )
-    with _tree_cache_lock:
-        _static_cache = (now, value)
-    return value
-
-
-def _measure_tree_bytes(paths: Iterable[Path]) -> int:
-    """Sum the real size of the directories ClipForge writes media into.
-
-    Deliberately counts the FILES rather than trusting the filesystem's own
-    block accounting. On this sandbox the root is virtiofs and `statvfs`
-    reports 72 MB used while `du` finds 1.2 GB — the kernel's numbers simply
-    do not describe what is on disk, so anything derived from them is a
-    fiction. Walking the tree is the only measurement here that can be
-    believed.
-    """
-    total = 0
-    for root in paths:
-        if not root or not root.exists():
-            continue
-        try:
-            for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
-                for name in filenames:
-                    p = Path(dirpath) / name
-                    try:
-                        # st_size, not st_blocks: this is what the app will
-                        # read and write, and it is the number the user can
-                        # reason about. Symlinks are skipped so a link into the
-                        # tree is not counted twice.
-                        if p.is_symlink():
-                            continue
-                        total += p.stat().st_size
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return total
-
-
-def disk_stats(path: Path | None = None, settings: Settings | None = None) -> dict[str, Any]:
-    """Disk free/total for the volume jobs ACTUALLY write to.
-
-    Measured on the DATA dir, not the repo root. CLIPFORGE_DATA_DIR and
-    CLIPFORGE_STORAGE_DIR exist precisely so every job artefact can be moved
-    onto a larger mounted volume — and reporting the sandbox root in that case
-    describes a filesystem nothing is written to, so the Doctor card would
-    show a full disk that is in fact empty. Unknown stays None rather than a
-    confident wrong number.
-
-    `freeBytes` is the CONSERVATIVE figure, not the filesystem's own: it is
-    the smaller of what statvfs claims and what the filesystem size minus the
-    bytes ClipForge can actually see on disk. On a host whose block accounting
-    is broken the second term is far smaller and correct, and a preflight
-    built on the first term would wave through a job that dies at clip 9 of 10.
-    Under-estimating free space is the safe direction for a gate; it never
-    admits a job that could not have fit.
-    """
-    stats: dict[str, Any] = {
-        "freeBytes": None, "totalBytes": None, "path": None,
-        "treeBytes": None, "statvfsFreeBytes": None,
-        "mediaBytes": None, "depsBytes": None,
-    }
-    target = Path(path) if path is not None else ROOT
-    try:
-        import shutil as _shutil
-
-        # A data dir pointing at a volume that is not mounted must not read as
-        # "0 bytes free" (which refuses every job at submit time) — walk up to
-        # the nearest parent that does exist and report the real filesystem.
-        probe = target
-        while not probe.exists() and probe != probe.parent:
-            probe = probe.parent
-        usage = _shutil.disk_usage(probe)
-        stats["totalBytes"] = usage.total
-        stats["statvfsFreeBytes"] = usage.free
-        stats["path"] = str(probe)
-
-        # Only worth measuring when something can actually be measured.
-        if settings is None:
-            try:
-
-                settings = load_config(quiet=True)
-            except Exception:
-                settings = None
-        if settings is not None:
-            p = settings.app.paths
-            media = _cached_measure(
-                "media:" + str(probe),
-                (p.data_dir, p.outputs_dir, p.downloads_dir, p.uploads_dir),
-                _TREE_CACHE_TTL_SEC,
-            )
-            deps = _static_tree_bytes(ROOT)
-            tree = media + deps
-            stats["treeBytes"] = tree
-            stats["mediaBytes"] = media
-            stats["depsBytes"] = deps
-            # Everything we can SEE on this volume is now counted, so
-            # total-minus-tree really is the space a new job has to fit in.
-            # The min with statvfs keeps the conservative property even on a
-            # host whose accounting is sane but reports a smaller number.
-            visible_free = usage.total - tree
-            stats["freeBytes"] = min(usage.free, max(0, visible_free))
-    except Exception:
-        pass  # unknown stays None
-    return stats
-
-
-def tailnet_ip() -> str | None:
-    """This process's Tailscale IP (100.64.0.0/10), or None when absent."""
-    exe = os.path.expanduser(shutil_which("tailscale") or "")
-    if exe:
-        try:
-            import subprocess
-
-            out = subprocess.run(
-                [exe, "ip", "-4"], capture_output=True, text=True, timeout=4
-            )
-            for line in out.stdout.splitlines():
-                ip = line.strip()
-                if _is_tailnet(ip):
-                    return ip
-        except Exception:
-            pass
-    try:
-        import socket
-
-        import psutil  # optional
-
-        for addrs in psutil.net_if_addrs().values():
-            for a in addrs:
-                if a.family == socket.AF_INET and _is_tailnet(a.address):
-                    return a.address
-    except Exception:
-        pass
-    return None
-
-
-def _is_tailnet(ip: str) -> bool:
-    parts = ip.split(".")
-    if len(parts) != 4 or parts[0] != "100":
-        return False
-    try:
-        return 64 <= int(parts[1]) <= 127
-    except ValueError:
-        return False
-
-
-def shutil_which(name: str) -> str | None:
-    from shutil import which
-
-    return which(name)
-
-
-# --------------------------------------------------------------------------- #
-# remote worker dispatch (freebuff dashboard + home-renderer over Tailscale)
-# --------------------------------------------------------------------------- #
-
-
-class DispatchError(Exception):
-    """Job could not be handed to the remote worker — the UI shows this."""
-
-
-def _auth_headers(settings: Settings) -> dict[str, str]:
-    if settings.hosted.worker_token:
-        return {"Authorization": f"Bearer {settings.hosted.worker_token}"}
-    return {}
-
-
-def remote_probe(settings: Settings) -> dict[str, Any]:
-    """GET {WORKER_URL}/agent/ping → honest online/offline with reason."""
-    if not settings.hosted.worker_url:
-        return {"online": False, "detail": "WORKER_URL not configured"}
-    try:
-        import urllib.request
-
-        req = urllib.request.Request(
-            f"{settings.hosted.worker_url}/agent/ping",
-            headers={**_auth_headers(settings), "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8") or "{}")
-        return {
-            "online": True,
-            "detail": str(data.get("version", "worker-agent")),
-            "queueDepth": int(data.get("queueDepth", 0)),
-        }
-    except Exception as exc:
-        return {"online": False, "detail": f"{type(exc).__name__}: {exc}"}
+        hours = int(self.settings.hosted.retention_hours or 0)
+        if hours <= 0:
+            return 0
+        out = reclaim.sweep_expired(self.store, self.settings.app.paths, hours)
+        return int(out.get("jobsRemoved") or 0)
 
 
 def _multipart_stream(
-    fields: dict[str, str], file_field: str, file_path: Path, chunk: int = 1024 * 1024
+    fields: dict[str, str],
+    file_field: str,
+    file_path: Path,
+    chunk: int = 1 << 20,
 ):
-    """Yield a multipart/form-data body in chunks without loading the file."""
+    """Build a multipart/form-data body as an iterator of bytes.
+
+    ``fields`` are the small text parts (jobId, source…), ``file_path`` is
+    streamed from disk in ``chunk`` slices, so a 60 MB source never has to fit
+    in memory. Returns ``(gen, total_bytes, boundary)``: the caller needs the
+    exact length up front for Content-Length, and urllib will not compute it
+    from an iterator.
+    """
     boundary = f"----clipforge{uuid.uuid4().hex}"
     parts: list[bytes] = []
-    for name, value in fields.items():
+    for key, value in fields.items():
         parts.append(
             (
-                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
-            ).encode("utf-8")
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
         )
     head = b"".join(parts) + (
-        f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
-        f"filename=\"{file_path.name}\"\r\nContent-Type: video/mp4\r\n\r\n"
-    ).encode("utf-8")
-    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{file_field}"; '
+        f'filename="{file_path.name}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode()
+    tail = f"\r\n--{boundary}--\r\n".encode()
     size = file_path.stat().st_size
     total = len(head) + size + len(tail)
 
@@ -506,3 +173,292 @@ def dispatch_job(settings: Settings, job: dict[str, Any], source_path: Path) -> 
 
 
 
+
+
+# --------------------------------------------------------------------------- #
+# system stats (never NaN — None means "unknown", the UI renders it honestly)
+# --------------------------------------------------------------------------- #
+
+_MB = 1024 * 1024
+_STATS_CACHE: dict[str, Any] = {}
+_STATS_CACHE_AT = 0.0
+_STATS_LOCK = threading.Lock()
+_DISK_CACHE: dict[str, Any] = {}
+_DISK_CACHE_AT = 0.0
+_DISK_CACHE_KEY = ""
+
+
+def _proc_stat_cpu_percent() -> float | None:
+    """Sample /proc/stat twice (0.05 s apart) → busy percentage, or None."""
+    try:
+        def read() -> tuple[int, int]:
+            with open("/proc/stat", encoding="ascii") as fh:
+                line = fh.readline()
+            parts = [int(p) for p in line.split()[1:9]]
+            idle = parts[3] + parts[4]  # idle + iowait
+            return sum(parts), idle
+
+        total0, idle0 = read()
+        time.sleep(0.05)
+        total1, idle1 = read()
+        dt, di = total1 - total0, idle1 - idle0
+        if dt <= 0:
+            return None
+        return round(100.0 * (dt - di) / dt, 1)
+    except Exception:
+        return None
+
+
+def system_stats() -> dict[str, Any]:
+    """CPU/RAM for the status card. Unknown is None, never NaN or 0."""
+    global _STATS_CACHE, _STATS_CACHE_AT
+    with _STATS_LOCK:
+        if _STATS_CACHE and time.time() - _STATS_CACHE_AT < 2.0:
+            return dict(_STATS_CACHE)
+        stats: dict[str, Any] = {
+            "cpuPercent": None,
+            "cores": os.cpu_count(),
+            "memTotalBytes": None,
+            "memUsedBytes": None,
+            "load1": None,
+            "pid": os.getpid(),
+        }
+        try:
+            import psutil  # optional dependency
+
+            vm = psutil.virtual_memory()
+            stats["cpuPercent"] = round(psutil.cpu_percent(interval=0.1), 1)
+            stats["cores"] = psutil.cpu_count() or stats["cores"]
+            stats["memTotalBytes"] = vm.total
+            stats["memUsedBytes"] = vm.total - vm.available
+        except ImportError:
+            stats["cpuPercent"] = _proc_stat_cpu_percent()
+            if hasattr(os, "getloadavg"):
+                try:
+                    stats["load1"] = round(os.getloadavg()[0], 2)
+                except OSError:
+                    pass
+            try:
+                meminfo = {}
+                with open("/proc/meminfo", encoding="ascii") as fh:
+                    for line in fh:
+                        key, _, val = line.partition(":")
+                        meminfo[key.strip()] = int(val.strip().split()[0]) * 1024
+                if meminfo.get("MemTotal"):
+                    stats["memTotalBytes"] = meminfo["MemTotal"]
+                    stats["memUsedBytes"] = meminfo["MemTotal"] - meminfo.get(
+                        "MemAvailable", 0
+                    )
+            except Exception:
+                pass
+        except Exception as exc:  # psutil present but failed — say unknown
+            logger.warning(f"[hosting] psutil failed: {exc}")
+
+        for k, v in stats.items():
+            if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+                stats[k] = None
+
+        _STATS_CACHE = stats
+        _STATS_CACHE_AT = time.time()
+        return dict(stats)
+
+
+def mb_from_bytes(value: int | float | None) -> float | None:
+    """Bytes in, MB out — the one conversion (1 MB = 1024*1024 bytes)."""
+    if value is None:
+        return None
+    return round(float(value) / _MB, 1)
+
+
+def _measure_tree_bytes(paths: Iterable[Path]) -> int:
+    total = 0
+    for root in paths:
+        try:
+            if not root.exists():
+                continue
+            for p in root.rglob("*"):
+                try:
+                    if p.is_file() and not p.is_symlink():
+                        total += p.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return total
+
+
+def invalidate_disk_cache() -> None:
+    """Forget the cached tree size (after a delete/offload)."""
+    global _DISK_CACHE, _DISK_CACHE_AT, _DISK_CACHE_KEY
+    _DISK_CACHE = {}
+    _DISK_CACHE_AT = 0.0
+    _DISK_CACHE_KEY = ""
+
+
+def disk_stats(path: Path | None = None, settings: Settings | None = None) -> dict[str, Any]:
+    """Honest free/total space for the filesystem holding `path`.
+
+    ``freeBytes`` is the CONSERVATIVE of two real measurements: what statvfs
+    says is free, and what is actually reachable given the bytes our own tree
+    occupies. It is never more optimistic than the filesystem, and when the
+    filesystem cannot be read it is None (unknown), never 0 — a confident zero
+    refuses every job at submit time.
+    """
+    global _DISK_CACHE, _DISK_CACHE_AT, _DISK_CACHE_KEY
+    probe = Path(path) if path is not None else Path(ROOT)
+    # Walk up to the nearest existing ancestor: a not-yet-created job dir must
+    # report the filesystem it will live on, not "0 free".
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    key = str(probe)
+    with _STATS_LOCK:
+        if _DISK_CACHE and _DISK_CACHE_KEY == key and time.time() - _DISK_CACHE_AT < 5.0:
+            return dict(_DISK_CACHE)
+        out: dict[str, Any] = {
+            "path": str(probe),
+            "totalBytes": None,
+            "freeBytes": None,
+            "statvfsFreeBytes": None,
+            "treeBytes": None,
+            "totalMb": None,
+            "freeMb": None,
+        }
+        try:
+            usage = shutil.disk_usage(str(probe))
+            out["totalBytes"] = int(usage.total)
+            out["statvfsFreeBytes"] = int(usage.free)
+        except Exception as exc:  # noqa: BLE001 - unknown, not zero
+            logger.debug(f"[hosting] disk_usage({probe}) failed: {exc}")
+        try:
+            if settings is not None:
+                p = settings.app.paths
+                roots = [p.data_dir, p.outputs_dir, p.downloads_dir]
+            else:
+                roots = [probe]
+            tree = _measure_tree_bytes(roots)
+            out["treeBytes"] = tree
+            if out["totalBytes"] is not None:
+                out["freeBytes"] = min(
+                    out["statvfsFreeBytes"],
+                    max(0, out["totalBytes"] - tree),
+                )
+            else:
+                out["freeBytes"] = out["statvfsFreeBytes"]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[hosting] tree measurement failed: {exc}")
+            out["freeBytes"] = out["statvfsFreeBytes"]
+        out["totalMb"] = mb_from_bytes(out["totalBytes"])
+        out["freeMb"] = mb_from_bytes(out["freeBytes"])
+        _DISK_CACHE = out
+        _DISK_CACHE_AT = time.time()
+        _DISK_CACHE_KEY = key
+        return dict(out)
+
+
+def wait_for_space(
+    paths: Any,
+    need_bytes: int,
+    *,
+    cap_bytes: int | None = None,
+    timeout_sec: float = 1800.0,
+    poll_sec: float = 5.0,
+    on_wait: Any = None,
+) -> tuple[bool, str]:
+    """Block until the host has room for `need_bytes`, cleaning as it waits.
+
+    Returns ``(ok, reason)``. ``on_wait(reason, free, scratch)`` is called on
+    every tick so the job can report "Waiting for disk space" with the numbers
+    instead of going silent. A caller that never gets space gets ``(False,
+    reason)`` and can decide — it is not an exception here.
+    """
+    data_dir = Path(getattr(paths, "data_dir", paths))
+    deadline = time.time() + timeout_sec
+    last_reason = ""
+    while True:
+        stats = disk_stats(data_dir)
+        free = stats.get("freeBytes")
+        if free is None:
+            return True, "free space unreadable — proceeding"
+        scratch = stats.get("treeBytes") or 0
+        over_cap = bool(cap_bytes) and scratch + int(need_bytes) > int(cap_bytes)
+        if free >= need_bytes and not over_cap:
+            return True, ""
+        last_reason = (
+            f"{mb_from_bytes(free)} MB free, need {mb_from_bytes(need_bytes)} MB"
+            if free < need_bytes
+            else f"scratch would pass the {mb_from_bytes(cap_bytes)} MB cap"
+        )
+        if time.time() >= deadline:
+            return False, last_reason
+        if on_wait is not None:
+            try:
+                on_wait(last_reason, free, scratch)
+            except Exception:  # noqa: BLE001 - a progress hook must not break the wait
+                pass
+        time.sleep(poll_sec)
+
+
+def shutil_which(name: str) -> str | None:
+    return shutil.which(name)
+
+
+class DispatchError(Exception):
+    """A remote worker rejected or could not accept a job."""
+
+
+def _auth_headers(settings: Settings) -> dict[str, str]:
+    token = getattr(settings.hosted, "worker_token", "") or ""
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def tailnet_ip() -> str | None:
+    """This process's Tailscale 100.x address when tailscaled is reachable."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3
+        )
+        if out.returncode == 0:
+            for line in out.stdout.splitlines():
+                ip = line.strip()
+                if _is_tailnet(ip):
+                    return ip
+    except Exception:
+        pass
+    try:
+        for _name, addrs in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = addrs[0]
+            if _is_tailnet(ip):
+                return ip
+    except Exception:
+        pass
+    return None
+
+
+def _is_tailnet(ip: str) -> bool:
+    return ip.startswith("100.") and 64 <= int(ip.split(".")[1] or 0) <= 127
+
+
+def remote_probe(settings: Settings) -> dict[str, Any]:
+    """Is the configured remote worker answering? Never invents success."""
+    url = getattr(settings.hosted, "worker_url", "") or ""
+    if not url:
+        return {"enabled": False, "detail": "no WORKER_URL — running locally"}
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(f"{url}/agent/health", headers=_auth_headers(settings))
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+        return {
+            "enabled": True,
+            "online": True,
+            "detail": str(data.get("version", "worker-agent")),
+        }
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        return {
+            "enabled": True,
+            "online": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }

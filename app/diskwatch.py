@@ -38,8 +38,9 @@ _MB = 1024 * 1024
 SCRATCH_CAP_BYTES = 300 * _MB
 #: How often the sampler reads free space. The brief asks for 5 s samples.
 SAMPLE_SEC = 5.0
-#: A finished batch must give the disk back to within this much of where it
-#: started. Logs, the job JSON and normal filesystem noise live inside it.
+#: How far the WHOLE filesystem's free space may drift before the delta is
+#: worth mentioning. It is a reporting threshold, never a verdict: model
+#: caches, logs, WAL checkpoints and other jobs move it independently.
 RECOVERY_TOLERANCE_BYTES = 50 * _MB
 
 
@@ -171,7 +172,7 @@ class JobLedger:
     def _run(self) -> None:
         while not self._stop.wait(self.sample_sec):
             try:
-                point = self.sample()
+                self.sample()
                 if self.on_sample:
                     self.on_sample(self.report())
             except Exception as exc:  # noqa: BLE001 - never kill a job over stats
@@ -257,23 +258,54 @@ class JobLedger:
             "sampleSec": self.sample_sec,
         }
 
-    def recovered(self) -> tuple[bool, str]:
-        """Did the batch give the disk back? (self-check before "complete")"""
+    def global_delta(self) -> tuple[bool, str]:
+        """INFORMATION ONLY: how the whole filesystem's free space moved.
+
+        This is never a pass/fail gate. The number moves for reasons the batch
+        does not own — the ASR model cache, another job, the log file, the
+        OS page cache, a WAL checkpoint — and on a 2.5 GB box a 93 MB swing is
+        ordinary noise. Using it as a verdict is what failed a batch whose 14
+        verified clips were already in the bucket.
+        """
         now = free_bytes(self.data_dir)
         if self.start_free is None or now is None:
-            return True, "free space unreadable — self-check skipped"
+            return True, "free space unreadable — not measured"
         short = self.start_free - now
-        if short <= RECOVERY_TOLERANCE_BYTES:
-            return True, (
-                f"{mb(now)} MB free, started at {mb(self.start_free)} MB "
-                f"(within {mb(RECOVERY_TOLERANCE_BYTES)} MB)"
-            )
         worst = biggest_file(self.roots)
+        detail = (
+            f"{mb(now)} MB free, started at {mb(self.start_free)} MB "
+            f"(batch delta {mb(short)} MB, informational)"
+        )
+        if worst and short > 0:
+            detail += f"; largest file this batch still holds: {worst[0]} ({mb(worst[1])} MB)"
+        return short <= RECOVERY_TOLERANCE_BYTES, detail
+
+    def recovered(self) -> tuple[bool, str]:
+        """Deprecated alias for :meth:`global_delta` (kept for old callers)."""
+        return self.global_delta()
+
+    def scratch_check(self) -> tuple[bool, str]:
+        """THE hard check: this job's own scratch folder must be gone.
+
+        Deleting it and verifying the delete is the only thing a batch can own
+        end to end. A leftover here is a real bug in cleanup, and it is handled
+        by cleaning it again and warning — never by failing a batch that already
+        produced verified clips.
+        """
+        leftovers: list[tuple[str, int]] = []
+        for root in self.roots:
+            try:
+                if root.exists():
+                    leftovers.append((str(root), tree_bytes(root)))
+            except OSError:
+                continue
+        if not leftovers:
+            return True, "job scratch folder is gone"
+        still = sum(size for _, size in leftovers)
         return False, (
-            f"this batch left {mb(short)} MB on the disk: {mb(now)} MB free, "
-            f"started at {mb(self.start_free)} MB, tolerance "
-            f"{mb(RECOVERY_TOLERANCE_BYTES)} MB"
-            + (f" — largest leftover {worst[0]} ({mb(worst[1])} MB)" if worst else "")
+            "job scratch still present: "
+            + ", ".join(f"{p} ({mb(s)} MB)" for p, s in leftovers)
+            + f" — {mb(still)} MB total"
         )
 
 

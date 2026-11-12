@@ -23,7 +23,7 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
@@ -151,9 +151,6 @@ SIZE_SCALE_STEP = 0.05
 # keep working without a second copy of the data.
 from app.caption_presets import (  # noqa: E402
     CAPTION_PRESETS,
-    DEFAULT_PRESET,
-    PRESET_ORDER,
-    CaptionPreset,
     get_preset,
 )
 
