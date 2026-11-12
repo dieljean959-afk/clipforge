@@ -130,6 +130,22 @@ def _purge_remote_job(job_id: str) -> None:
     pass
 
 
+def _job_list(store=None):
+    """List jobs the same way _active_job_for does (durable records, sorted)."""
+    from app import store as _store
+    return sorted(
+        [j for j in (_store.list_jobs() if store is None else store.list_jobs())],
+        key=lambda j: j.get("createdAt") or 0,
+        reverse=True,
+    )
+
+
+def _describe_job(job):
+    """Normalise one job the way jobstatus.describe() does for the dashboard."""
+    from app import jobstatus
+    return jobstatus.describe(job or {})
+
+
 def _share_backfill() -> dict[str, int]:
     """Give every pre-existing clip a share id, and report what it did.
 
@@ -1442,6 +1458,92 @@ def _srt_time(sec: float) -> str:
     m, rem = divmod(rem, 60_000)
     s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+
+@app.get("/api/jobs")
+def list_jobs() -> dict:
+    """Every durable batch. `GET /api/jobs/{id}` gives one up to the client."""
+    return {"jobs": [_describe_job(j) for j in _job_list()]}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict:
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    return _describe_job(job)
+
+
+@app.post("/api/jobs")
+def create_job(body: CreateJobIn) -> dict:
+    """Create and queue a new batch (idempotent for an identical source+settings).
+
+    This is the API behind the "New batch" button. `POST /api/jobs/upload`
+    stays the only way to ingest a file, and `/api/jobs/{id}/retry` stays the
+    only way to re-run a failed batch.
+    """
+    # One ACTIVE batch per video + settings. A finished/failed batch already has
+    # its rendered clips on disk, so it is not an active run and must not steal
+    # a new submission for the same video.
+    duplicate = _active_job_for(body)
+    if duplicate is not None:
+        logger.info("[jobs] %s is already being processed as %s — returning that job",
+                    source_ident(body.source), duplicate.get("_id"))
+        return {"jobId": duplicate["_id"], "title": duplicate.get("title"),
+                "duration": duplicate.get("durationSec"), "deduped": True}
+
+    job = store.create_job(
+        source_type=body.sourceType,
+        source=body.source,
+        title=body.source.split("?")[0][:80] or "Untitled clip",
+        min_clip_sec=body.minClipSec,
+        max_clip_sec=body.maxClipSec,
+        max_clips=body.maxClips,
+        caption_preset=body.captionPreset,
+        language=body.language,
+        duration=None,
+    )
+    store.append_job_log(job["_id"], f"job created ({body.sourceType}: {body.source[:80]})")
+    store.write_job(job)
+    worker.enqueue(job["_id"])
+    return {"jobId": job["_id"], "title": job.get("title"), "duration": job.get("durationSec")}
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str) -> dict:
+    if not purge.valid_job_id(job_id):
+        raise HTTPException(400, "invalid job id")
+    marked = purge.mark(store, job_id, keep_source=False)
+    if marked is None:
+        raise HTTPException(404, "job not found")
+    return {
+        "deleting": True,
+        "jobId": job_id,
+        "status": purge.STATUS,
+        "keptSource": False,
+    }
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str) -> dict:
+    """Resume a failed batch from its last checkpointed stage + cached clips."""
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.get("stage") != "failed":
+        raise HTTPException(400, "only failed jobs can be retried")
+    dead_end = worker_mod.unrecoverable_reason(store, job)
+    if dead_end is not None:
+        job.update({"stage": "failed", "error": dead_end, "errorDetail": None,
+                    "interrupted": False, "interruptReason": None})
+        store.write_job(job)
+        raise HTTPException(400, dead_end)
+    try:
+        depth = worker.retry_from_cache(job_id)
+    except KeyError:
+        raise HTTPException(404, "job not found") from None
+    return {"queued": True, "queueDepth": depth}
 
 
 @app.get("/api/jobs/{job_id}/captions.txt")
