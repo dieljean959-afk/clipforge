@@ -178,14 +178,26 @@ export function NewJobForm({
             <option value="">Auto — based on video length</option>
             {[3, 5, 8, 10, 15, 20, 25, 30, 40].map((n) => (
               <option key={n} value={n}>
-                Max {n}
+                {n} clips
               </option>
             ))}
           </select>
           <span className="mt-1 block text-[11px] leading-relaxed">
-            Auto scales with length: 5-8 clips under 10 min, 10-15 up to 25 min,
-            15-25 up to an hour, 25-40 beyond. It is a ceiling — the AI only
-            keeps moments that score as real highlights, so you may get fewer.
+            {clipCap ? (
+              <>
+                Exactly {clipCap} clips. AI picks the strongest moments first;
+                if fewer clear the highlight bar, the next-best moments fill
+                the batch and are marked as lower confidence. Only a video too
+                short for {clipCap} separate moments gets fewer.
+              </>
+            ) : (
+              <>
+                Auto scales with length: 5-8 clips under 10 min, 10-15 up to 25
+                min, 15-25 up to an hour, 25-40 beyond. It is a ceiling — the AI
+                only keeps moments that score as real highlights, so you may
+                get fewer.
+              </>
+            )}
           </span>
         </span>
       </label>

@@ -1875,13 +1875,19 @@ def heuristic_candidates(
         if end - start < min(lo, length) * 0.6:
             continue
         # Keep the chosen windows apart so the batch is not five copies of the
-        # same twelve seconds.
-        if any(abs(start - p["start"]) < length * 0.8 for p in picked):
+        # same twelve seconds. The gap is a full window, not 80% of one: two
+        # windows 0.8·length apart still OVERLAP, and the caller's overlap
+        # filter then rejects every second pick — which is how an 8-clip
+        # request on a 5-minute source could only ever yield 7.
+        if any(abs(start - p["start"]) < length for p in picked):
             continue
         picked.append({
             "start": round(start, 2),
             "end": round(end, 2),
-            "score": round(min(1.0, 0.5 + score / 20.0), 3),
+            # Same 0-100 scale as the model's scores, capped below the default
+            # 60 floor: transcript density is a tie-breaker, not a highlight,
+            # and it must never render as "0.6" or masquerade as an 80.
+            "score": round(min(59.0, 45.0 + score * 3.0), 1),
             "title": "Best moment",
             "hook_text": "",
             "hashtags": [],
@@ -1954,6 +1960,109 @@ def clip_hook_title(
     return None
 
 
+def _clashes(cand: dict[str, Any], chosen: list[dict[str, Any]]) -> bool:
+    """True when `cand` overlaps a clip already chosen."""
+    start = float(cand.get("start") or 0.0)
+    end = float(cand.get("end") or 0.0)
+    return any(
+        start < float(k.get("end") or 0.0) - OVERLAP_TOLERANCE_SEC
+        and end > float(k.get("start") or 0.0) + OVERLAP_TOLERANCE_SEC
+        for k in chosen
+    )
+
+
+def _fitted_length(duration_sec: float, target: int, cfg: GeminiConfig) -> float:
+    """Clip length that lets `target` clips fit in `duration_sec`.
+
+    Uses half the fair share so gaps and already-chosen moments do not starve
+    the fill, and never drops below the user's minimum clip length. Long
+    sources still get the usual midpoint length because it caps the result.
+    """
+    lo = float(cfg.min_clip_sec or 15)
+    hi = float(cfg.max_clip_sec or 60)
+    fair = (max(1.0, duration_sec) * 0.5) / max(1, int(target))
+    return max(lo, min((lo + hi) / 2.0, fair))
+
+
+def _fill_to_target(
+    selected: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    words: list[dict],
+    duration_sec: float,
+    cfg: GeminiConfig,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Top a short selection up to the count the user asked for.
+
+    The score floor is what makes a batch honest: it drops the weakest moments
+    instead of padding to a quota. But when the reader has explicitly typed
+    "15 clips", a batch of two is not honesty — it is the request being
+    ignored, and it was the single most common complaint about detection.
+
+    Fill order is deliberate:
+      1. Moments the model DID return but scored below the floor (best first).
+         They are still model-picked, just weaker than a highlight.
+      2. Transcript-density windows, which is the same local ranking the
+         no-candidate fallback already uses. These are marked with
+         `detection_source: transcript_heuristic` so the UI can tell them apart.
+
+    Every added clip is marked `belowFloor` (or keeps its heuristic source), so
+    a filled batch is never passed off as fifteen highlights. Overlap is
+    checked against everything already chosen, so filling cannot produce two
+    cuts of the same moment.
+    """
+    target = max(1, int(cfg.max_clips or 1))
+    need = target - len(selected)
+    if need <= 0:
+        return [], {"below": 0, "heuristic": 0}
+
+    chosen = list(selected)
+    filled: list[dict[str, Any]] = []
+    below = 0
+    heuristic = 0
+
+    pool = [
+        c for c in candidates
+        if not any(c is taken for taken in selected) and not _clashes(c, chosen)
+    ]
+    pool.sort(key=lambda c: -float(c.get("score") or 0.0))
+    for cand in pool:
+        if len(filled) >= need:
+            break
+        filled.append({**cand, "belowFloor": True})
+        chosen.append(cand)
+        below += 1
+
+    if len(filled) < need:
+        # Ask the local ranker for a wide pool: the overlap filter can discard
+        # most of it when the early, high-density windows sit where a chosen
+        # clip already is.
+        spare = max(8, target * 2)
+        # Window length has to FIT the request. A fixed mid-window (37.5 s)
+        # cannot produce eight separate clips from a five-minute source even
+        # though eight are possible, because the windows themselves collide.
+        length = _fitted_length(duration_sec, target, cfg)
+        local = heuristic_candidates(
+            words,
+            duration_sec,
+            replace(
+                cfg,
+                min_clip_sec=int(round(length)),
+                max_clip_sec=int(round(length)),
+                max_clips=spare,
+            ),
+        )
+        for cand in local:
+            if len(filled) >= need:
+                break
+            if _clashes(cand, chosen):
+                continue
+            filled.append({**cand, "belowFloor": True})
+            chosen.append(cand)
+            heuristic += 1
+
+    return filled, {"below": below, "heuristic": heuristic}
+
+
 def detect_clips(
     words: list[dict],
     settings: Settings,
@@ -1962,6 +2071,7 @@ def detect_clips(
     max_clip_sec: int | None = None,
     max_clips: int | None = None,
     duration_sec: float | None = None,
+    exact_count: bool = False,
     on_log=None,
     on_progress=None,
     chunk_cache: ChunkCache | None = None,
@@ -1982,6 +2092,11 @@ def detect_clips(
     `report`, if given, is filled in with how many candidates were detected,
     how many cleared the score floor and how many were kept — the three numbers
     that explain a batch size the user did not choose.
+
+    `exact_count` turns `max_clips` from a ceiling into a quota. When fewer
+    candidates clear the score floor, the shortfall is topped up from the
+    model's own below-floor picks and then transcript density; every added clip
+    is marked `belowFloor`, and the shortfall is logged rather than hidden.
 
     `on_progress(fraction, detail)` is called once per chunk. Without it a
     28-chunk detection run sat on a hardcoded 50% for two and a half minutes,
@@ -2379,9 +2494,10 @@ def detect_clips(
         if report is not None:
             report["duplicateClipsDropped"] = len(dupes)
 
-    # Keep only the strong ones, up to the cap. The cap is a ceiling and the
-    # score floor is the gate: a source with three genuinely good moments
-    # returns three clips whatever its length, and the report says so.
+    # Keep only the strong ones, up to the cap. On an AUTO target the cap is a
+    # ceiling and the score floor is the gate: a source with three genuinely
+    # good moments returns three clips whatever its length, and the report says
+    # so. An explicitly requested count is topped up below.
     top, above_floor, below_floor = clipcount.gate(
         candidates, cfg.max_clips, cfg.min_score
     )
@@ -2392,7 +2508,18 @@ def detect_clips(
         # ended up with an empty batch instead of a mediocre one. Fall back to
         # ranking the transcript locally so the job still delivers clips, and
         # say plainly that the clips were not AI-picked.
-        local = heuristic_candidates(words, duration_sec or 0.0, cfg)
+        local_cfg = cfg
+        if exact_count:
+            # Same fitting as the fill path: "10 clips" from a 6-minute source
+            # needs shorter windows than the default midpoint, or the local
+            # ranker runs out of non-overlapping slots short of the request.
+            fit = _fitted_length(float(duration_sec or 0.0), int(cfg.max_clips or 1), cfg)
+            local_cfg = replace(
+                cfg,
+                min_clip_sec=int(round(fit)),
+                max_clip_sec=int(round(max(fit, float(cfg.min_clip_sec or 15)))),
+            )
+        local = heuristic_candidates(words, duration_sec or 0.0, local_cfg)
         if local:
             logger.warning(
                 f"[llm] {label} produced no usable candidates across "
@@ -2430,10 +2557,37 @@ def detect_clips(
                 f"responding with usable JSON right now."
             )
         raise LlmError(f"{label} returned no valid clip candidates")
+    # An explicitly requested count is a QUOTA, not a ceiling. Filling from the
+    # model's own lower-scored picks first (then transcript density) is what
+    # makes "give me 15" produce 15 on a source where only two moments cleared
+    # the floor — with every added clip marked, so the batch stays honest.
+    filled: list[dict[str, Any]] = []
+    fill_stats = {"below": 0, "heuristic": 0}
+    if exact_count and len(top) < max(1, int(cfg.max_clips or 1)):
+        filled, fill_stats = _fill_to_target(
+            top, candidates, words, float(duration_sec or 0.0), cfg
+        )
+        if filled:
+            added = len(filled)
+            logger.info(
+                f"[llm] requested {cfg.max_clips} clip(s): {len(top)} cleared the score "
+                f"floor, filled {added} more ({fill_stats['below']} lower-scored model "
+                f"pick(s), {fill_stats['heuristic']} transcript-density window(s))"
+            )
+            if on_log:
+                on_log(
+                    f"You asked for {cfg.max_clips} clips: {len(top)} cleared the score "
+                    f"floor, so {added} lower-ranked moment(s) were added to reach "
+                    f"{len(top) + added}. They are marked below the highlight floor."
+                )
+            top = [*top, *filled]
     if report is not None:
         report.update({
             "detected": len(candidates),
             "selected": len(top),
+            "requested": int(cfg.max_clips or 0) if exact_count else None,
+            "filledBelowFloor": fill_stats["below"],
+            "filledHeuristic": fill_stats["heuristic"],
             "cap": cfg_for_report.max_clips,
             "floor": cfg_for_report.min_score,
             "aboveFloor": above_floor,

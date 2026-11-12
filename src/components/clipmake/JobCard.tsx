@@ -578,10 +578,18 @@ export function JobCard({
           {job.clipsAboveScore ?? job.candidatesDetected} scored above{" "}
           {Math.round(job.clipScoreFloor ?? 0)} ·{" "}
           <span className="text-foreground">{job.clipCount ?? 0} rendered</span>
-          {job.clipTarget ? ` (ceiling ${job.clipTarget})` : ""}
-          {job.clipTargetReason ? ` — ${job.clipTargetReason}` : ""}
+          {job.clipTarget
+            ? job.clipTargetReason?.startsWith("you asked for")
+              ? ` (asked for ${job.clipTarget})`
+              : ` (ceiling ${job.clipTarget})`
+            : ""}
+          {job.clipTargetReason && !job.clipTargetReason.startsWith("you asked for")
+            ? ` — ${job.clipTargetReason}`
+            : ""}
           {typeof job.clipsBelowScore === "number" && job.clipsBelowScore > 0
-            ? `. ${job.clipsBelowScore} weaker moment${job.clipsBelowScore === 1 ? "" : "s"} dropped rather than padded in.`
+            ? job.clipTargetReason?.startsWith("you asked for")
+              ? `. ${job.clipsBelowScore} weaker moment${job.clipsBelowScore === 1 ? "" : "s"} kept to reach your count.`
+              : `. ${job.clipsBelowScore} weaker moment${job.clipsBelowScore === 1 ? "" : "s"} dropped rather than padded in.`
             : "."}
         </p>
       )}

@@ -1967,6 +1967,10 @@ class Pipeline:
             min_clip_sec=opts.get("minClipSec"),
             max_clip_sec=opts.get("maxClipSec"),
             max_clips=target,
+            # A number the user picked is a count they expect to receive. The
+            # auto-scaled target is a ceiling and keeps the old "only real
+            # highlights" behaviour; an explicit 5/8/10/15/20 is a quota.
+            exact_count=bool(override),
             # The source length is the last thing detection needs when there is
             # no transcript to work from: it is what lets the pipeline return
             # evenly spaced clips instead of failing a job whose source simply
@@ -1999,6 +2003,19 @@ class Pipeline:
         # Persist one stage artifact per candidate so a retry can tell which clips
         # were already rendered and which still need the export stage.
         ws.write_clips("detect", candidates)
+        # Keep the batch-size explanation truthful on a FRESH run, not only on
+        # a resume: when the count was filled with weaker moments, the job card
+        # must be able to say so instead of pretending every clip cleared the
+        # highlight floor.
+        floor = float(self.settings.gemini.min_score)
+        scores = [float(c.get("score") or 0.0) for c in candidates]
+        self._patch_job(
+            job_id,
+            candidatesDetected=len(candidates),
+            clipsAboveScore=sum(1 for s in scores if s >= floor),
+            clipsBelowScore=sum(1 for s in scores if s < floor),
+            clipScoreFloor=floor,
+        )
         # Record HOW these clips were chosen so the dashboard can say "AI highlights
         # via deepseek" instead of a blank "detectedSource". The provider label is
         # already used a few lines above for the chunk cache and the log line, so this

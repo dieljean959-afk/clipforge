@@ -15,7 +15,10 @@ whole batch) without telling anyone why:
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from app import llm as llm_mod  # noqa: E402
 from app import worker as worker_mod  # noqa: E402
+from app.config import GeminiConfig  # noqa: E402
 from tools._failover_helpers import _settings, _Stub  # noqa: E402
 
 
@@ -42,6 +46,99 @@ def test_a_twenty_minute_source_is_three_windows_not_ten():
     words = _transcript(1200)
     chunks = llm_mod.chunk_words(words)
     assert len(chunks) == 3, f"got {len(chunks)} calls for 20 min"
+
+
+# --- 1b. an explicit clip count is a quota ------------------------------
+
+@pytest.mark.parametrize(
+    "seconds,target",
+    [
+        (300.0, 5), (300.0, 8), (300.0, 10), (300.0, 15),
+        (1237.0, 5), (1237.0, 8), (1237.0, 10), (1237.0, 15), (1237.0, 20),
+    ],
+)
+def test_an_explicit_clip_count_is_always_reached(target, seconds):
+    """Asking for N clips must produce N clips, not "the N best".
+
+    Before this, a 20-minute source whose provider returned two candidates
+    above the score floor produced a two-clip batch — the reader's number was
+    silently reinterpreted as a ceiling. The fill pass must reach the target
+    from the model's below-floor picks and transcript density, never overlap,
+    and never exceed the request.
+    """
+    words = _transcript(seconds)
+    cfg = GeminiConfig(
+        model="test", min_clip_sec=15, max_clip_sec=60,
+        max_clips=target, max_retries=1,
+    )
+    selected = [{"start": 20.0, "end": 50.0, "score": 88.0}]
+    candidates = [
+        selected[0],
+        {"start": 120.0, "end": 150.0, "score": 55.0},
+    ]
+    filled, stats = llm_mod._fill_to_target(selected, candidates, words, seconds, cfg)
+    chosen = [*selected, *filled]
+
+    assert len(chosen) == target, f"{seconds}s source, asked {target}, got {len(chosen)}"
+    assert len(chosen) <= target, "fill must never exceed the request"
+
+    for i, a in enumerate(chosen):
+        for b in chosen[i + 1:]:
+            assert not (
+                a["start"] < b["end"] - llm_mod.OVERLAP_TOLERANCE_SEC
+                and b["start"] < a["end"] - llm_mod.OVERLAP_TOLERANCE_SEC
+            ), f"two chosen clips overlap: {a} / {b}"
+
+    assert stats["below"] + stats["heuristic"] == len(filled)
+
+
+def test_a_source_too_short_for_the_count_returns_what_fits_without_overlap():
+    """20 x 15 s cannot fit in 300 s alongside a selected 30 s clip."""
+    words = _transcript(300)
+    cfg = GeminiConfig(
+        model="test", min_clip_sec=15, max_clip_sec=60,
+        max_clips=20, max_retries=1,
+    )
+    selected = [{"start": 20.0, "end": 50.0, "score": 88.0}]
+    filled, _ = llm_mod._fill_to_target(selected, list(selected), words, 300.0, cfg)
+    chosen = [*selected, *filled]
+    assert len(chosen) < 20, "this source cannot hold 20 separate moments"
+    assert len(chosen) >= 15, "but it must fill as many as genuinely fit"
+    for i, a in enumerate(chosen):
+        for b in chosen[i + 1:]:
+            assert not (
+                a["start"] < b["end"] - llm_mod.OVERLAP_TOLERANCE_SEC
+                and b["start"] < a["end"] - llm_mod.OVERLAP_TOLERANCE_SEC
+            )
+
+
+def test_filled_clips_are_marked_lower_confidence():
+    words = _transcript(1200)
+    cfg = GeminiConfig(
+        model="test", min_clip_sec=15, max_clip_sec=60,
+        max_clips=8, max_retries=1,
+    )
+    selected = [{"start": 20.0, "end": 50.0, "score": 88.0}]
+    filled, _ = llm_mod._fill_to_target(selected, list(selected), words, 1200.0, cfg)
+    assert filled, "expected the fill pass to add clips"
+    assert all(c.get("belowFloor") is True for c in filled)
+    assert all("transcript_heuristic" in str(c.get("detection_source", "")) or c.get("belowFloor") for c in filled)
+
+
+def test_fill_does_nothing_when_the_target_is_already_met():
+    words = _transcript(1200)
+    cfg = GeminiConfig(
+        model="test", min_clip_sec=15, max_clip_sec=60,
+        max_clips=3, max_retries=1,
+    )
+    selected = [
+        {"start": 10.0, "end": 40.0, "score": 90.0},
+        {"start": 100.0, "end": 130.0, "score": 85.0},
+        {"start": 200.0, "end": 230.0, "score": 80.0},
+    ]
+    filled, stats = llm_mod._fill_to_target(selected, list(selected), words, 1200.0, cfg)
+    assert filled == []
+    assert stats == {"below": 0, "heuristic": 0}
 
 
 def test_windows_overlap_and_cover_every_word():
