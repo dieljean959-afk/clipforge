@@ -33,6 +33,8 @@ from starlette.background import BackgroundTask
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app import config
+
 from app import (
     caption_style,
     clipcount,
@@ -520,7 +522,7 @@ def health() -> dict:
         "apiUptimeMs": int((time.time() - HOST_STARTUP_MS) * 1000),
         "nodeVersion": "node " + str(hosting.NODE_VERSION_MAJOR),
         "ffmpeg": hosting.FFMPEG_BIN,
-        "appVersion": hosting._HOSTED_VERSION,
+        "appVersion": config.HOSTED_VERSION,
         "config": {
             "whisper_model": _whisper_model_cached("small"),
             "workerDaemonOnline": worker_mod.status().get("online"),

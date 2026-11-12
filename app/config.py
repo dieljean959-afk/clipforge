@@ -1379,8 +1379,6 @@ class SocialConfig:
 
 
 @dataclass
-#: Hosted release version, e.g. "1.1.0". The dashboard reads this so the
-#: UI can surface the exact build even if the worker/daemon restarts.
  
 class Settings:
     app: AppConfig

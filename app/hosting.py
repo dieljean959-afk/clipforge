@@ -9,17 +9,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from loguru import logger
-
-#: Hosted release version, e.g. "1.1.0".
-HOSTED_VERSION: str = "1.1.0"
-
-#: The major version component of `_HOSTED_VERSION`.
-NODE_VERSION_MAJOR: int = int(HOSTED_VERSION.split(".")[0])
-
 from app.config import ROOT, Settings
 from app.config import load_config
 from app.store import LocalStore
-from app.stages import remove_workspace
+
 class RetentionCleaner:
     """Background thread that deletes finished work after the retention window.
 
