@@ -1447,6 +1447,60 @@ def public_share_page(share_id: str, request: Request) -> HTMLResponse:
     )
 
 
+@app.post("/api/storage/reclaim")
+def storage_reclaim() -> dict:
+    """Push finished batches' media to the bucket and drop the local copies.
+
+    The dashboard's "Free disk" button has always called this route; it was not
+    registered, so the only disk-relief control in the UI answered 404. The
+    work itself lives in `reclaim.reclaim` and is idempotent: files already in
+    the bucket are re-verified, not re-uploaded from scratch, and a running
+    batch is skipped because it is writing those paths right now.
+    """
+    try:
+        return reclaim.reclaim(store, settings.app.paths)
+    except Exception as exc:  # noqa: BLE001 - report the real reason
+        logger.warning(f"[storage] reclaim failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(503, f"could not free local disk: {exc}") from exc
+
+
+@app.get("/api/storage/unused")
+def storage_unused() -> dict:
+    """Bucket media whose batch no longer exists, grouped per batch.
+
+    These batches cannot appear anywhere in the dashboard — their job documents
+    are gone, so the page has nothing to list — yet their source and clips still
+    count against the plan. Reads the bucket once and compares it to the live
+    job ids. Deletes nothing.
+    """
+    try:
+        return reclaim.unused_batches(store)
+    except Exception as exc:  # noqa: BLE001 - the card must render anyway
+        logger.warning(f"[storage] unused scan failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(503, f"could not read the bucket: {exc}") from exc
+
+
+class DeleteUnusedIn(BaseModel):
+    jobIds: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/storage/unused/delete")
+def storage_unused_delete(body: DeleteUnusedIn | None = None) -> dict:
+    """Delete unused bucket media. Ids are re-checked against live jobs.
+
+    The client may name the batches it was shown, or send nothing for "every
+    batch that is unused right now". Either way the server re-derives the live
+    set at delete time, so a stale list can never remove a batch that has just
+    been re-queued.
+    """
+    ids = [str(j) for j in ((body.jobIds if body else []) or [])] or None
+    try:
+        return reclaim.delete_unused_batches(store, ids)
+    except Exception as exc:  # noqa: BLE001 - report, never half-answer
+        logger.warning(f"[storage] unused delete failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(503, f"could not delete unused media: {exc}") from exc
+
+
 @app.get("/api/clips")
 def list_clips(jobId: str = "") -> list[dict]:
     """The clips grid's data source — one job's clips, or one clip by id.
@@ -1883,6 +1937,101 @@ def _srt_time(sec: float) -> str:
 def list_jobs() -> dict:
     """Every durable batch. `GET /api/jobs/{id}` gives one up to the client."""
     return {"jobs": [_describe_job(j) for j in _job_list()]}
+
+
+#: Batches one bulk-delete request may name. The dashboard chunks its list at
+#: this size; the cap keeps a malformed request from turning into a very long
+#: synchronous loop of document writes.
+BULK_DELETE_MAX = 200
+
+
+class BulkDeleteIn(BaseModel):
+    jobIds: list[str] = Field(default_factory=list)
+
+
+@app.get("/api/jobs/junk")
+def junk_jobs() -> dict:
+    """Batches that settled without delivering a single clip.
+
+    The dashboard's "Clean up" dialog has always asked for this route, but the
+    route did not exist: the request fell through to `/api/jobs/{job_id}`, was
+    read as a job called "junk", and answered a fabricated `queued` record.
+    The dialog therefore showed nothing and the button could never work.
+
+    Declared BEFORE `/api/jobs/{job_id}` on purpose: FastAPI matches routes in
+    definition order, and the other way round would keep swallowing it. The
+    classification matches what the dialog can safely delete (`complete` with
+    no clips, or `failed`); a batch that produced clips is never listed here.
+    """
+    out: list[dict[str, Any]] = []
+    for raw in _job_list():
+        job = _describe_job(raw)
+        status = str(job.get("status") or "")
+        try:
+            clips = int(job.get("clipCount") or 0)
+        except (TypeError, ValueError):
+            clips = 0
+        if status != "failed" and not (status == "complete" and clips == 0):
+            continue
+        reason = (
+            str(job.get("error") or job.get("failedStage") or "failed")
+            if status == "failed"
+            else "no clips rendered"
+        )
+        out.append({
+            "_id": job["_id"],
+            "title": job.get("title") or job.get("source") or job["_id"],
+            "stage": job.get("stage") or status,
+            "status": status,
+            "clipCount": clips,
+            "createdAt": job.get("createdAt"),
+            "reason": reason[:120],
+        })
+    return {"jobs": out}
+
+
+@app.post("/api/jobs/bulk-delete")
+def bulk_delete_jobs(body: BulkDeleteIn) -> dict:
+    """Mark many settled batches for deletion in one call.
+
+    This is the mass path behind "Clean up dead batches". `require_finished=True`
+    is the safety that matters: without it a stale dashboard could mark a batch
+    that was still downloading, which cancelled a live worker and removed 35 of
+    its files mid-run. Each id is checked on its own, so one bad entry cannot
+    fail the whole sweep, and anything refused is named in the answer instead of
+    disappearing silently.
+
+    Deletion itself stays asynchronous (app/purge.py): this only marks the
+    batches, exactly like the single DELETE route.
+    """
+    ids = [str(j) for j in (body.jobIds or [])][:BULK_DELETE_MAX]
+    deleted: list[str] = []
+    missing: list[str] = []
+    refused: list[dict[str, str]] = []
+    for job_id in ids:
+        if not purge.valid_job_id(job_id):
+            missing.append(job_id)
+            continue
+        try:
+            marked = purge.mark(store, job_id, require_finished=True)
+        except purge.JobNotDeletable as exc:
+            refused.append({"jobId": job_id, "reason": str(exc)})
+            continue
+        except purge.PurgeError as exc:
+            refused.append({"jobId": job_id, "reason": str(exc)})
+            continue
+        if marked is None:
+            missing.append(job_id)
+        else:
+            deleted.append(job_id)
+    if deleted:
+        logger.info(f"[jobs] bulk delete marked {len(deleted)} batch(es) for purge")
+    return {
+        "deleting": deleted,
+        "deleted": deleted,
+        "missing": missing,
+        "refused": refused,
+    }
 
 
 @app.get("/api/jobs/{job_id}")

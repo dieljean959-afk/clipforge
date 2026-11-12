@@ -956,6 +956,32 @@ export const api = {
       freeBytes: number | null;
       reason: string;
     }>("/api/storage/reclaim", { method: "POST" }),
+  /**
+   * Bucket media whose batch no longer exists anywhere in the dashboard.
+   *
+   * These are the batches a reader cannot see (their job documents are gone),
+   * yet their source and clips still count against the plan. Listing is a
+   * single bucket read; deleting re-checks every id against the live jobs on
+   * the server, so an old list can never remove a batch that has restarted.
+   */
+  unusedStorage: () =>
+    request<{
+      items: Array<{ jobId: string; bytes: number; objects: number; kinds: string[] }>;
+      totalBytes: number;
+      objects: number;
+      enabled: boolean;
+    }>("/api/storage/unused"),
+  deleteUnusedStorage: (jobIds?: string[]) =>
+    request<{
+      deleted: string[];
+      skipped: string[];
+      removed: number;
+      bytesFreed: number;
+    }>("/api/storage/unused/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(jobIds && jobIds.length > 0 ? { jobIds } : {}),
+    }),
   /** Delete the S3/R2 credentials. Region and prefix (non-secret) survive. */
   deleteStorageKeys: () =>
     request<{ enabled: boolean; clientReady: boolean; bucket: string | null; endpoint: string | null; prefix: string; deleteLocal: boolean; linesRemoved: number }>(

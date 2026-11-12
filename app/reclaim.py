@@ -708,6 +708,116 @@ def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
     return out
 
 
+def unused_batches(store: Any) -> dict[str, Any]:
+    """Bucket objects whose batch no longer exists, grouped per batch.
+
+    A batch whose job document is gone cannot appear in the dashboard, so its
+    media is invisible there while still counting against the plan. That is the
+    only thing this returns: `models/` and other non-batch prefixes are never
+    considered, and a batch that is still live is never listed.
+
+    Reading the job list is load-bearing. If the store throws, the answer must
+    be "cannot tell" rather than "everything is unused" — returning an empty
+    list is the safe failure, because the delete path re-checks anyway.
+    """
+    from . import objectstore
+
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled:
+        return {"items": [], "totalBytes": 0, "objects": 0, "enabled": False}
+    try:
+        live = {str(j.get("_id")) for j in _all_jobs(store)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[reclaim] unused scan: cannot read jobs ({exc})")
+        return {"items": [], "totalBytes": 0, "objects": 0, "enabled": True}
+    groups: dict[str, dict[str, Any]] = {}
+    for obj in objectstore.list_prefix():
+        key = str(obj.get("key") or "")
+        parts = key.split("/")
+        if len(parts) < 4 or parts[1] not in {"uploads", "outputs"}:
+            continue
+        job_id = parts[2]
+        if not job_id or job_id in live:
+            continue
+        g = groups.setdefault(job_id, {
+            "jobId": job_id, "bytes": 0, "objects": 0, "kinds": set(),
+        })
+        g["bytes"] += int(obj.get("size") or 0)
+        g["objects"] += 1
+        g["kinds"].add(parts[1])
+    items = sorted(groups.values(), key=lambda g: -g["bytes"])
+    for g in items:
+        g["kinds"] = sorted(g["kinds"])
+    return {
+        "items": items,
+        "totalBytes": sum(g["bytes"] for g in items),
+        "objects": sum(g["objects"] for g in items),
+        "enabled": True,
+    }
+
+
+def delete_unused_batches(store: Any, job_ids: list[str] | None = None) -> dict[str, Any]:
+    """Delete bucket media for batches that are provably not live any more.
+
+    `job_ids=None` means "every unused batch right now". Whatever the caller
+    asked for, the live set is read again HERE and every id is filtered through
+    it, so a list rendered a minute ago cannot delete a batch that has since
+    been re-queued. Returns what was removed and what was skipped, with bytes,
+    so the caller can say exactly how much plan was reclaimed.
+    """
+    from . import objectstore
+
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled:
+        return {"deleted": [], "skipped": [], "removed": 0, "bytesFreed": 0}
+    try:
+        live = {str(j.get("_id")) for j in _all_jobs(store)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[reclaim] unused delete: cannot read jobs ({exc})")
+        return {"deleted": [], "skipped": sorted(job_ids or []), "removed": 0, "bytesFreed": 0}
+
+    wanted = sorted(set(job_ids)) if job_ids else None
+    scan = unused_batches(store)
+    known = {str(g["jobId"]): g for g in scan["items"]}
+    targets = wanted if wanted is not None else sorted(known)
+    deleted: list[str] = []
+    skipped: list[str] = []
+    removed = 0
+    bytes_freed = 0
+    for job_id in targets:
+        if job_id in live:
+            skipped.append(job_id)
+            continue
+        group = known.get(job_id)
+        if group is None:
+            skipped.append(job_id)
+            continue
+        try:
+            gone = delete_job_objects(job_id)
+        except Exception as exc:  # noqa: BLE001 - one batch must not stop the rest
+            logger.warning(f"[reclaim] unused delete {job_id} failed: {exc}")
+            skipped.append(job_id)
+            continue
+        if gone:
+            deleted.append(job_id)
+            removed += gone
+            bytes_freed += int(group["bytes"])
+        else:
+            skipped.append(job_id)
+    if deleted:
+        objectstore.invalidate_usage()
+        logger.info(
+            f"[reclaim] removed {removed} unused object(s) from {len(deleted)} "
+            f"dead batch(es), {round(bytes_freed / _MB, 1)} MB"
+        )
+    return {
+        "deleted": deleted,
+        "skipped": skipped,
+        "removed": removed,
+        "bytesFreed": bytes_freed,
+    }
+
+
 def reconcile(store: Any) -> dict[str, Any]:
     """Bucket vs DB: objects whose batch no longer exists, and batches with none."""
     from . import objectstore

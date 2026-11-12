@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { useHealth } from "@/hooks/use-poll";
 import { SocialAccounts } from "./SocialAccounts";
+import { UnusedMediaRow } from "./UnusedMediaRow";
 import {
   api,
   type DetectionProvider,
@@ -594,6 +595,9 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 {typeof storage.usageBytes === "number" ? "" : ""}
               </StatLine>
             )}
+            {/* Media whose batch is gone: invisible in the batch list, still on
+                the plan. Its own row so the delete is next to the number. */}
+            {storage?.enabled && <UnusedMediaRow onCleaned={() => void refreshHealth()} />}
             {diskFree !== null && (
               <StatLine
                 icon={HardDrive}

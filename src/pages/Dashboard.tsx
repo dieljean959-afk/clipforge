@@ -116,6 +116,12 @@ export default function Dashboard() {
   );
   const doneJobs = allJobs.filter((j) => j.status === "complete");
   const failedJobs = allJobs.filter((j) => j.status === "failed");
+  // Paused batches are settled, but they are not complete and not failed, so
+  // they used to match none of the sections above: a paused batch disappeared
+  // from the page entirely while still holding its files (and its delete
+  // button). Showing them with the active ones is what makes every batch a
+  // reader owns reachable — and deletable — from the dashboard.
+  const pausedJobs = allJobs.filter((j) => j.status === "paused");
 
   // Auto-select the newest completed job without a setState-in-effect:
   // the effective selection is derived, and the user's explicit pick is kept
@@ -426,11 +432,11 @@ export default function Dashboard() {
         </section>
 
         {/* active pipeline */}
-        {(activeJobs.length > 0 || failedJobs.length > 0) && (
+        {(activeJobs.length > 0 || failedJobs.length > 0 || pausedJobs.length > 0) && (
           <section className="mt-10">
             <h2 className="text-lg font-bold tracking-tight">In the forge</h2>
             <div className="mt-3 grid gap-3">
-              {[...activeJobs, ...failedJobs].map((job) => (
+              {[...activeJobs, ...failedJobs, ...pausedJobs].map((job) => (
                 <JobCard
                   key={job._id}
                   job={job}
@@ -563,9 +569,15 @@ export default function Dashboard() {
           {doneJobs.length === 0 ? (
             <div className="mt-3 rounded-xl border border-dashed border-border p-10 text-center">
               <Film className="mx-auto size-8 text-muted-foreground" />
-              <p className="mt-3 text-sm font-medium">No batches yet</p>
+              {/* "No batches yet" beside a running card two sections up read as
+                  if the batch had vanished. Say which kind of empty this is. */}
+              <p className="mt-3 text-sm font-medium">
+                {allJobs.length > 0 ? "No finished batches yet" : "No batches yet"}
+              </p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Queue your first video with the form above.
+                {allJobs.length > 0
+                  ? "Your batches are listed above until their clips are ready."
+                  : "Queue your first video with the form above."}
               </p>
             </div>
           ) : (
