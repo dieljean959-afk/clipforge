@@ -2281,6 +2281,14 @@ class Pipeline:
                 self.store.write_clip(
                     clip_id,
                     {
+                        # The cues have to survive the workspace. They were only
+                        # written to `captions/cues_NNN.json`, and that tree is
+                        # swept (and its media offloaded) when the batch
+                        # finishes — so the burned-in captions were fine but the
+                        # clip's subtitle data and SRT export came back EMPTY.
+                        # The clip document is durable, so it is the right home
+                        # for the exact cues that were burned in.
+                        "captionCues": cues,
                         "needsReview": bool(coverage.get("needsReview")),
                         "captionWarning": warning,
                         "captionCoverage": coverage,
@@ -2465,6 +2473,24 @@ class Pipeline:
                     clip_cues = (
                         ws.read_json("captions", f"cues_{i:03d}.json") or {}
                     ).get("cues") or []
+                    # The workspace is swept when a batch finishes, so a resume,
+                    # re-render or retry used to find no cue/emoji
+                    # sidecar and render the clip WITHOUT its captions — same
+                    # clip, different look. The durable clip document now holds
+                    # exactly what was burned in; fall back to it instead of
+                    # silently dropping the caption layer.
+                    if not clip_cues or not emoji_track:
+                        durable = existing_doc or (self.store.get_clip_doc(clip_id) or {})
+                        if not clip_cues:
+                            clip_cues = durable.get("captionCues") or []
+                        if not emoji_track:
+                            selected = durable.get("emojiTrack") or []
+                            if selected:
+                                emoji_track = {
+                                    "selected": selected,
+                                    "source": durable.get("emojiSource"),
+                                    "tags": durable.get("emojiTags") or [],
+                                }
                     # LOCKED_SPEC §2: the white bar's text, per clip, from the
                     # clip's own content, in the video's language.
                     clip_title, title_source = self._clip_title(job, cut, clip_cues)

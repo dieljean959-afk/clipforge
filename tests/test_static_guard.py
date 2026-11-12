@@ -77,10 +77,14 @@ def test_app_main_imports() -> None:
     # differently from the live API, so the route count is allowed to land
     # slightly outside the old hard-coded bound without meaning anything broke.
     routes = int(proc.stdout.strip().splitlines()[-1])
-    # The jobs CRUD routes added this run (list/create/get/retry/delete = 6),
-    # plus the share-backfill boot code, bring the count above the previous
-    # hard-coded window. Give it a range that accepts the new normal.
-    assert 18 <= routes <= 32, f"unexpected route count {routes}"
+    # The jobs CRUD routes (list/create/get/retry/delete = 6), the batch
+    # maintenance routes (junk list, bulk delete), the storage routes (reclaim,
+    # unused list/delete) and /api/dev/verify-clips bring the count above the
+    # previous window. The bound is a sanity floor/ceiling for "the app still
+    # registers its routes", not an exact inventory: raise it when routes are
+    # intentionally added, never to hide a failed import (the return code above
+    # already covers that).
+    assert 18 <= routes <= 45, f"unexpected route count {routes}"
 
 
 def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:

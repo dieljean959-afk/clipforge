@@ -1464,6 +1464,82 @@ def storage_reclaim() -> dict:
         raise HTTPException(503, f"could not free local disk: {exc}") from exc
 
 
+@app.get("/api/dev/verify-clips")
+def verify_clips(jobId: str) -> dict:
+    """Prove every rendered clip of one batch is really playable.
+
+    The render path already runs `video.verify_output` on each encode, but that
+    proof dies with the process that ran it: a later reboot cannot tell a good
+    clip from a 0-byte remnant. This exposes the SAME check on demand — bytes,
+    a decodable video stream, 1080x1920, a duration that matches the planned
+    cut, and a decoded picture that is not black.
+
+    Media that was offloaded is pulled to a temp file first, so the answer does
+    not depend on what is left on local disk. Read-only: nothing here edits or
+    re-renders a clip.
+    """
+    import shutil
+
+    job = store.get_job(jobId) or {}
+    if not job:
+        raise HTTPException(404, "job not found")
+    clips = store.list_clips(jobId)
+    out: list[dict[str, Any]] = []
+    tmp_root = Path(tempfile.mkdtemp(prefix="verify-", dir=settings.app.paths.data_dir))
+    try:
+        for clip in clips:
+            clip_id = str(clip.get("_id") or "")
+            order = clip.get("order")
+            result: dict[str, Any] = {
+                "clipId": clip_id,
+                "order": order if isinstance(order, int) else None,
+                "title": clip.get("title") or "",
+                "valid": False,
+                "reason": "",
+            }
+            path = Path(str(clip.get("videoPath") or ""))
+            try:
+                if not (path.exists() and path.stat().st_size > 0):
+                    # Offloaded: pull the object back just for the probe, then
+                    # delete the copy. Never leave a second local copy behind.
+                    key = objectstore.key_for_path(path, settings.app.paths.outputs_dir)
+                    local = tmp_root / (path.name or f"{clip_id}.mp4")
+                    if not key or not objectstore.materialize(key, local):
+                        result["reason"] = "media is neither on disk nor in the bucket"
+                        out.append(result)
+                        continue
+                    path = local
+                expected = None
+                try:
+                    start, end = float(clip.get("start") or 0), float(clip.get("end") or 0)
+                    if end > start > 0:
+                        expected = end - start
+                except (TypeError, ValueError):
+                    expected = None
+                meta = video_svc.verify_output(path, expected_sec=expected)
+                result.update({
+                    "valid": True,
+                    "durationSec": round(float(meta.get("duration") or 0.0), 3),
+                    "width": int(meta.get("width") or 0),
+                    "height": int(meta.get("height") or 0),
+                    "bytes": path.stat().st_size,
+                })
+            except video_svc.RenderError as exc:
+                result["reason"] = str(exc)
+            except Exception as exc:  # noqa: BLE001 - one bad clip must not 500 the report
+                result["reason"] = f"{type(exc).__name__}: {exc}"
+            out.append(result)
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+    valid = sum(1 for r in out if r["valid"])
+    return {
+        "total": len(out),
+        "valid": valid,
+        "invalid": len(out) - valid,
+        "clips": out,
+    }
+
+
 @app.get("/api/storage/unused")
 def storage_unused() -> dict:
     """Bucket media whose batch no longer exists, grouped per batch.
@@ -1576,26 +1652,25 @@ def _attach_clip_captions(store: LocalStore, doc: dict[str, Any]) -> list[dict[s
     if cues and cues[0] != "":
         return cues
     job_id = str(doc.get("jobId") or "")
-    if not job_id:
+    order = doc.get("order")
+    if not job_id or not isinstance(order, int):
         return cues
-    clips_dir = store._paths.data_dir / "clips"
-    json_path = clips_dir / f"{doc.get('_id')}.json"
-    if not json_path.exists():
+    # ONLY this clip's own sidecar. The old loop walked cues_000..003 and
+    # returned the first that existed, so after a re-order or a partial
+    # workspace clip 1 could display clip 0's captions — worse than none.
+    cue_path = store._paths.outputs_dir / job_id / "captions" / f"cues_{order:03d}.json"
+    if not cue_path.exists():
         return cues
     try:
-        json.loads(json_path.read_text(encoding="utf-8"))
+        payload = json.loads(cue_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return cues
-    for key in ("cues_000.json", "cues_001.json", "cues_002.json", "cues_003.json"):
-        cue_path = store._paths.outputs_dir / job_id / "captions" / key
-        if cue_path.exists():
-            try:
-                payload = json.loads(cue_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            merged = payload.get("cues") or []
-            if merged and merged[0] != "":
-                return merged
+    owner = payload.get("clipId")
+    if owner and str(owner) != str(doc.get("_id")):
+        return cues
+    merged = payload.get("cues") or []
+    if merged and merged[0] != "":
+        return merged
     return cues
 
 def _list_clips_with_captions(store: LocalStore, job_id: str | None, limit: int = 96, with_cues: bool = False) -> list[dict]:
