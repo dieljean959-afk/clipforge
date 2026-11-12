@@ -132,12 +132,10 @@ def _purge_remote_job(job_id: str) -> None:
 
 def _job_list(store=None):
     """List jobs the same way _active_job_for does (durable records, sorted)."""
-    from app import store as _store
-    return sorted(
-        [j for j in (_store.list_jobs() if store is None else store.list_jobs())],
-        key=lambda j: j.get("createdAt") or 0,
-        reverse=True,
-    )
+    from app.store import LocalStore as _Store
+    store = _Store(settings.app.paths)
+    jobs = store.list_jobs() if store is not None else store.list_jobs()
+    return sorted(jobs, key=lambda j: j.get("createdAt") or 0, reverse=True)
 
 
 def _describe_job(job):
