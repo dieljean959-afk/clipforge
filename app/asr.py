@@ -30,6 +30,8 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from app import objectstore
+
 from app import hostlimits
 
 ENGINE_WHISPERX = "whisperx"
@@ -675,21 +677,55 @@ def model_status(settings: Any) -> dict[str, Any]:
     needle = model.replace("/", "--")
     paths: list[str] = []
     size = 0
+    files_present = False
+    local_present = False
+    bucket_present = False
+
+    def _measure(base: Path) -> None:
+        """Add one model directory to the report (path + real bytes)."""
+        nonlocal size, files_present
+        paths.append(str(base))
+        for f in base.rglob("*"):
+            try:
+                if f.is_file():
+                    size += f.stat().st_size
+            except OSError:
+                continue
+        if all((base / f).is_file() and (base / f).stat().st_size > 0 for f in ("model.bin", "config.json")):
+            files_present = True
+
     try:
+        # The app keeps its streamed copies in <data>/models/<name>; the HF hub
+        # cache is only where a one-off download lands. Checking the hub alone
+        # reported "0 files / 0 MB" while 464 MB of `small` sat on disk.
+        from app import modelstore  # noqa: PLC0415
+
+        local = modelstore.local_dir(model)
+        if local.is_dir():
+            _measure(local)
+            local_present = files_present
         base = Path(cache)
         if base.is_dir():
             for p in base.glob("models--*"):
-                if needle not in p.name:
-                    continue
-                paths.append(str(p))
-                for f in p.rglob("*"):
-                    try:
-                        if f.is_file():
-                            size += f.stat().st_size
-                    except OSError:
-                        continue
-    except Exception:
-        pass
+                if needle in p.name:
+                    _measure(p)
+    except Exception as exc:  # noqa: BLE001 - a status card never breaks the API
+        logger.warning(f"[asr] model paths could not be measured: {exc}")
+
+    # Between batches the weights are deliberately released (they are 464 MB and
+    # only needed while decoding); the durable copy is in the bucket. Reporting
+    # "0 files" for a model that loads in 1 s would be a lie, so ask the bucket.
+    if not files_present:
+        try:
+            from app import modelstore  # noqa: PLC0415
+
+            meta = objectstore.head(modelstore._key(model, "model.bin")) or {}
+            bucket_present = bool(meta.get("size"))
+        except Exception as exc:  # noqa: BLE001 - offline is not a status error
+            logger.info(f"[asr] bucket copy of {model} not checked: {exc}")
+        files_present = bucket_present
+        if bucket_present:
+            size = int(meta.get("size") or 0)
     threads = None
     try:
         from app import hostlimits as _hl  # noqa: PLC0415
@@ -700,6 +736,8 @@ def model_status(settings: Any) -> dict[str, Any]:
     label = f"{model} ({compute})"
     if note:
         label = f"{model} ({compute}) — configured {configured} does not fit this host"
+    if not local_present and bucket_present:
+        label += " · weights in bucket, restored for each batch"
     return {
         "engine": engine,
         "engineDetail": detail,
@@ -712,7 +750,10 @@ def model_status(settings: Any) -> dict[str, Any]:
         "label": label,
         "cacheDir": cache,
         "paths": paths,
-        "filesPresent": bool(paths),
+        "filesPresent": files_present,
+        "localPresent": local_present,
+        "bucketPresent": bucket_present,
+        "idle": not local_present,
         "sizeMb": round(size / 1048576, 1) if size else 0,
         "batchSize": batch_size(settings),
         "threads": threads,
