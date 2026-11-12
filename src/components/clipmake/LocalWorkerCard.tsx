@@ -198,7 +198,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
     }
   };
 
-  const workerOnline = health?.worker.online === true;
+  const workerOnline = health?.worker?.online === true;
   const warmup = health?.warmup;
   const warming = warmup?.stage === "loading_model";
   const warmupFailed = warmup?.stage === "failed";

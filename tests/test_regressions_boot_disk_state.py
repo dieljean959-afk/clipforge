@@ -208,15 +208,30 @@ def test_a_hung_phase_times_out_instead_of_blocking():
     assert phase.status == "timeout"
 
 
-def test_health_route_touches_no_disk(monkeypatch):
-    """`/api/health` must answer from memory: 1-2 ms, never a disk walk."""
-    import inspect
+def test_health_request_path_does_no_network_or_subprocess(monkeypatch):
+    """The card's expensive blocks belong to the background snapshot.
 
-    from app import main
+    `/api/health` may read cached stats, but it must never spawn a process, head
+    the bucket or start a model load on the request path — that is what made the
+    route time out while the API was alive.
+    """
+    import subprocess
+    import time
 
-    src = inspect.getsource(main.health)
-    for forbidden in ("disk_stats", "list_jobs", "objectstore", "status()"):
-        assert forbidden not in src, f"health() must not call {forbidden}"
+    from app import main, objectstore
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("health() spawned a subprocess")))
+    monkeypatch.setattr(objectstore, "head", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("health() called the bucket")))
+    monkeypatch.setattr(objectstore, "status", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("health() called the bucket")))
+
+    t0 = time.perf_counter()
+    payload = main.health()
+    took_ms = (time.perf_counter() - t0) * 1000
+    assert payload["ok"] is True
+    assert took_ms < 100, f"health() took {took_ms:.0f} ms"
 
 
 def test_instance_lock_refuses_a_live_holder_and_reclaims_a_dead_one(tmp_path):
@@ -272,3 +287,33 @@ def test_clip_media_never_recurses_into_the_share_copy(tmp_path, monkeypatch):
     assert main._clip_media(clip, "video") == master
     assert main._clip_media(clip, "thumb") is None
     assert main._master_path(clip) == master
+
+
+def test_health_returns_the_dashboard_contract(monkeypatch):
+    """"Cannot read properties of undefined (reading 'online')" was /api/health
+    answering a liveness stub while the card read `health.worker.online`."""
+    from app import main
+
+    payload = main.health()
+    # Required by HealthDto: a missing `worker` is a client-side crash.
+    assert isinstance(payload["worker"], dict)
+    assert "online" in payload["worker"]
+    assert "queueDepth" in payload["worker"]
+    for key in ("version", "warmup", "whisper", "system", "disk", "limits",
+                "tools", "cookies", "storage", "dispatch", "detection"):
+        assert key in payload, f"/api/health must carry {key!r}"
+    assert payload["whisper"]["model"], "the card shows the RESOLVED model"
+    assert payload["ok"] is True
+    assert isinstance(payload["degraded"], list)
+
+
+def test_health_never_raises_when_the_worker_is_gone(monkeypatch):
+    from app import main
+
+    def boom():
+        raise RuntimeError("worker RPC down")
+
+    monkeypatch.setattr(main.worker, "status", boom)
+    payload = main.health()
+    assert payload["worker"]["online"] is False
+    assert "worker" in payload["degraded"]

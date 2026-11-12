@@ -41,6 +41,7 @@ from app import (
     reclaim,
     share_video,
     sharelink,
+    worker,
 )
 
 
@@ -48,8 +49,6 @@ from uuid import uuid4 as uuid4
 
 
 SHARE_CACHE_CONTROL = "public, max-age=31536000, immutable"
-MEDIA_CACHE_CONTROL = "public, max-age=300"
-_SHARE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 MEDIA_CACHE_CONTROL = "public, max-age=300"
 _MIN_FREE_BYTES = 100 * 1024 * 1024  # 100 MB free-disk floor before HTTP 507
 
@@ -382,6 +381,10 @@ def _boot_phases(b: Boot) -> None:
 
     b.run_phase("update_checks", _updates, timeout_ms=15_000)
 
+    # The dashboard polls /api/health; its expensive blocks live in this thread
+    # so the route itself stays a memory read.
+    b.run_phase("health_snapshot", start_health_snapshot, timeout_ms=5_000)
+
     b.extra.append  # keep the phase list stable for /api/status
     clear_failure(data_dir)
 
@@ -541,6 +544,286 @@ def _do_warmup() -> None:
 
 warmup = {}
 
+
+# --------------------------------------------------------------------------- #
+# /api/health — the dashboard's whole status card, answered from a snapshot
+# --------------------------------------------------------------------------- #
+#
+# The card reads one document: worker, warmup, whisper, asr, system, disk,
+# tools, cookies, storage, dispatch, detection, limits, tailnet. Building all of
+# that on every poll is exactly what made this route time out (a version probe
+# per poll, a bucket HEAD, a tailnet round-trip). The EXPENSIVE blocks are
+# rebuilt every 2.5 s in one background thread; the request merges the snapshot
+# with the cheap live bits (worker state, warmup, uptime) and returns in ~1 ms.
+# A block that fails is named in `degraded` — never silently dropped.
+
+_HEALTH_SLOW: dict[str, Any] = {}
+_HEALTH_SLOW_AT = 0.0
+_HEALTH_LOCK = threading.Lock()
+_HEALTH_THREAD: threading.Thread | None = None
+HEALTH_SNAPSHOT_SEC = 2.5
+_MODEL_BLOCK: dict[str, Any] | None = None
+_MODEL_BLOCK_AT = 0.0
+_DISPATCH_BLOCK: dict[str, Any] | None = None
+_DISPATCH_BLOCK_AT = 0.0
+_STORAGE_BLOCK: dict[str, Any] | None = None
+_STORAGE_BLOCK_AT = 0.0
+
+
+def _tool_version(cmd: list[str] | None) -> str | None:
+    """First line of `<tool> -version`, or None. Bounded, background only."""
+    if not cmd:
+        return None
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=3, check=False
+        )
+        text = (out.stdout or out.stderr or "").strip().splitlines()
+        return text[0].strip() if text else None
+    except Exception:  # noqa: BLE001 - "could not run it" is the honest answer
+        return None
+
+
+def _cookie_state() -> dict[str, Any] | None:
+    """The yt-dlp cookie jar: present?, age, count, and whether it is stale."""
+    import shutil
+
+    raw = str(getattr(settings.download, "cookies_file", "") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        return {"present": False, "path": str(path), "problem": "file not found"}
+    try:
+        age_days = round((time.time() - path.stat().st_mtime) / 86400, 1)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return {"present": False, "path": str(path), "problem": str(exc)}
+    cookies = [ln for ln in lines if ln and not ln.startswith("#")]
+    session_only = all(ln.split("\t")[-1].strip() == "" for ln in cookies) if cookies else False
+    stale = age_days > 30
+    return {
+        "present": True,
+        "path": str(path),
+        "ageDays": age_days,
+        "cookieCount": len(cookies),
+        "sessionOnly": session_only,
+        "stale": stale,
+        "problem": (
+            "cookies are session-only or older than 30 days; YouTube will bounce"
+            if stale or session_only
+            else None
+        ),
+        "shutilWhich": shutil.which("yt-dlp"),
+    }
+
+
+def _key_status(provider: str, names: tuple[str, ...]) -> dict[str, Any]:
+    """Presence only. A key's VALUE is never read into a response or a log."""
+    present = next((n for n in names if os.environ.get(n)), None)
+    return {
+        "provider": provider,
+        "keyLoaded": bool(present),
+        "source": present or "env",
+        "problem": None if present else f"set one of {', '.join(names)}",
+        "lastCheckedAt": int(time.time() * 1000),
+        "aliases": list(names),
+    }
+
+
+def _build_health_slow() -> dict[str, Any]:
+    """Every expensive block of the status card. Called off the request path."""
+    import shutil
+
+    from app import asr as _asr
+    from app import hosting as _hosting
+
+    out: dict[str, Any] = {}
+    degraded: list[str] = []
+    since = time.time()
+
+    def block(name: str, fn) -> None:
+        try:
+            out[name] = fn()
+        except Exception as exc:  # noqa: BLE001 - one broken block, not a broken card
+            degraded.append(name)
+            out[name] = None
+            logger.warning(f"[health] {name} block failed: {type(exc).__name__}: {exc}")
+
+    def _tools() -> dict[str, Any]:
+        ffmpeg = shutil.which("ffmpeg")
+        ffprobe = shutil.which("ffprobe")
+        try:
+            import yt_dlp  # noqa: PLC0415
+
+            ytdlp = getattr(getattr(yt_dlp, "version", None), "__version__", None)
+        except Exception:  # noqa: BLE001 - not installed is a real state
+            ytdlp = None
+        return {
+            "ffmpeg": _tool_version([ffmpeg, "-version"]) if ffmpeg else None,
+            "ffprobe": ffprobe,
+            "ytdlp": ytdlp,
+            "mediaDir": str(settings.app.paths.outputs_dir),
+            "downloadsDir": str(settings.app.paths.downloads_dir),
+        }
+
+    def _model() -> dict[str, Any]:
+        info = _asr.model_status(settings)
+        engine = _asr.status(settings)
+        return {
+            "whisper": {
+                "model": info.get("model"),
+                "compute": info.get("computeType"),
+                "configuredModel": info.get("configured"),
+                "engine": info.get("engine"),
+                "isWhisperx": str(info.get("engine") or "").endswith("whisperx"),
+                "label": info.get("label"),
+                "sizeMb": info.get("sizeMb"),
+                "localPresent": info.get("localPresent"),
+                "bucketPresent": info.get("bucketPresent"),
+                "mismatch": info.get("mismatch"),
+            },
+            "asr": {
+                "engine": getattr(engine, "engine", None),
+                "model": info.get("model"),
+                "device": info.get("device"),
+                "detail": info.get("label"),
+                "estimatedRtf": getattr(engine, "estimated_rtf", None),
+                "rtfSource": getattr(engine, "rtf_source", None),
+            },
+        }
+
+    def _storage() -> dict[str, Any]:
+        info = objectstore.status()
+        ready = bool(info.get("clientReady"))
+        return {
+            "enabled": bool(info.get("enabled")),
+            "clientReady": ready,
+            "bucket": info.get("bucket"),
+            "endpoint": info.get("endpoint"),
+            "prefix": info.get("prefix"),
+            "deleteLocal": info.get("deleteLocal"),
+            "verified": ready,
+            "ready": ready,
+            "hasAccessKey": info.get("hasAccessKey"),
+            "hasSecret": info.get("hasSecret"),
+            "accessKeyFirst4": info.get("accessKeyFirst4"),
+            "usageBytes": info.get("usageBytes"),
+            "usageGb": round((info.get("usageBytes") or 0) / 1024**3, 2),
+            "budgetGb": round((info.get("budgetBytes") or 0) / 1024**3, 2),
+            "usedPercent": (
+                round(100 * (info.get("usageBytes") or 0) / info["budgetBytes"], 1)
+                if info.get("budgetBytes")
+                else None
+            ),
+        }
+
+    def _dispatch() -> dict[str, Any]:
+        probe = _hosting.remote_probe(settings)
+        return {
+            "enabled": bool(getattr(settings.hosted, "worker_url", "")),
+            "workerUrl": getattr(settings.hosted, "worker_url", "") or None,
+            "remote": probe,
+            "detail": probe.get("detail"),
+        }
+
+    block("system", _hosting.system_stats)
+
+    def _disk() -> dict[str, Any]:
+        return _hosting.disk_stats(settings.app.paths.data_dir, settings)
+
+    block("disk", _disk)
+    block("tools", _tools)
+    # The model block heads the bucket when no local copy exists, so it runs on
+    # its own slower clock (30 s) instead of every 2.5 s snapshot.
+    def _model_cached() -> dict[str, Any]:
+        global _MODEL_BLOCK, _MODEL_BLOCK_AT
+        if _MODEL_BLOCK and (time.time() - _MODEL_BLOCK_AT) < 30:
+            return _MODEL_BLOCK
+        value = _model()
+        _MODEL_BLOCK, _MODEL_BLOCK_AT = value, time.time()
+        return value
+
+    block("model", _model_cached)
+    block("cookies", _cookie_state)
+    def _storage_cached() -> dict[str, Any]:
+        global _STORAGE_BLOCK, _STORAGE_BLOCK_AT
+        if _STORAGE_BLOCK and (time.time() - _STORAGE_BLOCK_AT) < 20:
+            return _STORAGE_BLOCK
+        value = _storage()
+        _STORAGE_BLOCK, _STORAGE_BLOCK_AT = value, time.time()
+        return value
+
+    block("storage", _storage_cached)
+    # A remote worker probe is a tailnet round-trip; once every 20 s is plenty.
+    def _dispatch_cached() -> dict[str, Any]:
+        global _DISPATCH_BLOCK, _DISPATCH_BLOCK_AT
+        if _DISPATCH_BLOCK and (time.time() - _DISPATCH_BLOCK_AT) < 20:
+            return _DISPATCH_BLOCK
+        value = _dispatch()
+        _DISPATCH_BLOCK, _DISPATCH_BLOCK_AT = value, time.time()
+        return value
+
+    block("dispatch", _dispatch_cached)
+    block("tailnetIp", _hosting.tailnet_ip)
+
+    out["llm"] = _key_status("gemini", ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
+    out["llmGroq"] = _key_status("groq", ("GROQ_API_KEY",))
+    out["llmNvidia"] = _key_status("nvidia", ("NVIDIA_API_KEY",))
+    out["llmDeepSeek"] = _key_status("deepseek", ("DEEPSEEK_API_KEY",))
+    out["detection"] = {
+        "provider": "deepseek",
+        "label": "DeepSeek",
+        "tradeoff": "hosted, fast; the key is the only thing sent to the provider",
+        "options": [],
+        "models": {},
+        "transcriptionEngine": "faster-whisper",
+        "ready": out["llmDeepSeek"]["keyLoaded"],
+        "detail": None if out["llmDeepSeek"]["keyLoaded"] else "DEEPSEEK_API_KEY is not set",
+    }
+    out["degraded"] = degraded
+    out["builtAt"] = int(time.time() * 1000)
+    out["buildMs"] = int((time.time() - since) * 1000)
+    return out
+
+
+def _health_slow_loop() -> None:
+    """Refresh the snapshot forever, one block at a time, never raising."""
+    global _HEALTH_SLOW_AT
+    while True:
+        try:
+            snap = _build_health_slow()
+            with _HEALTH_LOCK:
+                _HEALTH_SLOW.clear()
+                _HEALTH_SLOW.update(snap)
+                _HEALTH_SLOW_AT = time.time()
+        except Exception as exc:  # noqa: BLE001 - the loop must survive anything
+            logger.warning(f"[health] snapshot refresh failed: {type(exc).__name__}: {exc}")
+        time.sleep(HEALTH_SNAPSHOT_SEC)
+
+
+def start_health_snapshot() -> dict[str, Any]:
+    """Start the refresher once (idempotent: the boot phase may re-run)."""
+    global _HEALTH_THREAD
+    with _HEALTH_LOCK:
+        if _HEALTH_THREAD is not None and _HEALTH_THREAD.is_alive():
+            return {"detail": "already running"}
+        # One synchronous build in the BOOT phase (budgeted), so the first
+        # dashboard poll sees a complete card instead of nulls.
+        try:
+            first = _build_health_slow()
+            _HEALTH_SLOW.clear()
+            _HEALTH_SLOW.update(first)
+            globals()["_HEALTH_SLOW_AT"] = time.time()
+        except Exception as exc:  # noqa: BLE001 - the thread will retry
+            logger.warning(f"[health] first snapshot failed: {type(exc).__name__}: {exc}")
+        th = threading.Thread(target=_health_slow_loop, name="health-snapshot", daemon=True)
+        _HEALTH_THREAD = th
+        th.start()
+    return {"detail": f"refresh every {HEALTH_SNAPSHOT_SEC}s"}
+
 # `_boot()` runs at import time, so an exception escaping it makes the MODULE
 # unimportable: uvicorn prints a traceback and exits before it ever binds
 # 127.0.0.1:8000. Nothing in the browser can distinguish that from "the host is
@@ -612,18 +895,81 @@ async def _resource_monitor() -> None:
 
 @app.get("/api/health")
 def health() -> dict:
-    """Liveness + the boot timeline. Answers from MEMORY, in microseconds.
+    """The dashboard's status card, answered from a prebuilt snapshot (~1 ms).
 
-    This route is polled by the dashboard and by the supervisor. It must never
-    walk the disk, call the worker daemon, hash a key or touch the bucket: each
-    of those has been a cause of a "dead-looking" API while the process was
-    perfectly alive. The measured dependency report lives in /api/status.
+    It must never walk the disk, spawn ffmpeg, call the worker daemon over a
+    socket, head the bucket or round-trip to the tailnet on the REQUEST path:
+    each of those has made the card "dead-looking" while the API was fine. The
+    expensive blocks are refreshed every 2.5 s by `_health_slow_loop`; this
+    merges them with the cheap live bits and never omits `worker`.
     """
     boot.mark_health()
-    return {
+    with _HEALTH_LOCK:
+        slow = dict(_HEALTH_SLOW)
+        age_ms = int((time.time() - _HEALTH_SLOW_AT) * 1000) if _HEALTH_SLOW_AT else None
+
+    degraded = list(slow.get("degraded") or [])
+    try:
+        worker_state = worker.status()
+    except Exception as exc:  # noqa: BLE001 - the card must render anyway
+        degraded.append("worker")
+        logger.warning(f"[health] worker status failed: {type(exc).__name__}: {exc}")
+        worker_state = {
+            "online": False,
+            "currentJob": None,
+            "queueDepth": 0,
+            "activeCount": 0,
+        }
+
+    # Both live in the snapshot: the first disk read walks the data dir (60 ms
+    # here), and a request-path walk is exactly what made this route time out.
+    system = slow.get("system")
+    disk = slow.get("disk")
+
+    # warmup is the memory-only readiness record from _do_warmup(); map it onto
+    # the stage/detail pair the card renders.
+    current = str(warmup.get("current") or "")
+    if warmup.get("reason"):
+        warm_stage, warm_detail = "failed", str(warmup["reason"])
+    elif current == "already downloaded":
+        warm_stage, warm_detail = "ready", current
+    else:
+        warm_stage, warm_detail = "skipped", current or "unknown"
+
+    payload: dict[str, Any] = {
         "ok": True,
+        "degraded": sorted(set(degraded)),
+        "version": getattr(config, "HOSTED_VERSION", "1.1.0"),
         "apiUptimeMs": int(time.time() * 1000 - HOST_STARTUP_MS),
         "appVersion": getattr(config, "HOSTED_VERSION", "1.1.0"),
+        "worker": worker_state,
+        "stallTimeoutSec": worker_state.get("stallTimeoutSec"),
+        "warmup": {"stage": warm_stage, "detail": warm_detail,
+                   "configured": warmup.get("configured"),
+                   "model": warmup.get("model"), "note": warmup.get("note")},
+        "system": system,
+        "disk": disk,
+        "limits": {
+            "maxSourceMin": int(getattr(settings.hosted, "max_source_min", 120)),
+            "retentionHours": int(getattr(settings.hosted, "retention_hours", 0)),
+        },
+        "whisper": (slow.get("model") or {}).get("whisper") or {
+            "model": settings.whisper.model,
+            "compute": settings.whisper.compute_type,
+            "configuredModel": settings.whisper.model,
+        },
+        "asr": (slow.get("model") or {}).get("asr"),
+        "tools": slow.get("tools"),
+        "cookies": slow.get("cookies"),
+        "storage": slow.get("storage"),
+        "dispatch": slow.get("dispatch"),
+        "detection": slow.get("detection"),
+        "llm": slow.get("llm"),
+        "llmGroq": slow.get("llmGroq"),
+        "llmNvidia": slow.get("llmNvidia"),
+        "llmDeepSeek": slow.get("llmDeepSeek"),
+        "tailnetIp": slow.get("tailnetIp"),
+        "snapshotAgeMs": age_ms,
         "boot": {
             "listenMs": boot.listen_ms,
             "firstHealthMs": boot.first_health_ms,
@@ -631,6 +977,7 @@ def health() -> dict:
             "failedPhases": boot.summary()["failedPhases"],
         },
     }
+    return payload
 
 
 @app.get("/api/status")

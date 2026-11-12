@@ -43,6 +43,7 @@ PHASES = (
     "log_hygiene",
     "invariants",
     "update_checks",
+    "health_snapshot",
 )
 
 

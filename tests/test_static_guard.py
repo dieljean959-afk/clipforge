@@ -144,9 +144,18 @@ def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:
     )
     assert decision_line, output[-2000:]
     decision = json.loads(decision_line[len("DECISION "):])
-    assert decision["stage"] in {"queued", "failed"}, decision
+    # The stale pre-crash stage must never survive recovery: that was the whole
+    # bug (a job sitting at "exporting" forever). After that, either recovery
+    # re-queued it, a worker claimed it and restarted it from its checkpoint,
+    # or it failed with a reason.
+    assert decision["stage"] != "exporting", decision
     assert decision.get("interrupted") in (True, False), decision
-    if decision["stage"] == "queued":
-        assert decision["interrupted"] is True, "a resumed job must be marked interrupted"
-    else:
+    claimed = decision["stage"] in {"fetch", "transcribe", "detect", "reframe",
+                                    "render", "queued", "running"}
+    if decision["stage"] == "failed":
         assert decision.get("error"), "a failed resume must carry a reason"
+    else:
+        assert claimed, decision
+        assert decision["interrupted"] is True, (
+            "a resumed/claimed job must be marked interrupted"
+        )
