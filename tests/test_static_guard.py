@@ -121,7 +121,11 @@ def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:
         "j = m.store.get_job('deadbeefdeadbeefdeadbeefdeadbeef') or {};"
         "print('DECISION ' + json.dumps({k: j.get(k) for k in "
         "('stage','interrupted','interruptReason','error','errorKind')}));"
-        "print('boot-ok')"
+        "print('boot-ok');"
+        # The phase list spawns the real worker daemon (start_new_session), so
+        # it outlived the test process and leaked one `app.workerd` per run.
+        "m.worker._stop_daemon();"
+        "m.worker.stop()"
     )
     proc = subprocess.run(
         [sys.executable, "-c", script],

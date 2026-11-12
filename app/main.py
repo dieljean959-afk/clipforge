@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
@@ -51,6 +51,9 @@ from uuid import uuid4 as uuid4
 SHARE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 MEDIA_CACHE_CONTROL = "public, max-age=300"
 _MIN_FREE_BYTES = 100 * 1024 * 1024  # 100 MB free-disk floor before HTTP 507
+#: Container types the pipeline can probe and render. Anything else is refused
+#: at the door instead of failing later inside ffmpeg.
+ALLOWED_UPLOAD_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 
 
 _STARTED_AT = time.time()
@@ -308,6 +311,16 @@ def _boot_phases(b: Boot) -> None:
             remote=_purge_remote_job,
         )
         return {"detail": "delete purge started"}
+
+    def _reap_daemons() -> dict:
+        from app import workerd as _wd
+
+        # A daemon whose lock file is gone cannot be adopted or stopped; it only
+        # holds RAM. Reap before spawning anything else.
+        killed = _wd.reap_stray_daemons(settings, keep_pids={worker.daemon_pid} if worker.daemon_pid else set())
+        return {"detail": f"{len(killed)} stray daemon(s) reaped"}
+
+    b.run_phase("worker_dedupe", _reap_daemons, timeout_ms=10_000)
 
     b.run_phase("worker_purge", _purge, timeout_ms=5_000)
 
@@ -1913,6 +1926,94 @@ def create_job(body: CreateJobIn) -> dict:
     store.write_job(job)
     worker.enqueue(job["_id"])
     return {"jobId": job["_id"], "title": job.get("title"), "duration": job.get("durationSec")}
+
+
+@app.post("/api/jobs/upload")
+async def upload_job(
+    file: UploadFile = File(...),
+    captionPreset: str | None = Form(None),
+    maxClips: int | None = Form(None),
+    minClipSec: int | None = Form(None),
+    maxClipSec: int | None = Form(None),
+    language: str = Form("auto"),
+) -> dict:
+    """Create a batch from an ATTACHED file.
+
+    The dashboard posts multipart here (api.uploadJob); the route had been lost,
+    so every "Attach file" submission answered 404 while URL batches worked.
+    The bytes are streamed to `<uploads>/<job_id>/source.<ext>` — the exact path
+    the pipeline's upload branch resolves — with the same size cap as a URL
+    source, and a failed write never leaves a half job behind.
+    """
+    import shutil
+
+    name = Path(file.filename or "").name
+    # No suffix is NOT "probably mp4": guessing stored /etc/hostname as an .mp4
+    # and failed minutes later inside ffmpeg instead of at the door.
+    ext = Path(name).suffix.lower()
+    if ext not in ALLOWED_UPLOAD_EXT:
+        raise HTTPException(
+            415,
+            f"unsupported file type {ext or '(none)'!r}; use one of "
+            f"{', '.join(sorted(ALLOWED_UPLOAD_EXT))}",
+        )
+
+    cap_mb = int(getattr(settings.hosted, "max_source_mb", 0) or 0)
+    cap = cap_mb * 1024 * 1024 if cap_mb > 0 else 0
+
+    # Stream to a STAGING directory first, and only create the job document
+    # once the bytes are complete. Persisting the job first meant a slow or
+    # aborted upload left a queued job with no file, which boot recovery would
+    # adopt and fail ("the uploaded file is no longer on the server").
+    staging = settings.app.paths.uploads_dir / f".staging-{uuid4().hex}"
+    staged = staging / f"source{ext}"
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        written = 0
+        with staged.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if cap and written > cap:
+                    raise HTTPException(413, f"file exceeds the {cap_mb} MB limit")
+                out.write(chunk)
+        if written == 0:
+            raise HTTPException(400, "the uploaded file is empty")
+    except HTTPException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    except Exception as exc:  # noqa: BLE001 - report write failures honestly
+        shutil.rmtree(staging, ignore_errors=True)
+        raise HTTPException(500, f"could not store the upload: {type(exc).__name__}: {exc}") from exc
+
+    job = store.create_job(
+        source_type="upload",
+        source=name,
+        title=Path(name).stem[:80] or "Untitled clip",
+        min_clip_sec=minClipSec,
+        max_clip_sec=maxClipSec,
+        max_clips=maxClips,
+        caption_preset=captionPreset,
+        language=language or "auto",
+        duration=None,
+    )
+    job_id = job["_id"]
+    dest_dir = settings.app.paths.uploads_dir / job_id
+    try:
+        dest_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging.rename(dest_dir)
+    except OSError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        store.delete_job(job_id)
+        raise HTTPException(500, f"could not place the upload: {exc}") from exc
+
+    job["bytes"] = written
+    store.append_job_log(job_id, f"upload stored: {name} ({written} bytes)")
+    store.write_job(job)
+    worker.enqueue(job_id)
+    return {"jobId": job_id, "file": name, "bytes": written}
 
 
 @app.delete("/api/jobs/{job_id}")

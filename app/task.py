@@ -397,7 +397,10 @@ class Pipeline:
         now_ms = int(time.time() * 1000)
         job.update({
             "stage": "failed",
+            "status": "failed",
             "failedStage": stage,
+            "isTerminal": True,
+            "finishedAt": now_ms,
             "error": message,
             "errorDetail": detail,
             # The worker re-queues only this kind, after cleaning up orphans.
@@ -2717,12 +2720,45 @@ class Pipeline:
         if job is None:
             return
         now_ms = int(time.time() * 1000)
+        # A terminal verdict must be written ONCE, here: the document used to be
+        # saved as stage=complete with isTerminal=False and finishedAt=None, so
+        # anything reading the raw job (not the API's normaliser) saw a batch
+        # that never stopped running.
+        counts = {"done": 0, "failed": 0, "pending": 0, "total": 0}
+        clips: list[dict[str, Any]] = list(job.get("clips") or [])
+        try:
+            from app import invariants
+
+            clips = sorted(
+                self.store.list_clip_docs(job_id),
+                key=lambda c: (int(c.get("order") or 0), str(c.get("_id"))),
+            )
+            for c in clips:
+                state = str(c.get("renderState") or "pending")
+                key = "done" if state == "done" else ("failed" if state == "failed" else "pending")
+                counts[key] += 1
+            counts["total"] = len(clips)
+            detail = (
+                invariants.partial_success_label(counts)
+                if counts["failed"]
+                else "All clips ready"
+            )
+        except Exception as exc:  # noqa: BLE001 - completion must still complete
+            logger.warning(f"[job {job_id}] clip tally skipped: {exc}")
+            detail = "All clips ready"
         job.update({
             "stage": "complete",
             "status": "complete",
             "progress": 100.0,
-            "progressDetail": "All clips ready",
+            "progressDetail": detail,
             "completedAt": now_ms,
+            "finishedAt": now_ms,
+            "isTerminal": True,
+            "clipCount": counts["done"],
+            "renderFailures": counts["failed"],
+            # The projection lives in the same document as the counts, so a
+            # reader never sees "1 clip ready" with an empty clips list.
+            "clips": clips,
             "lastProgressAt": now_ms,
             "stageStatus": self._stage_status,
             # A completion must not inherit the flag left by an interrupted

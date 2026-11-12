@@ -172,10 +172,14 @@ def test_list_clip_docs_uses_the_job_not_a_stale_summary(env):
     assert len(store.list_clip_docs(job["_id"])) == 15
 
 
-def test_job_state_transitions_are_atomic(tmp_path):
-    """save_job is tmp+rename: a reader never sees a half-written document."""
-    settings = load_config(quiet=True)
-    store = LocalStore(settings.app.paths)
+def test_job_state_transitions_are_atomic(env):
+    """save_job is tmp+rename: a reader never sees a half-written document.
+
+    Uses the per-test data dir. It used to call load_config() and write into the
+    LIVE data/jobs, which left a fake "xxxxxxxx…" job that the running worker
+    kept adopting and running instead of the user's batch.
+    """
+    settings, store = env
     path = store._job_path("x" * 32)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"_id": "x" * 32, "stage": "queued", "big": "y" * 200_000}
@@ -317,3 +321,98 @@ def test_health_never_raises_when_the_worker_is_gone(monkeypatch):
     payload = main.health()
     assert payload["worker"]["online"] is False
     assert "worker" in payload["degraded"]
+
+
+# --------------------------------------------------------------------------- #
+# job movement (round 2)
+# --------------------------------------------------------------------------- #
+
+def test_finish_writes_one_terminal_document(env, monkeypatch):
+    """"stage=complete" used to be saved with isTerminal=False and clips=[].
+
+    The API's normaliser hid it, but the document is what boot recovery, the
+    dedupe check and the clip list read.
+    """
+    from app import task
+
+    settings, store = env
+    job = _job(store, stage="exporting", progress=99, isTerminal=False)
+    _clip(store, job["_id"], 0)
+    _clip(store, job["_id"], 1)
+
+    class FakeRunner:
+        _stage_status: dict = {}
+
+        def __init__(self):
+            self.store = store
+            self.settings = settings
+
+        def _log(self, *a, **k):
+            return None
+
+    task.Pipeline._finish(FakeRunner(), job["_id"], 12.0)  # type: ignore[arg-type]
+    doc = store.get_job(job["_id"])
+    assert doc["stage"] == "complete"
+    assert doc["isTerminal"] is True
+    assert doc["finishedAt"], "a terminal document must carry its finish stamp"
+    assert doc["clipCount"] == 2
+    assert len(doc["clips"]) == 2, "the projection and the counts land together"
+    assert doc["progressDetail"] == "All clips ready"
+
+
+def test_upload_route_rejects_an_unknown_container(env, monkeypatch):
+    """An extension-less file used to be stored as `.mp4` and failed in ffmpeg."""
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    settings, store = env
+    # `app.main` is a module-level singleton bound to the LIVE data dir; point it
+    # at this test's tmp store before exercising the route.
+    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setattr(main, "store", store)
+    client = TestClient(main.app)
+    res = client.post(
+        "/api/jobs/upload",
+        files={"file": ("hostname", b"abc", "application/octet-stream")},
+    )
+    assert res.status_code == 415
+    assert "unsupported file type" in res.json()["detail"]
+
+
+def test_upload_route_stores_the_file_where_the_pipeline_looks(env, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    settings, store = env
+    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(main.worker, "enqueue", lambda job_id: 1)
+    client = TestClient(main.app)
+    res = client.post(
+        "/api/jobs/upload",
+        files={"file": ("tiny.mp4", b"\x00\x00\x00\x18ftypmp42", "video/mp4")},
+        data={"language": "en"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    job = store.get_job(body["jobId"])
+    assert job["sourceType"] == "upload" and job["stage"] == "queued"
+    expected = settings.app.paths.uploads_dir / body["jobId"] / "source.mp4"
+    assert expected.is_file() and expected.stat().st_size == body["bytes"]
+
+
+def test_daemon_lock_is_exclusive(tmp_path):
+    """A second daemon must not be able to claim the same data dir."""
+    from app import workerd
+
+    lock = tmp_path / "work" / "worker.lock"
+    first = workerd.acquire_single_instance_lock(lock)
+    assert first is not None
+    try:
+        assert workerd.acquire_single_instance_lock(lock) is None
+    finally:
+        import os
+
+        os.close(first)

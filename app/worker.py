@@ -912,16 +912,20 @@ class InProcessWorker:
         # `FAILED: The worker exited cleanly (code 0)`. The child's own
         # completion line is the proof of work; a 0 exit plus that line is a
         # success, whatever the document looked like a millisecond earlier.
-        if self.completed_despite_exit_code(rc, job.get("logs")):
+        if stage not in {"complete", "failed", "paused"} and self.completed_despite_exit_code(rc, job.get("logs")):
             done_ms = int(time.time() * 1000)
 
             def _mark_complete(j: dict[str, Any]) -> None:
                 j.update({
                     "stage": "complete", "status": "complete", "progress": 100.0,
                     "completedAt": j.get("completedAt") or done_ms,
+                    "finishedAt": j.get("finishedAt") or done_ms,
+                    "isTerminal": True,
                     "interrupted": False, "interruptReason": None,
                     "error": None, "errorDetail": None,
                 })
+                if not j.get("progressDetail"):
+                    j["progressDetail"] = "All clips ready"
 
             self.store.update_job(job_id, _mark_complete)
             logger.warning(

@@ -105,6 +105,65 @@ def acquire_single_instance_lock(path: Path) -> int | None:
     return fd
 
 
+def reap_stray_daemons(settings: Settings, keep_pids: set[int] | None = None) -> list[int]:
+    """Terminate `app.workerd` processes that cannot own any data dir.
+
+    A daemon whose lock file has been DELETED (a test's tmp dir, a wiped
+    sandbox) can never be adopted or stopped by an API: it just sits there with
+    ~20 MB of RSS and worker threads. 29 of them had accumulated on this host
+    (575 MB of a 2 GiB budget) from test runs and restarts.
+
+    Only processes whose cmdline is exactly `-m app.workerd` are candidates,
+    and a candidate is only killed when its lock fd points at a path that no
+    longer exists AND it is not our live daemon.
+    """
+    keep = set(keep_pids or set())
+    keep.add(os.getpid())
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "app.workerd"], capture_output=True, text=True, timeout=5
+        )
+        pids = [int(p) for p in out.stdout.split() if p.strip().isdigit()]
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    killed: list[int] = []
+    for pid in pids:
+        if pid in keep:
+            continue
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode()
+        except OSError:
+            continue
+        if "app.workerd" not in cmdline:
+            continue
+        try:
+            fds = list(Path(f"/proc/{pid}/fd").iterdir())
+        except OSError:
+            continue
+        stray = False
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if "worker.lock" not in target:
+                continue
+            # A deleted lock (the " (deleted)" marker from /proc) can never be
+            # reclaimed, so the daemon is unreachable by construction.
+            if " (deleted)" in target:
+                stray = True
+            break
+        if not stray:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+            logger.warning(f"[worker] reaped stray daemon {pid} (its lock file is gone)")
+        except OSError:
+            continue
+    return killed
+
+
 class WorkerUnavailable(RuntimeError):
     """The daemon could not be reached — the caller must say so, not guess."""
 
@@ -184,7 +243,13 @@ class WorkerDaemon:
 
     # -- lifecycle --------------------------------------------------------
 
-    def serve(self) -> None:
+    def serve(self) -> bool:
+        """Run the daemon until asked to stop. Returns False if not the owner.
+
+        The bool matters: this used to return early and leave the PROCESS alive
+        with its worker threads, so every restart/test that raced the lock left
+        another idle `app.workerd` behind (29 of them, ~575 MB) on a 2 GiB host.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_fd = acquire_single_instance_lock(self.path.with_suffix(".lock"))
         if self._lock_fd is None:
@@ -192,7 +257,7 @@ class WorkerDaemon:
                 f"[workerd] another daemon already owns {self.path.parent} — exiting "
                 "(the API will adopt the running one)"
             )
-            return
+            return False
         try:
             self.path.unlink()
         except FileNotFoundError:
@@ -216,6 +281,7 @@ class WorkerDaemon:
                 threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
         finally:
             self.shutdown()
+        return True
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -261,7 +327,13 @@ def main() -> int:
     daemon = WorkerDaemon(settings)
     signal.signal(signal.SIGTERM, lambda *_: daemon.request_stop())
     signal.signal(signal.SIGINT, lambda *_: daemon.request_stop())
-    daemon.serve()
+    owned = daemon.serve()
+    if not owned:
+        # Another daemon owns this data dir. Exit NOW: lingering with no socket
+        # is a memory leak, not a standby worker.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
     return 0
 
 

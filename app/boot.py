@@ -33,6 +33,7 @@ from loguru import logger
 #: Phase names are stable strings: the dashboard and doctor.py key off them.
 PHASES = (
     "worker_spawn",
+    "worker_dedupe",
     "worker_purge",
     "reclaim_watchdog",
     "crash_sweep",

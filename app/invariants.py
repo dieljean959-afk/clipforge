@@ -160,6 +160,10 @@ def _needs_repair(job: dict[str, Any], counts: dict[str, int]) -> list[str]:
     # after the failed clip is repaired the batch is simply complete.
     if job.get("warning") and counts["failed"] == 0:
         broken.append("stale-partial-success-warning")
+    # A terminal batch without a finish stamp reads as "still running" to every
+    # consumer that sorts or times batches by when they ended.
+    if stage in ("complete", "failed", "cancelled") and not job.get("finishedAt"):
+        broken.append("terminal-without-finishedAt")
     return broken
 
 
@@ -196,6 +200,7 @@ def repair_job(
     job["stage"] = "complete" if done else ("failed" if failed else str(job.get("stage") or "complete"))
     job["status"] = job["stage"]
     job["completedAt"] = job.get("completedAt") or now
+    job["finishedAt"] = job.get("finishedAt") or job["completedAt"]
     job["interrupted"] = False
     job["errorKind"] = None
     job["failedStage"] = None
@@ -243,6 +248,27 @@ def check_and_repair(
                 clips = _clips_for(store, job)
             counts = _counts(clips)
             broken = _needs_repair(job, counts)
+            if not broken and counts["total"] == 0:
+                # A batch that died before any clip existed (bad fetch, bad
+                # source) still needs the terminal flag written: the document
+                # said stage=failed, isTerminal=false, so every raw reader
+                # (not just the API normaliser) saw a job that would never end.
+                stage = str(job.get("stage") or "")
+                if stage in ("complete", "failed", "cancelled") and not job.get("isTerminal"):
+                    job["isTerminal"] = True
+                    job["finishedAt"] = job.get("finishedAt") or job.get("completedAt") or int(time.time() * 1000)
+                    store.write_job(job)
+                    repaired += 1
+                    details.append({
+                        "jobId": job.get("_id"),
+                        "broken": ["terminal-stage-without-terminal-flag"],
+                        "counts": counts,
+                    })
+                    logger.warning(
+                        f"[invariants] job {job.get('_id')} repaired "
+                        f"(terminal stage {stage!r} was not marked terminal)"
+                    )
+                continue
             if not broken:
                 continue
             jid = str(job.get("_id") or "")
