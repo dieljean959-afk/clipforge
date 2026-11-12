@@ -1289,10 +1289,9 @@ class Pipeline:
             url = job.get("source")
             if not url:
                 raise download.DownloadError(
-                    "This batch has no video URL recorded. The job document is missing "
-                    "the `source` field the pipeline needs to fetch the video. Re-create "
-                    "the batch from the dashboard — 'Paste YouTube/TikTok URL' or 'Attach "
-                    "file' — rather than re-running an incomplete job."
+                    "This batch has no video URL recorded — create one from the dashboard "
+                    "with 'Paste YouTube/TikTok URL' or 'Attach file'. The job is now "
+                    "stopped; your finished clips are on the bucket and downloadable."
                 )
             if not isinstance(url, str) or not url.strip():
                 raise download.DownloadError(
