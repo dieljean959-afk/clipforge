@@ -711,6 +711,9 @@ def _build_health_slow() -> dict[str, Any]:
     def _storage() -> dict[str, Any]:
         info = objectstore.status()
         ready = bool(info.get("clientReady"))
+        # A listing that failed is UNKNOWN, not zero. Rendering an error as
+        # "0.00 GB" made a healthy, model-filled bucket look wiped.
+        unknown = bool(info.get("usageUnknown"))
         return {
             "enabled": bool(info.get("enabled")),
             "clientReady": ready,
@@ -723,11 +726,13 @@ def _build_health_slow() -> dict[str, Any]:
             "hasAccessKey": info.get("hasAccessKey"),
             "hasSecret": info.get("hasSecret"),
             "accessKeyFirst4": info.get("accessKeyFirst4"),
-            "usageBytes": info.get("usageBytes"),
-            "usageGb": round((info.get("usageBytes") or 0) / 1024**3, 2),
+            "usageBytes": None if unknown else info.get("usageBytes"),
+            "usageGb": None if unknown else round((info.get("usageBytes") or 0) / 1024**3, 2),
             "budgetGb": round((info.get("budgetBytes") or 0) / 1024**3, 2),
             "usedPercent": (
-                round(100 * (info.get("usageBytes") or 0) / info["budgetBytes"], 1)
+                None
+                if unknown
+                else round(100 * (info.get("usageBytes") or 0) / info["budgetBytes"], 1)
                 if info.get("budgetBytes")
                 else None
             ),

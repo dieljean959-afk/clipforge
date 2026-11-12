@@ -428,8 +428,16 @@ def verify(key: str, expect_bytes: int, cfg: ObjectStoreConfig | None = None) ->
 
 def list_prefix(
     prefix: str | None = None, cfg: ObjectStoreConfig | None = None,
+    *, strict: bool = False,
 ) -> list[dict[str, Any]]:
-    """Every object under a prefix, with sizes. Paginated: 1000 per call."""
+    """Every object under a prefix, with sizes. Paginated: 1000 per call.
+
+    `strict=True` re-raises a listing failure instead of returning the partial
+    list. Callers that report a NUMBER use it: a transient S3 error used to
+    come back as "0 objects, 0 bytes" and the dashboard rendered that as
+    "Bucket 0.00 GB", which reads exactly like the bucket being wiped. A
+    failure is not an empty bucket.
+    """
     cfg = cfg or config_from_env()
     s3 = client(cfg)
     if s3 is None or not cfg.enabled:
@@ -456,6 +464,8 @@ def list_prefix(
                 break
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[objectstore] listing {prefix} failed: {exc}")
+        if strict:
+            raise
         return out
     return out
 
@@ -480,7 +490,26 @@ def usage(cfg: ObjectStoreConfig | None = None, *, refresh: bool = False) -> dic
                 "budgetBytes": cfg.budget_bytes,
                 "cached": True,
             }
-        objs = list_prefix(cfg=cfg)
+        try:
+            objs = list_prefix(cfg=cfg, strict=True)
+        except Exception as exc:  # noqa: BLE001 - a failed listing is not "empty"
+            logger.warning(f"[objectstore] usage listing failed: {exc}")
+            if _usage_cache is not None:
+                # Keep the last real reading rather than flashing a false zero.
+                return {
+                    "bytes": _usage_cache[1],
+                    "objects": _usage_cache[2],
+                    "budgetBytes": cfg.budget_bytes,
+                    "cached": True,
+                    "stale": True,
+                }
+            return {
+                "bytes": 0,
+                "objects": 0,
+                "budgetBytes": cfg.budget_bytes,
+                "cached": False,
+                "unknown": True,
+            }
         total = sum(o["size"] for o in objs)
         _usage_cache = (now, total, len(objs))
     return {"bytes": total, "objects": len(objs), "budgetBytes": cfg.budget_bytes, "cached": False}
@@ -722,5 +751,7 @@ def status() -> dict[str, Any]:
         "secretLength": len(cfg.secret_key),
         "usageBytes": use["bytes"],
         "usageObjects": use["objects"],
+        "usageUnknown": bool(use.get("unknown")),
+        "usageStale": bool(use.get("stale")),
         "budgetBytes": cfg.budget_bytes,
     }
