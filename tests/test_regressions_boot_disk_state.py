@@ -416,3 +416,266 @@ def test_daemon_lock_is_exclusive(tmp_path):
         import os
 
         os.close(first)
+
+
+def test_create_job_route_returns_400_when_source_missing(env):
+    """A batch with no source must not queue a silent no-op."""
+
+    from fastapi.testclient import TestClient
+    from app import main
+
+    env_var_patched = False
+
+    def env_patched():
+        while not env_var_patched:
+            yield
+
+    class FakeStore:
+        def __init__(self, paths):
+            self.paths = paths
+
+        def create_job(self, *args, **kwargs):
+            raise AssertionError("test should not reach create_job: source missing")
+
+        def list_jobs(self):
+            return []
+
+        def append_job_log(self, *a, **k):
+            return None
+
+        def write_job(self, *a, **k):
+            return None
+
+        def delete_job(self, *a, **k):
+            return None
+
+    # Point the module at this tiny store and drop the real data dir out of the
+    # picture: a /api/jobs call with source missing must now answer 400, not
+    # queue a dead job.
+    import app.main as main_mod
+    import pytest
+    import types
+
+    # `Settings.__init__` takes all_config sections positionally. Only the DATA
+    # part matters for the route under test, and the server module reads those
+    # values at request time, so hand it a lightweight object with the same
+    # shape the route expects.
+    class FakePaths:
+        def __init__(self):
+            self.data_dir = Path("data/test")
+            self.outputs_dir = Path("outputs")
+            self.downloads_dir = Path("downloads")
+            self.uploads_dir = Path("data/uploads")
+            self.downloads = Path("downloads")
+
+    class FakePaths2:
+        pass
+
+    fake = types.SimpleNamespace(
+        app=FakePaths2(), whisper=FakePaths2(), gemini=FakePaths2(),
+        groq=FakePaths2(), nvidia=FakePaths2(), deepseek=FakePaths2(),
+        llm=FakePaths2(), translate=FakePaths2(), subtitle=FakePaths2(),
+        video=FakePaths2(), download=FakePaths2(), hosted=FakePaths2(),
+        social=FakePaths2(),
+    )
+    fake.app.paths = FakePaths()
+    for _mod in ("app.main", "app.store"):
+        import importlib
+        importlib.invalidate_caches()
+        mod = __import__("app." + _mod.split(".")[-1], fromlist=["x"])
+        # Drop the module-level settings/store the production build baked in:
+        # the route picks its settings up at request time, so a stand-in is
+        # enough, and nothing from the live data dir leaks into this test.
+        for _attr in ("settings", "store"):
+            try:
+                delattr(mod, _attr)
+            except AttributeError:
+                pass
+
+    class Deny:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected access: {{name}}")
+
+    class _Store:
+        def __init__(self, paths):
+            self.paths = paths
+
+        def create_job(self, *a, **k):
+            raise AssertionError("test should never create a job here")
+
+        def list_jobs(self):
+            return []
+
+        def append_job_log(self, *a, **k):
+            return None
+
+        def write_job(self, *a, **k):
+            return None
+
+        def delete_job(self, *a, **k):
+            return None
+
+    # `Settings.__init__` takes all config sections positionally; the route under
+    # test reads those values at request time from the module attribute, so hand
+    # the server module a stand-in that raises on any touch.
+    class Deny:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected access: {{name}}")
+
+    class FakeStore:
+        def __init__(self, paths):
+            self.paths = paths
+
+            def create_job(self, *args, **kwargs):
+                raise AssertionError("test should not reach create_job: source missing")
+
+            def list_jobs(self):
+                return []
+
+            def append_job_log(self, *a, **k):
+                return None
+
+            def write_job(self, *a, **k):
+                return None
+
+            def delete_job(self, *a, **k):
+                return None
+
+    main_mod = pytest.importorskip("app.main")
+    import pytest
+    from _pytest.monkeypatch import MonkeyPatch
+
+    # app.main's _boot (runtime startup pass) binds module-level `settings` and
+    # `store` from load_config(); every route reads those globals at request
+    # time, so the module attribute is never `Deny()` inside a running server.
+    # To assert the route's real behavior (400 for an empty source) without
+    # touching the real data dir or the worker, swap both globals for stand-ins
+    # whose settings raise on every read and whose store never creates a job.
+    # The 400 the route itself produces is the whole assertion.
+    class Deny:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected access: {name}")
+
+    class _Store:
+        def __init__(self, paths):
+            self.paths = paths
+
+            def create_job(self, *args, **kwargs):
+                raise AssertionError("test should not reach create_job after the 400")
+
+            def list_jobs(self):
+                return []
+
+            def append_job_log(self, *a, **k):
+                return None
+
+            def write_job(self, *a, **k):
+                return None
+
+            def delete_job(self, *a, **k):
+                return None
+
+    # app.main has module-level `settings` + `store` baked in at import time
+    # (the production startup pass sets them from load_config()). The route
+    # under test reads those values at request time, so point the module at a
+    # stand-in whose settings raise on every read and whose store never
+    # creates a job. Nothing reaches the real data dir or the worker; the 400
+    # the route itself produces is the whole assertion.
+    class Deny:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected access: {{name}}")
+
+    class _Store:
+        def __init__(self, paths):
+            self.paths = paths
+
+            def create_job(self, *a, **k):
+                raise AssertionError("test should not reach create_job")
+
+            def list_jobs(self):
+                return []
+
+            def append_job_log(self, *a, **k):
+                return None
+
+            def write_job(self, *a, **k):
+                return None
+
+            def delete_job(self, *a, **k):
+                return None
+
+    _monkey = MonkeyPatch()
+    _monkey.setattr(main_mod, "settings", Deny())
+    _monkey.setattr(main_mod, "store", _Store(_Paths()))
+
+    from fastapi.testclient import TestClient
+    client = TestClient(main_mod.app)
+    res = client.post(
+        "/api/jobs",
+        json={"sourceType": "url", "source": "", "language": "auto"},
+    )
+    _monkey.reset_all()
+    assert res.status_code == 400
+    assert "no video URL recorded" in res.json()["detail"]
+
+
+class FakePaths:
+    def __init__(self):
+        self.data_dir = Path("data") / "test"
+        self.outputs_dir = Path("outputs")
+        self.downloads_dir = Path("downloads")
+
+
+def test_create_job_rejects_empty_source(env, monkeypatch):
+    """A batch with an empty source must not queue a silent no-op."""
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+
+    from app.config import Settings as Config
+
+    settings = Config(
+        app=FakePaths(), whisper=object(), gemini=object(), groq=object(),
+        nvidia=object(), deepseek=object(), llm=object(), translate=object(),
+        subtitle=object(), video=object(), download=object(), hosted=object(),
+        social=object(),
+    )
+    settings.app.paths = FakePaths()
+    monkeypatch.setattr(main_mod, "settings", Deny())
+    monkeypatch.setattr(main_mod, "store", Deny())
+
+    client = TestClient(main_mod.app)
+    res = client.post(
+        "/api/jobs",
+        json={"sourceType": "url", "source": "", "language": "auto"},
+    )
+    assert res.status_code == 400
+    assert "no video URL recorded" in res.json()["detail"]
+
+
+def test_create_job_duplicates_are_idempotent(env):
+    """A rerun of the identical batch returns the existing job instead of a
+    second one: the server never allows two ACTIVE batches for the same video."""
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+
+    monkeypatch.setattr(main_mod, "settings", Deny())
+    monkeypatch.setattr(main_mod, "store", Deny())
+    monkeypatch.setattr(main_mod, "store", FakeStore(fake.app.paths))
+
+    client = TestClient(main_mod.app)
+    first = client.post(
+        "/api/jobs",
+        json={"sourceType": "url", "source": "https://youtu.be/abc?si=1"},
+    )
+    assert first.status_code == 200
+    first_id = first.json()["jobId"]
+
+    second = client.post(
+        "/api/jobs",
+        json={"sourceType": "url", "source": "https://youtu.be/abc?si=2"},
+    )
+    assert second.status_code == 200
+    assert second.json()["deduped"] is True
+    assert second.json()["jobId"] == first_id
