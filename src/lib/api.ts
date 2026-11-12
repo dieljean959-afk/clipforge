@@ -390,6 +390,11 @@ export interface HealthDto {
     freeBytes?: number | null;
     totalBytes?: number | null;
     path?: string | null;
+    scratchMb?: number | null;
+    cacheMb?: number | null;
+    modelMb?: number | null;
+    lastCleanedAt?: number | null;
+    lastFreedMb?: number | null;
   } | null;
   /**
    * The real toolchain, read from the binaries on PATH per poll, plus the
@@ -956,6 +961,31 @@ export const api = {
       freeBytes: number | null;
       reason: string;
     }>("/api/storage/reclaim", { method: "POST" }),
+  /** Dry-run by default; `apply` backs up the job DB and performs the reset. */
+  diskReset: (apply = false) =>
+    request<{
+      ok: boolean;
+      dryRun: boolean;
+      freeBeforeMb: number;
+      freeAfterMb: number;
+      freedMb: number;
+      plannedMb: number;
+      categories: Array<{
+        name: string;
+        mb: number;
+        count: number;
+        paths: string[];
+        note: string;
+      }>;
+      kept: Array<{ path: string; reason: string }>;
+      openDeleted: Array<{ pid: number; cmd: string; path: string; mb: number }>;
+      backup: string | null;
+      skipped: Array<{ what: string; why: string }>;
+    }>("/api/storage/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apply }),
+    }),
   /**
    * Bucket media whose batch no longer exists anywhere in the dashboard.
    *

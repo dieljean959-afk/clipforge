@@ -33,6 +33,7 @@ import {
 import { useHealth } from "@/hooks/use-poll";
 import { SocialAccounts } from "./SocialAccounts";
 import { UnusedMediaRow } from "./UnusedMediaRow";
+import { DiskResetDialog } from "./DiskResetDialog";
 import {
   api,
   type DetectionProvider,
@@ -225,6 +226,10 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   // keeps the reading honest instead of implying the 4 GB sandbox is full.
   const diskPath = health?.disk?.path ?? null;
   const diskLow = diskFree !== null && diskFree < 1.5 * 1024 ** 3;
+  const diskFootprint = health?.disk ?? null;
+  const lastCleaned = diskFootprint?.lastCleanedAt
+    ? new Date(diskFootprint.lastCleanedAt).toLocaleString()
+    : "never";
 
   // The real pipeline toolchain, read from the binaries on PATH by the server,
   // plus the folder rendered clips actually land in.
@@ -613,6 +618,13 @@ export function LocalWorkerCard({ className }: { className?: string }) {
                 {diskTotal !== null ? ` / ${fmtBytes(diskTotal)}` : ""}
               </StatLine>
             )}
+            {diskFootprint && (
+              <StatLine icon={Trash2} className="text-[10px] text-muted-foreground">
+                scratch {diskFootprint.scratchMb?.toFixed(0) ?? 0} MB · cache{" "}
+                {diskFootprint.cacheMb?.toFixed(0) ?? 0} MB · model{" "}
+                {diskFootprint.modelMb?.toFixed(0) ?? 0} MB · cleaned {lastCleaned}
+              </StatLine>
+            )}
             {/* Which downloader and encoder actually run, and where the clips
                 land. A version shown here is the version that just ran, so a
                 broken ffmpeg build is visible before the next batch fails. */}
@@ -938,6 +950,7 @@ export function LocalWorkerCard({ className }: { className?: string }) {
             {reclaiming ? "Freeing…" : "Free disk space"}
           </button>
         )}
+        <DiskResetDialog onApplied={() => void refreshHealth()} />
       </div>
 
       {/* Storage credential dialog */}

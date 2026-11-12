@@ -10,14 +10,13 @@ outputs_dir = "outputs"
 data_dir = "data"
 
 [whisper]
-# medium is the accuracy default (~1.5GB model; slower/heavier than small on CPU)
-# large-v3 (~3GB, best, needs 8GB+ free RAM)
-#
-# This is the SANDBOX default and is deliberately modest: the hosted worker runs
-# on 1 vCPU / 2 GiB, where hostlimits downgrades large-v3/medium to small to
-# fit. A GPU worker host should NOT inherit this value — override it there with
+# The sandbox runs on 1 vCPU / 2 GiB. `medium` is downgraded to `small` by
+# hostlimits anyway, but declaring `medium` still caused a 752 MiB distil-medium
+# Hugging Face download that could never be loaded on this host. Keep the
+# configured model equal to the model that actually runs so no oversized
+# download is ever attempted. A GPU worker overrides this with
 # CLIPFORGE_WHISPER_MODEL=large-v3, which wins over this file.
-model = "medium"
+model = "small"
 
 # Transcription backend. "auto" prefers WhisperX (github.com/m-bain/whisperX —
 # batched CTranslate2 decoding + wav2vec2 forced alignment for accurate

@@ -36,6 +36,7 @@ from app import config
 
 from app import (
     clipcount,
+    diskreset,
     objectstore,
     purge,
     reclaim,
@@ -341,6 +342,12 @@ def _boot_phases(b: Boot) -> None:
         }
 
     b.run_phase("crash_sweep", _crash_sweep, timeout_ms=30_000)
+
+    def _disk_loop() -> dict:
+        diskreset.start_sweeper(store, settings)
+        return {"detail": "10-minute crash-proof disk sweeper started"}
+
+    b.run_phase("disk_reset_watchdog", _disk_loop, timeout_ms=5_000)
 
     def _warm() -> dict:
         _do_warmup()
@@ -750,7 +757,12 @@ def _build_health_slow() -> dict[str, Any]:
     block("system", _hosting.system_stats)
 
     def _disk() -> dict[str, Any]:
-        return _hosting.disk_stats(settings.app.paths.data_dir, settings)
+        info = _hosting.disk_stats(settings.app.paths.data_dir, settings)
+        try:
+            info.update(diskreset.footprint(settings))
+        except Exception as exc:  # noqa: BLE001 - the card must still render
+            logger.debug(f"[health] disk footprint skipped: {exc}")
+        return info
 
     block("disk", _disk)
     block("tools", _tools)
@@ -1212,6 +1224,30 @@ def source_ident(url: str) -> str:
     return f"{host}{path}" + (f"?{query}" if query else "")
 
 
+DISK_PAUSE_BYTES = 800 * 1024 * 1024
+
+
+def _require_disk_headroom() -> None:
+    """Pause NEW submissions below 800 MB; never touch a running batch."""
+    import shutil
+
+    try:
+        free = int(shutil.disk_usage(str(settings.app.paths.data_dir)).free)
+    except OSError:
+        return
+    if free >= DISK_PAUSE_BYTES:
+        return
+    logger.warning(
+        f"[disk] new batch paused: {free // 1048576} MB free "
+        f"(< {DISK_PAUSE_BYTES // 1048576} MB)"
+    )
+    raise HTTPException(
+        507,
+        f"Waiting for disk space — only {free // 1048576} MB free. "
+        "Press Reset disk or run tools/disk_reset.py --apply, then retry.",
+    )
+
+
 class CreateJobIn(BaseModel):
     sourceType: str = Field(pattern="^(url|upload)$")
     source: str = Field(min_length=1, max_length=2048)
@@ -1450,6 +1486,24 @@ def public_share_page(share_id: str, request: Request) -> HTMLResponse:
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+class DiskResetIn(BaseModel):
+    apply: bool = False
+
+
+@app.post("/api/storage/reset")
+def storage_reset(body: DiskResetIn | None = None) -> dict:
+    """Dry-run by default; `{"apply": true}` performs the reset.
+
+    Same function as `tools/disk_reset.py`, including its protect list and
+    bucket HEAD verification, so this route cannot delete more than the CLI.
+    """
+    try:
+        return diskreset.reset(store, settings, apply=bool(body and body.apply))
+    except Exception as exc:  # noqa: BLE001 - report the real reason
+        logger.warning(f"[storage] reset failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(503, f"could not reset local disk: {exc}") from exc
 
 
 @app.post("/api/storage/reclaim")
@@ -2130,6 +2184,7 @@ def create_job(body: CreateJobIn) -> dict:
     stays the only way to ingest a file, and `/api/jobs/{id}/retry` stays the
     only way to re-run a failed batch.
     """
+    _require_disk_headroom()
     # One ACTIVE batch per video + settings. A finished/failed batch already has
     # its rendered clips on disk, so it is not an active run and must not steal
     # a new submission for the same video.
@@ -2174,6 +2229,7 @@ async def upload_job(
     the pipeline's upload branch resolves — with the same size cap as a URL
     source, and a failed write never leaves a half job behind.
     """
+    _require_disk_headroom()
     import shutil
 
     name = Path(file.filename or "").name
