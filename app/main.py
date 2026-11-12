@@ -121,6 +121,8 @@ from starlette.background import BackgroundTask
 from app import worker as worker_mod
 from app.worker import InProcessWorker
 from app.workerd import WorkerSupervisor
+# The API process started; used by GET /api/health to report true uptime.
+HOST_STARTUP_MS = int(time.time() * 1000)
 
 
 def _purge_remote_job(job_id: str) -> None:
@@ -494,6 +496,43 @@ async def _resource_monitor() -> None:
                 "heavy work in the API process would explain a proxy 500"
             )
         baseline = api_rss or baseline
+
+
+@app.get("/api/health")
+def health() -> dict:
+    """A single synchronous endpoint the dashboard polls. All file/process/
+    bucket checks happen here and are measured, so the dashboard can report
+    the true last-known state instead of "restarting" a server that is fine.
+    """
+    from app import hosting, objectstore
+    from app.store import LocalStore
+
+    try:
+        paths = hosting.load_paths()
+        store = LocalStore(paths)
+        jobs = [] if store is None else store.list_jobs()
+        jobs_count = len(jobs)
+    except Exception:
+        jobs_count = 0
+
+    payload = {
+        "ok": True,
+        "apiUptimeMs": int((time.time() - HOST_STARTUP_MS) * 1000),
+        "nodeVersion": "node " + str(hosting.NODE_VERSION_MAJOR),
+        "ffmpeg": hosting.FFMPEG_BIN,
+        "appVersion": hosting._HOSTED_VERSION,
+        "config": {
+            "whisper_model": _whisper_model_cached("small"),
+            "workerDaemonOnline": worker_mod.status().get("online"),
+            "workerPid": worker_mod.daemon_pid(),
+            "concurrency": worker_mod.status().get("concurrency"),
+            "retentionHours": getattr(settings.hosted, "retention_hours", 0) or 0,
+            "diskFreeMb": hosting.disk_stats(paths).get("freeMb") if paths else None,
+            "durableMedia": objectstore.config_from_env().enabled,
+            "jobsOnDisk": jobs_count,
+        },
+    }
+    return payload
 
 
 @app.on_event("startup")

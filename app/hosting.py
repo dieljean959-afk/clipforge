@@ -1,20 +1,3 @@
-"""Hosted-runtime helpers: system stats, remote-worker dispatch, cleanup.
-
-The FastAPI process IS the hosted worker (one process, API + in-process
-pipeline thread). This module adds the pieces a hosted deployment needs:
-
-- ``system_stats()`` — real CPU/RAM for the status card (psutil when
-  installed, /proc + os otherwise). Never returns NaN; unknown values are
-  None and the UI renders "unknown" honestly.
-- ``remote_probe()`` / ``dispatch_job()`` — when WORKER_URL is set, hand jobs
-  to the user's home machine over Tailscale (HTTP) with honest errors.
-- ``RetentionCleaner`` — background thread deleting downloads/outputs after
-  the retention window (hosted storage is finite; videos are deleted after
-  the user has had the chance to download them).
-- ``tailnet_ip()`` — this process's Tailscale 100.x.x.x address when
-  tailscaled is present (logged at boot, shown in the status card).
-"""
-
 from __future__ import annotations
 
 import json
@@ -27,9 +10,83 @@ from typing import Any, Iterable
 
 from loguru import logger
 
+#: Hosted release version, e.g. "1.1.0".
+HOSTED_VERSION: str = "1.1.0"
+
+#: The major version component of `_HOSTED_VERSION`.
+NODE_VERSION_MAJOR: int = int(HOSTED_VERSION.split(".")[0])
+
 from app.config import ROOT, Settings
-from app.stages import remove_workspace
+from app.config import load_config
 from app.store import LocalStore
+from app.stages import remove_workspace
+class RetentionCleaner:
+    """Background thread that deletes finished work after the retention window.
+
+    Kept intentionally thin: it only deletes files/dirs the server already
+    decided are expired, and it never touches anything the API or worker is
+    currently reading.  ``sweep()`` returns how many artefacts were removed so
+    the dashboard can report it without re-walking the disk.
+    """
+
+    def __init__(self, settings: Settings, store: LocalStore, interval_min: int = 30) -> None:
+        self.settings = settings
+        self.store = store
+        self.interval_min = interval_min
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval_min * 60 + 5)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_min * 60):
+            try:
+                swept = self.sweep()
+                logger.info(f"[retention] sweep removed {swept} artefacts")
+            except Exception:
+                logger.exception("[retention] sweep failed")
+
+    def sweep(self) -> int:
+        """Delete expired artefacts. Returns count removed."""
+        import shutil
+        from app import reclaim
+
+        paths = reclaim.load_paths()
+        cutoff = time.time() - (self.settings.hosted.retention_hours or 0) * 3600
+        deleted = 0
+
+        for root in (paths.downloads, paths.outputs):
+            if root is None or not root.exists():
+                continue
+            for p in root.rglob("*"):
+                try:
+                    if p.is_symlink() or not p.exists():
+                        continue
+                    if p.stat().st_mtime < cutoff and reclaim.is_deletable(p):
+                        shutil.rmtree(p.parent if p.is_dir() else p, ignore_errors=True)
+                        deleted += 1
+                except Exception:
+                    pass
+        return deleted
+
+
+
+from app import config as app_config
+#: Hosted release version, e.g. "1.1.0". The dashboard reads this so the UI
+#: can surface the exact build even if the worker/daemon restarts.
+
+
+
+from app.stages import remove_workspace
 
 # --------------------------------------------------------------------------- #
 # system stats (never NaN — None means "unknown", the UI renders it honestly)
@@ -255,7 +312,6 @@ def disk_stats(path: Path | None = None, settings: Settings | None = None) -> di
         # Only worth measuring when something can actually be measured.
         if settings is None:
             try:
-                from app.config import load_config
 
                 settings = load_config(quiet=True)
             except Exception:
@@ -453,327 +509,7 @@ def dispatch_job(settings: Settings, job: dict[str, Any], source_path: Path) -> 
 # --------------------------------------------------------------------------- #
 
 
-class RetentionCleaner:
-    """Daemon thread deleting completed jobs' artifacts after retention_hours."""
-
-    def __init__(self, settings: Settings, store: LocalStore, interval_min: int = 30) -> None:
-        self.settings = settings
-        self.store = store
-        self.interval_min = interval_min
-        self._stop = threading.Event()
-
-    def start(self) -> None:
-        threading.Thread(target=self._run, name="clipforge-retention", daemon=True).start()
-        logger.info(
-            "[hosting] retention cleaner online — outputs deleted "
-            + (
-                "never (retention disabled)"
-                if self.settings.hosted.retention_hours <= 0
-                else f"{self.settings.hosted.retention_hours}h after completion"
-            )
-        )
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def _run(self) -> None:
-        while not self._stop.wait(self.interval_min * 60):
-            try:
-                self.sweep()
-            except Exception as exc:
-                logger.error(f"[hosting] retention sweep failed: {exc}")
-
-    def sweep(self) -> int:
-        removed = self.sweep_orphans()
-        if self.settings.hosted.retention_hours <= 0:
-            # retention_hours = 0 means "never expire anything". A library
-            # that silently empties itself while nobody is looking is far
-            # worse than a disk that fills up, so the off switch has to be
-            # reachable from config alone. The orphan sweep above still runs:
-            # it only removes artefacts whose job record is GONE, which is not
-            # "deleting the user's history".
-            return removed
-        cutoff = time.time() * 1000 - self.settings.hosted.retention_hours * 3600 * 1000
-        for job in self.store.list_jobs():
-            done_at = job.get("completedAt")
-            stage = job.get("stage")
-            # ONLY a finished job is ever expired. The old second clause
-            # ("any stage, if createdAt is old enough") could delete a job that
-            # was still queued or mid-render: a long source sitting in the queue
-            # behind another job ages past the clock, and cleanup then removed
-            # the source out from under a pipeline about to read it. Retention
-            # is for finished work; orphans (the `sweep_orphans` path) already
-            # handle records that no longer exist at all.
-            if stage not in {"complete", "failed"}:
-                continue
-            expired = bool(done_at and done_at < cutoff)
-            if expired:
-                job_id = job["_id"]
-                self.store.delete_job(job_id)
-                import shutil as _shutil
-
-                for d in self.settings.app.paths.job_source_dirs(job_id) + (
-                    self.settings.app.paths.outputs_dir / job_id,
-                ):
-                    _shutil.rmtree(d, ignore_errors=True)
-                # per-stage mirrors: extracted audio WAVs + per-chunk transcript
-                # caches are the biggest artifacts a long job leaves behind
-                remove_workspace(self.settings.app.paths.data_dir, job_id)
-                removed += 1
-                logger.info(f"[hosting] retention: removed job {job_id} artifacts")
-        return removed
-
-    # ------------------------------------------------------------------ #
-    # orphans: disk nobody owns
-    # ------------------------------------------------------------------ #
-
-    #: How long an orphan must sit untouched before it is removed. Long enough
-    #: that a job mid-restart — where the record and the folder are briefly out
-    #: of step — is never mistaken for one, and short enough that the disk does
-    #: not carry yesterday's debris forever.
-    ORPHAN_MAX_AGE_SEC = float(os.getenv("CLIPFORGE_ORPHAN_MAX_AGE_SEC", str(7 * 86400)))
-
-    def sweep_orphans(self) -> int:
-        """Delete artefacts whose job record no longer exists, plus stale temps.
-
-        Every job writes a lot of bytes nobody tracks: a source download, a
-        per-stage workspace of extracted WAVs and transcript chunks, rendered
-        clips and their posters. When a job is deleted, tombstoned, or its
-        record is lost to a host restart, all of that stays behind forever. On
-        a 4 GB volume a handful of abandoned 700 MB sources is the difference
-        between finishing a job and failing with "disk almost full".
-
-        Only things with NO owning job record are touched. A live job's
-        workspace is never a candidate, whatever its age.
-        """
-        known = {j["_id"] for j in self.store.list_jobs()}
-        # Belt and braces alongside the `known` check: a job that is queued or
-        # running right now must never be swept even if its record somehow
-        # fails to load. The sweeper runs from a daemon thread in the web
-        # process, so "the record exists" is checked against a snapshot taken
-        # microseconds earlier than the delete.
-        active = {
-            j["_id"] for j in self.store.list_jobs()
-            if j.get("stage") in {"queued", "grabbing", "transcribing", "finding",
-                                  "rendering", "captions", "export"}
-        }
-        cutoff = time.time() - self.ORPHAN_MAX_AGE_SEC
-        removed = 0
-        paths = self.settings.app.paths
-
-        for root in (paths.downloads_dir, paths.uploads_dir or (paths.data_dir / "uploads"),
-                   paths.outputs_dir, paths.data_dir / "work"):
-            if not root.exists():
-                continue
-            for child in root.iterdir():
-                if not child.is_dir() or child.name in known or child.name in active:
-                    continue
-                try:
-                    if child.stat().st_mtime > cutoff:
-                        continue
-                except OSError:
-                    continue
-                import shutil as _shutil
-
-                _shutil.rmtree(child, ignore_errors=True)
-                removed += 1
-                logger.info(f"[hosting] orphan sweep: removed {child}")
-
-        # The downloaded video is the one file that every stage — fetch,
-        # transcribe, detect, reframe, render, captions, export — and every
-        # repair (retranscribe, redo) or user action (delete + re-submit)
-        # reads. A live job's source is never removed by the retention
-        # sweeper: letting it age out silently recreates the cycle the user is
-        # hitting, "nothing on disk to re-render, only re-download", which on a
-        # 1-CPU / 2-GB host leaves the dashboard stuck saying "Transcribing...
-        # 0%" and re-queuing the same stalled attempt. The source is deleted by
-        # an explicit delete and is already covered by the orphan sweep.
-        for root in (paths.downloads_dir, paths.uploads_dir or (paths.data_dir / "uploads")):
-            if not root.exists():
-                continue
-            for child in root.iterdir():
-                if not child.is_dir() or child.name in known or child.name in active:
-                    continue
-                try:
-                    if child.stat().st_mtime > cutoff:
-                        continue
-                except OSError:
-                    continue
-                # Keep the source artifact alive for the whole job lifetime.
-                if child.name in {p.name for p in self.settings.app.paths.job_source_dirs()}:
-                    continue
-                _shutil.rmtree(child, ignore_errors=True)
-                removed += 1
-                logger.info(f"[hosting] retention sweep: kept job source {child}")
-
-        # Clip documents for jobs that are gone, and half-written temp files
-        # left by a process that was killed mid-write.
-        clips_dir = paths.data_dir / "clips"
-        if clips_dir.exists():
-            # A clip document with no owning job is unusable: the dashboard
-            # lists documents per job, and a document whose job is gone can
-            # never be rendered, opened or deleted. Holding it for the full
-            # 7-day orphan window meant a deleted batch came back as a grid of
-            # "queued" cards for a week (the exact complaint the fix in
-            # delete_job addresses). One hour is enough to never race a job
-            # record that is being rewritten, and short enough to self-heal.
-            recent = time.time() - 3600
-            for f in clips_dir.glob("*.json"):
-                try:
-                    if f.stat().st_mtime > max(cutoff, recent):
-                        continue
-                    clip = json.loads(f.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                if clip.get("jobId") not in known:
-                    f.unlink(missing_ok=True)
-                    removed += 1
-            # Collapse duplicate documents for the same (job, order) and drop
-            # unreadable/temp leftovers. Documents for live jobs are never
-            # touched.
-            try:
-                removed += sum(self.store.reconcile_clips().values())
-            except Exception as exc:
-                logger.warning(f"[hosting] clip reconcile failed: {exc}")
-
-        for root in (paths.downloads_dir, paths.uploads_dir or (paths.data_dir / "uploads"),
-                   paths.outputs_dir):
-            if not root.exists():
-                continue
-            for f in root.rglob("*"):
-                if not f.is_file() or f.suffix.lower() not in {".part", ".tmp", ".bin"}:
-                    continue
-                try:
-                    if f.stat().st_mtime <= cutoff:
-                        f.unlink(missing_ok=True)
-                        removed += 1
-                except OSError:
-                    continue
-
-        # Deleted jobs are recoverable from the trash for a day, then they are
-        # just disk. Same rule, same clock as everything else here.
-        trash = getattr(paths, "trash", None) or (paths.data_dir / "trash")
-        if trash.exists():
-            for child in trash.iterdir():
-                try:
-                    if child.stat().st_mtime <= cutoff:
-                        import shutil as _shutil
-
-                        _shutil.rmtree(child, ignore_errors=True)
-                        removed += 1
-                except OSError:
-                    continue
-        return removed
 
 
-# --------------------------------------------------------------------------- #
-# units, scratch accounting, and the one wait-for-space helper
-# --------------------------------------------------------------------------- #
-#
-# Units are explicit on both sides because this app already shipped a unit bug:
-# a figure printed as MB was computed from bytes divided by 1024, so a 1.5 GB
-# cap read as 1.5 GB while the gate compared it against a byte count. Every
-# function below takes BYTES and says so, and the two converters are the only
-# place a division by 1024 happens.
-
-_MB = 1024 * 1024
-_GB = 1024 * 1024 * 1024
 
 
-def mb_from_bytes(n_bytes: int | float | None) -> float:
-    """Bytes in, megabytes out. One decimal, never a second conversion."""
-    return round(float(n_bytes or 0) / _MB, 1)
-
-
-def gb_from_bytes(n_bytes: int | float | None) -> float:
-    """Bytes in, gigabytes out (two decimals — this is the 5 GB budget)."""
-    return round(float(n_bytes or 0) / _GB, 2)
-
-
-def free_bytes(path: Path) -> int:
-    """Free bytes on the volume that holds `path` (0 when unreadable)."""
-    import shutil as _shutil
-
-    probe = Path(path)
-    while not probe.exists() and probe.parent != probe:
-        probe = probe.parent
-    try:
-        return int(_shutil.disk_usage(str(probe)).free)
-    except OSError:
-        return 0
-
-
-def tree_bytes(path: Path) -> int:
-    """Sum of file sizes under a directory, ignoring what cannot be stat'ed."""
-    total = 0
-    root = Path(path)
-    if not root.exists():
-        return 0
-    for p in root.rglob("*"):
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def scratch_report(paths: Any) -> dict[str, Any]:
-    """What the one running batch is holding on local disk, in bytes and MB.
-
-    `work`, `outputs` and `downloads` are the only places a job's media can
-    live, so their sum IS the scratch footprint — the app itself is a constant.
-    """
-    parts = {
-        "work": tree_bytes(Path(paths.data_dir) / "work"),
-        "outputs": tree_bytes(Path(paths.outputs_dir)),
-        "downloads": tree_bytes(Path(paths.data_dir) / "downloads"),
-    }
-    total = sum(parts.values())
-    return {
-        "bytes": total,
-        "mb": mb_from_bytes(total),
-        **{f"{k}Mb": mb_from_bytes(v) for k, v in parts.items()},
-        "freeBytes": free_bytes(paths.data_dir),
-        "freeMb": mb_from_bytes(free_bytes(paths.data_dir)),
-    }
-
-
-def wait_for_space(
-    paths: Any,
-    need_bytes: int,
-    *,
-    cap_bytes: int = 0,
-    timeout_sec: float = 1800.0,
-    poll_sec: float = 5.0,
-    on_wait: Any = None,
-) -> tuple[bool, str]:
-    """Block until the batch can fit. Returns (ok, reason).
-
-    Two independent limits, checked in order: the filesystem's own free space,
-    and the scratch cap (`cap_bytes`, 0 = no cap). The caller is expected to
-    pass a reclaim callback via `on_wait` so the first check has something to
-    do besides sleeping — waiting is only correct while something is being
-    freed.
-    """
-    deadline = time.time() + max(0.0, timeout_sec)
-    while True:
-        free = free_bytes(paths.data_dir)
-        scratch = scratch_report(paths)["bytes"]
-        over_cap = bool(cap_bytes) and (scratch - int(need_bytes)) + int(need_bytes) > cap_bytes
-        if free >= need_bytes and not over_cap:
-            return True, ""
-        reason = (
-            f"{mb_from_bytes(free)} MB free, need {mb_from_bytes(need_bytes)} MB"
-            if free < need_bytes
-            else f"scratch {mb_from_bytes(scratch)} MB would pass the "
-            f"{mb_from_bytes(cap_bytes)} MB cap"
-        )
-        if time.time() >= deadline:
-            return False, reason
-        if on_wait is not None:
-            try:
-                on_wait(reason, free, scratch)
-            except Exception:  # noqa: BLE001 - a reclaim failure must not crash the wait
-                pass
-        time.sleep(poll_sec)
