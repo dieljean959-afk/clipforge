@@ -15,11 +15,11 @@ buffer in RAM. Video-only and audio-only are captured as two objects:
 Each object is HEAD-verified against the byte count before it is trusted.
 
 When a format cannot be streamed (HLS/fragmented with no seekable container, a
-site that only offers muxed `b`), the fallback downloads 150 s sections,
+site that only offers muxed `b`), the fallback downloads 75 s sections,
 uploads and deletes each one immediately, and records the section list so the
 renderer can cut a clip out of the one section that contains it. A high-bitrate
-section is split once more to stay under the upload cap; those 75 s pieces can
-carry a few extra decoded seconds.
+section is re-encoded into exact-start pieces to stay under the upload cap;
+plan-boundary `-c copy` splits are never used.
 
 `RemoteSource` is what the rest of the pipeline sees instead of a Path: `str()`
 gives a fresh presigned URL, and `url_for_span(start, end)` picks the object
@@ -44,13 +44,13 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 PART_BYTES = 8 * 1024 * 1024
-SECTION_SEC = 150.0
+SECTION_SEC = 75.0
 
 #: Sections to try when the source's length is UNKNOWN (yt-dlp metadata
-#: failed). 150 s x 48 = 2 h = the largest source this app accepts, so an
+#: failed). 75 s x 96 = 2 h = the largest source this app accepts, so an
 #: unreadable metadata field can no longer cut a long video short: the loop
 #: still stops at the first section past the end of the video.
-UNKNOWN_DURATION_SECTIONS = 48
+UNKNOWN_DURATION_SECTIONS = 96
 #: Filebase's free plan refuses MULTIPART video uploads above 25 MB
 #: ("Free accounts are limited to 25MB video uploads"), while a single PUT of
 #: the same bytes is accepted. Every object that carries video is therefore
@@ -280,10 +280,11 @@ def _stream_one(
 def _split_if_big(path: Path, *, target: int, seconds: float) -> list[tuple[Path, float]]:
     """Split a section that came out over the plan's single-object limit.
 
-    A 720p source at ~1 Mbps gives ~19 MB per 150 s, but a high-bitrate one
-    does not. Splitting with `-c copy` is a container remux — no re-encode, no
-    change to the pixels a clip is cut from — and it keeps every object under
-    the 25 MB the free plan accepts.
+    A 720p source at ~2 Mbps gives ~18 MB per 75 s, but a high-bitrate one does
+    not. `-c copy` at a planned boundary is FORBIDDEN here: it starts at the
+    previous keyframe (measured 71.5 s for a requested 75.0 s), putting video
+    ahead of the audio. Re-encode the small pieces at high quality so every
+    piece starts on the exact requested second.
     """
     size = path.stat().st_size
     if size <= target:
@@ -296,7 +297,9 @@ def _split_if_big(path: Path, *, target: int, seconds: float) -> list[tuple[Path
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-ss", f"{i * each:.3f}", "-i", str(path),
-            "-t", f"{each:.3f}", "-c", "copy",
+            "-t", f"{each:.3f}", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-threads", "1",
             "-avoid_negative_ts", "make_zero", str(part),
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -316,7 +319,7 @@ def section_key(prefix: str, job_id: str, index: int) -> str:
 
 
 def _section_count(total_sec: float) -> int:
-    """How many 150 s sections to request for a source of `total_sec`.
+    """How many 75 s sections to request for a source of `total_sec`.
 
     Unknown length used to mean "6 sections" = 15 minutes, which silently
     replaced a 20-minute source with its first three quarters. Ask for the
@@ -332,11 +335,11 @@ def source_duration(
 ) -> float:
     """Length of the SOURCE, never of the one object that got probed.
 
-    A sections capture probes ONE 150 s object, so ffprobe reports 2:30 for a
-    20:37 video. Storing that as `durationSec` cut the batch to the first two
-    and a half minutes: auto clip count scaled off 2:30 and the detector never
-    looked past the first window. For a whole-object capture the probe IS the
-    source, so it wins.
+    A sections capture probes ONE 75 s object, so ffprobe reports 1:15 for a
+    20:37 video. Storing that as `durationSec` cut the batch to the first
+    minute: auto clip count scaled off 1:15 and the detector never looked past
+    the first window. For a whole-object capture the probe IS the source, so
+    it wins.
     """
     if sections:
         # `end` is now the real probed end of the last non-empty section, not
@@ -352,7 +355,7 @@ def _sections(
     on_log: Callable[[str], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Two-minute sections: download, single-PUT upload, verify, delete.
+    """75 s sections: download, single-PUT upload, verify, delete.
 
     This is the primary path on a plan that rejects multipart video. Each
     section is its own object under `uploads/<job>/sections/`, and the local
@@ -367,6 +370,11 @@ def _sections(
     out: list[dict[str, Any]] = []
     tmpdir = Path(tempfile.mkdtemp(prefix=f"sec-{job_id[:8]}-"))
     try:
+        # 75 s is yt-dlp's frame-accurate section size here. The old 150 s +
+        # `-c copy` split started the second piece at a keyframe BEFORE the
+        # requested boundary (measured: 71.5 s instead of 75.0 s), which put
+        # video 3.5 s ahead of the correctly-seeked audio. Do not reintroduce
+        # a copy split at a planned boundary.
         for i in range(count):
             start = i * SECTION_SEC
             end = min(start + SECTION_SEC, total_sec) if total_sec > 0 else start + SECTION_SEC
@@ -784,7 +792,7 @@ def capture(
                 if on_log:
                     on_log(
                         "[stream] the bucket plan refuses multipart video over "
-                        "25 MB — switching to 150 s sections"
+                        "25 MB — switching to 75 s sections"
                     )
                 break
             if exc.bucket_down:
@@ -798,7 +806,7 @@ def capture(
         if on_log:
             on_log(
                 "[stream] piping the whole video is not possible here — "
-                "capturing 150 s sections instead"
+                "capturing 75 s sections instead"
             )
         sections = _sections(
             url, job_id, total_sec=total_sec, settings=settings,

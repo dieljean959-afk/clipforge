@@ -626,9 +626,19 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
             raise HTTPException(400, str(gate.get("reason") or "audio sync gate failed"))
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 - a missing gate is reported, not hidden
-        logger.warning(f"[video] sync gate skipped for {clip_id}: {exc}")
-        gate = None
+    except Exception as exc:  # noqa: BLE001 - fail closed, never skip a gate
+        reason = f"audio sync gate unavailable: {type(exc).__name__}: {exc}"[:500]
+        logger.warning(f"[video] sync gate failed for {clip_id}: {reason}")
+        db.write_clip(
+            clip_id,
+            {
+                "renderState": "failed",
+                "mediaError": reason,
+                "jobId": job_id,
+            },
+            job_id=job_id,
+        )
+        raise HTTPException(400, reason) from None
 
     thumb_path = dest.parent / f"clip_{order:03d}.thumb.jpg"
     try:

@@ -90,6 +90,22 @@ def test_span_validation_rejects_an_empty_plan():
         raise AssertionError("an empty span must be rejected before ffmpeg")
 
 
+def test_video_and_audio_seeks_are_independent():
+    args, audio_map = encode.source_input_args(
+        "sec_000_p1.mp4",
+        "audio.m4a",
+        seek=39.07,       # section-relative: 75 + 39.07 = 114.07
+        audio_seek=114.07,  # whole audio: absolute
+        clip_seconds=38.0,
+    )
+    assert args.count("-ss") == 2
+    assert args[args.index("-ss") + 1] == "39.070"
+    second = args.index("-ss", args.index("-ss") + 1)
+    assert args[second + 1] == "114.070"
+    assert audio_map == "1:a:0?"
+    assert "-accurate_seek" in args
+
+
 def test_requested_count_asks_for_replacement_candidates():
     assert clipcount.candidate_target(10, exact=True) == 14
     assert clipcount.candidate_target(1, exact=True) == 4

@@ -128,6 +128,24 @@ def test_a_clip_is_cut_from_the_section_that_contains_it(bucket):
     assert seek0 == pytest.approx(12.0)
 
 
+def test_extra_decoded_seconds_in_a_section_are_usable(bucket, monkeypatch):
+    """A 75 s object can really contain ~78 s; do not reject a clip at 152 s."""
+    source = source_stream.RemoteSource(
+        "j",
+        video_key="s0",
+        audio_key="a",
+        method="sections",
+        sections=[
+            {"key": "s0", "start": 75.0, "end": 150.0},
+            {"key": "s1", "start": 150.0, "end": 225.0},
+        ],
+    )
+    monkeypatch.setattr(source, "_actual_section_end", lambda sec: 153.6)
+    url, seek = source.url_for_span(114.07, 152.07)
+    assert seek == pytest.approx(39.07)
+    assert "s0" in url
+
+
 def test_a_clip_crossing_a_section_boundary_fails_instead_of_truncating(bucket):
     source = source_stream.RemoteSource(
         "j",
@@ -183,8 +201,37 @@ def test_an_unknown_length_no_longer_caps_the_capture_at_15_minutes():
 
 
 def test_a_known_length_still_asks_for_exactly_what_is_needed():
-    assert source_stream._section_count(1237.0) == 9
-    assert source_stream._section_count(120.0) == 1
+    assert source_stream._section_count(1237.0) == 17
+    assert source_stream._section_count(120.0) == 2
+
+
+def test_section_size_stays_frame_accurate():
+    # 150 s + `-c copy` split started 3.5 s early in the real batch. Keep the
+    # direct section at 75 s unless a frame-accuracy test replaces this.
+    assert source_stream.SECTION_SEC <= 75.0
+
+
+def test_oversize_section_split_reencodes_instead_of_copying(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    src = tmp_path / "sec.mp4"
+    src.write_bytes(b"x" * 15)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        from pathlib import Path
+
+        out = Path(cmd[-1])
+        out.write_bytes(b"y" * 5)
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(source_stream.subprocess, "run", fake_run)
+    pieces = source_stream._split_if_big(src, target=10, seconds=2.0)
+    assert len(pieces) == 2
+    for cmd in calls:
+        assert "copy" not in cmd
+        assert "libx264" in cmd
 
 
 def test_a_whole_object_source_is_seeked_to_the_clip_not_zero(bucket):
@@ -259,12 +306,12 @@ def test_a_capture_reuses_sections_already_in_the_bucket(monkeypatch, tmp_path):
         settings=SimpleNamespace(),
     )
 
-    assert len(sections) == 9, sections
-    assert len(calls) == 7, f"re-downloaded {len(calls)} sections instead of 7"
-    assert "*0-150" not in calls, "section 1 was downloaded again"
+    assert len(sections) == 17, sections
+    assert len(calls) == 15, f"re-downloaded {len(calls)} sections instead of 15"
+    assert "*0-75" not in calls, "section 1 was downloaded again"
     assert sections[0]["key"].endswith("sec_000.mp4")
     assert sections[0]["bytes"] == 1000
-    assert [s["start"] for s in sections] == [0.0, 150.0, 300.0, 450.0, 600.0, 750.0, 900.0, 1050.0, 1200.0]
+    assert [s["start"] for s in sections] == [i * 75.0 for i in range(17)]
     assert sections[-1]["end"] == 1237.0, "the last span must end at the real duration"
 
 
@@ -283,4 +330,4 @@ def test_a_known_duration_beats_an_empty_probe(monkeypatch):
     from app import source_stream
 
     assert source_stream._section_count(0.0) == source_stream.UNKNOWN_DURATION_SECTIONS
-    assert source_stream._section_count(1237.0) == 9
+    assert source_stream._section_count(1237.0) == 17
