@@ -430,6 +430,7 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
     src: Any = db.find_source_file(job_id)
     render_src: Any = src
     render_audio: str | None = None
+    audio_plan: dict[str, Any] | None = None
     seek_offset: float | None = None
     probe_meta: dict[str, Any] | None = None
     cut_start = float(clip.get("start") or 0.0)
@@ -508,6 +509,9 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
         except source_stream.StreamError as exc:
             raise HTTPException(400, redact_urls(str(exc))) from None
         render_audio = src.audio_url()
+        audio_plan = src.audio_plan(
+            cut_start, float(clip.get("end") or cut_start), order=order
+        )
         probe_meta = src.probe
 
     from app.stages import StageWorkspace
@@ -570,6 +574,8 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
             start_offset=seek_offset,
             audio_seek=cut_start,
             audio_start_time=float(getattr(src, "audio_start_time", 0.0) or 0.0),
+            audio_plan=audio_plan,
+            audio_source_key=getattr(src, "audio_key", None),
         )
     except RenderError as exc:
         db.write_clip(
@@ -662,6 +668,7 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
             "contractOk": meta.get("contractOk"),
             "contractChecks": meta.get("contractChecks"),
             "captionCues": cues,
+            "audioPlan": meta.get("audioPlan"),
             "styleId": _subtitle.style_fingerprint(
                 settings, str(job.get("captionPreset") or settings.subtitle.preset)
             ),

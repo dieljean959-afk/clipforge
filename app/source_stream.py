@@ -667,6 +667,23 @@ class RemoteSource:
         self._section_end_cache[key] = actual
         return actual
 
+    def audio_plan(self, start_sec: float, end_sec: float, *, order: int | None = None) -> dict[str, Any]:
+        """The explicit, per-clip source range that owns the audio.
+
+        This is deliberately not derivable from the section-relative video
+        seek. Storing it on the clip makes a reused/foreign range fail the
+        render instead of producing a clip with another clip's sound.
+        """
+        plan: dict[str, Any] = {
+            "sourceKey": self.audio_key,
+            "start": round(float(start_sec), 3),
+            "end": round(float(end_sec), 3),
+            "streamStart": round(float(self.audio_start_time or 0.0), 6),
+        }
+        if order is not None:
+            plan["order"] = int(order)
+        return plan
+
     def audio_url(self, *, expires: int = 900) -> str:
         from app import objectstore
 

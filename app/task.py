@@ -2573,6 +2573,7 @@ class Pipeline:
                     # so ffmpeg fetches the part it renders, not the source.
                     render_src: Any = src
                     render_audio: str | None = None
+                    audio_plan: dict[str, Any] | None = None
                     seek_offset: float | None = None
                     probe_meta: dict[str, Any] | None = None
                     if isinstance(src, source_stream.RemoteSource):
@@ -2581,6 +2582,11 @@ class Pipeline:
                             float(cut.get("end") or 0.0),
                         )
                         render_audio = src.audio_url()
+                        audio_plan = src.audio_plan(
+                            float(cut.get("start") or 0.0),
+                            float(cut.get("end") or 0.0),
+                            order=i,
+                        )
                         probe_meta = src.probe
                         self._log(
                             job_id,
@@ -2608,6 +2614,8 @@ class Pipeline:
                         audio_start_time=float(
                             getattr(src, "audio_start_time", 0.0) or 0.0
                         ),
+                        audio_plan=audio_plan,
+                        audio_source_key=getattr(src, "audio_key", None),
                     )
                     timings["renderMs"] = round((time.perf_counter() - _render_t0) * 1000.0, 1)
                     # The independent gate, on the FINAL file and the REAL
@@ -2653,6 +2661,8 @@ class Pipeline:
                             audio_start_time=float(
                                 getattr(src, "audio_start_time", 0.0) or 0.0
                             ),
+                            audio_plan=audio_plan,
+                            audio_source_key=getattr(src, "audio_key", None),
                             safe_only=True,
                         )
                         safe_meta["attempts"] = (safe_meta.get("attempts") or [])
@@ -2789,6 +2799,7 @@ class Pipeline:
                         "ffmpegStderr": meta.get("ffmpegStderr"),
                         "renderAttempts": meta.get("attempts"),
                         "audioSync": meta.get("audioSync"),
+                        "audioPlan": meta.get("audioPlan"),
                         "timings": timings,
                         "jobId": job_id,
                     },
@@ -2829,6 +2840,7 @@ class Pipeline:
                         "ffmpegStderr": meta.get("ffmpegStderr"),
                         "renderAttempts": meta.get("attempts"),
                         "audioSync": meta.get("audioSync"),
+                        "audioPlan": meta.get("audioPlan"),
                         "timings": timings,
                         "jobId": job_id,
                     },

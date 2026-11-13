@@ -624,6 +624,62 @@ def source_input_args(
     return inputs, audio_map
 
 
+def audio_plan_seek(
+    cut: dict[str, Any],
+    audio_src: str | None,
+    audio_seek: float | None,
+    audio_start_time: float,
+    audio_plan: dict[str, Any] | None,
+    audio_source_key: str | None = None,
+) -> tuple[float | None, float]:
+    """Derive the audio seek from a per-clip plan, never from a shared value.
+
+    A separate audio object is one file for the whole source. The only thing
+    that makes a clip's audio "its own" is its absolute source range. Requiring
+    this plan makes handing a clip another clip's plan (or forgetting the plan)
+    a hard render error instead of a silently wrong deliverable.
+    """
+    if not audio_src:
+        return audio_seek, audio_start_time
+    if not isinstance(audio_plan, dict) or not audio_plan:
+        raise ValueError(
+            "a separate audio source requires an explicit per-clip audio plan"
+        )
+    for key in ("sourceKey", "start", "end", "streamStart"):
+        if key not in audio_plan:
+            raise ValueError(f"audio plan is missing {key}")
+    if not str(audio_plan.get("sourceKey") or ""):
+        raise ValueError("audio plan has no source key")
+    start = float(audio_plan["start"])
+    end = float(audio_plan["end"])
+    stream_start = max(0.0, float(audio_plan["streamStart"] or 0.0))
+    cut_start = float(cut.get("start") or 0.0)
+    cut_end = float(cut.get("end") or 0.0)
+    if abs(start - cut_start) > 0.01 or abs(end - cut_end) > 0.01:
+        raise ValueError(
+            f"audio plan {start:.3f}–{end:.3f}s does not match clip "
+            f"{cut_start:.3f}–{cut_end:.3f}s"
+        )
+    planned_order = audio_plan.get("order")
+    if planned_order is not None and int(planned_order) != int(cut.get("order", -1)):
+        raise ValueError(
+            f"audio plan belongs to clip {planned_order}, not {cut.get('order')}"
+        )
+    if audio_source_key is not None and str(audio_source_key) != str(audio_plan["sourceKey"]):
+        raise ValueError(
+            "audio plan source key does not match the audio input"
+        )
+    if audio_seek is not None and abs(float(audio_seek) - start) > 0.05:
+        raise ValueError(
+            f"audio seek {float(audio_seek):.3f}s is not the plan start {start:.3f}s"
+        )
+    if abs(float(audio_start_time or 0.0) - stream_start) > 0.05:
+        raise ValueError(
+            "audio stream start_time does not match the per-clip audio plan"
+        )
+    return max(0.0, start - stream_start), stream_start
+
+
 def render_clip(
     src: Path,
     cut: dict[str, Any],
@@ -640,6 +696,8 @@ def render_clip(
     start_offset: float | None = None,
     audio_seek: float | None = None,
     audio_start_time: float = 0.0,
+    audio_plan: dict[str, Any] | None = None,
+    audio_source_key: str | None = None,
     safe_only: bool = False,
 ) -> dict[str, Any]:
     """Render one reframe cut into a 9:16 MP4.
@@ -657,6 +715,12 @@ def render_clip(
     per-clip status + the ffmpeg command/stderr for View logs).
     """
     from app import video as _video
+
+    if audio_src:
+        audio_seek, audio_start_time = audio_plan_seek(
+            cut, audio_src, audio_seek, audio_start_time, audio_plan,
+            audio_source_key,
+        )
 
     render_started = time.perf_counter()
 
@@ -1266,6 +1330,7 @@ def render_clip(
         "ffmpegCommand": _video.redact_urls(" ".join(cmd)),
         "ffmpegStderr": _video.redact_urls((proc.stderr or "").strip()),
         "attempts": attempts,
+        "audioPlan": audio_plan,
     }
 
 # fmt: off

@@ -7,6 +7,8 @@ end-to-end evidence is reported separately.
 
 from __future__ import annotations
 
+import pytest
+
 from app import audiosync, clipcount, encode
 
 
@@ -88,6 +90,31 @@ def test_span_validation_rejects_an_empty_plan():
         assert "empty" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("an empty span must be rejected before ffmpeg")
+
+
+def test_audio_plan_must_belong_to_this_clip():
+    cut = {"order": 2, "start": 114.07, "end": 152.07}
+    plan = {
+        "sourceKey": "audio.m4a",
+        "start": 114.07,
+        "end": 152.07,
+        "streamStart": 0.0,
+        "order": 2,
+    }
+    seek, start = encode.audio_plan_seek(cut, "audio.m4a", 114.07, 0.0, plan)
+    assert seek == pytest.approx(114.07)
+    assert start == 0.0
+
+    with pytest.raises(ValueError, match="does not match clip"):
+        encode.audio_plan_seek(cut, "audio.m4a", 114.07, 0.0, {**plan, "end": 150.0})
+    with pytest.raises(ValueError, match="belongs to clip"):
+        encode.audio_plan_seek(cut, "audio.m4a", 114.07, 0.0, {**plan, "order": 3})
+    with pytest.raises(ValueError, match="requires an explicit per-clip"):
+        encode.audio_plan_seek(cut, "audio.m4a", 114.07, 0.0, None)
+    with pytest.raises(ValueError, match="source key does not match"):
+        encode.audio_plan_seek(
+            cut, "audio.m4a", 114.07, 0.0, plan, audio_source_key="other-video.m4a"
+        )
 
 
 def test_video_and_audio_seeks_are_independent():
