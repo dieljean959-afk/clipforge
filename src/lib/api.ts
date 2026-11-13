@@ -267,6 +267,8 @@ export interface ClipDto {
   shareReady?: boolean;
   shareUrl?: string | null;
   sharePageUrl?: string | null;
+  /** Direct public MP4 (Range-capable). The canonical page is shareUrl. */
+  shareVideoUrl?: string | null;
   /** 7-day, revocable public token (new share links). */
   shareToken?: string | null;
   shareExpiresAt?: number | null;
@@ -1221,6 +1223,7 @@ export const api = {
       shareReady: boolean;
       shareUrl: string | null;
       sharePageUrl: string | null;
+      shareVideoUrl?: string | null;
       shareToken?: string | null;
       shareExpiresAt?: number | null;
     }>(`/api/clips/${encodeURIComponent(clipId)}/share-link`, { method: "POST" }),
@@ -1230,6 +1233,7 @@ export const api = {
       ok: boolean;
       token: string;
       url: string;
+      videoUrl: string;
       downloadUrl: string;
       pageUrl: string;
       expiresAt: number;

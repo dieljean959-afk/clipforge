@@ -2822,6 +2822,23 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 - completion must still complete
             logger.warning(f"[job {job_id}] clip tally skipped: {exc}")
             detail = "All clips ready"
+        # Every fresh deliverable gets a public page token at completion, so the
+        # card can share immediately instead of waiting for a Copy tap. The
+        # public route still enforces expiry/revocation on every request.
+        try:
+            from app import sharelink as _sharelink
+
+            for clip in clips:
+                if (
+                    str(clip.get("renderState") or "") == "done"
+                    and clip.get("videoPath")
+                    and _sharelink.token_state(clip)["state"] != "ready"
+                ):
+                    _sharelink.ensure_id(clip)
+                    _sharelink.ensure_token(clip)
+                    self.store.write_clip(clip)
+        except Exception as exc:  # noqa: BLE001 - sharing must not block completion
+            logger.warning(f"[job {job_id}] share token mint skipped: {exc}")
         job.update({
             "stage": "complete",
             "status": "complete",

@@ -530,7 +530,9 @@ def check_share(settings: Settings) -> list[Check]:
     clip = next((c for c in clips if c.get("shareToken") and not c.get("shareRevoked")), None)
     if clip is None:
         return [Check("share link", "warn", "no live share token yet", "open a clip and press Share")]
-    url = f"http://127.0.0.1:{settings.app.port}/s/{clip['shareToken']}"
+    # `/s/<token>` is the HTML page (for social unfurlers); the ranged bytes
+    # live on the explicit .mp4 endpoint.
+    url = f"http://127.0.0.1:{settings.app.port}/s/{clip['shareToken']}.mp4"
     req = urllib.request.Request(url, headers={"Range": "bytes=0-99"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 - localhost

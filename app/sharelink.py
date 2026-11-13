@@ -195,21 +195,35 @@ def backfill(store: Any, *, limit: int = 500) -> dict[str, int]:
     render/prewarm path's job, so this is cheap and never transcodes.
     """
     minted = 0
+    tokens = 0
     scanned = 0
     try:
         clips = store.list_all_clips(limit=limit)
     except Exception:  # noqa: BLE001 - a backfill must never break boot
-        return {"scanned": 0, "minted": 0}
+        return {"scanned": 0, "minted": 0, "tokens": 0}
     for clip in clips:
         scanned += 1
-        if valid_id(clip.get("shareId")):
+        changed = False
+        if not valid_id(clip.get("shareId")):
+            clip["shareId"] = new_id()
+            clip.setdefault("shareState", STATE_PREPARING)
+            minted += 1
+            changed = True
+        # Mint the 7-day token for finished media now, not only when somebody
+        # taps Copy. A clip that just rendered should have a shareable page on
+        # its card immediately; `token_state` still refuses pending clips.
+        if (
+            str(clip.get("renderState") or "") in {"done", "complete", "rendered", "uploaded"}
+            and clip.get("videoPath")
+            and token_state(clip)["state"] != "ready"
+        ):
+            ensure_token(clip)
+            tokens += 1
+            changed = True
+        if not changed:
             continue
-        sid = new_id()
-        clip["shareId"] = sid
-        clip.setdefault("shareState", STATE_PREPARING)
         try:
             store.write_clip(clip)
-            minted += 1
         except Exception:  # noqa: BLE001 - keep going through the backlog
             continue
-    return {"scanned": scanned, "minted": minted}
+    return {"scanned": scanned, "minted": minted, "tokens": tokens}

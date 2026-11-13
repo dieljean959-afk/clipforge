@@ -180,7 +180,7 @@ def main() -> int:
             if not token:
                 bad.append(f"{cid}: share token missing")
             else:
-                status, body = ranged(f"{args.base}/s/{token}")
+                status, body = ranged(f"{args.base}/s/{token}.mp4")
                 if status != 206 or len(body) != 1024:
                     bad.append(f"{cid}: share HTTP {status}/{len(body)}B")
         if done:

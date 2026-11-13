@@ -114,7 +114,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
    */
   const shareVia = async () => {
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
-    const link = clipShareUrl(clip._id, clip.shareId);
+    const link = clipShareUrl(clip._id, clip.shareToken ?? clip.shareId);
     const nav = navigator as Navigator & {
       canShare?: (data: ShareData) => boolean;
       share?: (data: ShareData) => Promise<void>;
@@ -157,7 +157,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
   /** Open one platform's own composer with the caption (and link) filled in. */
   const shareTo = (slug: string, label: string) => {
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
-    const link = clipShareUrl(clip._id, clip.shareId);
+    const link = clipShareUrl(clip._id, clip.shareToken ?? clip.shareId);
     const intent = visibleIntents(!!link).find((i) => i.slug === slug);
     if (!intent) {
       toast.error(`${label} cannot build a share link here.`);
@@ -343,7 +343,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
             </p>
 
             <div className="grid grid-cols-3 gap-1.5">
-              {visibleIntents(!!clipShareUrl(clip._id, clip.shareId)).map((intent) => (
+              {visibleIntents(!!clipShareUrl(clip._id, clip.shareToken ?? clip.shareId)).map((intent) => (
                 <button
                   key={intent.slug}
                   type="button"
@@ -364,7 +364,7 @@ export function PostMenu({ clip, rendered }: { clip: ClipDto; rendered: boolean 
               type="button"
               onClick={() => {
                 setOpen(false);
-                const link = clipShareUrl(clip._id, clip.shareId);
+                const link = clipShareUrl(clip._id, clip.shareToken ?? clip.shareId);
                 void navigator.clipboard
                   .writeText(
                     link

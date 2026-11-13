@@ -231,9 +231,15 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
     }
 
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
+    // The page URL is what a social app unfurls; the .mp4 is what we fetch
+    // when the OS share sheet wants a real file. They are deliberately
+    // different now that /s/<token> is HTML with OG tags.
     const publicUrl = token
       ? `${window.location.origin}/s/${token}`
       : clipShareUrl(clip._id, clip.shareId);
+    const fileUrl = token
+      ? `${window.location.origin}/s/${token}.mp4`
+      : publicUrl;
     const file = readyRef.current ? cache.get(clip._id, fileName) : null;
 
     // Some apps drop the text field when a file is attached, so the caption is
@@ -271,7 +277,7 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       const controller = new AbortController();
       void (async () => {
         try {
-          const res = await fetch(publicUrl, {
+          const res = await fetch(fileUrl, {
             signal: controller.signal,
             cache: "force-cache",
           });

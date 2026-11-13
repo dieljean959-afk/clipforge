@@ -132,17 +132,19 @@ def _share_backfill() -> dict[str, int]:
     fresh install, and the thread finishes the backlog behind the UI.
     """
     started = sharelink.backfill(store)
-    if started["minted"]:
+    if started["minted"] or started.get("tokens"):
         logger.info(
-            f"[share] minted {started['minted']} share link(s) for existing clips"
+            f"[share] minted {started['minted']} share id(s) and "
+            f"{started.get('tokens', 0)} public token(s) for existing clips"
         )
 
     def _finish() -> None:
         try:
             rest = sharelink.backfill(store, limit=2000)
-            if rest["minted"]:
+            if rest["minted"] or rest.get("tokens"):
                 logger.info(
-                    f"[share] backfilled {rest['minted']} more share link(s) "
+                    f"[share] backfilled {rest['minted']} more share id(s) and "
+                    f"{rest.get('tokens', 0)} token(s) "
                     f"({rest['scanned']} clips scanned)"
                 )
         except Exception as exc:  # noqa: BLE001 - telemetry only
@@ -1485,9 +1487,12 @@ def public_share_mp4(share_id: str, request: Request) -> Response:
     app-wide middleware already allows any origin for /api but not for /s.
     """
     raw = share_id[:-4] if share_id.lower().endswith(".mp4") else share_id
-    clip = _clip_for_share_id(raw)
-    if clip is None:
-        raise HTTPException(404, "this share link does not exist")
+    # New links use a 7-day token; old links use the 10-char share id. Both
+    # resolve to public bytes, and the token branch still enforces revocation.
+    try:
+        clip, _tok = _resolve_public_share(raw)
+    except HTTPException as exc:
+        raise exc
     share = _share_copy_for(clip)
     if share is None or not share.exists():
         # Older links predate the bucket-backed share route. They must not
@@ -1556,58 +1561,181 @@ def _share_stream_response(
 
 @app.api_route("/s/{token}", methods=["GET", "HEAD"])
 def public_share_token(token: str, request: Request) -> Response:
-    """A 7-day public share link. No login, no cookie, real Range support.
+    """The public share page /s/<token>. No login, no cookie, no expiry leak.
 
-    If the token is an older short share id, fall through to the OG page so
-    links that were copied before this feature keep working.
+    This is an HTML page with Open Graph and Twitter Card tags because that is
+    what a social app fetches when the link is pasted. The playable bytes are
+    at /s/<token>.mp4, not here: serving MP4 at this URL made every social
+    unfurl show a bare URL (and made the copied link look like a download).
+
+    Older 10-character share ids still resolve to the same page; their direct
+    MP4 remains /s/<id>.mp4.
     """
-    clip = _clip_for_share_token(token)
-    if clip is None:
-        return public_share_page(token, request)
-    state = sharelink.token_state(clip)
-    if state["state"] != "ready":
-        raise HTTPException(410, state["detail"])
-    return _share_stream_response(clip, request)
+    clip, tok = _resolve_public_share(token)
+    return _share_page_html(clip, request, token=tok)
 
 
 @app.api_route("/s/{token}/download", methods=["GET", "HEAD"])
 def public_share_download(token: str, request: Request) -> Response:
-    """The download option on a share link."""
-    clip = _clip_for_share_token(token)
-    if clip is None:
-        raise HTTPException(404, "this share link does not exist")
-    state = sharelink.token_state(clip)
-    if state["state"] != "ready":
-        raise HTTPException(410, state["detail"])
+    """The download option on a share link (token or legacy share id)."""
+    clip, _tok = _resolve_public_share(token)
     return _share_stream_response(clip, request, attachment=True)
+
+
+def _public_origin(request: Request) -> str:
+    """The origin a recipient will actually use.
+
+    The API is reached through the Vite/production proxy, so ``request.base_url``
+    can describe the upstream socket rather than the browser origin. Honour the
+    standard forwarded headers first and fall back to the Host header. A copied
+    link must never contain 127.0.0.1 when the page came from a public domain.
+    """
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    if not host:
+        host = (request.headers.get("host") or request.url.netloc or "").strip()
+    if not proto:
+        proto = request.url.scheme
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _resolve_public_share(raw: str) -> tuple[dict[str, Any], str | None]:
+    """Resolve a token or a legacy share id, enforcing token expiry/revocation."""
+    token_clip = _clip_for_share_token(raw)
+    if token_clip is not None:
+        state = sharelink.token_state(token_clip)
+        if state["state"] != "ready":
+            raise HTTPException(410, state["detail"])
+        return token_clip, raw
+    legacy = _clip_for_share_id(raw)
+    if legacy is not None:
+        return legacy, None
+    raise HTTPException(404, "this share link does not exist")
+
+
+def _share_page_html(
+    clip: dict[str, Any], request: Request, *, token: str | None = None,
+) -> HTMLResponse:
+    """A public, self-contained share page with the tags social apps read.
+
+    This is the URL people paste into X/WhatsApp/Facebook. The raw MP4 lives at
+    a separate ``.mp4`` URL so a crawler gets HTML metadata here instead of
+    immediately downloading bytes. Every URL is absolute: a relative
+    ``og:video`` is ignored by most unfurlers.
+    """
+    base = _public_origin(request)
+    sid = token or str(clip.get("shareId") or "")
+    if not sid:
+        raise HTTPException(404, "this clip has no share link")
+    page_url = f"{base}/s/{sid}"
+    video_url = f"{base}/s/{sid}.mp4"
+    download_url = f"{base}/s/{sid}/download"
+    embed_url = f"{base}/s/{sid}/embed"
+    thumb_path = clip.get("thumbPath")
+    image_url = f"{base}/api/clips/{clip['_id']}/thumb" if thumb_path else ""
+    title = _og_escape(clip.get("title") or clip.get("hookText") or "ClipForge clip")
+    hook = _og_escape(clip.get("hookText") or clip.get("title") or "Made with ClipForge")
+    w = int(clip.get("mediaWidth") or 1080)
+    h = int(clip.get("mediaHeight") or 1920)
+    secure = f'<meta property="og:video:secure_url" content="{_og_escape(video_url)}">' \
+        if video_url.startswith("https://") else ""
+    image_tags = ""
+    if image_url:
+        image_tags = (
+            f'<meta property="og:image" content="{_og_escape(image_url)}">'
+            f'<meta name="twitter:image" content="{_og_escape(image_url)}">'
+        )
+    tags = "".join([
+        '<meta property="og:type" content="video.other">',
+        '<meta property="og:site_name" content="ClipForge">',
+        f'<meta property="og:title" content="{title}">',
+        f'<meta property="og:description" content="{hook}">',
+        f'<meta property="og:url" content="{_og_escape(page_url)}">',
+        f'<meta property="og:video" content="{_og_escape(video_url)}">',
+        f'<meta property="og:video:url" content="{_og_escape(video_url)}">',
+        secure,
+        '<meta property="og:video:type" content="video/mp4">',
+        f'<meta property="og:video:width" content="{w}">',
+        f'<meta property="og:video:height" content="{h}">',
+        '<meta name="twitter:card" content="player">',
+        f'<meta name="twitter:title" content="{title}">',
+        f'<meta name="twitter:description" content="{hook}">',
+        f'<meta name="twitter:player" content="{_og_escape(embed_url)}">',
+        f'<meta name="twitter:player:width" content="{w}">',
+        f'<meta name="twitter:player:height" content="{h}">',
+        f'<meta name="twitter:player:stream" content="{_og_escape(video_url)}">',
+        '<meta name="twitter:player:stream:content_type" content="video/mp4">',
+        image_tags,
+    ])
+    poster = f' poster="{_og_escape(image_url)}"' if image_url else ""
+    html = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<link rel="canonical" href="{_og_escape(page_url)}">
+{tags}
+<style>
+ body{{margin:0;background:#0b0b0d;color:#f4f4f5;font:16px/1.5 system-ui,sans-serif;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      min-height:100vh;gap:18px;padding:24px;text-align:center}}
+ video{{max-width:min(420px,92vw);max-height:78vh;border-radius:14px;background:#000}}
+ a{{color:#7dd3a0}}
+ .download{{display:inline-block;padding:10px 16px;border-radius:999px;background:#f4f4f5;color:#111;text-decoration:none;font-weight:700}}
+ small{{color:#a1a1aa}}
+</style></head>
+<body>
+  <video src="{_og_escape(video_url)}" controls playsinline preload="metadata"{poster}></video>
+  <div>
+    <p style="font-size:18px;font-weight:700;margin:0 0 6px">{title}</p>
+    <p style="color:#a1a1aa;margin:0 0 14px">{hook}</p>
+    <a class="download" href="{_og_escape(download_url)}">Download MP4</a>
+  </div>
+  <small>Made with ClipForge</small>
+</body></html>"""
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "public, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @app.get("/s/{token}/page")
 def public_share_token_page(token: str, request: Request) -> HTMLResponse:
-    """A minimal player page for the share link, with a download button."""
-    clip = _clip_for_share_token(token)
-    if clip is None:
-        raise HTTPException(404, "this share link does not exist")
-    state = sharelink.token_state(clip)
-    if state["state"] != "ready":
-        raise HTTPException(410, state["detail"])
-    title = _og_escape(clip.get("title") or "ClipForge clip")
-    src = f"/s/{token}"
-    dl = f"/s/{token}/download"
+    """Legacy page URL; serves the same canonical share page."""
+    clip, tok = _resolve_public_share(token)
+    return _share_page_html(clip, request, token=tok)
+
+
+@app.get("/s/{token}/embed")
+def public_share_embed(token: str, request: Request) -> HTMLResponse:
+    """Minimal iframe player used by Twitter's player card."""
+    clip, tok = _resolve_public_share(token)
+    base = _public_origin(request)
+    sid = tok or str(clip.get("shareId") or "")
+    video_url = f"{base}/s/{sid}.mp4"
+    poster_path = clip.get("thumbPath")
+    poster = f"{base}/api/clips/{clip['_id']}/thumb" if poster_path else ""
+    poster_attr = f' poster="{_og_escape(poster)}"' if poster else ""
     return HTMLResponse(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        f"<title>{title}</title>"
-        f"<meta property=\"og:title\" content=\"{title}\">"
-        f"<meta property=\"og:video\" content=\"{src}\">"
-        "<style>body{margin:0;background:#0b0b0f;color:#f5f5f5;font-family:system-ui,sans-serif;"
-        "display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px;box-sizing:border-box}"
-        "main{width:min(420px,100%)}video{width:100%;border-radius:18px;background:#000;display:block}"
-        "a{display:block;margin-top:14px;text-align:center;padding:12px;border-radius:999px;background:#f5f5f5;color:#111;"
-        "text-decoration:none;font-weight:700}p{opacity:.65;font-size:12px;text-align:center}</style></head>"
-        f"<body><main><video src=\"{src}\" controls playsinline preload=\"metadata\"></video>"
-        f"<a href=\"{dl}\">Download MP4</a><p>{title}</p></main></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<style>html,body,video{margin:0;width:100%;height:100%;background:#000}</style>"
+        f"</head><body><video src=\"{_og_escape(video_url)}\" controls playsinline "
+        f"autoplay muted loop{poster_attr}></video></body></html>",
+        headers={"Cache-Control": "public, max-age=300"},
     )
+
+
+@app.api_route("/s/{token}/thumb", methods=["GET", "HEAD"])
+def public_share_thumb(token: str) -> Response:
+    """Public poster for a share page; no login required for the unfurler."""
+    clip, _tok = _resolve_public_share(token)
+    resp = clip_thumb(str(clip["_id"]))
+    resp.headers.update(_SHARE_CORS)
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
 
 
 @app.get("/s/{share_id}")
@@ -1902,14 +2030,18 @@ def create_share_link(clip_id: str, request: Request) -> dict:
     token = sharelink.ensure_token(clip)
     clip["shareState"] = sharelink.STATE_READY
     store.write_clip(clip)
-    base = str(request.base_url).rstrip("/")
+    base = _public_origin(request)
     expires = int(clip.get("shareExpiresAt") or 0)
     return {
         "ok": True,
         "token": token,
+        # The canonical URL to paste into a social app: an HTML page with OG
+        # tags. `videoUrl` is the playable Range endpoint; downloadUrl forces
+        # an attachment.
         "url": f"{base}/s/{token}",
+        "pageUrl": f"{base}/s/{token}",
+        "videoUrl": f"{base}/s/{token}.mp4",
         "downloadUrl": f"{base}/s/{token}/download",
-        "pageUrl": f"{base}/s/{token}/page",
         "expiresAt": expires,
         "expiresInDays": 7,
         "revocable": True,
@@ -1984,7 +2116,8 @@ def ensure_share_link(clip_id: str) -> dict:
         "shareReady": tok["state"] == "ready",
         "shareToken": token,
         "shareUrl": f"/s/{token}",
-        "sharePageUrl": f"/s/{token}/page",
+        "shareVideoUrl": f"/s/{token}.mp4",
+        "sharePageUrl": f"/s/{token}",
         "shareExpiresAt": tok.get("expiresAt"),
     }
 
@@ -2009,6 +2142,8 @@ def _attach_share_state(clips: list[dict]) -> list[dict]:
             state = "failed"
             tok["detail"] = "the rendered file is missing from disk and bucket"
         token = tok.get("token")
+        sid = token or (str(clip.get("shareId") or "") or None)
+        share_page = f"/s/{sid}" if sid else None
         out.append({
             **clip,
             **sharelink.share_state(clip, None),
@@ -2016,8 +2151,11 @@ def _attach_share_state(clips: list[dict]) -> list[dict]:
             "shareDetail": tok["detail"],
             "shareReady": state == "ready",
             "shareToken": token,
-            "shareUrl": f"/s/{token}" if token else None,
-            "sharePageUrl": f"/s/{token}/page" if token else None,
+            # `/s/<id>` is now an HTML page with OG tags. The playable MP4 has
+            # its own explicit URL; do not hand a raw MP4 to a social app.
+            "shareUrl": share_page,
+            "sharePageUrl": share_page,
+            "shareVideoUrl": f"/s/{sid}.mp4" if sid else None,
             "shareExpiresAt": tok.get("expiresAt"),
         })
     return out

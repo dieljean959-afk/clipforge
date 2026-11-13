@@ -222,6 +222,11 @@ export default defineConfig({
       // local pipeline API + rendered media
       "/api": "http://127.0.0.1:8000",
       "/clips": "http://127.0.0.1:8000",
+      // Public share links must reach FastAPI on the SAME origin they were
+      // copied from. Without this, Vite's SPA fallback served index.html for
+      // /s/<token> and the recipient/social crawler never saw the clip. Use
+      // "/s/" (not "/s") so Vite's module path /src is never captured.
+      "/s/": "http://127.0.0.1:8000",
     },
   },
 });
