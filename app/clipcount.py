@@ -73,6 +73,19 @@ def suggest(duration_sec: float, ceiling: int = HARD_CEILING) -> tuple[int, str]
     return count, f"{mins} min source ({label}) — up to {count} clips"
 
 
+def candidate_target(requested: int, *, exact: bool) -> int:
+    """How many candidates to ask detection for when N is a quota.
+
+    N + 40% (at least N + 3) gives render failures a real replacement moment
+    instead of silently returning a short batch. Auto counts are ceilings, not
+    quotas, so they keep asking for just the ceiling.
+    """
+    n = max(1, int(requested or 1))
+    if not exact:
+        return n
+    return n + max(3, (n * 2 + 4) // 5)
+
+
 def reasonable_clips(
     candidates: list[dict],
     *,

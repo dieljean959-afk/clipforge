@@ -1879,8 +1879,11 @@ class Pipeline:
                 # not stored — so it is left alone rather than invented.
                 floor = float(self.settings.gemini.min_score)
                 scores = [float(c.get("score") or 0.0) for c in cached]
+                target = int(job.get("requestedClipTarget") or job.get("clipTarget") or len(cached))
                 patch: dict[str, Any] = {
-                    "clipTarget": len(cached),
+                    "clipTarget": target,
+                    "requestedClipTarget": target,
+                    "candidateTarget": len(cached),
                     "clipsAboveScore": sum(1 for s in scores if s >= floor),
                     "clipsBelowScore": sum(1 for s in scores if s < floor),
                     "clipScoreFloor": floor,
@@ -1928,8 +1931,21 @@ class Pipeline:
             target, reason = clipcount.suggest(duration, self.settings.gemini.max_clips)
         else:
             target, reason = self.settings.gemini.max_clips, "flat count (auto scaling off)"
+        # Explicit N is a quota. Ask detection for N + 40% (at least N + 3)
+        # candidates so a failed render has a real next moment to replace it
+        # with, instead of silently returning fewer than requested.
+        detect_target = clipcount.candidate_target(target, exact=bool(override))
+        extra = detect_target - target
+        if extra:
+            reason = f"{reason}; scoring {detect_target} candidates for {target} slots"
         self._log(job_id, f"Clip target: {target} — {reason}")
-        self._patch_job(job_id, clipTarget=target, clipTargetReason=reason)
+        self._patch_job(
+            job_id,
+            clipTarget=target,
+            requestedClipTarget=target,
+            candidateTarget=detect_target,
+            clipTargetReason=reason,
+        )
 
         # stage 2: transcribe gets its own log callback.
         def _on_transcribe_log(line: str) -> None:
@@ -1973,7 +1989,7 @@ class Pipeline:
             self.settings,
             min_clip_sec=opts.get("minClipSec"),
             max_clip_sec=opts.get("maxClipSec"),
-            max_clips=target,
+            max_clips=detect_target,
             # A number the user picked is a count they expect to receive. The
             # auto-scaled target is a ceiling and keeps the old "only real
             # highlights" behaviour; an explicit 5/8/10/15/20 is a quota.
@@ -2059,12 +2075,21 @@ class Pipeline:
 
         self._check_disk_space(job_id, float(job.get("durationSec") or 0.0))
 
+        requested_target = int(
+            job.get("requestedClipTarget") or job.get("clipTarget")
+            or self.settings.gemini.max_clips
+        )
         clips = clipcount.reasonable_clips(
             candidates,
-            max_clips=job.get("clipTarget") or self.settings.gemini.max_clips,
+            max_clips=job.get("candidateTarget") or len(candidates),
             fallback=self.settings.gemini.max_clips,
         )
-        job = self._patch_job(job_id, clipTarget=len(clips))
+        job = self._patch_job(
+            job_id,
+            clipTarget=requested_target,
+            requestedClipTarget=requested_target,
+            candidateTarget=len(clips),
+        )
 
         # Clamp every cut into the source duration before reframe sees it, so a
         # candidate whose end drifted past the source (or whose start is below 0)
@@ -2439,6 +2464,19 @@ class Pipeline:
         total_sec = 0.0
         rendered = 0
         failed: list[tuple[int, str, str]] = []
+        requested_count = int(job.get("requestedClipTarget") or job.get("clipTarget") or len(cuts))
+        ready_count = 0
+        used_ids: set[str] = set()
+        gate_previous: list[dict[str, Any]] = []
+        for prior in self.store.list_clip_docs(job_id):
+            if prior.get("renderState") == "done":
+                ready_count += 1
+                used_ids.add(str(prior.get("_id")))
+                sync = prior.get("audioSync") or {}
+                if sync.get("fingerprint"):
+                    gate_previous.append(
+                        {"clipId": prior.get("_id"), "fingerprint": sync["fingerprint"]}
+                    )
         # Resolved ONCE for the whole export loop, and fingerprinted: a clip
         # whose stored styleId still matches may be reused, anything else must
         # re-encode. Without the id, "Re-render captions" skipped every clip
@@ -2447,6 +2485,13 @@ class Pipeline:
         style_id = str(resolved["hash"])
 
         for i, cut in enumerate(cuts):
+            if ready_count >= requested_count:
+                self._log(
+                    job_id,
+                    f"requested {requested_count} clips are ready — "
+                    f"not consuming the remaining replacement candidates",
+                )
+                break
             self._progress(
                 job_id, "exporting",
                 (i + 1) / len(cuts),
@@ -2455,6 +2500,7 @@ class Pipeline:
                 units_done=i + 1, units_total=len(cuts),
             )
             clip_id = cut.get("clipId") or f"clip_{i:03d}"
+            used_ids.add(str(clip_id))
             # Per-clip resume: a clip that is already rendered AND recorded as
             # done must not pay for a second ffmpeg pass on every retry — the
             # bounded-runner path re-enters this loop from clip 0 each time.
@@ -2488,6 +2534,9 @@ class Pipeline:
                 {"renderState": "running", "jobId": job_id},
                 job_id=job_id,
             )
+            gate_result: dict[str, Any] | None = None
+            meta: dict[str, Any] | None = None
+            timings: dict[str, float] = {}
             with self._heartbeat(job_id, f"render clip {i + 1}"):
                 try:
                     # The context-aware emoji chosen in the captions stage (an
@@ -2528,7 +2577,8 @@ class Pipeline:
                     probe_meta: dict[str, Any] | None = None
                     if isinstance(src, source_stream.RemoteSource):
                         render_src, seek_offset = src.url_for_span(
-                            float(cut.get("start") or 0.0)
+                            float(cut.get("start") or 0.0),
+                            float(cut.get("end") or 0.0),
                         )
                         render_audio = src.audio_url()
                         probe_meta = src.probe
@@ -2541,6 +2591,7 @@ class Pipeline:
                         )
                     if self._ledger is not None:
                         self._ledger.check(f"export clip {i + 1}")
+                    _render_t0 = time.perf_counter()
                     meta = encode.render_clip(
                         render_src, cut, dest / f"clip_{i:03d}.mp4", cap_settings,
                         cues=clip_cues,
@@ -2553,9 +2604,110 @@ class Pipeline:
                         audio_src=render_audio,
                         probe_meta=probe_meta,
                         start_offset=seek_offset,
+                        audio_seek=float(cut.get("start") or 0.0),
+                        audio_start_time=float(
+                            getattr(src, "audio_start_time", 0.0) or 0.0
+                        ),
                     )
+                    timings["renderMs"] = round((time.perf_counter() - _render_t0) * 1000.0, 1)
+                    # The independent gate, on the FINAL file and the REAL
+                    # source. It never trusts the renderer's own plan.
+                    _gate_t0 = time.perf_counter()
+                    from app import audiosync as _audiosync
+
+                    gate_cache = dest / ".audiosync"
+                    gate_cache.mkdir(parents=True, exist_ok=True)
+                    gate_source = render_audio or render_src
+                    gate_result = _audiosync.gate_clip(
+                        dest / f"clip_{i:03d}.mp4",
+                        gate_source,
+                        plan_start=float(cut.get("start") or 0.0),
+                        plan_end=float(cut.get("end") or 0.0),
+                        cues=clip_cues,
+                        settings=cap_settings,
+                        cache_dir=gate_cache / f"clip_{i:03d}",
+                        previous=gate_previous,
+                        source_start_time=float(getattr(src, "audio_start_time", 0.0) or 0.0),
+                    )
+                    timings["gateMs"] = round((time.perf_counter() - _gate_t0) * 1000.0, 1)
+                    if not gate_result.get("passed") and not (gate_result.get("placement") or {}).get("ok"):
+                        # The brief's one automatic repair: a placement failure
+                        # is re-rendered once with the safer render ladder.
+                        self._log(
+                            job_id,
+                            f"clip {i + 1}: audio sync gate failed ({gate_result.get('reason')}) "
+                            "— re-rendering once with safe settings",
+                        )
+                        _safe_t0 = time.perf_counter()
+                        safe_meta = encode.render_clip(
+                            render_src, cut, dest / f"clip_{i:03d}.mp4", cap_settings,
+                            cues=clip_cues,
+                            preset_key=str(resolved["presetKey"]),
+                            emoji_selection=emoji_track.get("selected") or [],
+                            title=clip_title,
+                            on_log=lambda line: self._log(job_id, line),
+                            audio_src=render_audio,
+                            probe_meta=probe_meta,
+                            start_offset=seek_offset,
+                            audio_seek=float(cut.get("start") or 0.0),
+                            audio_start_time=float(
+                                getattr(src, "audio_start_time", 0.0) or 0.0
+                            ),
+                            safe_only=True,
+                        )
+                        safe_meta["attempts"] = (safe_meta.get("attempts") or [])
+                        safe_meta["attempts"].insert(0, {
+                            "attempt": "sync-safe",
+                            "ok": True,
+                            "reason": str(gate_result.get("reason") or ""),
+                        })
+                        timings["safeRenderMs"] = round((time.perf_counter() - _safe_t0) * 1000.0, 1)
+                        meta = safe_meta
+                        _gate_t0 = time.perf_counter()
+                        gate_result = _audiosync.gate_clip(
+                            dest / f"clip_{i:03d}.mp4",
+                            gate_source,
+                            plan_start=float(cut.get("start") or 0.0),
+                            plan_end=float(cut.get("end") or 0.0),
+                            cues=clip_cues,
+                            settings=cap_settings,
+                            cache_dir=gate_cache / f"clip_{i:03d}",
+                            previous=gate_previous,
+                            source_start_time=float(
+                                getattr(src, "audio_start_time", 0.0) or 0.0
+                            ),
+                        )
+                    if "safeRenderMs" in timings:
+                        timings["safeGateMs"] = round(
+                            (time.perf_counter() - _gate_t0) * 1000.0, 1
+                        )
+                    if not gate_result.get("passed"):
+                        sync_error = RuntimeError(
+                            "audio_mismatch after one safe re-render: "
+                            + str(gate_result.get("reason") or "sync gate failed")
+                        )
+                        setattr(sync_error, "attempts", meta.get("attempts"))
+                        raise sync_error
+                    meta["audioSync"] = gate_result
                 except Exception as exc:
                     detail = str(exc)[:500]
+                    ladder = getattr(exc, "attempts", None) or (
+                        meta.get("attempts") if isinstance(meta, dict) else None
+                    )
+                    if ladder:
+                        bits = []
+                        for step in ladder:
+                            if not isinstance(step, dict):
+                                continue
+                            if step.get("ok"):
+                                bits.append(f"{step.get('attempt')} ok")
+                            else:
+                                bits.append(
+                                    f"{step.get('attempt')}: "
+                                    f"{str(step.get('reason') or 'failed')[:120]}"
+                                )
+                        if bits:
+                            detail = (detail + " | retry ladder: " + "; ".join(bits))[:700]
                     self._log(job_id, f"render failed clip {i + 1}: {detail}")
                     # Keep WHERE it failed: "failed to map segment from shared
                     # object" names a library, not the code that asked for it.
@@ -2577,12 +2729,15 @@ class Pipeline:
                             stderr = str(got or "")[-1500:]
                         except Exception:
                             stderr = ""
+                        render_attempts = ladder
                         self.store.update_clip(
                             clip_id,
                             lambda c: c.update({
                                 "renderState": "failed",
                                 "mediaError": detail,
                                 "ffmpegStderr": stderr or c.get("ffmpegStderr"),
+                                "renderAttempts": render_attempts,
+                                "audioSync": gate_result,
                                 "failedAt": int(time.time() * 1000),
                                 "jobId": job_id,
                             }),
@@ -2632,6 +2787,9 @@ class Pipeline:
                         "captionSettings": resolved,
                         "ffmpegCommand": meta.get("ffmpegCommand"),
                         "ffmpegStderr": meta.get("ffmpegStderr"),
+                        "renderAttempts": meta.get("attempts"),
+                        "audioSync": meta.get("audioSync"),
+                        "timings": timings,
                         "jobId": job_id,
                     },
                     job_id=job_id,
@@ -2669,6 +2827,9 @@ class Pipeline:
                         "captionSettings": resolved,
                         "ffmpegCommand": meta.get("ffmpegCommand"),
                         "ffmpegStderr": meta.get("ffmpegStderr"),
+                        "renderAttempts": meta.get("attempts"),
+                        "audioSync": meta.get("audioSync"),
+                        "timings": timings,
                         "jobId": job_id,
                     },
                     job_id=job_id,
@@ -2678,8 +2839,15 @@ class Pipeline:
             # local bytes immediately. Nothing is deleted before the bucket has
             # confirmed the size, and a failure leaves the file alone and marks
             # the clip "upload pending" so the completion sweep retries it.
+            _upload_t0 = time.perf_counter()
             self._store_clip_media(
                 job_id, clip_id, dest / f"clip_{i:03d}.mp4", thumb_path, meta,
+            )
+            timings["uploadMs"] = round((time.perf_counter() - _upload_t0) * 1000.0, 1)
+            self.store.update_clip(
+                clip_id,
+                lambda c: c.update({"timings": timings}),
+                job_id=job_id,
             )
             # The title plate PNG and the encoder's temp file belong to THIS
             # clip only; leaving them would accumulate one small file per clip.
@@ -2690,14 +2858,37 @@ class Pipeline:
                 leftover.unlink(missing_ok=True)
             total_sec += meta["durationSec"]
             rendered += 1
+            ready_count += 1
+            sync = meta.get("audioSync") or {}
+            if sync.get("fingerprint"):
+                gate_previous.append({"clipId": clip_id, "fingerprint": sync["fingerprint"]})
 
-        ws.mark_done("export", artifacts=[], count=len(cuts))
+        # Drop replacement candidates that were never consumed. A finished
+        # batch must show exactly what it delivered (plus any attempted
+        # failures), not 14 cards for a 10-clip request.
+        final_cuts = [c for c in cuts if str(c.get("clipId")) in used_ids]
+        self.store.sync_clip_docs(job_id, final_cuts)
+        ws.mark_done("export", artifacts=[], count=len(final_cuts))
+        unmet = ""
         if failed:
             reasons = "; ".join(f"clip {i+1}: {r}" for i, _, r in failed)
             self._log(job_id, f"{len(failed)} clip(s) failed to render: {reasons}")
+        if ready_count < requested_count:
+            unmet = (
+                f"only {len(cuts)} candidate moment(s) were available for "
+                f"{requested_count} requested; {ready_count} became ready and "
+                f"{len(failed)} failed: {reasons if failed else 'none'}"
+            )[:700]
+            self._log(job_id, unmet)
         self._patch_job(
             job_id,
-            clipCount=rendered,
+            clipTarget=requested_count,
+            requestedClipTarget=requested_count,
+            clipCount=ready_count,
+            requestedClips=requested_count,
+            readyClips=ready_count,
+            failedClips=len(failed),
+            unmetReason=unmet or None,
             totalClipsSec=round(total_sec, 3),
             renderFailures=len(failed),
         )
@@ -2848,6 +3039,9 @@ class Pipeline:
             "finishedAt": now_ms,
             "isTerminal": True,
             "clipCount": counts["done"],
+            "requestedClips": int(job.get("requestedClips") or job.get("requestedClipTarget") or counts["done"]),
+            "readyClips": counts["done"],
+            "failedClips": counts["failed"],
             "renderFailures": counts["failed"],
             # The projection lives in the same document as the counts, so a
             # reader never sees "1 clip ready" with an empty clips list.

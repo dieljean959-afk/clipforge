@@ -518,6 +518,61 @@ def check_clip_health(settings: Settings, store: Any = None) -> list[Check]:
     )]
 
 
+def check_audio_sync(settings: Settings, store: Any = None) -> list[Check]:
+    """Audio placement + duplicate results for the newest gated batch.
+
+    The gate runs locally at render time and stores only numbers/reasons. This
+    checker does not download media or contact an ASR provider; it reports the
+    newest batch's recorded placement lag/correlation and re-runs the pure
+    duplicate comparison against the stored fingerprints.
+    """
+    from app import audiosync
+    from app.store import LocalStore
+
+    st = store or LocalStore(settings.app.paths)
+    try:
+        clips = st.list_all_clips(limit=250)
+    except Exception as exc:  # noqa: BLE001
+        return [Check("audio sync", "fail", f"cannot list clips: {exc}", "inspect data/clips")]
+    gated = [c for c in clips if isinstance(c.get("audioSync"), dict)]
+    if not gated:
+        return [Check(
+            "audio sync", "warn", "no clips carry an audioSync result yet",
+            "render a batch with the new sync gate",
+        )]
+    latest_job = max(gated, key=lambda c: int(c.get("createdAt") or 0)).get("jobId")
+    batch = [c for c in gated if c.get("jobId") == latest_job]
+    placement = [c["audioSync"].get("placement") or {} for c in batch]
+    lags = [float(p["lagMs"]) for p in placement if p.get("lagMs") is not None]
+    corrs = [float(p["correlation"]) for p in placement if p.get("correlation") is not None]
+    failed = [c for c in batch if not (c["audioSync"] or {}).get("passed")]
+    max_lag = max((abs(v) for v in lags), default=0.0)
+    min_corr = min(corrs, default=0.0)
+    detail = (
+        f"job {latest_job}: {len(batch)} gated, {len(failed)} failed; "
+        f"max |lag| {max_lag:.0f} ms, min correlation {min_corr:.3f}"
+    )
+    fix = "" if not failed else "open the failed clip and press Retry render"
+    checks = [Check("audio sync", "ok" if not failed else "fail", detail, fix)]
+
+    seen: list[dict[str, Any]] = []
+    dupes = 0
+    for c in batch:
+        fp = (c["audioSync"] or {}).get("fingerprint") or {}
+        if not fp:
+            continue
+        found = audiosync.duplicate_of(fp, seen)
+        if not found.get("ok"):
+            dupes += 1
+        seen.append({"clipId": c.get("_id"), "fingerprint": fp})
+    checks.append(Check(
+        "duplicate clips", "ok" if dupes == 0 else "fail",
+        f"job {latest_job}: {len(seen)} fingerprinted, {dupes} duplicate(s)",
+        "" if dupes == 0 else "reject the duplicate candidate and re-render the batch",
+    ))
+    return checks
+
+
 def check_share(settings: Settings) -> list[Check]:
     """A real ranged GET on a share token, from a cookieless request."""
     from app.store import LocalStore
@@ -558,6 +613,7 @@ def run_doctor(settings: Settings) -> dict[str, Any]:
     checks += check_routes(settings)
     checks += check_bucket(settings)
     checks += check_clip_health(settings)
+    checks += check_audio_sync(settings)
     checks += check_share(settings)
     payload = {
         "ok": all(c.status != "fail" for c in checks),

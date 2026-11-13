@@ -33,6 +33,22 @@ from fastapi import HTTPException
 class RenderError(Exception):
     pass
 
+
+def redact_urls(text: str) -> str:
+    """Remove presigned query strings before an error/log leaves the process.
+
+    Signed URLs carry an access-key id and a signature. They must never be
+    printed, stored on a clip, or returned to the browser. The object KEY is
+    not sensitive and stays visible for diagnosis.
+    """
+    def _one(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        base = raw.split("?", 1)[0]
+        return base + ("?<redacted>" if "?" in raw else "")
+
+    return re.sub(r"https?://[^\s'\"<>]+", _one, str(text or ""))
+
+
 def probe(path: Path | str) -> dict[str, Any]:
     """ffprobe a media file (or presigned URL) → geometry and stream facts."""
     label = Path(str(path)).name if not str(path).startswith(("http://", "https://")) else "remote media"
@@ -65,8 +81,18 @@ def probe(path: Path | str) -> dict[str, Any]:
         # overlay paths report 30000/1001 vs 30, so the comparison is tolerant
         # to one-thousandth of a frame, not to a whole frame.
         cfr = fps > 0 and base_fps > 0 and abs(fps - base_fps) <= 0.001
+        def _start(stream: dict[str, Any] | None, fmt: dict[str, Any]) -> float:
+            """Container/stream start_time, normalised to a non-negative float."""
+            raw = (stream or {}).get("start_time") or fmt.get("start_time") or 0
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                return 0.0
+
         return {
             "duration": float(meta.get("format", {}).get("duration", 0) or 0),
+            "startTime": _start(vstream, meta.get("format", {}) or {}),
+            "audioStartTime": _start(astream, meta.get("format", {}) or {}),
             "width": int(vstream.get("width", 0)) if vstream else 0,
             "height": int(vstream.get("height", 0)) if vstream else 0,
             "fps": round(fps, 3) if fps > 0 else 0.0,
@@ -80,7 +106,7 @@ def probe(path: Path | str) -> dict[str, Any]:
             "bitrate": int((vstream or {}).get("bit_rate") or 0),
         }
     except Exception as exc:
-        raise RenderError(f"ffprobe failed for {label}: {exc}") from exc
+        raise RenderError(f"ffprobe failed for {label}: {redact_urls(str(exc))}") from exc
 
 
 def has_faststart(path: Path | str) -> bool:
@@ -321,6 +347,24 @@ def _ffmpeg_error_tail(stderr: str, limit: int = 8) -> str:
         )
     return "(ffmpeg produced no output)"
 
+def _crop_from_command(command: str) -> dict[str, int] | None:
+    """Recover the old cut's static crop when its checkpoint is gone.
+
+    A Retry without `reframe/cuts.json` used to fall back to a centre crop,
+    changing the framing of an otherwise correct clip. The old render command
+    already recorded `crop=w:h:x:y`; reuse it when it is plain integers.
+    """
+    match = re.search(
+        r"\bcrop=(\d+):(\d+):(\d+):(\d+)", str(command or "")
+    )
+    if not match:
+        return None
+    w, h, x, y = (int(v) for v in match.groups())
+    if w <= 0 or h <= 0:
+        return None
+    return {"w": w, "h": h, "x": x, "y": y}
+
+
 def _ffmpeg_slots() -> int:
     """How many ffmpeg children may run at once on this host.
 
@@ -397,20 +441,72 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
                 "this clip's source is neither on disk nor recorded in the bucket — "
                 "it cannot be re-rendered without re-fetching the video",
             )
+        # Bucket lifecycle rules can expire the uploaded source sections while
+        # the rendered clips stay live. Retry then used to fail forever with a
+        # presigned 404. If the recorded source object is gone, re-capture the
+        # original URL (once) and use that fresh source for this repair.
+        from app import objectstore
+
+        if objectstore.head(str(stream_meta.get("videoKey"))) is None:
+            original_url = str(job.get("source") or "")
+            if not original_url:
+                raise HTTPException(
+                    400,
+                    "the bucket source has expired and this job has no original URL to re-fetch",
+                )
+            db.append_job_log(
+                job_id,
+                "source objects expired (404) — re-fetching the original video for this retry",
+            )
+            try:
+                src = source_stream.capture(
+                    original_url,
+                    job_id,
+                    settings,
+                    on_log=lambda line: db.append_job_log(job_id, line),
+                    expected_seconds=float(job.get("durationSec") or 0.0),
+                )
+            except Exception as exc:  # noqa: BLE001 - surface the provider reason
+                raise HTTPException(
+                    400,
+                    "the bucket source expired and re-fetching it failed: "
+                    + redact_urls(str(exc)),
+                ) from None
+            fresh = src.describe()
+            db.update_job(
+                job_id,
+                lambda doc: doc.update(
+                    sourceStream=fresh,
+                    remote=True,
+                    **{k: fresh.get(k) for k in ("duration", "width", "height", "fps")},
+                ),
+            )
         try:
-            src = source_stream.RemoteSource(
+            src = src or source_stream.RemoteSource(
                 job_id,
                 video_key=str(stream_meta.get("videoKey")),
                 audio_key=str(stream_meta.get("audioKey") or ""),
-                probe={k: stream_meta[k] for k in ("duration", "width", "height", "fps")
-                       if stream_meta.get(k) is not None},
+                probe=dict(
+                    stream_meta.get("probe")
+                    or {
+                        k: stream_meta[k]
+                        for k in ("duration", "width", "height", "fps")
+                        if stream_meta.get(k) is not None
+                    }
+                ),
                 method=str(stream_meta.get("method") or "sections"),
                 sections=list(stream_meta.get("sections") or []),
                 bytes_total=int(stream_meta.get("bytes") or 0),
+                audio_start_time=float(stream_meta.get("audioStartTime") or 0.0),
             )
         except Exception as exc:  # noqa: BLE001 - report the real reason
             raise HTTPException(400, f"could not rebuild the bucket source: {exc}") from None
-        render_src, seek_offset = src.url_for_span(cut_start)
+        try:
+            render_src, seek_offset = src.url_for_span(
+                cut_start, float(clip.get("end") or cut_start)
+            )
+        except source_stream.StreamError as exc:
+            raise HTTPException(400, redact_urls(str(exc))) from None
         render_audio = src.audio_url()
         probe_meta = src.probe
 
@@ -432,6 +528,9 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
             "end": float(clip.get("end") or 0.0),
             "title": clip.get("title"),
         }
+        crop_box = _crop_from_command(str(clip.get("ffmpegCommand") or ""))
+        if crop_box:
+            cut["cropBox"] = crop_box
         if not cut["end"] > cut["start"]:
             raise HTTPException(400, "this clip has no usable start/end to re-render")
 
@@ -459,18 +558,28 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
             dest,
             settings,
             cues=cues,
-            preset_key=str(clip.get("preset") or "") or None,
+            # `clip.preset` is the ENCODER preset (veryfast), not the caption
+            # style. Using it here made Retry write the default caption look on
+            # a bold-stack job. The job owns the caption preset.
+            preset_key=str(job.get("captionPreset") or settings.subtitle.preset),
             emoji_selection=selected,
             title=clip.get("title"),
             on_log=lambda line: db.append_job_log(job_id, line),
             audio_src=render_audio,
             probe_meta=probe_meta,
             start_offset=seek_offset,
+            audio_seek=cut_start,
+            audio_start_time=float(getattr(src, "audio_start_time", 0.0) or 0.0),
         )
     except RenderError as exc:
         db.write_clip(
             clip_id,
-            {"renderState": "failed", "mediaError": str(exc)[:500], "jobId": job_id},
+            {
+                "renderState": "failed",
+                "mediaError": str(exc)[:500],
+                "renderAttempts": getattr(exc, "attempts", None),
+                "jobId": job_id,
+            },
             job_id=job_id,
         )
         raise HTTPException(400, str(exc)) from None
@@ -485,6 +594,41 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
             job_id=job_id,
         )
         raise HTTPException(400, f"re-render failed: {type(exc).__name__}: {exc}") from None
+
+    # A retry is a fresh deliverable, so it gets the same independent gate as
+    # a batch render. The source audio is ranged-read by audiosync; the signed
+    # URL is never written to the clip document.
+    try:
+        from app import audiosync as _audiosync
+
+        gate = _audiosync.gate_clip(
+            dest,
+            render_audio or render_src,
+            plan_start=cut_start,
+            plan_end=float(clip.get("end") or cut_start + 1.0),
+            cues=cues,
+            settings=settings,
+            cache_dir=dest.parent / ".audiosync" / f"clip_{order:03d}",
+            previous=[],
+            source_start_time=float(getattr(src, "audio_start_time", 0.0) or 0.0),
+        )
+        if not gate.get("passed"):
+            db.write_clip(
+                clip_id,
+                {
+                    "renderState": "failed",
+                    "mediaError": str(gate.get("reason") or "audio sync gate failed")[:500],
+                    "audioSync": gate,
+                    "jobId": job_id,
+                },
+                job_id=job_id,
+            )
+            raise HTTPException(400, str(gate.get("reason") or "audio sync gate failed"))
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a missing gate is reported, not hidden
+        logger.warning(f"[video] sync gate skipped for {clip_id}: {exc}")
+        gate = None
 
     thumb_path = dest.parent / f"clip_{order:03d}.thumb.jpg"
     try:
@@ -508,6 +652,14 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
             "contractOk": meta.get("contractOk"),
             "contractChecks": meta.get("contractChecks"),
             "captionCues": cues,
+            "styleId": _subtitle.style_fingerprint(
+                settings, str(job.get("captionPreset") or settings.subtitle.preset)
+            ),
+            "captionSettings": _subtitle._resolved(
+                settings, str(job.get("captionPreset") or settings.subtitle.preset)
+            ),
+            "audioSync": gate,
+            "renderAttempts": meta.get("attempts"),
             "renderState": "done",
             "mediaError": None,
             "failedAt": None,

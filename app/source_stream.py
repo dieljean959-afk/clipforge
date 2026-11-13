@@ -561,6 +561,7 @@ class RemoteSource:
         probe: dict[str, Any] | None = None, method: str = "stdout-stream",
         sections: list[dict[str, Any]] | None = None, bytes_total: int = 0,
         format_id: str = "", audio_format: str = "",
+        audio_start_time: float = 0.0,
     ) -> None:
         self.job_id = job_id
         self.video_key = video_key
@@ -571,6 +572,12 @@ class RemoteSource:
         self.bytes_total = bytes_total
         self.format_id = format_id
         self.audio_format = audio_format
+        #: Where the separate audio object's timeline starts. The renderer
+        #: subtracts this from the absolute clip start so a container with a
+        #: non-zero start_time still seeks to the same source moment as video.
+        self.audio_start_time = max(0.0, float(audio_start_time or 0.0))
+        #: Real object ends for boundary checks; filled by _actual_section_end.
+        self._section_end_cache: dict[str, float] = {}
 
     # -- the two things downstream stages need -------------------------
     @property
@@ -587,24 +594,66 @@ class RemoteSource:
 
         return objectstore.presign(self.video_key, expires=3600) or ""
 
-    def url_for_span(self, start_sec: float) -> tuple[str, float]:
+    def url_for_span(
+        self, start_sec: float, end_sec: float | None = None
+    ) -> tuple[str, float]:
         """(object URL, seek offset) for a clip starting at `start_sec`.
 
-        With sections, a clip is cut from the one 5-minute section that holds
-        its start — a clip is never longer than that, so no concatenation and
-        no local copy is needed.
+        With sections, a clip is cut from the one section that holds its start.
+        If `end_sec` is supplied and the clip crosses a section boundary this
+        raises instead of silently decoding only the first part: a 38 s clip at
+        747.4 s used to be cut from the 675–750 s object and then fail ERANGE
+        at the requested 38 s. The export loop turns this into a failed
+        candidate and replaces it with the next moment.
         """
         from app import objectstore
 
         if self.sections:
             for sec in self.sections:
                 if sec["start"] <= start_sec < sec["end"]:
+                    if end_sec is not None:
+                        actual_end = self._actual_section_end(sec)
+                        if float(end_sec) > actual_end + 0.05:
+                            raise StreamError(
+                                f"clip {start_sec:.2f}–{float(end_sec):.2f}s crosses "
+                                f"source section {float(sec['start']):.2f}–"
+                                f"{actual_end:.2f}s; no single object covers it"
+                            )
                     url = objectstore.presign(sec["key"], expires=900)
                     return url or "", start_sec - float(sec["start"])
             last = self.sections[-1]
+            if end_sec is not None and float(end_sec) > float(last["end"]) + 0.05:
+                raise StreamError(
+                    f"clip {start_sec:.2f}–{float(end_sec):.2f}s has no source "
+                    f"section covering its end"
+                )
             url = objectstore.presign(last["key"], expires=900)
             return url or "", max(0.0, start_sec - float(last["start"]))
-        return objectstore.presign(self.video_key, expires=900) or "", 0.0
+        # A whole-object video starts at the source's 0, so the clip's
+        # ABSOLUTE start is the seek. Returning 0 here made every clip of a
+        # non-sectioned source render from the first frame while the separate
+        # audio object was (also) seeked from 0.
+        return objectstore.presign(self.video_key, expires=900) or "", max(0.0, float(start_sec))
+
+    def _actual_section_end(self, sec: dict[str, Any]) -> float:
+        """Planned end, or the real container end when it carries extra frames."""
+        key = str(sec.get("key") or "")
+        cached = self._section_end_cache.get(key)
+        if cached is not None:
+            return cached
+        planned = float(sec.get("end") or 0.0)
+        actual = planned
+        try:
+            from app import objectstore, video
+
+            url = objectstore.presign(key, expires=600)
+            probed = float((video.probe(url) if url else {}).get("duration") or 0.0)
+            if probed > 0.1:
+                actual = float(sec.get("start") or 0.0) + probed
+        except Exception:  # noqa: BLE001 - a failed probe falls back to the plan
+            actual = planned
+        self._section_end_cache[key] = actual
+        return actual
 
     def audio_url(self, *, expires: int = 900) -> str:
         from app import objectstore
@@ -620,6 +669,11 @@ class RemoteSource:
             "audioFormat": self.audio_format,
             "bytes": self.bytes_total,
             "sections": self.sections,
+            # The whole-source duration/geometry. Without this a Retry rebuilt
+            # a RemoteSource with an EMPTY probe and then clamped an absolute
+            # 114 s clip against a 75 s section, so the retry rendered 0.2 s.
+            "probe": self.probe,
+            "audioStartTime": self.audio_start_time,
         }
 
 
@@ -753,6 +807,15 @@ def capture(
             last_err = "streaming unsupported"
 
     probe = _probe_remote(video_key)
+    # The audio object has its own container timeline. Capture it once here
+    # rather than probing the same URL for every clip; the renderer needs it
+    # to translate an absolute source second into an input seek.
+    audio_start_time = 0.0
+    try:
+        audio_probe = _probe_remote(audio_key)
+        audio_start_time = max(0.0, float((audio_probe or {}).get("startTime") or 0.0))
+    except Exception:  # noqa: BLE001 - zero is the historical, safe default
+        audio_start_time = 0.0
     if not probe or not int(probe.get("width") or 0):
         probe = {
             "duration": total_sec,
@@ -792,6 +855,7 @@ def capture(
         bytes_total=int(video.get("bytes") or 0) + int(audio.get("bytes") or 0),
         format_id=chosen or "(sections)",
         audio_format=str(audio.get("format") or ""),
+        audio_start_time=audio_start_time,
     )
     if on_log:
         on_log(

@@ -23,11 +23,13 @@ render stage asks once per clip.
 from __future__ import annotations
 
 import functools
+import math
 import os
 import re
 import shlex as _shlex
 import subprocess
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -528,6 +530,100 @@ def cfr_args(fps: int = 30) -> list[str]:
     return ["-r", str(fps), *(["-fps_mode", "cfr"] if modern() else ["-vsync", "cfr"])]
 
 
+def clamp_span(start: float, end: float, duration: float) -> tuple[float, float, str | None]:
+    """Clamp one planned source span to the real, finite source length.
+
+    This is the gate that prevents the two ERANGE shapes that are not the
+    emoji bug: a negative start, and an end past EOF. Returns the corrected
+    span plus the correction sentence, or raises ValueError for a span that
+    cannot be repaired (non-finite or empty after clamping).
+    """
+    s, e = float(start), float(end)
+    if not math.isfinite(s) or not math.isfinite(e):
+        raise ValueError(f"clip span is not finite (start={start!r}, end={end!r})")
+    planned = (s, e)
+    note: str | None = None
+    if s < 0:
+        s = 0.0
+    if duration > 0:
+        # Keep a sliver below EOF so end > start even for a degenerate plan.
+        s = min(s, max(0.0, duration - 0.05))
+        if e > duration:
+            e = duration
+    if e <= s:
+        raise ValueError(
+            f"clip span is empty after validation (start={planned[0]:.3f}, "
+            f"end={planned[1]:.3f}, source duration={duration:.3f})"
+        )
+    if (s, e) != planned:
+        note = (
+            f"clamped span {planned[0]:.3f}-{planned[1]:.3f}s to "
+            f"{s:.3f}-{e:.3f}s (source duration {duration:.3f}s)"
+        )
+    return s, e, note
+
+
+def clamp_emoji_windows(items: list[dict], clip_seconds: float) -> tuple[list[dict], int]:
+    """Keep emoji overlays inside the clip, where ffmpeg's numbers are legal.
+
+    A word that starts just before a clip boundary used to produce
+    ``fade=t=in:st=-0.130``. ffmpeg 4.4 reports that as the misleading
+    ``Numerical result out of range`` and fails the whole render. Clamping is
+    the correct behaviour: the overlay is visible from frame 0, and an event
+    entirely outside the clip is dropped. No colour, size, position or
+    animation timing inside the clip changes.
+    """
+    out: list[dict] = []
+    changed = 0
+    limit = max(0.0, float(clip_seconds))
+    for item in items:
+        try:
+            s0 = max(0.0, min(limit, float(item.get("start", 0.0))))
+            s1 = max(0.0, min(limit, float(item.get("end", 0.0))))
+        except (TypeError, ValueError):
+            changed += 1
+            continue
+        if s1 - s0 < 0.04:
+            changed += 1
+            continue
+        if s0 != float(item.get("start", 0.0)) or s1 != float(item.get("end", 0.0)):
+            changed += 1
+        out.append({**item, "start": s0, "end": s1})
+    return out, changed
+
+
+def source_input_args(
+    src: str,
+    audio_src: str | None,
+    *,
+    seek: float,
+    audio_seek: float,
+    clip_seconds: float,
+    seek_mode: str = "input",
+) -> tuple[list[str], str]:
+    """Build the two explicit, independently seeked source inputs.
+
+    Pure and testable on purpose: the original bug was one shared `seek` for
+    the section-relative video and the whole-source audio. The video seek and
+    audio seek are separate arguments here, and neither call site can fall
+    back to the other one.
+    """
+    prefix = ["-noaccurate_seek"] if seek_mode == "keyframe" else ["-accurate_seek"]
+    span = max(0.01, float(clip_seconds))
+    inputs = [
+        *prefix, "-ss", f"{max(0.0, float(seek)):.3f}", "-t", f"{span:.3f}",
+        "-i", str(src),
+    ]
+    audio_map = "0:a:0?"
+    if audio_src:
+        inputs += [
+            *prefix, "-ss", f"{max(0.0, float(audio_seek)):.3f}", "-t", f"{span:.3f}",
+            "-i", str(audio_src),
+        ]
+        audio_map = "1:a:0?"
+    return inputs, audio_map
+
+
 def render_clip(
     src: Path,
     cut: dict[str, Any],
@@ -542,6 +638,9 @@ def render_clip(
     audio_src: str | None = None,
     probe_meta: dict[str, Any] | None = None,
     start_offset: float | None = None,
+    audio_seek: float | None = None,
+    audio_start_time: float = 0.0,
+    safe_only: bool = False,
 ) -> dict[str, Any]:
     """Render one reframe cut into a 9:16 MP4.
 
@@ -558,6 +657,8 @@ def render_clip(
     per-clip status + the ffmpeg command/stderr for View logs).
     """
     from app import video as _video
+
+    render_started = time.perf_counter()
 
     # A source can now be a presigned URL (the bucket is the library; the disk
     # only ever holds the clip being written) or a local Path (uploads). The
@@ -611,7 +712,15 @@ def render_clip(
 
     start = float(cut.get("start", 0.0))
     end = float(cut.get("end", duration))
-    clip_seconds = max(0.1, end - start)
+    try:
+        start, end, span_note = clamp_span(start, end, duration)
+    except ValueError as exc:
+        raise _video.RenderError(f"invalid clip plan: {exc}") from exc
+    if span_note and on_log:
+        on_log(span_note)
+    clip_seconds = end - start
+    if clip_seconds <= 0:
+        raise _video.RenderError("invalid clip plan: non-positive clip length")
 
     # The deliverable geometry, not the source's. The clip is cropped to a
     # 9:16 window around the subject and then SCALED up to this frame; using
@@ -630,6 +739,17 @@ def render_clip(
     crop_y = int(crop.get("y", 0))
     crop_w = int(crop.get("w", width))
     crop_h = int(crop.get("h", height))
+    # Even, positive dimensions are an ffmpeg requirement, not a style
+    # choice. A cut produced against a differently-sized source could ask for
+    # a zero/odd crop and fail with a numeric error after a long decode.
+    if out_w <= 0 or out_h <= 0 or out_w % 2 or out_h % 2:
+        raise _video.RenderError(
+            f"invalid output geometry {out_w}x{out_h}: width/height must be positive and even"
+        )
+    crop_w = max(2, min(crop_w, width))
+    crop_h = max(2, min(crop_h, height))
+    crop_x = max(0, min(crop_x, max(0, width - crop_w)))
+    crop_y = max(0, min(crop_y, max(0, height - crop_h)))
 
     samples = cut.get("sampleWindows") or []
     # TARGET A: per-shot framing mode. The reframe stage decides FIT vs FILL
@@ -751,6 +871,13 @@ def render_clip(
             frame_w=out_w, frame_h=out_h, anchor_y=anchor_y,
             preset_key=preset_key,
         )
+    emoji, emoji_clamped = clamp_emoji_windows(emoji, clip_seconds)
+    if emoji_clamped and on_log:
+        on_log(
+            f"clamped {emoji_clamped} emoji overlay(s) to 0-{clip_seconds:.3f}s "
+            "(out-of-range word boundary)"
+        )
+
     if cues:
         from app import subtitle as _subtitle
 
@@ -825,7 +952,7 @@ def render_clip(
     # a different filter chain / encoder instead of aborting the clip. Both
     # re-invocations use the same seek semantics, so the output geometry and
     # captions are unchanged.
-    def _build(graph: str, enc: Any) -> list[str]:
+    def _build(graph: str, enc: Any, seek_mode: str = "input") -> list[str]:
         # Emoji: an animated style can attach a Twemoji PNG to a chunk's key
         # word. PNGs cannot be drawn by libass, so each one becomes a looped
         # input and an overlay windowed with enable=between(). Only styles that
@@ -835,15 +962,19 @@ def render_clip(
         # Inputs: the video stream, and — for a bucket source — the separate
         # audio object. Both get their OWN `-ss` so ffmpeg range-fetches only
         # the clip's bytes from each, instead of reading the file from 0.
-        # `seek` is the position INSIDE the input: for a sectioned source it is
-        # the clip's start minus the section's start, which is why it is not
-        # simply `start`.
-        seek = start if start_offset is None else start_offset
-        inputs = ["-ss", f"{seek:.3f}", "-i", str(src)]
-        audio_map = "0:a:0?"
-        if audio_src:
-            inputs += ["-ss", f"{seek:.3f}", "-i", audio_src]
-            audio_map = "1:a:0?"
+        # `seek` is the position INSIDE the video input: for a sectioned
+        # source it is the clip's start minus the section's start, which is why
+        # it is not simply `start`. The audio object is ALWAYS the whole source,
+        # so its seek is the absolute clip start (minus that object's own
+        # start_time). Using the section-relative `seek` for both was the bug:
+        # clip 2 at 114.07s seeked 39.07s into audio instead of 114.07s.
+        seek = start if start_offset is None else max(0.0, float(start_offset))
+        abs_audio = start if audio_seek is None else max(0.0, float(audio_seek))
+        a_seek = max(0.0, abs_audio - max(0.0, float(audio_start_time or 0.0)))
+        inputs, audio_map = source_input_args(
+            str(src), audio_src, seek=seek, audio_seek=a_seek,
+            clip_seconds=clip_seconds, seek_mode=seek_mode,
+        )
 
         if emoji or title_png:
             # ONE pass, ONE input per DISTINCT emoji image.
@@ -922,6 +1053,7 @@ def render_clip(
                 *enc.ffmpeg_codec_args(),
                 "-map", f"[{out_label}]",
                 "-map", audio_map,
+                "-af", "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-ar", "44100",
@@ -935,6 +1067,7 @@ def render_clip(
                 # contract and makes every deliverable identical.
                 *cfr_args(30),
                 "-movflags", "+faststart",
+                "-avoid_negative_ts", "make_zero",
                 str(tmp_dest),
             ]
         return [
@@ -946,27 +1079,30 @@ def render_clip(
             # decoding before the first frame reached the encoder. Crop windows
             # and ASS cues are clip-relative (t=0 at the seek point), so this does
             # not shift the reframe or the captions.
-            "-ss", f"{seek:.3f}",
-            "-i", str(src),
-            *(["-ss", f"{seek:.3f}", "-i", audio_src] if audio_src else []),
-            "-t", f"{clip_seconds:.3f}",
+            *inputs,
             *enc.threads_args(),
             "-vf", graph,
             *enc.ffmpeg_codec_args(),
             "-map", "0:v:0",
             "-map", audio_map,
+            "-af", "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
+            "-t", f"{clip_seconds:.3f}",
             *cfr_args(30),
             "-movflags", "+faststart",
+            "-avoid_negative_ts", "make_zero",
             str(tmp_dest),
         ]
 
-    def _attempt(graph: str, enc: Any) -> tuple[list[str], Any]:
-        cmd = _build(graph, enc)
+    def _attempt(graph: str, enc: Any, seek_mode: str = "input") -> tuple[list[str], Any]:
+        cmd = _build(graph, enc, seek_mode)
         if on_log:
-            on_log(f"ffmpeg {' '.join(_shlex.quote(a) for a in cmd)}")
+            on_log(
+                "ffmpeg "
+                + _video.redact_urls(" ".join(_shlex.quote(a) for a in cmd))
+            )
         try:
             proc = subprocess.run(
                 cmd,
@@ -982,10 +1118,14 @@ def render_clip(
             ) from exc
         if proc.returncode != 0:
             err = (proc.stderr or "").strip().splitlines()
-            reason = err[-1] if err else "no diagnostic"
-            raise _video.RenderError(
+            reason = _video.redact_urls(err[-1] if err else "no diagnostic")
+            failure = _video.RenderError(
                 f"ffmpeg failed on clip {cut.get('order', '?')}: {reason}"
             )
+            # Keep the full diagnostic on the exception so the clip document
+            # and Retry UI can show the real command failure, not one line.
+            setattr(failure, "stderr", _video.redact_urls((proc.stderr or "")[-4000:]))
+            raise failure
         if not tmp_dest.exists() or tmp_dest.stat().st_size == 0:
             raise _video.RenderError(
                 f"ffmpeg exited 0 but produced no output for clip {cut.get('order', '?')}"
@@ -1014,17 +1154,46 @@ def render_clip(
 
     safe_choice = choose(settings, force_software=True).for_output(out_w, out_h, fps)
     safe_choice.timeout_sec = render_deadline_sec(clip_seconds, hardware=safe_choice.hardware)
-    plans: list[tuple[str, str, Any]] = [("primary", filtergraph, choice)]
-    if static_graph != filtergraph or choice.encoder != safe_choice.encoder:
-        plans.append(("static-crop/software", static_graph, safe_choice))
+    # Last-resort path: same locked caption/title/emoji stack, a centre crop,
+    # a lower bitrate ceiling and keyframe seeking. It keeps the deliverable
+    # contract when the tracked crop graph itself is what ffmpeg rejects.
+    simple_choice = replace(
+        safe_choice,
+        crf=max(24, min(30, int(safe_choice.crf) + 3)),
+        maxrate_kbps=max(400, int(safe_choice.maxrate_kbps * 0.7)),
+        bufsize_kbps=max(800, int(safe_choice.bufsize_kbps * 0.7)),
+        timeout_sec=render_deadline_sec(clip_seconds, hardware=safe_choice.hardware),
+    )
+    simple_w = max(2, min(width, int(round(height * out_w / max(1, out_h)))))
+    simple_h = height
+    simple_x = max(0, (width - simple_w) // 2)
+    simple_graph = (
+        f"crop={simple_w}:{simple_h}:{simple_x}:0"
+        f",scale={out_w}:{out_h}:force_original_aspect_ratio=increase"
+        f",crop={out_w}:{out_h},setsar=1"
+    )
+    if cues:
+        simple_graph = simple_graph + "," + ass_arg
+
+    plans: list[tuple[str, str, Any, str]] = [
+        ("primary", filtergraph, choice, "input"),
+        ("static-crop/software", static_graph, safe_choice, "input"),
+        ("simple-crop/keyframe-seek", simple_graph, simple_choice, "keyframe"),
+    ]
+    if safe_only:
+        # A failed independent sync gate gets one re-render with the safer
+        # paths. The caption/title/emoji stack is still the locked one.
+        plans = plans[1:]
 
     last_error: Exception | None = None
     cmd: list[str] = []
     proc: Any = None
     meta: dict[str, Any] | None = None
-    for label, graph, enc in plans:
+    attempts: list[dict[str, Any]] = []
+    for label, graph, enc, seek_mode in plans:
         try:
-            cmd, proc = _attempt(graph, enc)
+            cmd, proc = _attempt(graph, enc, seek_mode)
+            attempts.append({"attempt": label, "ok": True, "seek": seek_mode})
             meta = _video.verify_output(tmp_dest, expected_sec=clip_seconds)
             check_geometry(meta, out_w, out_h, tmp_dest.name)
             contract = _video.clip_contract(tmp_dest, expected_sec=clip_seconds)
@@ -1037,20 +1206,27 @@ def render_clip(
             break
         except _video.RenderError as exc:
             last_error = exc
+            attempts.append({
+                "attempt": label, "ok": False, "seek": seek_mode,
+                "reason": str(exc)[:400],
+            })
             # A timeout means the work is too slow, not that the graph is
             # wrong — retrying would just burn another full deadline.
             if "timed out" in str(exc):
+                setattr(exc, "attempts", attempts)
                 raise
             if label == plans[-1][0]:
+                setattr(exc, "attempts", attempts)
                 raise
             if on_log:
                 on_log(
                     f"clip {cut.get('order', '?')} attempt '{label}' failed "
-                    f"({str(exc)[:200]}) — retrying with a static crop"
+                    f"({str(exc)[:200]}) — retrying with a safer path"
                 )
             tmp_dest.unlink(missing_ok=True)
     if meta is None:
         assert last_error is not None
+        setattr(last_error, "attempts", attempts)
         raise last_error
 
     # Verified — publish it. Nothing else ever sees a partial encode.
@@ -1066,6 +1242,7 @@ def render_clip(
 
     probed = _video.probe(str(dest))
     return {
+        "renderMs": round((time.perf_counter() - render_started) * 1000.0, 1),
         "clipOrder": int(cut.get("order", 0)),
         "start": round(start, 3),
         "end": round(end, 3),
@@ -1086,8 +1263,9 @@ def render_clip(
         "encoderLabel": choice.label,
         "hardwareEncoded": bool(choice.hardware),
         "preset": choice.preset,
-        "ffmpegCommand": " ".join(cmd),
-        "ffmpegStderr": (proc.stderr or "").strip(),
+        "ffmpegCommand": _video.redact_urls(" ".join(cmd)),
+        "ffmpegStderr": _video.redact_urls((proc.stderr or "").strip()),
+        "attempts": attempts,
     }
 
 # fmt: off

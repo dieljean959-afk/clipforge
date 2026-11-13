@@ -109,7 +109,7 @@ def test_the_capture_records_no_local_path(monkeypatch, bucket):
 
 
 def test_a_clip_is_cut_from_the_section_that_contains_it(bucket):
-    """5-minute sections: every clip fits inside one, so no concatenation."""
+    """A clip inside one section is cut there, with no concatenation."""
     source = source_stream.RemoteSource(
         "j",
         video_key="clipforge/uploads/j/sections/sec_000.mp4",
@@ -126,6 +126,24 @@ def test_a_clip_is_cut_from_the_section_that_contains_it(bucket):
     url0, seek0 = source.url_for_span(12.0)
     assert url0.endswith("sections/sec_000.mp4?sig=1&exp=900")
     assert seek0 == pytest.approx(12.0)
+
+
+def test_a_clip_crossing_a_section_boundary_fails_instead_of_truncating(bucket):
+    source = source_stream.RemoteSource(
+        "j",
+        video_key="clipforge/uploads/j/sections/sec_000.mp4",
+        audio_key="clipforge/uploads/j/audio.m4a",
+        method="sections",
+        sections=[
+            {"key": "s0", "start": 0.0, "end": 750.0},
+            {"key": "s1", "start": 750.0, "end": 900.0},
+        ],
+    )
+    with pytest.raises(source_stream.StreamError, match="crosses source section"):
+        source.url_for_span(747.4, 785.4)
+    # Sampling/reframe still resolves the start without asking for the end.
+    _, seek = source.url_for_span(747.4)
+    assert seek == pytest.approx(747.4)
 
 
 # --- the length of the SOURCE, not of the object that was probed ---------
@@ -167,6 +185,17 @@ def test_an_unknown_length_no_longer_caps_the_capture_at_15_minutes():
 def test_a_known_length_still_asks_for_exactly_what_is_needed():
     assert source_stream._section_count(1237.0) == 9
     assert source_stream._section_count(120.0) == 1
+
+
+def test_a_whole_object_source_is_seeked_to_the_clip_not_zero(bucket):
+    """The old whole-object branch returned seek=0 for every clip."""
+    source = source_stream.RemoteSource(
+        "j", video_key="clipforge/uploads/j/video.mp4",
+        audio_key="clipforge/uploads/j/audio.m4a",
+    )
+    url, seek = source.url_for_span(412.5)
+    assert url.endswith("uploads/j/video.mp4?sig=1&exp=900")
+    assert seek == pytest.approx(412.5)
 
 
 def test_presigned_urls_are_fresh_per_call(bucket):

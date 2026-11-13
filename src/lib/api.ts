@@ -102,6 +102,12 @@ export interface JobDto {
   createdAt?: number;
   /** Clips actually rendered for this job (0 or absent while running). */
   clipCount?: number;
+  /** User-requested quota and the requested/ready/failed breakdown. */
+  requestedClips?: number;
+  readyClips?: number;
+  failedClips?: number;
+  /** Exact shortfall sentence when the candidate list ran out. */
+  unmetReason?: string | null;
   /** Seconds of source video, probed server-side. */
   durationSec?: number | null;
   /** Seconds of rendered clip footage across all clips. */
@@ -221,6 +227,17 @@ export interface ClipDto {
   mediaHeight?: number | null;
   mediaDurationSec?: number | null;
   mediaError?: string | null;
+  /** Independent sync-gate result (placement lag/correlation, speech, duplicate). */
+  audioSync?: {
+    passed?: boolean;
+    reason?: string;
+    placement?: { lagMs?: number | null; correlation?: number | null; toleranceMs?: number };
+    speech?: { ok?: boolean | null; overlap?: number; wer?: number | null };
+    duplicate?: { ok?: boolean; duplicateOf?: string | null };
+  } | null;
+  /** Real retry-ladder steps and their reasons. */
+  renderAttempts?: { attempt?: string; ok?: boolean; reason?: string; seek?: string }[] | null;
+  timings?: { renderMs?: number; gateMs?: number; safeRenderMs?: number; uploadMs?: number } | null;
   fps?: number | null;
   /** Set by the 10-minute cheap contract monitor. */
   healthState?: "ok" | "failed" | null;
