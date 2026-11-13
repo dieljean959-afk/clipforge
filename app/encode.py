@@ -655,7 +655,12 @@ def audio_plan_seek(
     stream_start = max(0.0, float(audio_plan["streamStart"] or 0.0))
     cut_start = float(cut.get("start") or 0.0)
     cut_end = float(cut.get("end") or 0.0)
-    if abs(start - cut_start) > 0.01 or abs(end - cut_end) > 0.01:
+    # A source snippet is local video with an absolute source range. It uses
+    # cutStart/cutEnd (relative to the snippet) while start/end remain absolute
+    # so the audio and gate stay tied to the real source range.
+    plan_cut_start = float(audio_plan.get("cutStart", start))
+    plan_cut_end = float(audio_plan.get("cutEnd", end))
+    if abs(plan_cut_start - cut_start) > 0.01 or abs(plan_cut_end - cut_end) > 0.01:
         raise ValueError(
             f"audio plan {start:.3f}–{end:.3f}s does not match clip "
             f"{cut_start:.3f}–{cut_end:.3f}s"

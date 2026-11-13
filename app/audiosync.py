@@ -296,6 +296,16 @@ def _caption_words(cues: list[dict], start: float, end: float) -> list[str]:
     return out
 
 
+def speech_model_is_decisive(model_size: str) -> bool:
+    """Whether a local model is strong enough to fail a clip on word overlap.
+
+    `base` produced a false mismatch on a correctly placed Spanish clip;
+    placement remains the hard check at that model size.
+    """
+    size = str(model_size or "").strip().lower()
+    return not size or size in {"small", "medium", "large-v3"}
+
+
 def _speech_check(
     clip_path: Path,
     cues: list[dict],
@@ -362,19 +372,31 @@ def _speech_check(
             if ref else 0.0
         )
         ok = overlap >= 0.25 or (error is not None and error <= 0.65)
+        model_size = str(getattr(transcript, "model_size", "") or "")
+        # `base` is a real local model but too weak for a decisive Spanish
+        # word-overlap verdict: on a correctly placed clip it produced
+        # overlap 0.192 while `small` heard the captions correctly. Placement
+        # and duplicate checks are independent; do not fail a clip on an
+        # unreliable ASR downgrade.
+        decisive = speech_model_is_decisive(model_size)
         return {
-            "ok": bool(ok),
+            "ok": bool(ok) if decisive else None,
             "windowStartSec": round(win_start, 3),
             "windowEndSec": round(win_end, 3),
             "referenceWords": len(ref),
             "heardWords": len(hyp),
             "overlap": round(float(overlap), 3),
             "wer": round(float(error), 3) if error is not None else None,
+            "model": model_size,
             "heard": " ".join(hyp[:40]),
             "reason": (
                 "spoken words match the burned-in captions"
-                if ok
-                else "spoken words do not match the burned-in captions"
+                if ok and decisive
+                else (
+                    "spoken words do not match the burned-in captions"
+                    if decisive
+                    else f"speech check used '{model_size}' — not decisive; placement and duplicate checks still apply"
+                )
             ),
         }
     except Exception as exc:  # noqa: BLE001 - an unavailable model is not a mismatch

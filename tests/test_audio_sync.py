@@ -92,6 +92,13 @@ def test_span_validation_rejects_an_empty_plan():
         raise AssertionError("an empty span must be rejected before ffmpeg")
 
 
+def test_only_reliable_local_models_can_fail_the_speech_check():
+    assert audiosync.speech_model_is_decisive("small")
+    assert audiosync.speech_model_is_decisive("medium")
+    assert not audiosync.speech_model_is_decisive("base")
+    assert not audiosync.speech_model_is_decisive("tiny")
+
+
 def test_audio_plan_must_belong_to_this_clip():
     cut = {"order": 2, "start": 114.07, "end": 152.07}
     plan = {
