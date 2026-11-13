@@ -1255,6 +1255,50 @@ INAUDIBLE_BELOW = 0.30
 PLACEHOLDER_MUTTERING = "[muttering]"
 PLACEHOLDER_INAUDIBLE = "[inaudible]"
 
+#: Non-speech markers Whisper emits (and our own low-confidence placeholder
+#: adds). They are metadata, not dialogue: burned into a caption they read as
+#: something the speaker said. Cleaned before cues are built and again when an
+#: old clip is re-rendered or its SRT is downloaded.
+_MARKER_WORDS = (
+    "inaudible", "unintelligible", "indistinct", "muttering", "music",
+    "musica", "música", "applause", "applausos", "laughs", "laughing",
+    "laughter", "risas", "sighs", "sighing", "coughs", "coughing",
+    "silence", "crosstalk", "noise", "static", "beep", "bleep",
+    "cheering", "cheers", "applauding", "clapping",
+)
+_MARKER_RE = re.compile(
+    r"[\[\(]\s*(?:" + "|".join(_MARKER_WORDS) + r")\b[^\]\)]{0,30}[\]\)]",
+    re.IGNORECASE,
+)
+
+
+def clean_caption_text(text: str) -> str:
+    """Strip bracketed non-speech markers, leaving the spoken words alone.
+
+    This is the ONLY text change allowed in the caption pipeline. It does not
+    touch casing, punctuation, line breaks or the render look. A marker that
+    fills the whole cue disappears entirely rather than leaving an empty line.
+    """
+    cleaned = _MARKER_RE.sub(" ", str(text or ""))
+    # A marker split into separate tokens ("[ INAUDIBLE ]") also goes.
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"^[\s,;:\-–—]+|[\s,;:\-–—]+$", "", cleaned)
+    return cleaned
+
+
+def clean_cues(cues: list[dict]) -> list[dict]:
+    """Return cues with marker-only text removed and real text cleaned."""
+    out: list[dict] = []
+    for cue in cues or []:
+        text = clean_caption_text(str(cue.get("text") or ""))
+        if not text:
+            continue
+        if text == str(cue.get("text") or "").strip():
+            out.append(cue)
+        else:
+            out.append({**cue, "text": text})
+    return out
+
 
 def cue_confidence(words: list[dict]) -> float | None:
     """Mean confidence of a cue's words, or None if it was never measured.
@@ -1586,9 +1630,18 @@ def words_to_cues(
     def flush() -> None:
         if not current:
             return
-        cues.append(_make_cue(current[0]["start"], current[-1]["end"],
-                              " ".join(str(x["word"]) for x in current),
-                              current, confidence_threshold, inaudible_threshold))
+        text = clean_caption_text(" ".join(str(x["word"]) for x in current))
+        if not text:
+            # The whole burst was a non-speech marker. Do not create a cue:
+            # "[INAUDIBLE]" burned into the video is not a caption.
+            current.clear()
+            return
+        cue = _make_cue(current[0]["start"], current[-1]["end"], text,
+                        current, confidence_threshold, inaudible_threshold)
+        if not clean_caption_text(str(cue.get("text") or "")):
+            current.clear()
+            return
+        cues.append(cue)
         current.clear()
 
     for w in words:

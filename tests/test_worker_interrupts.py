@@ -14,8 +14,6 @@ progress on each attempt.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from app.worker import InProcessWorker, death_signal
@@ -110,6 +108,11 @@ def test_a_job_dying_in_the_same_place_still_runs_out_of_budget():
 
     assert worker._note_interrupted(job, "j", 143, "transcribing", "") is False
     assert queued == [], "a job that keeps dying at the same point must stop looping"
+    assert job["loopDetected"] is True
+    assert job["stage"] == "failed" and job["failedStage"] == "transcribing"
+    assert "Loop detected" in job["error"]
+    assert "Resume" in job["error"]
+    assert any("LOOP DETECTED" in line for line in store.logs)
 
 
 def test_the_interrupt_reason_survives_both_code_conventions():

@@ -78,8 +78,12 @@ async function copyLink(url: string): Promise<boolean> {
 export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boolean }) {
   const [entry, setEntry] = useState<cache.ShareEntry>(() => cache.getEntry(clip._id));
   const [busy, setBusy] = useState(false);
+  const [revoking, setRevoking] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [linkReady, setLinkReady] = useState(clip.shareReady === true);
+  const [linkReady, setLinkReady] = useState(
+    clip.shareReady === true || Boolean(clip.shareToken),
+  );
+  const [token, setToken] = useState<string | null>(clip.shareToken ?? null);
   const readyRef = useRef(false);
 
   const fileName = clipFileName(clip);
@@ -145,7 +149,9 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
         void api
           .ensureShareLink(clip._id)
           .then((s) => {
-            if (alive) setLinkReady(s.shareReady);
+            if (!alive) return;
+            if (s.shareToken) setToken(s.shareToken);
+            setLinkReady(s.shareReady);
           })
           .catch(() => {
             /* a link that is not ready yet is not an error to shout about */
@@ -158,26 +164,55 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
     };
   }, [clip._id, clip.shareReady, rendered]);
 
-  /** Copy the public MP4 link. This is the whole of "Share link". */
-  const onCopyLink = useCallback(() => {
-    const sid = clip.shareId;
-    if (!sid) {
-      toast.error("This clip has no share link yet.");
-      return;
-    }
-    const url = api.clipPublicMp4Url(sid);
+  /** Copy the 7-day public link, minting it first if this clip has none. */
+  const onCopyLink = useCallback(async () => {
     setBusy(true);
-    void copyLink(url).then((ok) => {
-      setBusy(false);
+    try {
+      let live = token;
+      if (!live) {
+        const minted = await api.createShareLink(clip._id);
+        live = minted.token;
+        setToken(live);
+      }
+      const url = `${window.location.origin}/s/${live}`;
+      const ok = await copyLink(url);
       if (!ok) {
         toast.error("Could not copy the link.", { description: url });
         return;
       }
+      setLinkReady(true);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2_000);
       toast.success("Copied ✓", { description: url });
-    });
-  }, [clip.shareId, clip._id]);
+    } catch (err) {
+      toast.error("Could not create the share link.", {
+        description: err instanceof Error ? err.message : "The server did not answer.",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [clip._id, token]);
+
+  const onRevoke = useCallback(async () => {
+    if (!window.confirm("Revoke this share link? Anyone already holding it will get 'link revoked'.")) {
+      return;
+    }
+    setRevoking(true);
+    try {
+      await api.revokeShareLink(clip._id);
+      setToken(null);
+      setLinkReady(false);
+      toast.success("Share link revoked", {
+        description: "Copy creates a new 7-day link.",
+      });
+    } catch (err) {
+      toast.error("Could not revoke the link.", {
+        description: err instanceof Error ? err.message : "The server did not answer.",
+      });
+    } finally {
+      setRevoking(false);
+    }
+  }, [clip._id]);
 
   const onShare = useCallback(() => {
     // --- SYNCHRONOUS FROM HERE. No await, no fetch, no state set. -----------
@@ -196,7 +231,9 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
     }
 
     const caption = buildPostCaption(clip.hookText, clip.hashtags);
-    const publicUrl = clipShareUrl(clip._id, clip.shareId);
+    const publicUrl = token
+      ? `${window.location.origin}/s/${token}`
+      : clipShareUrl(clip._id, clip.shareId);
     const file = readyRef.current ? cache.get(clip._id, fileName) : null;
 
     // Some apps drop the text field when a file is attached, so the caption is
@@ -295,7 +332,7 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       )
       .finally(() => setBusy(false));
     // --- end of the synchronous window --------------------------------------
-  }, [clip._id, clip.title, clip.hookText, clip.hashtags, fileName]);
+  }, [clip._id, clip.title, clip.hookText, clip.hashtags, fileName, token, shareUrl]);
 
   const pct = cache.progressOf(clip._id);
   const showRing = entry.inFlight && !entry.ready;
@@ -312,15 +349,16 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
     if (typeof navigator !== "undefined" && typeof (navigator as unknown as { share?: unknown }).share === "function") {
       onShare();
     } else {
-      onCopyLink();
+      void onCopyLink();
     }
   }, [fileReady, onShare, onCopyLink]);
 
   return (
+    <div className="flex w-full items-center gap-1">
     <Button
       size="sm"
       variant="outline"
-      className="h-7 w-full cursor-pointer gap-1.5 text-xs"
+      className={cn("h-7 cursor-pointer gap-1.5 text-xs", linkReady ? "flex-1" : "w-full")}
       disabled={!rendered || busy}
       title={
         rendered
@@ -355,10 +393,35 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       )}
       {!linkReady && rendered && (
         <span className="ml-auto text-[10px] font-normal text-muted-foreground">
-          Preparing…
+          Tap to link
         </span>
       )}
     </Button>
+    {linkReady && rendered && (
+      <>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 shrink-0 cursor-pointer px-2 text-[10px] text-muted-foreground"
+          disabled={busy || revoking}
+          onClick={() => void onCopyLink()}
+          title="Copy the 7-day share link"
+        >
+          Copy
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 shrink-0 cursor-pointer px-2 text-[10px] text-muted-foreground"
+          disabled={busy || revoking}
+          onClick={() => void onRevoke()}
+          title="Revoke this share link"
+        >
+          {revoking ? "…" : "Revoke"}
+        </Button>
+      </>
+    )}
+    </div>
   );
 }
 

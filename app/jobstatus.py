@@ -66,7 +66,8 @@ _PLAN_ALIASES: dict[str, str] = {
     "transcribe": "transcribing",
     "detecting": "finding", "detect": "finding",
     "reframe": "rendering", "render": "rendering",
-    "captions": "rendering", "export": "rendering",
+    "captions": "rendering", "export": "rendering", "exporting": "rendering",
+    "importing": "rendering", "post": "rendering",
 }
 
 _PLAN_LABELS: dict[str, str] = {
@@ -171,6 +172,15 @@ def stage_label(job: dict[str, Any]) -> str | None:
         s = plan_stage(raw)
     if not s or s in TERMINAL_STAGES:
         return None
+    # A render stage is countable, and the number is what makes "rendering"
+    # honest: "Rendering clips 13/15" cannot coexist with a Stage 1 header.
+    try:
+        done = job.get("unitsDone")
+        total = job.get("unitsTotal")
+        if s == "rendering" and done is not None and total:
+            return f"Rendering clips {int(float(done))}/{int(float(total))}"
+    except (TypeError, ValueError):
+        pass
     # Never hand the card a raw snake_case identifier ("queued" was rendering
     # next to capitalised labels from the same map).
     return _PLAN_LABELS.get(s, s.replace("_", " ").capitalize())
@@ -192,6 +202,9 @@ def describe(job: dict[str, Any]) -> dict[str, Any]:
     out["isTerminal"] = terminal
     out["activeStage"] = active_stage(job)
     out["stageLabel"] = stage_label(job)
+    plan = plan_stage(out.get("activeStage") or out.get("failedStage") or out.get("stage"))
+    out["stageNumber"] = (_PLAN_ORDER.index(plan) + 1) if plan in _PLAN_ORDER else None
+    out["stageTotal"] = len(_PLAN_ORDER)
 
     if terminal:
         # Progress is meaningless once the job has stopped, and a partial

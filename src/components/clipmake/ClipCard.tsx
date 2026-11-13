@@ -47,9 +47,13 @@ export function ClipCard({
   const [downloading, setDownloading] = useState(false);
 
   const rendered = clip.renderState === "done" && clip.videoPath !== null;
-  const failed = clip.renderState === "failed";
+  // A clip that was ready but now fails the cheap bucket/range/fps contract
+  // must expose the same Retry affordance as a failed render.
+  const healthFailed = clip.healthState === "failed";
+  const failed = clip.renderState === "failed" || healthFailed;
+  const failureReason = clip.mediaError || clip.healthIssue || "render failed";
   const hasMedia = clip.mediaBytes != null && Number.isFinite(clip.mediaBytes) && clip.mediaBytes > 0;
-  const playable = rendered && hasMedia;
+  const playable = rendered && hasMedia && !healthFailed;
   const hasTimestamps = Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end > clip.start;
   const fpsChip = clip.fps != null && clip.fps > 0;
   const captionPreview =
@@ -156,12 +160,12 @@ export function ClipCard({
             </span>
           )}
           {failed && (
-            <span className="flex items-center gap-1 rounded-full border border-destructive/50 bg-destructive/15 px-2 py-0.5 text-[10px] font-bold text-destructive" title={clip.mediaError ?? "render failed"}>
+            <span className="flex items-center gap-1 rounded-full border border-destructive/50 bg-destructive/15 px-2 py-0.5 text-[10px] font-bold text-destructive" title={failureReason}>
               <TriangleAlert className="size-3" />
-              render failed
+              {healthFailed ? "contract failed" : "render failed"}
             </span>
           )}
-          {rendered && hasMedia && !playable && (
+          {rendered && hasMedia && !playable && !healthFailed && (
             <span className="flex items-center gap-1 rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
               <Film className="size-3" />
               render exists, not playable
@@ -191,8 +195,8 @@ export function ClipCard({
           {clip.mediaBytes != null && Number.isFinite(clip.mediaBytes) && clip.mediaBytes > 0
             ? ` · ${(clip.mediaBytes / (1024 * 1024)).toFixed(1)} MB`
             : ``}
-          {failed && clip.mediaError && (
-            ` · ${String(clip.mediaError).slice(0, 60)}`
+          {failed && (
+            ` · ${String(failureReason).slice(0, 60)}`
           )}
         </p>
         {/* COVERAGE GUARD: a clip whose captions miss speech is never shown as
@@ -278,7 +282,7 @@ export function ClipCard({
               className="h-7 cursor-pointer gap-1.5 text-xs"
               onClick={async () => {
                 try {
-                  await api.retryClipRender(clip._id);
+                  await api.retryClipRender(clip._id, rendered);
                   toast.success("Re-render requested for this clip.");
                 } catch (err) {
                   toast.error(err instanceof Error ? err.message : "Retry render failed.");

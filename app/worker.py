@@ -1003,7 +1003,7 @@ class InProcessWorker:
         failed_ms = int(time.time() * 1000)
 
         def _apply_failure(j: dict[str, Any]) -> None:
-            if str(j.get("stage")) in {"complete", "paused"}:
+            if str(j.get("stage")) in {"complete", "paused"} or j.get("loopDetected"):
                 return
             j.update({
                 "stage": "failed",
@@ -1307,6 +1307,33 @@ class InProcessWorker:
         )
         count = 1 if advanced else int(job.get("interruptCount") or 0) + 1
         if count > INTERRUPT_MAX_RESUMES:
+            # Three restarts of the same stage with no forward progress is a
+            # loop, not a host bounce. Stop it with an explanation the card can
+            # show, and keep the runner tail as the stack/diagnostic detail.
+            loop_msg = (
+                f"Loop detected: the worker restarted {INTERRUPT_MAX_RESUMES} times "
+                f"in stage '{stage}' without making forward progress. "
+                "Finished clips and checkpoints are kept; press Resume to try again."
+            )
+            job.update({
+                "stage": "failed",
+                "status": "failed",
+                "failedStage": stage,
+                "interrupted": False,
+                "loopDetected": True,
+                "loopStage": stage,
+                "loopCount": count,
+                "error": loop_msg,
+                "errorDetail": (tail or "no runner output captured")[-4000:],
+                "completedAt": int(time.time() * 1000),
+            })
+            self.store.write_job(job)
+            self.store.append_job_log(
+                job_id,
+                f"LOOP DETECTED: {loop_msg} Stage: {stage}. "
+                + (tail[-800:] if tail else ""),
+            )
+            logger.error(f"[worker] {loop_msg} (job {job_id})")
             return False
         try:
             how = signal.Signals(sig or -rc).name

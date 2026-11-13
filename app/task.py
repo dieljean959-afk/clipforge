@@ -612,6 +612,7 @@ class Pipeline:
         # pipeline is writing ticks, the job is running.
         job["status"] = "running"
         prev_stage = job.get("stage")
+        same_stage = prev_stage == stage
         if prev_stage != stage:
             self._prior_eta_sec = None
             timings = list(job.get("stageTimings") or [])
@@ -690,9 +691,15 @@ class Pipeline:
         )
         total_eta = eta.plan_total_sec(plan) if plan else None
 
+        # Monotonic within a stage: a resume heartbeat can report a lower
+        # percentage than the work already done (the clock restarted before the
+        # completed clips were counted), and the bar visibly ran backwards.
+        floor = float(job.get("progressMax") or 0.0) if same_stage else 0.0
+        shown = max(floor, max(0.0, min(100.0, pct * 100)))
         job.update({
             "stage": stage,
-            "progress": max(0.0, min(100.0, pct * 100)),
+            "progress": shown,
+            "progressMax": shown,
             "progressDetail": detail,
             "unitLabel": unit_label,
             "unitsDone": units_done,
@@ -2598,6 +2605,13 @@ class Pipeline:
                         "mediaWidth": meta["width"],
                         "mediaHeight": meta["height"],
                         "mediaDurationSec": meta["durationSec"],
+                        "fps": meta.get("fps"),
+                        "mediaCodec": meta.get("codec"),
+                        "mediaPixFmt": meta.get("pixFmt"),
+                        "mediaAudioCodec": meta.get("audioCodec"),
+                        "mediaFaststart": meta.get("faststart"),
+                        "contractOk": meta.get("contractOk"),
+                        "contractChecks": meta.get("contractChecks"),
                         "renderState": "done",
                         # What the clip actually got, so the dashboard can show
                         # each emoji with its reason, and say whether a model
@@ -2632,7 +2646,18 @@ class Pipeline:
                         "mediaWidth": meta["width"],
                         "mediaHeight": meta["height"],
                         "mediaDurationSec": meta["durationSec"],
-                        "renderState": "done",
+                        "fps": meta.get("fps"),
+                        "mediaCodec": meta.get("codec"),
+                        "mediaPixFmt": meta.get("pixFmt"),
+                        "mediaAudioCodec": meta.get("audioCodec"),
+                        "mediaFaststart": meta.get("faststart"),
+                        "contractOk": meta.get("contractOk"),
+                        "contractChecks": meta.get("contractChecks"),
+                        # A ready clip must have a poster. The old fallback wrote
+                        # `done` here, so the grid showed a broken image on a
+                        # clip the contract said was deliverable.
+                        "renderState": "failed",
+                        "mediaError": f"thumbnail check failed: {thumb_exc}"[:500],
                         "title": clip_title,
                         "titleSource": title_source,
                         "renderMs": meta.get("renderMs"),
@@ -2717,6 +2742,8 @@ class Pipeline:
                         "mediaRemote": True,
                         "uploadPending": False,
                         "uploadError": None,
+                        "healthState": "ok",
+                        "healthIssue": None,
                         "videoKey": (res.get("video") or {}).get("key"),
                         "thumbKey": (res.get("thumb") or {}).get("key"),
                         "localDropped": bool(res.get("dropped")),
@@ -2731,7 +2758,9 @@ class Pipeline:
                     f"(est {(estimated or 0) / 1048576:.1f} MB), local copy released",
                 )
                 return
-            last_error = str((res.get("video") or {}).get("error") or "upload failed")[:200]
+            last_error = str(
+                res.get("error") or (res.get("video") or {}).get("error") or "upload failed"
+            )[:200]
             if attempt < 2:
                 self._log(job_id, f"upload attempt {attempt + 1} failed ({last_error}) — retrying in {delay:.0f}s")
                 time.sleep(delay)
@@ -2744,6 +2773,11 @@ class Pipeline:
                 "uploadError": last_error,
                 "localDropped": False,
                 "estimatedBytes": estimated,
+                # The local file is playable, but the deliverable is not on the
+                # bucket yet. It must not wear a green Ready badge: the Retry
+                # affordance and the health text come from this flag.
+                "healthState": "failed",
+                "healthIssue": f"upload pending: {last_error}",
             },
             job_id=job_id,
         )

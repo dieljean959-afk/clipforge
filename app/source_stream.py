@@ -335,6 +335,10 @@ def source_duration(
     source, so it wins.
     """
     if sections:
+        # `end` is now the real probed end of the last non-empty section, not
+        # the end of a planned-but-empty one. This is the fix for a 20:37 video
+        # showing 120:00 because 48 x 150 s sections were planned from a bad
+        # metadata field.
         return max(0.0, float(sections[-1].get("end") or 0.0))
     return float(probed or meta_sec or 0.0)
 
@@ -373,19 +377,33 @@ def _sections(
             except Exception:  # noqa: BLE001 - an unreadable bucket means re-capture
                 existing = {}
             if int(existing.get("size") or 0) > 0:
+                probe = _probe_remote(planned)
+                actual = float(probe.get("duration") or 0.0)
+                if probe and actual <= 0.1:
+                    # A zero-length object at the end of a source that metadata
+                    # said was longer (the 7200 s bug). It is not a section;
+                    # drop it and stop, rather than reporting a 2-hour source.
+                    objectstore.delete(planned)
+                    break
+                # An unprobeable reused section (unit-test fake, transient
+                # presign failure) keeps its recorded span; only a REAL
+                # zero-duration probe is treated as past the end.
+                real_end = min(end, start + actual) if actual > 0.1 else end
                 out.append({
                     "key": planned,
                     "bytes": int(existing["size"]),
                     "start": start,
-                    "end": end,
+                    "end": real_end,
                 })
                 if on_log:
                     on_log(
-                        f"[stream] section {i + 1}/{count}: {start:.0f}s–{end:.0f}s "
+                        f"[stream] section {i + 1}/{count}: {start:.0f}s–{real_end:.0f}s "
                         "is already in the bucket — reusing it"
                     )
                 if on_progress:
                     on_progress(min(1.0, (i + 1) / count))
+                if real_end < end - 1.0:
+                    break
                 continue
             cmd = _cli(settings) + [
                 "-f", VIDEO_FORMATS[0],
@@ -405,7 +423,12 @@ def _sections(
                     )
                 break
             local = files[0]
-            span = end - start
+            local_probe = _probe_local(local)
+            actual = float((local_probe or {}).get("duration") or 0.0)
+            if local_probe and actual <= 0.1:
+                local.unlink(missing_ok=True)
+                break
+            span = min(end - start, actual) if actual > 0.1 else end - start
             for k, (piece, piece_sec) in enumerate(
                 _split_if_big(local, target=MAX_VIDEO_OBJECT_BYTES, seconds=span)
             ):
@@ -426,11 +449,13 @@ def _sections(
                 out.append({
                     "key": key, "bytes": size,
                     "start": start + k * piece_sec,
-                    "end": start + (k + 1) * piece_sec,
+                    "end": min(end, start + (k + 1) * piece_sec),
                 })
             local.unlink(missing_ok=True)
             if on_progress:
                 on_progress(min(1.0, (i + 1) / count))
+            if local_probe and 0.1 < actual < SECTION_SEC - 1.0:
+                break
         if not out:
             raise StreamError("no sections were captured")
         return out
@@ -438,11 +463,25 @@ def _sections(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _probe_local(path: Path) -> dict[str, Any]:
+    """Probe a section before upload; a 0-second file means past the real end."""
+    try:
+        from app import video
+
+        return video.probe(path)
+    except Exception:  # noqa: BLE001 - capture reports the failure
+        return {}
+
+
 def _probe_remote(key: str) -> dict[str, Any]:
     """ffprobe the object through a presigned URL: headers only, no download."""
     from app import objectstore, video
 
-    url = objectstore.presign(key, expires=600)
+    try:
+        url = objectstore.presign(key, expires=600)
+    except Exception as exc:  # noqa: BLE001 - an unprobeable object is not a crash
+        logger.warning(f"[stream] could not presign {key}: {exc}")
+        return {}
     if not url:
         raise StreamError("could not presign the captured object", bucket_down=True)
     try:
@@ -450,6 +489,68 @@ def _probe_remote(key: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[stream] probe of {key} failed: {exc}")
         return {}
+
+
+def reconcile_source_duration(store: Any, job_id: str) -> dict[str, Any]:
+    """Replace a stored 120:00 with the real yt-dlp + ffprobe duration.
+
+    Older jobs can carry the length of the *planned* section list instead of
+    the video, because `source_duration()` trusted `sections[-1].end` and the
+    section count came from a bad metadata read. This asks yt-dlp for the
+    source length and ffprobe for the real end of the last non-empty section,
+    then writes the verified value and trims the empty tail from the record.
+    """
+    from app import download, objectstore, video
+
+    job = store.get_job(job_id)
+    if not job:
+        raise KeyError(job_id)
+    stream = job.get("sourceStream") or {}
+    sections = list(stream.get("sections") or [])
+    ytdlp_sec = 0.0
+    try:
+        ytdlp_sec = float((download.probe_url(str(job.get("source") or "")) or {}).get("duration") or 0.0)
+    except Exception as exc:  # noqa: BLE001 - ffprobe can still answer
+        logger.warning(f"[duration] yt-dlp probe failed: {exc}")
+    verified: list[dict[str, Any]] = []
+    for sec in sections:
+        key = str(sec.get("key") or "")
+        if not key:
+            continue
+        try:
+            head = objectstore.head(key) or {}
+            if int(head.get("size") or 0) <= 0:
+                continue
+            url = objectstore.presign(key, expires=300)
+            meta = video.probe(url) if url else {}
+            actual = float(meta.get("duration") or 0.0)
+        except Exception:  # noqa: BLE001 - a broken section is skipped
+            continue
+        if actual <= 0.1:
+            continue
+        start = float(sec.get("start") or 0.0)
+        verified.append({**sec, "end": round(start + actual, 3), "duration": round(actual, 3)})
+    ffprobe_sec = float(verified[-1]["end"]) if verified else 0.0
+    real = ffprobe_sec or ytdlp_sec
+    if not real:
+        raise RuntimeError("neither yt-dlp nor ffprobe could measure this source")
+    patch = {"durationSec": round(real, 3)}
+    if verified:
+        stream = {
+            **stream,
+            "sections": verified,
+            "probe": {**(stream.get("probe") or {}), "duration": round(real, 3)},
+        }
+        patch["sourceStream"] = stream
+    store.update_job(job_id, lambda j: j.update(patch))
+    return {
+        "jobId": job_id,
+        "ytdlpSec": round(ytdlp_sec, 3) if ytdlp_sec else None,
+        "ffprobeSec": round(ffprobe_sec, 3) if ffprobe_sec else None,
+        "durationSec": round(real, 3),
+        "sections": len(verified),
+        "oldDurationSec": job.get("durationSec"),
+    }
 
 
 class RemoteSource:

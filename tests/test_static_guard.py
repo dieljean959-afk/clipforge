@@ -84,7 +84,7 @@ def test_app_main_imports() -> None:
     # registers its routes", not an exact inventory: raise it when routes are
     # intentionally added, never to hide a failed import (the return code above
     # already covers that).
-    assert 18 <= routes <= 45, f"unexpected route count {routes}"
+    assert 18 <= routes <= 50, f"unexpected route count {routes}"
 
 
 def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:

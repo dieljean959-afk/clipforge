@@ -66,6 +66,54 @@ def lock_for(clip_id: str) -> threading.Lock:
         return lock
 
 
+#: New-style share links. A 7-day expiry is short enough that an accidental
+#: post is not permanent, and long enough to be useful; the UI can revoke it at
+#: any time. Stored in the clip document, so it survives a restart.
+TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+
+def new_token() -> str:
+    """A URL-safe, unguessable token (not the short human-typed id)."""
+    return secrets.token_urlsafe(18)
+
+
+def ensure_token(clip: dict[str, Any]) -> str:
+    """Return this clip's live token, minting a fresh 7-day one if needed."""
+    import time
+
+    token = clip.get("shareToken")
+    expires = int(clip.get("shareExpiresAt") or 0)
+    now = int(time.time() * 1000)
+    if (
+        isinstance(token, str)
+        and len(token) >= 16
+        and not clip.get("shareRevoked")
+        and expires > now
+    ):
+        return token
+    token = new_token()
+    clip["shareToken"] = token
+    clip["shareExpiresAt"] = now + TOKEN_TTL_MS
+    clip["shareRevoked"] = False
+    return token
+
+
+def token_state(clip: dict[str, Any]) -> dict[str, Any]:
+    """Whether a stored token is currently redeemable, with the real reason."""
+    import time
+
+    token = clip.get("shareToken")
+    expires = int(clip.get("shareExpiresAt") or 0)
+    now = int(time.time() * 1000)
+    if not isinstance(token, str) or len(token) < 16:
+        return {"token": None, "state": "missing", "detail": "no share link yet", "expiresAt": None}
+    if clip.get("shareRevoked"):
+        return {"token": token, "state": "revoked", "detail": "this share link was revoked", "expiresAt": expires or None}
+    if expires <= now:
+        return {"token": token, "state": "expired", "detail": "this share link expired after 7 days", "expiresAt": expires or None}
+    return {"token": token, "state": "ready", "detail": "ready", "expiresAt": expires}
+
+
 def ensure_id(clip: dict[str, Any]) -> str | None:
     """Return the clip's share id, minting and persisting one if needed.
 

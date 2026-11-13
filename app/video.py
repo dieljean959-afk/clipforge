@@ -33,8 +33,9 @@ from fastapi import HTTPException
 class RenderError(Exception):
     pass
 
-def probe(path: Path) -> dict[str, Any]:
-    """ffprobe a media file → {duration, width, height}."""
+def probe(path: Path | str) -> dict[str, Any]:
+    """ffprobe a media file (or presigned URL) → geometry and stream facts."""
+    label = Path(str(path)).name if not str(path).startswith(("http://", "https://")) else "remote media"
     try:
         out = subprocess.run(
             [
@@ -46,21 +47,148 @@ def probe(path: Path) -> dict[str, Any]:
             capture_output=True, text=True, timeout=60, check=True,
         )
         meta = json.loads(out.stdout)
-        vstream = next((s for s in meta.get("streams", []) if s.get("codec_type") == "video"), None)
-        fps_raw = (vstream or {}).get("avg_frame_rate") or (vstream or {}).get("r_frame_rate") or "0/1"
-        try:
-            num, _, den = str(fps_raw).partition("/")
-            fps = float(num) / float(den or 1)
-        except (ValueError, ZeroDivisionError):
-            fps = 0.0
+        streams = meta.get("streams", []) or []
+        vstream = next((s for s in streams if s.get("codec_type") == "video"), None)
+        astream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        def _rate(raw: Any) -> float:
+            try:
+                num, _, den = str(raw or "0/1").partition("/")
+                return float(num) / float(den or 1)
+            except (ValueError, ZeroDivisionError):
+                return 0.0
+
+        avg_raw = (vstream or {}).get("avg_frame_rate") or "0/0"
+        base_raw = (vstream or {}).get("r_frame_rate") or "0/0"
+        fps = _rate(avg_raw)
+        base_fps = _rate(base_raw)
+        # A constant-rate file has avg == r. VFR phone captures and some
+        # overlay paths report 30000/1001 vs 30, so the comparison is tolerant
+        # to one-thousandth of a frame, not to a whole frame.
+        cfr = fps > 0 and base_fps > 0 and abs(fps - base_fps) <= 0.001
         return {
             "duration": float(meta.get("format", {}).get("duration", 0) or 0),
             "width": int(vstream.get("width", 0)) if vstream else 0,
             "height": int(vstream.get("height", 0)) if vstream else 0,
-            "fps": fps if fps > 0 else 30.0,
+            "fps": round(fps, 3) if fps > 0 else 0.0,
+            "baseFps": round(base_fps, 3) if base_fps > 0 else 0.0,
+            "cfr": bool(cfr),
+            "codec": str((vstream or {}).get("codec_name") or ""),
+            "pixFmt": str((vstream or {}).get("pix_fmt") or ""),
+            "profile": str((vstream or {}).get("profile") or ""),
+            "audioCodec": str((astream or {}).get("codec_name") or ""),
+            "hasAudio": astream is not None,
+            "bitrate": int((vstream or {}).get("bit_rate") or 0),
         }
     except Exception as exc:
-        raise RenderError(f"ffprobe failed for {path.name}: {exc}") from exc
+        raise RenderError(f"ffprobe failed for {label}: {exc}") from exc
+
+
+def has_faststart(path: Path | str) -> bool:
+    """True when the MP4's ``moov`` atom precedes its ``mdat``.
+
+    ffprobe happily reads a file whose index is at the end. Browsers and
+    phones do not: they have to fetch the tail before playing, which is the
+    "preview spins forever" failure on a bucket-backed range request. The
+    check is a tiny box walk over the first 2 MB, not a full download.
+    """
+    raw_path = str(path)
+    if raw_path.startswith(("http://", "https://")):
+        return True  # ffprobe on a URL already paid for the ranged fetches
+    try:
+        total = Path(path).stat().st_size
+        with Path(path).open("rb") as fh:
+            pos = 0
+            for _ in range(64):
+                fh.seek(pos)
+                head = fh.read(8)
+                if len(head) < 8:
+                    return False
+                size = int.from_bytes(head[:4], "big")
+                box = head[4:8]
+                if size == 1:
+                    ext = fh.read(8)
+                    if len(ext) < 8:
+                        return False
+                    size = int.from_bytes(ext, "big")
+                elif size == 0:
+                    size = total - pos
+                if box == b"moov":
+                    return True
+                if box == b"mdat":
+                    return False
+                if size < 8 or pos + size > total:
+                    return False
+                pos += size
+    except OSError:
+        return False
+    return False
+
+
+def clip_contract(path: Path, *, expected_sec: float | None = None) -> dict[str, Any]:
+    """The deliverable contract, checked on the FINAL file (not the plan).
+
+    Every check is something the user experiences: a wrong size, a codec a
+    phone refuses, a VFR file the badge cannot label, a missing audio track, a
+    ``moov`` atom at the end (no preview), or a file that ffprobe reads but
+    ffmpeg cannot decode. Returns ``ok`` plus every check so the dashboard can
+    say exactly which one failed.
+    """
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        add("size", False, str(exc))
+        return {"ok": False, "reason": f"size check failed: {exc}", "checks": checks}
+    add("size", size >= 16_384, f"{size} bytes (minimum 16384)")
+    try:
+        meta = probe(path)
+    except RenderError as exc:
+        add("probe", False, str(exc))
+        return {"ok": False, "reason": str(exc), "checks": checks}
+    add("probe", True, f"{meta['width']}x{meta['height']} {meta['duration']:.2f}s")
+    add("resolution", meta["width"] == 1080 and meta["height"] == 1920,
+        f"{meta['width']}x{meta['height']} (expected 1080x1920)")
+    add("video codec", meta.get("codec") == "h264", f"{meta.get('codec') or 'none'} (expected h264)")
+    add("pixel format", meta.get("pixFmt") == "yuv420p", f"{meta.get('pixFmt') or 'none'} (expected yuv420p)")
+    add("audio", bool(meta.get("hasAudio")) and meta.get("audioCodec") == "aac",
+        f"{meta.get('audioCodec') or 'none'} (expected aac)")
+    fps = float(meta.get("fps") or 0.0)
+    cfr = bool(meta.get("cfr"))
+    add(
+        "constant frame rate",
+        24.0 <= fps <= 60.0 and cfr,
+        f"avg {fps or 0:.3f} fps / base {float(meta.get('baseFps') or 0):.3f} fps "
+        f"({'CFR' if cfr else 'VFR'}, expected 24-60)",
+    )
+    if expected_sec is not None and expected_sec > 0:
+        drift = abs(float(meta.get("duration") or 0.0) - float(expected_sec))
+        add("duration", drift <= 0.3, f"{drift:.3f}s drift from {expected_sec:.3f}s (max 0.3s)")
+    fast = has_faststart(path)
+    add("faststart", fast, "moov atom is before mdat" if fast else "moov atom is at the end")
+    try:
+        proc = subprocess.run(
+            [ffmpeg_bin(), "-v", "error", "-i", str(path), "-f", "null", "-"],
+            capture_output=True, text=True, timeout=180,
+        )
+        decode_ok = proc.returncode == 0 and not (proc.stderr or "").strip()
+        add("full decode", decode_ok, (proc.stderr or "clean decode").strip()[-300:])
+    except subprocess.TimeoutExpired:
+        add("full decode", False, "decode test exceeded 180s")
+    except Exception as exc:  # noqa: BLE001
+        add("full decode", False, f"{type(exc).__name__}: {exc}")
+
+    failed = next((c for c in checks if not c["ok"]), None)
+    return {
+        "ok": failed is None,
+        "reason": ("clip contract passed" if failed is None else
+                   f"{failed['name']} failed: {failed['detail']}"),
+        "checks": checks,
+        "meta": meta,
+    }
 
 def verify_source(path: Path) -> None:
     """Verify the source MP4 plays (duration > 0) before any pipeline work."""
@@ -164,6 +292,7 @@ def verify_output(path: Path, *, expected_sec: float | None = None) -> dict[str,
         f"[video] verified {path.name}: {size / 1024:.0f} KB, "
         f"{meta['width']}x{meta['height']}, {meta['duration']:.1f}s"
     )
+    meta["faststart"] = has_faststart(path)
     return meta
 
 # ffmpeg writes progress to stderr as carriage-return updates, so these lines
@@ -212,7 +341,7 @@ def _ffmpeg_slots() -> int:
         return 1
     return 2
 
-def retry_clip_render(clip_id: str) -> dict:
+def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
     """Re-render ONE clip by id, without re-running detection/transcription.
 
     The repair path for a clip whose ``renderState`` is ``failed``. It reuses
@@ -244,7 +373,7 @@ def retry_clip_render(clip_id: str) -> dict:
     if job.get("stage") in live:
         raise HTTPException(409, "this job is still running — wait for it to finish")
     order = int(clip.get("order") or 0)
-    if clip.get("renderState") == "done" and clip.get("videoPath"):
+    if clip.get("renderState") == "done" and clip.get("videoPath") and not force:
         raise HTTPException(409, "this clip is already rendered")
 
     # Source resolution, in the order the pipeline itself uses: a local copy
@@ -306,9 +435,15 @@ def retry_clip_render(clip_id: str) -> dict:
         if not cut["end"] > cut["start"]:
             raise HTTPException(400, "this clip has no usable start/end to re-render")
 
+    from app import subtitle as _subtitle
+
     cues = clip.get("captionCues") or []
     if not cues:
         cues = (ws.read_json("captions", f"cues_{order:03d}.json") or {}).get("cues") or []
+    # Old documents carry [INAUDIBLE]/[MUTTERING] cues. Clean them before the
+    # ASS file is written, and persist the cleaned track so the API/SRT and the
+    # burned-in captions cannot disagree after this repair.
+    cues = _subtitle.clean_cues(cues)
     emoji_track = clip.get("emojiTrack") or []
     selected = [
         e for e in emoji_track
@@ -366,6 +501,13 @@ def retry_clip_render(clip_id: str) -> dict:
             "mediaHeight": meta["height"],
             "mediaDurationSec": round(float(meta.get("duration") or meta.get("durationSec") or 0.0), 3),
             "fps": meta.get("fps", 30.0),
+            "mediaCodec": meta.get("codec"),
+            "mediaPixFmt": meta.get("pixFmt"),
+            "mediaAudioCodec": meta.get("audioCodec"),
+            "mediaFaststart": meta.get("faststart"),
+            "contractOk": meta.get("contractOk"),
+            "contractChecks": meta.get("contractChecks"),
+            "captionCues": cues,
             "renderState": "done",
             "mediaError": None,
             "failedAt": None,
@@ -1213,6 +1355,72 @@ def thumb_needs_rewrite(p: Path) -> bool:
 _ACTIVE_STAGES = {
     "queued", "grabbing", "transcribing", "finding", "rendering", "exporting",
 }
+
+
+def backfill_clip_metadata(store_obj: Any, settings: Any, *, limit: int = 512) -> dict[str, int]:
+    """Probe existing clip files through the bucket and store real media facts.
+
+    Clips rendered before the fps write only have width/height/size. Their
+    files are usually offloaded, and downloading them back would refill the
+    4 GB disk. A presigned URL + ffprobe reads the MP4's metadata with HTTP
+    range requests, so this is cheap and never materialises a media file.
+    """
+    from app import objectstore
+
+    stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0}
+    try:
+        clips = store_obj.list_all_clips(limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[backfill] cannot list clips: {exc}")
+        return stats
+    outputs = getattr(settings.app.paths, "outputs_dir", None)
+    for clip in clips:
+        stats["scanned"] += 1
+        if clip.get("fps") and clip.get("mediaDurationSec"):
+            stats["skipped"] += 1
+            continue
+        raw = clip.get("videoPath")
+        if not raw:
+            stats["skipped"] += 1
+            continue
+        source: str | Path
+        local = Path(str(raw))
+        if local.exists() and local.stat().st_size > 0:
+            source = local
+        else:
+            key = objectstore.key_for_path(str(raw), outputs)
+            source = objectstore.presign(key, expires=300) if key else None
+            if not source:
+                stats["skipped"] += 1
+                continue
+        try:
+            meta = probe(source)
+        except RenderError as exc:
+            logger.warning(f"[backfill] {clip.get('_id')}: {exc}")
+            stats["failed"] += 1
+            continue
+        if float(meta.get("duration") or 0) <= 0:
+            stats["failed"] += 1
+            continue
+        patch = {
+            "fps": float(meta.get("fps") or 0.0),
+            "mediaDurationSec": round(float(meta.get("duration") or 0.0), 3),
+            "mediaWidth": int(meta.get("width") or 0),
+            "mediaHeight": int(meta.get("height") or 0),
+            "mediaCodec": meta.get("codec"),
+            "mediaPixFmt": meta.get("pixFmt"),
+            "mediaAudioCodec": meta.get("audioCodec"),
+            "mediaBytes": clip.get("mediaBytes") or (local.stat().st_size if local.exists() else None),
+            "fpsSource": "ffprobe via bucket range" if not local.exists() else "ffprobe",
+        }
+        try:
+            store_obj.write_clip(str(clip.get("_id")), patch, job_id=clip.get("jobId"))
+            stats["updated"] += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[backfill] {clip.get('_id')} write failed: {exc}")
+            stats["failed"] += 1
+    logger.info(f"[backfill] clip media metadata: {stats}")
+    return stats
 
 
 def repair_render_states(store_obj: Any, *, limit: int = 512) -> dict[str, int]:

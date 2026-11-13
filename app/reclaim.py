@@ -389,7 +389,28 @@ def push_verified(path: Path, key: str) -> dict[str, Any]:
         return {"ok": False, "key": key, "error": "upload failed"}
     if not objectstore.verify(key, size):
         return {"ok": False, "key": key, "error": "HEAD size mismatch after upload"}
-    return {"ok": True, "key": key, "bytes": size}
+    # The upload is only deliverable if the URL a phone will use honours Range.
+    # This is one byte, not a re-download, and it catches a bucket policy or
+    # presign mode that accepts PUT/HEAD but answers GET with 403/200-full.
+    opened = objectstore.open_stream(key, "bytes=0-0")
+    if opened is None:
+        return {"ok": False, "key": key, "error": "uploaded object cannot be streamed"}
+    status, _headers, body = opened
+    try:
+        first = body.read() if hasattr(body, "read") else body
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - closing a failed stream is best-effort
+                pass
+    if status != 206 or len(first) != 1:
+        return {
+            "ok": False, "key": key,
+            "error": f"ranged GET returned HTTP {status} ({len(first)} byte(s)), expected 206/1",
+        }
+    return {"ok": True, "key": key, "bytes": size, "ranged": True}
 
 
 def push_clip_and_thumb(job_id: str, clip_path: Path, thumb_path: Path | None) -> dict[str, Any]:
@@ -404,9 +425,13 @@ def push_clip_and_thumb(job_id: str, clip_path: Path, thumb_path: Path | None) -
     video = push_verified(clip_path, objectstore.output_key(job_id, clip_path.name))
     if not video["ok"]:
         return {"ok": False, "video": video, "thumb": None, "dropped": False}
-    thumb_res = None
-    if thumb_path is not None and Path(thumb_path).exists():
-        thumb_res = push_verified(thumb_path, objectstore.output_key(job_id, Path(thumb_path).name))
+    if thumb_path is None or not Path(thumb_path).exists():
+        return {"ok": False, "video": video, "thumb": None, "dropped": False,
+                "error": "thumbnail missing — a ready clip needs a poster"}
+    thumb_res = push_verified(thumb_path, objectstore.output_key(job_id, Path(thumb_path).name))
+    if not thumb_res.get("ok"):
+        return {"ok": False, "video": video, "thumb": thumb_res, "dropped": False,
+                "error": str(thumb_res.get("error") or "thumbnail upload failed")}
     dropped = False
     if video["ok"]:
         cfg = objectstore.config_from_env()

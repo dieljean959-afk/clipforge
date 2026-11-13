@@ -506,6 +506,28 @@ def check_geometry(
         )
 
 
+def cfr_args(fps: int = 30) -> list[str]:
+    """Constant-frame-rate output args for the ffmpeg installed here.
+
+    `-fps_mode` was added in ffmpeg 5; this host has 4.4, where the same thing
+    is spelled `-vsync cfr`. Passing the newer flag made every re-render die
+    with "Option not found: -fps_mode" — a version detail, not a render bug.
+    """
+
+    @functools.lru_cache(maxsize=1)
+    def modern() -> bool:
+        try:
+            out = subprocess.run(
+                [ffmpeg_bin(), "-hide_banner", "-h", "full"],
+                capture_output=True, text=True, timeout=PROBE_TIMEOUT_SEC,
+            ).stdout or ""
+            return "-fps_mode" in out
+        except Exception:  # noqa: BLE001 - old ffmpeg is the safe default
+            return False
+
+    return ["-r", str(fps), *(["-fps_mode", "cfr"] if modern() else ["-vsync", "cfr"])]
+
+
 def render_clip(
     src: Path,
     cut: dict[str, Any],
@@ -647,7 +669,7 @@ def render_clip(
             f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
             f"crop={out_w}:{out_h},gblur=sigma=30,setsar=1[bgb];"
             f"[fg]scale={out_w}:-2:flags=bicubic,setsar=1[fgs];"
-            f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2"
+            f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,fps=30"
         )
 
     has_fit = any(s["mode"] == "fit" for s in clip_segments)
@@ -674,7 +696,7 @@ def render_clip(
             f"split=2[modesrc][fitref];"
             f"[modesrc]{fill_chain},setsar=1[fillbase];"
             f"[fitref]{_fit_graph()},setsar=1[fitscale];"
-            f"[fillbase][fitscale]overlay=0:0:enable='{fit_cond}'"
+            f"[fillbase][fitscale]overlay=0:0:enable='{fit_cond}',fps=30"
         )
     else:
         # build_output_chain's no-windows branch centre-crops at src height;
@@ -684,7 +706,7 @@ def render_clip(
                 width, height, fps, crop_x, crop_y, crop_w, crop_h, None,
             )
             + f",scale={out_w}:{out_h}:force_original_aspect_ratio=increase"
-            + f",crop={out_w}:{out_h},setsar=1"
+            + f",crop={out_w}:{out_h},setsar=1,fps=30"
         )
 
     # Burn the captions into the frames: an ASS file is written per clip from
@@ -731,6 +753,10 @@ def render_clip(
         )
     if cues:
         from app import subtitle as _subtitle
+
+        # A re-render can be handed cues written before marker cleanup. Clean
+        # them here too, so no old [INAUDIBLE] can be burned back in.
+        cues = _subtitle.clean_cues(cues)
 
         ass_path = dest.with_suffix(".ass")
         # The preset the JOB chose, not None: writing with None resolved every
@@ -903,6 +929,12 @@ def render_clip(
                 # is read as that INPUT's duration, which left the looped emoji
                 # input unbounded and the render running forever.
                 "-t", f"{clip_seconds:.3f}",
+                # CFR, not whatever timebase the source used. The old render
+                # copied a 25 fps source through, so the clip row had no fps
+                # and the badge said "no fps"; 30 is inside the mobile
+                # contract and makes every deliverable identical.
+                *cfr_args(30),
+                "-movflags", "+faststart",
                 str(tmp_dest),
             ]
         return [
@@ -926,6 +958,8 @@ def render_clip(
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
+            *cfr_args(30),
+            "-movflags", "+faststart",
             str(tmp_dest),
         ]
 
@@ -993,6 +1027,11 @@ def render_clip(
             cmd, proc = _attempt(graph, enc)
             meta = _video.verify_output(tmp_dest, expected_sec=clip_seconds)
             check_geometry(meta, out_w, out_h, tmp_dest.name)
+            contract = _video.clip_contract(tmp_dest, expected_sec=clip_seconds)
+            if not contract["ok"]:
+                raise _video.RenderError(contract["reason"])
+            meta.update(contract.get("meta") or {})
+            meta["contract"] = contract
             if label != "primary" and on_log:
                 on_log(f"clip {cut.get('order', '?')}: recovered with {label}")
             break
@@ -1035,7 +1074,14 @@ def render_clip(
         "height": int(meta["height"]),
         "bytes": int(dest.stat().st_size),
         "videoPath": str(dest),
-        "fps": float(probed.get("fps", 30.0)),
+        "fps": float(probed.get("fps") or 30.0),
+        "codec": probed.get("codec"),
+        "pixFmt": probed.get("pixFmt"),
+        "audioCodec": probed.get("audioCodec"),
+        "hasAudio": probed.get("hasAudio"),
+        "faststart": _video.has_faststart(dest),
+        "contractOk": bool((meta.get("contract") or {}).get("ok")),
+        "contractChecks": (meta.get("contract") or {}).get("checks") or [],
         "encoder": choice.encoder or "libx264",
         "encoderLabel": choice.label,
         "hardwareEncoded": bool(choice.hardware),

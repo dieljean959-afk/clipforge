@@ -349,6 +349,14 @@ def _boot_phases(b: Boot) -> None:
 
     b.run_phase("disk_reset_watchdog", _disk_loop, timeout_ms=5_000)
 
+    def _clip_health() -> dict:
+        from app import cliphealth
+
+        cliphealth.start_monitor(store, settings)
+        return {"detail": "clip HEAD/range/fps monitor started (boot + every 10 min)"}
+
+    b.run_phase("clip_health", _clip_health, timeout_ms=5_000)
+
     def _warm() -> dict:
         _do_warmup()
         return {"detail": warmup.get("current") or "unknown"}
@@ -1316,6 +1324,14 @@ def _clip_for_share_id(raw: str) -> dict[str, Any] | None:
     return None
 
 
+def _clip_for_share_token(raw: str) -> dict[str, Any] | None:
+    """Resolve a 7-day share token back to its clip."""
+    for clip in store.list_all_clips():
+        if clip.get("shareToken") == raw:
+            return clip
+    return None
+
+
 def _media_etag(p: Path) -> str:
     """A stable etag from real bytes (size + mtime), so changed files 412."""
     try:
@@ -1324,19 +1340,108 @@ def _media_etag(p: Path) -> str:
         return ""
 
 
-def _clip_bucket_stream(clip: dict[str, Any], request: Request, filename: str) -> StreamingResponse:
-    """Stream a clip's master from the bucket when local media was reclaimed."""
+def _ascii_filename(text: str, fallback: str = "clip", ext: str = "mp4") -> str:
+    """A header-safe download name (HTTP headers are latin-1 only).
+
+    Titles are Spanish/emoji in this app, and interpolating one directly into
+    Content-Disposition produced ``SER� CON`` on the wire. Starlette encodes
+    Unicode filenames as RFC 5987 ``filename*``; doing it here keeps a plain
+    ASCII name for old clients too.
+    """
+    import unicodedata
+
+    raw = unicodedata.normalize("NFKD", str(text or ""))
+    raw = raw.encode("ascii", "ignore").decode("ascii")
+    clean = "".join(ch for ch in raw if ch.isalnum() or ch in " -_").strip()
+    clean = "-".join(clean.split())[:60].strip("-_") or fallback
+    return f"{clean}.{ext}"
+
+
+def _bucket_key_for(clip: dict[str, Any]) -> str | None:
+    """The bucket key of this clip's master, or None when unknown."""
     from app import objectstore
-    if not clip.get("videoPath") or Path(clip["videoPath"]).exists():
-        return clip_download(clip, request, filename)
-    key = objectstore.key_for_path(clip["videoPath"], settings.app.paths.outputs_dir)
+
+    raw = clip.get("videoPath")
+    if not raw:
+        return None
+    return objectstore.key_for_path(raw, settings.app.paths.outputs_dir)
+
+
+def _body_iterator(body: Any) -> Any:
+    """Yield an S3 StreamingBody without ever holding the whole clip."""
+    if hasattr(body, "iter_chunks"):
+        try:
+            for chunk in body.iter_chunks(chunk_size=256 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001 - a closed socket is not an error
+                pass
+    else:
+        data = body.read() if hasattr(body, "read") else bytes(body)
+        if data:
+            yield data
+
+
+def _bucket_media_response(
+    clip: dict[str, Any],
+    request: Request,
+    *,
+    filename: str | None = None,
+    attachment: bool = False,
+) -> Response | None:
+    """Serve a clip master from the bucket with real Range support.
+
+    The old version passed the whole ``Request`` object as the S3 Range header
+    and then handed the ``(status, headers, body)`` tuple to StreamingResponse
+    as if it were an iterator. The result was a 200 with no body and Range
+    ignored — previews and downloads both failed while the route said OK.
+    """
+    from app import objectstore
+
+    key = _bucket_key_for(clip)
     if not key:
-        return clip_download(clip, request, filename)
+        return None
+    range_header = request.headers.get("range")
+    opened = objectstore.open_stream(key, range_header)
+    if opened is None:
+        return None
+    status, headers, body = opened
+    headers = dict(headers)
+    headers["Accept-Ranges"] = "bytes"
+    headers["Content-Type"] = "video/mp4"
+    headers["Cache-Control"] = MEDIA_CACHE_CONTROL
+    if filename:
+        disposition = "attachment" if attachment else "inline"
+        headers["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+    if request.method == "HEAD":
+        try:
+            total = int(headers.get("Content-Length") or 0)
+            if total and range_header and status == 200:
+                headers["Content-Length"] = str(total)
+        finally:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return Response(status_code=status, headers=headers, media_type="video/mp4")
     return StreamingResponse(
-        objectstore.open_stream(key, request),
+        _body_iterator(body),
+        status_code=status,
+        headers=headers,
         media_type="video/mp4",
-        headers={"Accept-Ranges": "bytes", "Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _clip_bucket_stream(
+    clip: dict[str, Any], request: Request, filename: str
+) -> Response | None:
+    """Stream a clip's master from the bucket when local media was reclaimed."""
+    if clip.get("videoPath") and Path(clip["videoPath"]).exists():
+        return None
+    return _bucket_media_response(clip, request, filename=filename, attachment=True)
 
 
 def _restore_media(p: Path) -> bool:
@@ -1367,7 +1472,7 @@ def _share_copy_for(clip: dict) -> Path | None:
 
 
 @app.api_route("/s/{share_id}.mp4", methods=["GET", "HEAD"])
-def public_share_mp4(share_id: str) -> FileResponse:
+def public_share_mp4(share_id: str, request: Request) -> Response:
     """The public MP4 for a share id.
 
     Public on purpose: no login, no expiry, no session. That is the whole
@@ -1385,7 +1490,9 @@ def public_share_mp4(share_id: str) -> FileResponse:
         raise HTTPException(404, "this share link does not exist")
     share = _share_copy_for(clip)
     if share is None or not share.exists():
-        raise HTTPException(503, "this share link is still being prepared")
+        # Older links predate the bucket-backed share route. They must not
+        # stay on "Preparing" forever: stream the master with Range instead.
+        return _share_stream_response(clip, request)
     return FileResponse(
         share,
         media_type="video/mp4",
@@ -1393,10 +1500,7 @@ def public_share_mp4(share_id: str) -> FileResponse:
             "Cache-Control": SHARE_CACHE_CONTROL,
             "Accept-Ranges": "bytes",
             "ETag": _media_etag(share),
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-            "Access-Control-Allow-Headers": "Range, Content-Type",
-            "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+            **_SHARE_CORS,
         },
     )
 
@@ -1408,6 +1512,101 @@ def _og_escape(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+    )
+
+
+_SHARE_CORS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "Range, Content-Type",
+    "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+}
+
+
+def _share_stream_response(
+    clip: dict[str, Any], request: Request, *, attachment: bool = False
+) -> Response:
+    """Public clip bytes, local or bucket-backed, with Range and CORS."""
+    filename = _ascii_filename(
+        f"{clip.get('order', 0) + 1:02d}-{clip.get('title') or 'clip'}"
+    )
+    p = _clip_media(clip, "video")
+    if p is not None:
+        return FileResponse(
+            p,
+            media_type="video/mp4",
+            filename=filename,
+            content_disposition_type="attachment" if attachment else "inline",
+            headers={
+                "Cache-Control": SHARE_CACHE_CONTROL,
+                "Accept-Ranges": "bytes",
+                "ETag": _media_etag(p),
+                **_SHARE_CORS,
+            },
+        )
+    streamed = _bucket_media_response(
+        clip, request, filename=filename, attachment=attachment
+    )
+    if streamed is None:
+        raise HTTPException(404, "this clip's video is no longer available")
+    streamed.headers.update(_SHARE_CORS)
+    streamed.headers["Cache-Control"] = SHARE_CACHE_CONTROL
+    return streamed
+
+
+@app.api_route("/s/{token}", methods=["GET", "HEAD"])
+def public_share_token(token: str, request: Request) -> Response:
+    """A 7-day public share link. No login, no cookie, real Range support.
+
+    If the token is an older short share id, fall through to the OG page so
+    links that were copied before this feature keep working.
+    """
+    clip = _clip_for_share_token(token)
+    if clip is None:
+        return public_share_page(token, request)
+    state = sharelink.token_state(clip)
+    if state["state"] != "ready":
+        raise HTTPException(410, state["detail"])
+    return _share_stream_response(clip, request)
+
+
+@app.api_route("/s/{token}/download", methods=["GET", "HEAD"])
+def public_share_download(token: str, request: Request) -> Response:
+    """The download option on a share link."""
+    clip = _clip_for_share_token(token)
+    if clip is None:
+        raise HTTPException(404, "this share link does not exist")
+    state = sharelink.token_state(clip)
+    if state["state"] != "ready":
+        raise HTTPException(410, state["detail"])
+    return _share_stream_response(clip, request, attachment=True)
+
+
+@app.get("/s/{token}/page")
+def public_share_token_page(token: str, request: Request) -> HTMLResponse:
+    """A minimal player page for the share link, with a download button."""
+    clip = _clip_for_share_token(token)
+    if clip is None:
+        raise HTTPException(404, "this share link does not exist")
+    state = sharelink.token_state(clip)
+    if state["state"] != "ready":
+        raise HTTPException(410, state["detail"])
+    title = _og_escape(clip.get("title") or "ClipForge clip")
+    src = f"/s/{token}"
+    dl = f"/s/{token}/download"
+    return HTMLResponse(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>{title}</title>"
+        f"<meta property=\"og:title\" content=\"{title}\">"
+        f"<meta property=\"og:video\" content=\"{src}\">"
+        "<style>body{margin:0;background:#0b0b0f;color:#f5f5f5;font-family:system-ui,sans-serif;"
+        "display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px;box-sizing:border-box}"
+        "main{width:min(420px,100%)}video{width:100%;border-radius:18px;background:#000;display:block}"
+        "a{display:block;margin-top:14px;text-align:center;padding:12px;border-radius:999px;background:#f5f5f5;color:#111;"
+        "text-decoration:none;font-weight:700}p{opacity:.65;font-size:12px;text-align:center}</style></head>"
+        f"<body><main><video src=\"{src}\" controls playsinline preload=\"metadata\"></video>"
+        f"<a href=\"{dl}\">Download MP4</a><p>{title}</p></main></body></html>"
     )
 
 
@@ -1425,9 +1624,6 @@ def public_share_page(share_id: str, request: Request) -> HTMLResponse:
     clip = _clip_for_share_id(share_id)
     if clip is None:
         raise HTTPException(404, "this share link does not exist")
-    share = _share_copy_for(clip)
-    if share is None or not share.exists():
-        raise HTTPException(503, "this share link is still being prepared")
     base = str(request.base_url).rstrip("/")
     vid = f"{base}/s/{clip['shareId']}.mp4"
     thumb_path = clip.get("thumbPath")
@@ -1490,37 +1686,62 @@ def public_share_page(share_id: str, request: Request) -> HTMLResponse:
 
 class DiskResetIn(BaseModel):
     apply: bool = False
+    scope: str = "local"  # local | bucket | all
 
 
 @app.post("/api/storage/reset")
 def storage_reset(body: DiskResetIn | None = None) -> dict:
     """Dry-run by default; `{"apply": true}` performs the reset.
 
-    Same function as `tools/disk_reset.py`, including its protect list and
-    bucket HEAD verification, so this route cannot delete more than the CLI.
+    ``scope=local`` is the existing protects-everything disk reset,
+    ``scope=bucket`` plans/applies only provably dead bucket objects, and
+    ``all`` runs both. Nothing is deleted without ``apply``. The bucket plan
+    is computed once and handed to apply (it carries its exact key list).
     """
+    apply = bool(body and body.apply)
+    scope = str((body.scope if body else "local") or "local").lower()
+    if scope not in {"local", "bucket", "all"}:
+        raise HTTPException(400, "scope must be local, bucket or all")
     try:
-        return diskreset.reset(store, settings, apply=bool(body and body.apply))
+        local = None
+        bucket = None
+        if scope in {"local", "all"}:
+            local = diskreset.reset(store, settings, apply=apply)
+            local["scope"] = "local"
+            # Unlinked-but-open bytes only return when the holder exits. The
+            # worker is the only long-lived child that holds media, and the
+            # supervisor owns its restart; do it only when the scan found one.
+            if apply and local.get("openDeleted"):
+                try:
+                    local["workerRestart"] = worker.restart()
+                except Exception as exc:  # noqa: BLE001 - report, do not fail reset
+                    local["workerRestart"] = {"ok": False, "error": str(exc)}
+        if scope in {"bucket", "all"}:
+            from app import bucketreset
+
+            planned = bucketreset.plan(store, settings)
+            if apply:
+                bucket = bucketreset.apply(store, settings, planned)
+            else:
+                planned.pop("_keys", None)
+                planned.pop("_multipart", None)
+                bucket = planned
+        if scope == "local":
+            return local or {}
+        if scope == "bucket":
+            return bucket or {}
+        return {
+            "ok": bool((local or {}).get("ok")) and bool((bucket or {}).get("ok")),
+            "scope": "all",
+            "dryRun": not apply,
+            "local": local,
+            "bucket": bucket,
+        }
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001 - report the real reason
         logger.warning(f"[storage] reset failed: {type(exc).__name__}: {exc}")
-        raise HTTPException(503, f"could not reset local disk: {exc}") from exc
-
-
-@app.post("/api/storage/reclaim")
-def storage_reclaim() -> dict:
-    """Push finished batches' media to the bucket and drop the local copies.
-
-    The dashboard's "Free disk" button has always called this route; it was not
-    registered, so the only disk-relief control in the UI answered 404. The
-    work itself lives in `reclaim.reclaim` and is idempotent: files already in
-    the bucket are re-verified, not re-uploaded from scratch, and a running
-    batch is skipped because it is writing those paths right now.
-    """
-    try:
-        return reclaim.reclaim(store, settings.app.paths)
-    except Exception as exc:  # noqa: BLE001 - report the real reason
-        logger.warning(f"[storage] reclaim failed: {type(exc).__name__}: {exc}")
-        raise HTTPException(503, f"could not free local disk: {exc}") from exc
+        raise HTTPException(503, f"could not reset {scope}: {exc}") from exc
 
 
 @app.get("/api/dev/verify-clips")
@@ -1599,6 +1820,14 @@ def verify_clips(jobId: str) -> dict:
     }
 
 
+@app.get("/api/clips/health")
+def clips_health() -> dict:
+    """The last cheap contract pass over every ready clip."""
+    from app import cliphealth
+
+    return cliphealth.report()
+
+
 @app.get("/api/storage/unused")
 def storage_unused() -> dict:
     """Bucket media whose batch no longer exists, grouped per batch.
@@ -1655,46 +1884,142 @@ def list_clips(jobId: str = "") -> list[dict]:
     return _attach_share_state(clips)
 
 
-@app.post("/api/clips/{clip_id}/share-link")
-def ensure_share_link(clip_id: str) -> dict:
-    """Mint/verify this clip's public link and report its real state.
+@app.post("/api/clips/{clip_id}/share")
+def create_share_link(clip_id: str, request: Request) -> dict:
+    """Mint a public, expiring, revocable share link and return it NOW.
 
-    This is the endpoint behind the Share button's "Preparing… -> ✓ Ready".
-    It is idempotent: the same clip returns the same id forever, and calling
-    it on an already-ready clip costs one stat().
+    This is deliberately not a transcode. The old flow waited for a separate
+    share-sized MP4 to be built and left the button on "Preparing…" forever
+    when that build never ran (which is every offloaded clip). The public
+    route streams the master directly from the bucket with Range, so a link is
+    valid the instant this returns.
     """
     clip = store.get_clip(clip_id)
     if clip is None:
         raise HTTPException(404, "clip not found")
-    sid = sharelink.ensure_id(clip)
-    if not sharelink.valid_id(sid):
-        raise HTTPException(500, "could not mint a share id for this clip")
-    share = _share_copy_for(clip)
-    state = sharelink.share_state(clip, share)
-    if state["shareState"] != sharelink.STATE_READY:
-        clip["shareState"] = state["shareState"]
-        store.write_clip(clip)
-    return state
+    if clip.get("renderState") != "done" or not clip.get("videoPath"):
+        raise HTTPException(409, "this clip has no rendered video yet")
+    token = sharelink.ensure_token(clip)
+    clip["shareState"] = sharelink.STATE_READY
+    store.write_clip(clip)
+    base = str(request.base_url).rstrip("/")
+    expires = int(clip.get("shareExpiresAt") or 0)
+    return {
+        "ok": True,
+        "token": token,
+        "url": f"{base}/s/{token}",
+        "downloadUrl": f"{base}/s/{token}/download",
+        "pageUrl": f"{base}/s/{token}/page",
+        "expiresAt": expires,
+        "expiresInDays": 7,
+        "revocable": True,
+        "shareState": "ready",
+    }
+
+
+@app.api_route("/api/clips/{clip_id}/share", methods=["GET", "HEAD"])
+def clip_share_bytes(clip_id: str, request: Request) -> Response:
+    """The MP4 behind the Share button's file path (same bytes as preview)."""
+    clip = store.get_clip(clip_id)
+    if clip is None or not clip.get("videoPath"):
+        raise HTTPException(404, "rendered video not available for this clip")
+    filename = _ascii_filename(
+        f"{clip.get('order', 0) + 1:02d}-{clip.get('title') or 'clip'}"
+    )
+    p = _clip_media(clip, "video")
+    if p is not None:
+        return FileResponse(
+            p,
+            media_type="video/mp4",
+            filename=filename,
+            content_disposition_type="inline",
+            headers={
+                "Cache-Control": MEDIA_CACHE_CONTROL,
+                "Accept-Ranges": "bytes",
+                "ETag": _media_etag(p),
+            },
+        )
+    streamed = _bucket_media_response(clip, request, filename=filename)
+    if streamed is not None:
+        return streamed
+    raise HTTPException(404, "clip file missing from disk and bucket")
+
+
+@app.delete("/api/clips/{clip_id}/share")
+def revoke_share_link(clip_id: str) -> dict:
+    """Revoke a share link immediately; the token is dead on the next request."""
+    clip = store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "clip not found")
+    token = clip.get("shareToken")
+    if not token:
+        return {"ok": True, "revoked": False, "detail": "no share link to revoke"}
+    clip["shareRevoked"] = True
+    clip["shareExpiresAt"] = 0
+    clip["shareState"] = "revoked"
+    store.write_clip(clip)
+    return {"ok": True, "revoked": True, "detail": "share link revoked"}
+
+
+@app.post("/api/clips/{clip_id}/share-link")
+def ensure_share_link(clip_id: str) -> dict:
+    """Mint/verify this clip's public link and report its real state.
+
+    Kept for older clients. It now mints the same 7-day token the new
+    ``/api/clips/{id}/share`` route uses and reports ready as soon as the
+    master is streamable — no separate share transcode, no endless
+    "Preparing…".
+    """
+    clip = store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "clip not found")
+    token = sharelink.ensure_token(clip)
+    clip["shareState"] = sharelink.STATE_READY
+    store.write_clip(clip)
+    tok = sharelink.token_state(clip)
+    return {
+        **sharelink.share_state(clip, _share_copy_for(clip)),
+        "shareState": "ready" if tok["state"] == "ready" else tok["state"],
+        "shareDetail": tok["detail"],
+        "shareReady": tok["state"] == "ready",
+        "shareToken": token,
+        "shareUrl": f"/s/{token}",
+        "sharePageUrl": f"/s/{token}/page",
+        "shareExpiresAt": tok.get("expiresAt"),
+    }
 
 
 def _attach_share_state(clips: list[dict]) -> list[dict]:
     """Add the share facts to each clip, without building anything.
 
-    A HEAD check the UI can trust has to answer from the filesystem, so this
-    probes the share copy that already exists and says "preparing" for the rest.
-    It never transcodes — that happens at the end of a render, or on the first
-    request to the public URL.
+    A clip's master is streamable from disk OR the bucket; a share copy is an
+    optional upgrade, not a prerequisite. Saying "preparing" until a separate
+    transcode exists left every offloaded clip on that label forever. The
+    token is the source of truth now, and the URL is valid immediately.
     """
     out = []
     for clip in clips:
-        share = None
-        master = clip.get("videoPath")
-        if master:
-            try:
-                share = share_video.share_path_for(Path(master))
-            except Exception:  # noqa: BLE001 - never fail a list over a poster
-                share = None
-        out.append({**clip, **sharelink.share_state(clip, share)})
+        tok = sharelink.token_state(clip)
+        has_media = bool(clip.get("videoPath")) and (
+            Path(str(clip.get("videoPath"))).exists()
+            or bool(_bucket_key_for(clip))
+        )
+        state = "ready" if tok["state"] == "ready" and has_media else tok["state"]
+        if tok["state"] == "ready" and not has_media:
+            state = "failed"
+            tok["detail"] = "the rendered file is missing from disk and bucket"
+        token = tok.get("token")
+        out.append({
+            **clip,
+            **sharelink.share_state(clip, None),
+            "shareState": state if state in {"ready", "preparing", "failed"} else "missing",
+            "shareDetail": tok["detail"],
+            "shareReady": state == "ready",
+            "shareToken": token,
+            "shareUrl": f"/s/{token}" if token else None,
+            "sharePageUrl": f"/s/{token}/page" if token else None,
+            "shareExpiresAt": tok.get("expiresAt"),
+        })
     return out
 
 def _attach_clip_captions(store: LocalStore, doc: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1815,13 +2140,45 @@ def clip_thumb(clip_id: str) -> FileResponse:
     )
 
 
+@app.api_route("/api/clips/{clip_id}/video", methods=["GET", "HEAD"])
+def clip_video(clip_id: str, request: Request) -> Response:
+    """The clip the preview plays — same origin, Range, inline.
+
+    This route did not exist: the dashboard's ``<video src>`` asked for
+    ``/api/clips/{id}/video`` and got a 404, so every preview was a black box
+    while downloads worked. Serving from the bucket here also means a
+    reclaimed local file is streamed, never downloaded back to the 4 GB disk.
+    """
+    clip = store.get_clip(clip_id)
+    if clip is None or not clip.get("videoPath"):
+        raise HTTPException(404, "rendered video not available for this clip")
+    filename = _ascii_filename(f"{clip.get('order', 0) + 1:02d}-{clip.get('title') or 'clip'}")
+    p = _clip_media(clip, "video")
+    if p is not None:
+        return FileResponse(
+            p,
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Cache-Control": MEDIA_CACHE_CONTROL,
+                "Accept-Ranges": "bytes",
+                "ETag": _media_etag(p),
+            },
+        )
+    streamed = _bucket_media_response(clip, request, filename=filename)
+    if streamed is not None:
+        return streamed
+    raise HTTPException(404, "clip file missing from disk and bucket")
+
+
 @app.api_route("/api/clips/{clip_id}/download", methods=["GET", "HEAD"])
 def clip_download(clip_id: str, request: Request) -> Response:
     clip = store.get_clip(clip_id)
     if clip is None or not clip.get("videoPath"):
         raise HTTPException(404, "rendered video not available for this clip")
-    safe = "".join(ch for ch in clip.get("title", "clip") if ch.isalnum() or ch in " -_")[:40] or "clip"
-    filename = f"{clip['order'] + 1:02d}-{safe}.mp4"
+    filename = _ascii_filename(
+        f"{clip.get('order', 0) + 1:02d}-{clip.get('title') or 'clip'}"
+    )
     streamed = _clip_bucket_stream(clip, request, filename=filename)
     if streamed is not None:
         return streamed
@@ -1831,11 +2188,12 @@ def clip_download(clip_id: str, request: Request) -> Response:
     return FileResponse(
         p,
         media_type="video/mp4",
-        filename=f"{clip['order'] + 1:02d}-{safe}.mp4",
+        filename=filename,
+        content_disposition_type="attachment",
         headers={
-            "Content-Disposition": f'attachment; filename="{clip["order"] + 1:02d}-{safe}.mp4"',
             "Cache-Control": MEDIA_CACHE_CONTROL,
             "Accept-Ranges": "bytes",
+            "ETag": _media_etag(p),
         },
     )
 
@@ -1999,28 +2357,50 @@ def clip_post(clip_id: str, body: PostClipBody) -> dict:
 
 
 @app.post("/api/clips/{clip_id}/retry-render")
-def retry_clip_render_route(clip_id: str) -> dict:
-    """Re-render ONE failed clip (the "Retry failed clip" button).
+def retry_clip_render_route(clip_id: str, force: bool = False) -> dict:
+    """Re-render ONE clip (the "Retry clip" button).
 
-    Light enough to run inline: it renders a single clip from the cached cut
-    and caption cues, and the result is pushed to the bucket before returning.
+    ``force=true`` re-renders a done clip too, which is how a caption-text fix
+    reaches an existing deliverable without re-running detection. Light enough
+    to run inline: it renders a single clip from the cached cut and caption
+    cues, and the result is pushed to the bucket before returning.
     """
     from app import video
 
     if store.get_clip_doc(clip_id) is None:
         raise HTTPException(404, "clip not found")
-    return video.retry_clip_render(clip_id)
+    return video.retry_clip_render(clip_id, force=force)
 
 
-@app.get("/api/clips/{clip_id}/srt")
+@app.api_route("/api/clips/{clip_id}/srt", methods=["GET", "HEAD"])
 def clip_srt(clip_id: str) -> Response:
+    """Download the clip's SRT with a real attachment filename.
+
+    This used to be ``text/plain`` with no Content-Disposition, so a phone
+    either rendered it inline or saved it as ``srt``. Subtitle players look at
+    the extension, and the download button advertises a .srt file.
+    """
+    from app import subtitle as subtitle_svc
+
     clip = store.get_clip(clip_id)
     if clip is None:
         raise HTTPException(404, "clip not found")
-    lines = []
+    lines: list[str] = []
     for i, cue in enumerate(clip.get("captionCues", []), 1):
-        lines.append(f"{i}\n{_srt_time(cue['start'])} --> {_srt_time(cue['end'])}\n{cue['text']}\n")
-    return Response("\n".join(lines), media_type="text/plain")
+        text = subtitle_svc.clean_caption_text(str(cue.get("text") or ""))
+        if not text:
+            continue
+        lines.append(
+            f"{len(lines) + 1}\n{_srt_time(cue['start'])} --> {_srt_time(cue['end'])}\n{text}\n"
+        )
+    filename = _ascii_filename(
+        f"{clip.get('order', 0) + 1:02d}-{clip.get('title') or 'clip'}", ext="srt"
+    )
+    return Response(
+        "\n".join(lines),
+        media_type="application/x-subrip; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/clips/{clip_id}/tracks/{filename}")
@@ -2314,6 +2694,22 @@ def delete_job(job_id: str) -> dict:
         "status": purge.STATUS,
         "keptSource": False,
     }
+
+
+@app.post("/api/jobs/{job_id}/verify-duration")
+def verify_job_duration(job_id: str) -> dict:
+    """Re-measure a job's source from yt-dlp and ffprobe.
+
+    Fixes the old 120:00 card for a 20:37 video without re-fetching media.
+    """
+    from app import source_stream
+
+    if store.get_job(job_id) is None:
+        raise HTTPException(404, "job not found")
+    try:
+        return source_stream.reconcile_source_duration(store, job_id)
+    except Exception as exc:  # noqa: BLE001 - report the real reason
+        raise HTTPException(400, f"could not verify the source duration: {exc}") from exc
 
 
 @app.post("/api/jobs/{job_id}/retry")

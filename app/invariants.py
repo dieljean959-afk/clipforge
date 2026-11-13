@@ -137,7 +137,36 @@ def partial_success_label(counts: dict[str, int]) -> str:
     return f"{done} clip{'s' if done != 1 else ''} ready"
 
 
-def _needs_repair(job: dict[str, Any], counts: dict[str, int]) -> list[str]:
+def _projection_stale(job: dict[str, Any], clips: list[dict[str, Any]]) -> bool:
+    """Does the job's embedded clip list still match the clip documents?
+
+    The projection is a cache the dashboard and export read; after a single
+    clip is re-rendered (caption cleanup, fps repair) the document changes but
+    the old projection can keep the stale captionCues/mediaBytes forever. That
+    is exactly how the fixed Burpees clip could still show [INAUDIBLE] in one
+    view and clean captions in another.
+    """
+    projected = job.get("clips")
+    if not isinstance(projected, list) or len(projected) != len(clips):
+        return True
+    by_id = {str(c.get("_id") or ""): c for c in projected if isinstance(c, dict)}
+    for doc in clips:
+        cid = str(doc.get("_id") or "")
+        old = by_id.get(cid)
+        if old is None:
+            return True
+        for key in (
+            "order", "renderState", "videoPath", "thumbPath", "mediaBytes",
+            "mediaDurationSec", "fps", "mediaCodec", "captionCues",
+        ):
+            if old.get(key) != doc.get(key):
+                return True
+    return False
+
+
+def _needs_repair(
+    job: dict[str, Any], counts: dict[str, int], clips: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Which invariants this document breaks (empty list = consistent)."""
     if counts["total"] == 0:
         return []
@@ -145,6 +174,9 @@ def _needs_repair(job: dict[str, Any], counts: dict[str, int]) -> list[str]:
     clips_field = job.get("clips")
     if not isinstance(clips_field, list) or len(clips_field) < counts["total"]:
         broken.append("clips-list-shorter-than-clip-docs")
+    elif str(job.get("stage") or "") in ("complete", "failed", "cancelled"):
+        if clips and _projection_stale(job, clips):
+            broken.append("clips-projection-stale")
     if counts["done"] and int(job.get("clipCount") or 0) < counts["done"]:
         broken.append("clipCount-below-rendered")
     stage = str(job.get("stage") or "")
@@ -247,7 +279,7 @@ def check_and_repair(
             else:
                 clips = _clips_for(store, job)
             counts = _counts(clips)
-            broken = _needs_repair(job, counts)
+            broken = _needs_repair(job, counts, clips)
             if not broken and counts["total"] == 0:
                 # A batch that died before any clip existed (bad fetch, bad
                 # source) still needs the terminal flag written: the document

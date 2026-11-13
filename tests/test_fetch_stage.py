@@ -28,9 +28,17 @@ def env(tmp_path, monkeypatch):
     # These two tests cover the LOCAL fallback, which only runs on an install
     # with no bucket at all. This machine has one configured, so without this
     # the fetch stage correctly takes the streaming path instead.
+    from types import SimpleNamespace
+
     from app import objectstore
 
     monkeypatch.setattr(objectstore, "configured", lambda *a, **k: False)
+    # `_push_source` reads the bucket config directly, so `configured` alone
+    # is not enough: without this the fake 1.8 KB "video" in the first test
+    # was uploaded to the real production bucket as job_fetch_test/source.mp4.
+    monkeypatch.setattr(
+        objectstore, "config_from_env", lambda *a, **k: SimpleNamespace(enabled=False)
+    )
     base = load_config(quiet=True)
     paths = replace(
         base.app.paths,

@@ -140,6 +140,9 @@ export interface JobDto {
   deleting?: { error?: string | null; attempts?: number; removed?: number } | null;
   /** The stage a RUNNING job is on, or null. Never set for a dead job. */
   activeStage?: string | null;
+  /** 1-4, derived server-side from the checkpointed pipeline stage. */
+  stageNumber?: number | null;
+  stageTotal?: number | null;
   /** Human name of the stage this job is on, or died in. */
   stageLabel?: string | null;
   progress: number;
@@ -219,6 +222,10 @@ export interface ClipDto {
   mediaDurationSec?: number | null;
   mediaError?: string | null;
   fps?: number | null;
+  /** Set by the 10-minute cheap contract monitor. */
+  healthState?: "ok" | "failed" | null;
+  healthIssue?: string | null;
+  healthCheckedAt?: number | null;
   /** The resolved caption look this clip was burned with (from the job). */
   captionSettings?: {
     presetKey?: string;
@@ -255,11 +262,14 @@ export interface ClipDto {
   renderMs?: number | null;
   translationTracks?: { lang: string; source?: boolean; cached?: boolean; error?: string; files?: Record<string, string> }[] | null;
   shareId?: string | null;
-  shareState?: "missing" | "preparing" | "ready" | "failed";
+  shareState?: "missing" | "preparing" | "ready" | "failed" | "revoked" | "expired";
   shareDetail?: string;
   shareReady?: boolean;
   shareUrl?: string | null;
   sharePageUrl?: string | null;
+  /** 7-day, revocable public token (new share links). */
+  shareToken?: string | null;
+  shareExpiresAt?: number | null;
 }
 
 /** One emoji burned onto a clip, with the judgement behind it. */
@@ -950,41 +960,52 @@ export const api = {
       error?: { code?: string; message?: string; hint?: string } | null;
       gate?: { ready?: boolean; verified?: boolean; reason?: string };
     }>("/api/storage/test", { method: "POST" }),
-  reclaimStorage: () =>
-    request<{
-      ok: boolean;
-      freedBytes: number;
-      freedMb: number;
-      uploaded: number;
-      scanned: number;
-      jobs: number;
-      freeBytes: number | null;
-      reason: string;
-    }>("/api/storage/reclaim", { method: "POST" }),
   /** Dry-run by default; `apply` backs up the job DB and performs the reset. */
-  diskReset: (apply = false) =>
+  diskReset: (apply = false, scope: "local" | "bucket" | "all" = "local") =>
     request<{
       ok: boolean;
+      scope?: "local" | "bucket" | "all";
       dryRun: boolean;
-      freeBeforeMb: number;
-      freeAfterMb: number;
-      freedMb: number;
-      plannedMb: number;
-      categories: Array<{
+      freeBeforeMb?: number;
+      freeAfterMb?: number;
+      freedMb?: number;
+      plannedMb?: number;
+      plannedBytes?: number;
+      usageBeforeMb?: number;
+      usageAfterMb?: number;
+      usageBeforeBytes?: number;
+      usageAfterBytes?: number;
+      objects?: number;
+      deletedObjects?: number;
+      abortedUploads?: number;
+      multipartCount?: number;
+      multipart?: Array<{
+        key: string;
+        uploadId: string;
+        initiated?: string;
+        ageHours: number;
+      }>;
+      local?: Record<string, unknown>;
+      /** The bucket's NAME for a bucket-only plan, the nested result for "all". */
+      bucket?: string | Record<string, unknown>;
+      failures?: string[];
+      backup?: string | null;
+      categories?: Array<{
         name: string;
         mb: number;
         count: number;
-        paths: string[];
-        note: string;
+        paths?: string[];
+        note?: string;
+        reason?: string;
+        items?: Array<{ key: string; mb: number; lastModified?: string }>;
       }>;
-      kept: Array<{ path: string; reason: string }>;
-      openDeleted: Array<{ pid: number; cmd: string; path: string; mb: number }>;
-      backup: string | null;
-      skipped: Array<{ what: string; why: string }>;
+      kept?: Array<{ path?: string; key?: string; reason: string }>;
+      openDeleted?: Array<{ pid: number; cmd: string; path: string; mb: number }>;
+      skipped?: Array<{ what: string; why: string }>;
     }>("/api/storage/reset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apply }),
+      body: JSON.stringify({ apply, scope }),
     }),
   /**
    * Bucket media whose batch no longer exists anywhere in the dashboard.
@@ -1135,10 +1156,11 @@ export const api = {
   resetCaptionStyle: () =>
     request<CaptionStyleDto>("/api/settings/captions", { method: "DELETE" }),
   /** Re-render a single clip (its export stage) without re-running detection or transcription. */
-  retryClipRender: (clipId: string) =>
-    request<{ queued: boolean; clipId: string }>(`/api/clips/${clipId}/retry-render`, {
-      method: "POST",
-    }),
+  retryClipRender: (clipId: string, force = false) =>
+    request<{ queued: boolean; clipId: string }>(
+      `/api/clips/${clipId}/retry-render${force ? "?force=true" : ""}`,
+      { method: "POST" },
+    ),
   /**
    * Swap, add or remove ONE chunk's emoji, then re-render that clip.
    *
@@ -1199,7 +1221,26 @@ export const api = {
       shareReady: boolean;
       shareUrl: string | null;
       sharePageUrl: string | null;
+      shareToken?: string | null;
+      shareExpiresAt?: number | null;
     }>(`/api/clips/${encodeURIComponent(clipId)}/share-link`, { method: "POST" }),
+  /** Mint a 7-day, revocable public link. Returns immediately. */
+  createShareLink: (clipId: string) =>
+    request<{
+      ok: boolean;
+      token: string;
+      url: string;
+      downloadUrl: string;
+      pageUrl: string;
+      expiresAt: number;
+      expiresInDays: number;
+      shareState: "ready";
+    }>(`/api/clips/${encodeURIComponent(clipId)}/share`, { method: "POST" }),
+  revokeShareLink: (clipId: string) =>
+    request<{ ok: boolean; revoked: boolean; detail: string }>(
+      `/api/clips/${encodeURIComponent(clipId)}/share`,
+      { method: "DELETE" },
+    ),
   clipThumbUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/thumb`,
   clipDownloadUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/download`,
   clipSrtUrl: (clipId: string) => `${BASE}/api/clips/${clipId}/srt`,

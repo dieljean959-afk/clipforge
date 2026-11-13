@@ -128,7 +128,6 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   const [storageForm, setStorageForm] = useState<StorageKeysInput>({});
   const [savingStorage, setSavingStorage] = useState(false);
   const [confirmStorageDelete, setConfirmStorageDelete] = useState(false);
-  const [reclaiming, setReclaiming] = useState(false);
   const [testingStorage, setTestingStorage] = useState(false);
   const [storageTest, setStorageTest] = useState<Awaited<
     ReturnType<typeof api.testStorage>
@@ -146,32 +145,6 @@ export function LocalWorkerCard({ className }: { className?: string }) {
   // rotated without retyping the endpoint), so Save must stay disabled until
   // something has actually been typed — otherwise the button looks broken.
   const storageDirty = Object.values(storageForm).some((v) => (v ?? "").trim() !== "");
-
-  /**
-   * Push finished batches into the bucket and drop their local copies.
-   *
-   * The 4 GB sandbox cannot hold a library plus a render, so this is how the
-   * library moves out of the way: clips then play straight from the bucket
-   * (the server streams them, it does not download them back). A running
-   * batch is skipped by the server — its files are being written.
-   */
-  const reclaimDisk = async () => {
-    setReclaiming(true);
-    try {
-      const out = await api.reclaimStorage();
-      if (out.uploaded > 0) {
-        toast.success(`Freed ${out.freedMb} MB`, {
-          description: `${out.uploaded} file${out.uploaded > 1 ? "s" : ""} from ${out.jobs} finished batch${out.jobs > 1 ? "es" : ""} now live in the bucket. Clips still play — they stream from there.`,
-        });
-      } else {
-        toast.message("Nothing to free up", { description: out.reason || "No finished batch keeps media on local disk." });
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not free disk space.");
-    } finally {
-      setReclaiming(false);
-    }
-  };
 
   // doctor: replaces vague "API unreachable" with specific, fixable checks
   const runDoctor = async () => {
@@ -931,25 +904,6 @@ export function LocalWorkerCard({ className }: { className?: string }) {
           <Pencil className="size-3" />
           {storageOn ? "Edit bucket" : "Set bucket"}
         </button>
-        {/* Only meaningful when the bucket is actually usable: reclaiming with
-            no bucket would delete the only copy. The server also refuses,
-            this just keeps the button from being a trap. */}
-        {storageOn && storage?.clientReady && (
-          <button
-            type="button"
-            onClick={reclaimDisk}
-            disabled={reclaiming}
-            className="flex cursor-pointer items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[10px] font-bold text-muted-foreground transition hover:border-primary/50 hover:text-foreground disabled:cursor-progress disabled:opacity-60"
-            title="Move every finished batch's media into the bucket and free the local copies — playback keeps working because clips stream from the bucket"
-          >
-            {reclaiming ? (
-              <Loader2 className="size-3 animate-spin" />
-            ) : (
-              <Trash2 className="size-3" />
-            )}
-            {reclaiming ? "Freeing…" : "Free disk space"}
-          </button>
-        )}
         <DiskResetDialog onApplied={() => void refreshHealth()} />
       </div>
 

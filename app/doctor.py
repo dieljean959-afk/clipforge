@@ -219,7 +219,14 @@ def _check_hosted(settings: Settings) -> list[Check]:
                       status.get("problem") or status.get("source", "not found"),
                       f"set {env_name} in the Keys tab (or .env)")]
     checks = [Check(f"{which} key", "ok", f"loaded from {status.get('source')}")]
-    if os.getenv("CLIPFORGE_DOCTOR_LIVE", "").lower() in {"1", "true", "yes"}:
+    # DeepSeek is the app's detector, and its balance is the difference between
+    # a batch running and every batch failing at detection. A 1-token chat is
+    # cheap proof, so it always runs for this provider (the key stays masked).
+    # Other providers keep the opt-in live probe.
+    live_probe = which == "deepseek" or os.getenv("CLIPFORGE_DOCTOR_LIVE", "").lower() in {
+        "1", "true", "yes"
+    }
+    if live_probe:
         base = str(cfg.base_url).rstrip("/")
         req = urllib.request.Request(  # noqa: S310 - https base from config
             f"{base}/models",
@@ -240,6 +247,50 @@ def _check_hosted(settings: Settings) -> list[Check]:
                 note = f" (CONFIGURED MODEL NOT IN CATALOG — pick one of: {', '.join(ids[:6])})"
             checks.append(Check(f"{which} API", "ok" if not note else "warn",
                                 f"live call ok, {len(ids)} model(s) visible{note}"))
+            if which == "deepseek":
+                try:
+                    payload = json.dumps({
+                        "model": cfg.model,
+                        "messages": [{"role": "user", "content": "Reply with OK."}],
+                        "max_tokens": 1,
+                        "temperature": 0,
+                    }).encode("utf-8")
+                    chat = urllib.request.Request(  # noqa: S310 - configured https base
+                        f"{base}/chat/completions",
+                        data=payload,
+                        headers={
+                            "Authorization": f"Bearer {api_key or ''}",
+                            "Content-Type": "application/json",
+                            "User-Agent": GROQ_USER_AGENT,
+                        },
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(chat, timeout=20) as resp:  # noqa: S310
+                        json.loads(resp.read().decode("utf-8"))
+                    checks.append(Check(
+                        "deepseek 1-token", "ok",
+                        "live chat completion returned (key masked, 1 token spent)",
+                    ))
+                except urllib.error.HTTPError as exc:
+                    # Report the provider's status/message, never the request
+                    # headers or the key. A 402 here means "out of credit",
+                    # which is the real reason detection would fail.
+                    raw = exc.read()[:500].decode("utf-8", "replace")
+                    try:
+                        why = json.loads(raw).get("error", {}).get("message") or raw
+                    except Exception:  # noqa: BLE001
+                        why = raw
+                    checks.append(Check(
+                        "deepseek 1-token", "fail",
+                        f"live chat failed: HTTP {exc.code} — {str(why)[:180]}",
+                        "check quota/billing; the key itself was not printed",
+                    ))
+                except Exception as exc:  # noqa: BLE001 - never print the key
+                    checks.append(Check(
+                        "deepseek 1-token", "fail",
+                        f"live chat failed: {type(exc).__name__}",
+                        "check quota/billing; the key itself was not printed",
+                    ))
         except urllib.error.HTTPError as exc:
             checks.append(Check(f"{which} API", "fail", f"live call failed: HTTP {exc.code}",
                                 "check the key + network"))
@@ -400,6 +451,97 @@ def check_encode(settings: Settings) -> list[Check]:
     return checks
 
 
+def check_routes(settings: Settings) -> list[Check]:
+    """Hit the real routes on the running API, not a mock."""
+    base = f"http://127.0.0.1:{settings.app.port}"
+    checks: list[Check] = []
+    probes = (
+        ("/api/health", "GET", None, "route /api/health"),
+        ("/api/clips/health", "GET", None, "route /api/clips/health"),
+        ("/api/storage/reset", "POST", b'{"scope":"bucket","apply":false}',
+         "route /api/storage/reset (bucket dry-run)"),
+    )
+    for path, method, data, name in probes:
+        try:
+            req = urllib.request.Request(
+                base + path, method=method, data=data,
+                headers={"Content-Type": "application/json"} if data else {},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                checks.append(Check(name, "ok", f"HTTP {resp.status}"))
+        except urllib.error.HTTPError as exc:
+            checks.append(Check(name, "fail", f"HTTP {exc.code}"))
+        except Exception as exc:  # noqa: BLE001
+            checks.append(Check(name, "warn", f"API not reachable: {exc}",
+                                "start the app, then run doctor again"))
+            break
+    return checks
+
+
+def check_bucket(settings: Settings) -> list[Check]:
+    """A real put/head/ranged-get/delete against the configured bucket."""
+    from app import objectstore
+
+    cfg = objectstore.config_from_env()
+    if not cfg.enabled:
+        return [Check("bucket round-trip", "warn", "bucket disabled (local-only media)", "")]
+    try:
+        result = objectstore.test_roundtrip(cfg)
+        steps = ", ".join(
+            f"{s['step']}={'ok' if s.get('ok') else 'FAIL'}" for s in result.get("steps", [])
+        )
+        return [Check(
+            "bucket round-trip", "ok" if result.get("ok") else "fail",
+            f"{cfg.bucket}: {steps}",
+            "" if result.get("ok") else "check endpoint/bucket/keys in the Keys tab",
+        )]
+    except Exception as exc:  # noqa: BLE001
+        return [Check("bucket round-trip", "fail", f"{type(exc).__name__}: {exc}", "check bucket settings")]
+
+
+def check_clip_health(settings: Settings, store: Any = None) -> list[Check]:
+    """HEAD + ranged 206 + stored fps for every ready clip."""
+    from app import cliphealth
+    from app.store import LocalStore
+
+    st = store or LocalStore(settings.app.paths)
+    try:
+        result = cliphealth.check(st, settings)
+    except Exception as exc:  # noqa: BLE001
+        return [Check("clip health", "fail", f"{type(exc).__name__}: {exc}", "inspect the bucket")]
+    if not result.get("checked"):
+        return [Check("clip health", "warn", "no ready clips to check", "")]
+    return [Check(
+        "clip health", "ok" if not result.get("bad") else "fail",
+        f"{result['checked']} ready clip(s), {result['bad']} failed HEAD/range/fps",
+        "" if not result.get("bad") else "open the clip and press Retry",
+    )]
+
+
+def check_share(settings: Settings) -> list[Check]:
+    """A real ranged GET on a share token, from a cookieless request."""
+    from app.store import LocalStore
+
+    st = LocalStore(settings.app.paths)
+    try:
+        clips = st.list_all_clips(limit=50)
+    except Exception as exc:  # noqa: BLE001
+        return [Check("share link", "warn", f"cannot list clips: {exc}", "")]
+    clip = next((c for c in clips if c.get("shareToken") and not c.get("shareRevoked")), None)
+    if clip is None:
+        return [Check("share link", "warn", "no live share token yet", "open a clip and press Share")]
+    url = f"http://127.0.0.1:{settings.app.port}/s/{clip['shareToken']}"
+    req = urllib.request.Request(url, headers={"Range": "bytes=0-99"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 - localhost
+            body = resp.read(100)
+            ok = resp.status == 206 and len(body) == 100
+            return [Check("share link", "ok" if ok else "fail",
+                          f"HTTP {resp.status}, {len(body)} bytes ranged", "")]
+    except Exception as exc:  # noqa: BLE001
+        return [Check("share link", "fail", f"{type(exc).__name__}: {exc}", "check the share route")]
+
+
 def run_doctor(settings: Settings) -> dict[str, Any]:
     checks: list[Check] = []
     checks += check_ffmpeg(settings)
@@ -411,6 +553,10 @@ def run_doctor(settings: Settings) -> dict[str, Any]:
     checks += check_storage(settings)
     checks += check_host(settings)
     checks += check_network()
+    checks += check_routes(settings)
+    checks += check_bucket(settings)
+    checks += check_clip_health(settings)
+    checks += check_share(settings)
     payload = {
         "ok": all(c.status != "fail" for c in checks),
         "summary": {

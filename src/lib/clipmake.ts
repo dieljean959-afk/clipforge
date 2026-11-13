@@ -187,15 +187,20 @@ export function overallStatus(job: JobDoc): OverallStatus {
   }
   const live = job.activeStage ?? job.stage;
   const idx = PIPELINE_STAGES.indexOf(live as ClipStage);
-  const stageNumber = idx === -1 ? 1 : idx + 1;
+  // The backend derives stage number + label from checkpoints. Trust those
+  // first: a stale counter once showed "Stage 1 of 4 — exporting" while clip
+  // 13 of 15 was rendering.
+  const stageNumber = job.stageNumber ?? (idx === -1 ? 1 : idx + 1);
   const within = Math.min(100, Math.max(0, job.progress ?? 0));
   const percent = Math.round(((stageNumber - 1 + within / 100) / total) * 100);
+  const detail =
+    job.stageLabel ?? STAGE_LABELS[live as ClipStage] ?? String(live ?? "");
   return {
     state: "running",
     stageNumber,
-    total,
+    total: job.stageTotal ?? total,
     percent: Math.min(99, percent),
-    label: `Stage ${stageNumber} of ${total} — ${STAGE_LABELS[live as ClipStage] ?? live}`,
+    label: `Stage ${stageNumber} of ${job.stageTotal ?? total} — ${detail}`,
     isTerminal: false,
   };
 }

@@ -45,7 +45,10 @@ def collect() -> dict:
     from app.store import LocalStore
 
     settings = load_config(quiet=True)
-    code, live = _api("/api/doctor")
+    # The live doctor includes a 1-token provider call and a bucket round-trip;
+    # five seconds was shorter than a cold DeepSeek response, so the tool fell
+    # back to an offline run and lost the bucket/clip/share checks.
+    code, live = _api("/api/doctor", timeout=45.0)
     if code == 200 and isinstance(live, dict) and live.get("checks"):
         report = live
         report["source"] = "live-api"

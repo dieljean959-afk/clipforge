@@ -116,6 +116,18 @@ def test_pipeline_aliases_map_onto_the_four_visible_stages():
     assert jobstatus.active_stage({"stage": "transcribe"}) == "transcribing"
     assert jobstatus.active_stage({"stage": "detect"}) == "finding"
     assert jobstatus.active_stage({"stage": "export"}) == "rendering"
+    assert jobstatus.active_stage({"stage": "exporting"}) == "rendering"
+
+
+def test_clip_13_of_15_is_stage_4_not_stage_1_exporting():
+    job = {
+        "status": "running", "stage": "exporting", "progress": 86.0,
+        "unitsDone": 13, "unitsTotal": 15,
+    }
+    described = jobstatus.describe(job)
+    assert described["activeStage"] == "rendering"
+    assert described["stageNumber"] == 4
+    assert described["stageLabel"] == "Rendering clips 13/15"
 
 
 # --- "queued" must not hide a job that is actually running ----------------
