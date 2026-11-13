@@ -669,9 +669,31 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
     # Push it to the bucket so the repaired clip survives a sandbox recycle, and
     # reconcile the batch summary (14 done + 1 failed → 15 ready).
     try:
-        from app import reclaim as _reclaim
+        from app import reclaim as _reclaim, objectstore as _objectstore
 
-        _reclaim.push_clip_and_thumb(job_id, dest, thumb_path)
+        pushed = _reclaim.push_clip_and_thumb(job_id, dest, thumb_path)
+        if pushed.get("ok"):
+            video_key = str((pushed.get("video") or {}).get("key") or "")
+            thumb_key = str((pushed.get("thumb") or {}).get("key") or "")
+            db.update_clip(
+                clip_id,
+                lambda c: c.update({
+                    "videoKey": video_key or _objectstore.output_key(job_id, dest.name),
+                    "thumbKey": thumb_key or _objectstore.output_key(job_id, thumb_path.name),
+                    "mediaRemote": True,
+                    "uploadPending": False,
+                    "uploadError": None,
+                    "localDropped": bool(pushed.get("dropped")),
+                }),
+            )
+        else:
+            db.update_clip(
+                clip_id,
+                lambda c: c.update({
+                    "uploadPending": True,
+                    "uploadError": str(pushed.get("error") or "upload failed")[:300],
+                }),
+            )
     except Exception as exc:  # noqa: BLE001 - the local copy is still valid
         logger.warning(f"[video] re-render upload failed for {clip_id}: {exc}")
     try:

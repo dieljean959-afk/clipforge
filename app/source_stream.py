@@ -15,14 +15,18 @@ buffer in RAM. Video-only and audio-only are captured as two objects:
 Each object is HEAD-verified against the byte count before it is trusted.
 
 When a format cannot be streamed (HLS/fragmented with no seekable container, a
-site that only offers muxed `b`), the fallback downloads **5-minute sections**,
+site that only offers muxed `b`), the fallback downloads 150 s sections,
 uploads and deletes each one immediately, and records the section list so the
-renderer can cut a clip out of the one section that contains it. A clip is at
-most `max_clip_sec` long, so it always fits inside one section.
+renderer can cut a clip out of the one section that contains it. A high-bitrate
+section is split once more to stay under the upload cap; those 75 s pieces can
+carry a few extra decoded seconds.
 
 `RemoteSource` is what the rest of the pipeline sees instead of a Path: `str()`
-gives a fresh presigned URL, and `url_for_span(t)` picks the object (whole
-video or the containing section) plus the seek offset inside it.
+gives a fresh presigned URL, and `url_for_span(start, end)` picks the object
+(whole video or the containing section) plus the seek offset inside it. A span
+that crosses a section boundary is rejected explicitly so the export loop can
+replace that candidate; it is never silently truncated.
+
 """
 
 from __future__ import annotations
