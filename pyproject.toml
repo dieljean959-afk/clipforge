@@ -1,0 +1,70 @@
+[project]
+name = "clipforge"
+version = "1.0.0"
+description = "ClipForge — local video → viral clips pipeline (MoneyPrinterTurbo heritage, MIT)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "python-multipart>=0.0.12",
+  "pydantic>=2.9",
+  "python-dotenv>=1.0",
+  "loguru>=0.7",
+  "faster-whisper>=1.1",
+  "numpy>=1.26",
+  "yt-dlp>=2024.10.22",    "google-genai>=0.6",
+    "pillow>=10.4",
+    # Durable media offload (app/objectstore.py). Pure-python, no compiler, and
+    # imported lazily, so an install without it still runs — media simply stays
+    # on local disk. S3-compatible: Cloudflare R2, Backblaze B2, AWS, Wasabi.
+    "boto3>=1.34",
+]
+
+[project.optional-dependencies]
+# WhisperX: the same CTranslate2 engine as faster-whisper plus a wav2vec2
+# forced-alignment pass for genuinely accurate word-level timestamps (caption
+# sync + clip highlighting depend on those). Heavy — pulls torch, torchaudio
+# and alignment models (multi-GB) — so it is opt-in. Newer releases also
+# provide the Silero VAD path used by app.asr. Without it the app runs
+# faster-whisper's own BatchedInferencePipeline: identical batching speed-up,
+# engine-native word timestamps. `config.toml [whisper] engine` selects between
+# them (`auto` prefers WhisperX when importable). The upper bound prevents an
+# unreviewed major API change from breaking the compatibility adapter.
+whisperx = ["whisperx>=3.3,<4", "silero-vad>=5.1"]
+# heavy extras installed by start.sh --with-extras (or manually)
+gpu = ["ctranslate2>=4.3"]
+vad = ["silero-vad>=5.1", "torch>=2.2", "numpy>=1.26"]
+reframe = ["mediapipe>=0.10", "opencv-python-headless>=4.9"]
+moviepy = ["moviepy>=2.1"]
+
+[project.scripts]
+clipforge = "app.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+# Only `tests/` is a pytest suite. `tools/` holds standalone drill scripts
+# that call `sys.exit()` at import time, so collecting them made a bare
+# `pytest -q` die with an INTERNALERROR before running a single test.
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Explicit, deterministic rule selection — newer ruff versions expand defaults,
+# which would make CI flaky. E/F are the core correctness rules (pyflakes
+# catches undefined names, unused imports, etc.); I is import sorting; W is
+# whitespace. Style-opinion sets (BLE/SIM/PLW/...) are intentionally not
+# enabled so the CI gate stays about real bugs. Long log/f-string lines are
+# tolerated (E501 off) — they read fine and wrapping them hurts greppability.
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

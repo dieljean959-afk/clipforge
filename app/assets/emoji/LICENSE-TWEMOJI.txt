@@ -1,0 +1,19 @@
+Twemoji emoji artwork — attribution and licence
+===============================================
+
+The PNG files in this directory are from Twemoji (https://twemoji.twitter.com/),
+release 15.0.3, fetched from the jdecked/twemoji mirror on jsDelivr by
+tools/fetch_twemoji.py. They are bundled here so the renderer never downloads
+anything at runtime.
+
+Twemoji graphics are licensed under the Creative Commons Attribution 4.0
+International licence (CC-BY 4.0):
+
+    https://creativecommons.org/licenses/by/4.0/
+
+Copyright 2020 Twitter, Inc and other contributors
+Graphics licensed under CC-BY 4.0: https://creativecommons.org/licenses/by/4.0/
+
+Modifications: none — the 72x72 PNGs are stored byte-for-byte as published.
+The emoji *choices* (which emoji, which emotion, which keywords) live in
+whitelist.json, which is Clipmake's own data, not part of Twemoji.

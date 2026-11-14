@@ -1,0 +1,1134 @@
+"""Filesystem-backed job/clip store for local ClipForge."""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+from loguru import logger
+
+from app.config import Paths
+
+try:  # POSIX advisory locking — guards read-modify-write across processes
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+
+
+def _uploads_root(paths: Paths) -> Path:
+    """Where new source files are written: inside the codebase, by default.
+
+    ``getattr`` rather than a plain attribute because tests (and any caller)
+    may hand in a duck-typed paths object; falling back to ``data/uploads``
+    keeps every such caller working and matches the real default anyway.
+    """
+    return getattr(paths, "uploads_dir", None) or (paths.data_dir / "uploads")
+
+
+def _job_source_dirs(paths: Paths, job_id: str) -> tuple[Path, ...]:
+    """Every directory that can hold this job's source file, best first.
+
+    Mirrors ``Paths.job_source_dirs`` with the same duck-typing tolerance: a
+    job uploaded before this change still lives in the legacy ``downloads/``
+    tree, so reads must fan out across both and neither may be assumed.
+    """
+    fn = getattr(paths, "job_source_dirs", None)
+    if callable(fn):
+        return tuple(fn(job_id))
+    return (_uploads_root(paths) / job_id, paths.downloads_dir / job_id)
+
+
+class LocalStore:
+    """Thread- AND process-safe JSON document store rooted at data_dir.
+
+    The worker supervisor (API process) and the per-job runner (child process)
+    both touch job documents: the parent tails child output into the job log
+    while the child writes stage progress. Two processes writing the same
+    `x.json.tmp` produced corrupt, unreadable files — so tmp names are unique
+    per process/thread and read-modify-write paths hold an advisory file lock.
+    """
+
+    # 'View logs' reads the tail; a longer array only costs disk on every write.
+    MAX_JOB_LOGS = 600
+
+    def __init__(self, paths: Paths) -> None:
+        self._paths = paths
+        self._lock = threading.RLock()
+
+    # Cross-process file lock. The per-job runner is a separate process, and a
+    # resumed job can hit the same job document from two processes at once, so
+    # this must be a real OS advisory lock (fcntl.flock) rather than a thread
+    # lock. A thread lock only serialises threads inside one process.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tmp_for(path: Path) -> Path:
+        """Unique tmp path per process+thread (never shared between writers)."""
+        return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Advisory exclusive lock around a read-modify-write of `path`."""
+        if fcntl is None:  # pragma: no cover - non-POSIX
+            yield
+            return
+        lock_path = path.with_name(path.name + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+
+    # ------------------------------------------------------------------
+    # ids
+    # ------------------------------------------------------------------
+
+    def job_id(self, doc: dict[str, Any]) -> str:
+        """id alias used by callers that reach into nested job payloads.
+
+        Several report helpers expect a ``job_id(doc)`` signature.  The
+        canonical key is ``_id``; older documents and a handful of callers
+        used ``id``, so we prefer the former and fall back to the latter.
+        """
+        if doc is None:
+            return ""
+        if "_id" in doc and isinstance(doc["_id"], str) and doc["_id"]:
+            return doc["_id"]
+        mid = doc.get("id")
+        if isinstance(mid, str) and mid:
+            return mid
+        return ""
+
+    def new_job_id(self) -> str:
+        return uuid.uuid4().hex
+
+    # ------------------------------------------------------------------
+    # job creation
+    # ------------------------------------------------------------------
+
+    def create_job(
+        self,
+        *,
+        source_type: str,
+        source: str | None,
+        title: str | None = None,
+        min_clip_sec: int | None = None,
+        max_clip_sec: int | None = None,
+        max_clips: int | None = None,
+        caption_preset: str | None = None,
+        language: str = "auto",
+        duration: float | None = None,
+    ) -> dict[str, Any]:
+        """Create and persist a new job document (stage: queued).
+
+        This was previously missing entirely — both ``POST /api/jobs`` and
+        ``POST /api/jobs/upload`` called ``store.create_job(...)`` and
+        crashed with ``AttributeError: 'LocalStore' object has no attribute
+        'create_job'`` → the raw 500 the user saw on every "Forge clips"
+        submit.
+
+        Field names match what the pipeline (``app/task.py``) and the API
+        serializers actually read:
+
+        - ``source`` / ``url``: source filename or URL (pipeline reads ``source``)
+        - ``options``: minClipSec / maxClipSec / maxClips (read by the detect stage)
+        - ``language``: caption language ("auto" | "en" | "es")
+        - ``durationSec``: pre-probed source length, when known
+        """
+        now_ms = int(time.time() * 1000)
+        job: dict[str, Any] = {
+            "_id": self.new_job_id(),
+            "sourceType": source_type,
+            "source": source,
+            "url": source if source_type == "url" else None,
+            "title": title,
+            "stage": "queued",
+            "status": "queued",
+            "createdAt": now_ms,
+            "durationSec": duration,
+            "language": language,
+            "options": {
+                "minClipSec": min_clip_sec,
+                "maxClipSec": max_clip_sec,
+                "maxClips": max_clips,
+            },
+            "captionPreset": caption_preset or "bold_stack",
+            "clips": [],
+            "logs": [],
+            "progress": 0.0,
+            "isTerminal": False,
+        }
+        self.save_job(job)
+        return job
+
+    # ------------------------------------------------------------------
+    # job put/get/delete
+    # ------------------------------------------------------------------
+
+    def _job_path(self, job_id: str) -> Path:
+        return self._paths.data_dir / "jobs" / f"{job_id}.json"
+
+    def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Persist or overwrite a job document atomically (tmp + rename).
+
+        This is an UNCONDITIONAL overwrite: a unique tmp file per process+thread
+        is renamed over the target, so no reader ever sees a half-written
+        document and two writers cannot interleave bytes. It does not merge, so
+        a caller holding a stale snapshot must use :meth:`update_job` (locked
+        read-modify-write) instead of writing that snapshot back.
+        """
+        jid = self.job_id(job)
+        path = self._job_path(jid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._tmp_for(path)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(job, fh, default=str, indent=2, sort_keys=False)
+        tmp.replace(path)
+        return job
+
+    def update_job(self, job_id: str, mutate) -> dict[str, Any] | None:
+        """Locked read-modify-write of the CURRENT job document.
+
+        `save_job` is an unconditional overwrite, so a caller that holds a
+        snapshot across time (the supervisor replaying a child's stdout runs
+        seconds behind the child) writes its stale copy back and silently
+        reverts whatever the child wrote in between. Observed as a failed job
+        flipped back to `grabbing` with its error dropped. Mutating the
+        document read *inside* the lock removes that window.
+        """
+        path = self._job_path(job_id)
+        with self._file_lock(path):
+            job = self.get_job(job_id)
+            if not isinstance(job, dict) or not job:
+                return None
+            mutate(job)
+            self.save_job(job)
+            return job
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        path = self._job_path(job_id)
+        if not path.exists():
+            return {}
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except json.JSONDecodeError:
+            logger.warning(f"corrupt job file: {path}")
+            return {}
+
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a job document AND the clip documents it owns.
+
+        Removing only the job document left every clip document behind. The
+        dashboard lists clips through the clip documents (and the all-batches
+        view walks the whole clip directory), so a deleted batch kept showing
+        up as a grid of “queued · not rendered yet” cards — one twin per clip,
+        forever. The media and workspace are removed by the API/hosting layers;
+        the metadata belongs here because this is the object that owns it.
+        """
+        path = self._job_path(job_id)
+        if not path.exists():
+            return False
+        path.unlink(missing_ok=True)
+        self.delete_clip_docs(job_id)
+        return True
+
+    def delete_clip_docs(self, job_id: str) -> int:
+        """Delete every clip document (and the summary blob) for a job."""
+        clips_dir = self._paths.data_dir / "clips"
+        if not clips_dir.exists():
+            return 0
+        removed = 0
+        for p in clips_dir.glob("*.json"):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(doc, dict) and doc.get("jobId") == job_id:
+                p.unlink(missing_ok=True)
+                removed += 1
+        summary = clips_dir / f"{job_id}.json"
+        if summary.exists():
+            summary.unlink(missing_ok=True)
+            removed += 1
+        return removed
+
+    def reconcile_clips(self) -> dict[str, int]:
+        """Drop clip documents whose job no longer exists, plus temp leftovers.
+
+        A clip document is only meaningful alongside its job: the dashboard
+        shows a card per document, and a document without a job can never be
+        rendered, opened or deleted through the UI. Deleting the job used to
+        leave them on disk (see delete_job), which is where the permanent
+        “queued” twins came from. Runs at boot and from the orphan sweeper, so
+        leftovers from an older build heal themselves instead of waiting for
+        the 7-day orphan window.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        stats = {"orphans": 0, "duplicates": 0, "temps": 0}
+        if not clips_dir.exists():
+            return stats
+        for tmp in clips_dir.glob("*.tmp"):
+            try:
+                tmp.unlink(missing_ok=True)
+                stats["temps"] += 1
+            except OSError:
+                continue
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                # Unreadable document: it can never be listed or rendered.
+                p.unlink(missing_ok=True)
+                stats["temps"] += 1
+                continue
+            if not isinstance(doc, dict):
+                continue
+            job_id = doc.get("jobId")
+            if not job_id or not self._job_path(str(job_id)).exists():
+                p.unlink(missing_ok=True)
+                stats["orphans"] += 1
+        # Duplicate documents for the same (job, order) from a pre-fix
+        # detection pass: keep the one that has media, else the one whose
+        # summary lists it (the current detection). Read everything once —
+        # this runs over every clip document on disk.
+        docs: list[tuple[Path, dict[str, Any]]] = []
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(doc, dict) and "candidateCount" not in doc:
+                docs.append((p, doc))
+        summaries: dict[str, set[str]] = {}
+        for p, doc in docs:
+            job_id = str(doc.get("jobId"))
+            if job_id not in summaries:
+                summaries[job_id] = set(self.summary_clip_ids(job_id))
+        best: dict[tuple[str, int], tuple[int, Path]] = {}
+        for p, doc in docs:
+            key = (str(doc.get("jobId")), int(doc.get("order") or 0))
+            authoritative = str(doc.get("_id")) in summaries.get(key[0], set())
+            rank = (
+                (4 if doc.get("renderState") == "done" else 0)
+                + (2 if doc.get("videoPath") else 0)
+                + (1 if authoritative else 0)
+            )
+            if key not in best or rank > best[key][0]:
+                best[key] = (rank, p)
+        if len(best) < len(docs):
+            keep = {p for _rank, p in best.values()}
+            for p, _doc in docs:
+                if p not in keep:
+                    p.unlink(missing_ok=True)
+                    stats["duplicates"] += 1
+        return stats
+
+    # ------------------------------------------------------------------
+    # listing helpers
+    # ------------------------------------------------------------------
+
+    def _list_job_paths(self) -> list[Path]:
+        """Return job document paths newest-first, broken ties by name."""
+        # Job documents live in the jobs/ subdirectory, not directly in data_dir.
+        # This keeps data_dir clean (config/status files sit alongside the
+        # subdirectory) and matches how the pipeline has written jobs since the
+        # hosted-worker refactor.
+        jobs_dir = self._paths.data_dir / "jobs"
+        try:
+            files = sorted(
+                (p for p in jobs_dir.iterdir() if p.suffix == ".json" and p.is_file()),
+                key=lambda p: (-p.stat().st_mtime_ns, p.name),
+                reverse=True,
+            )
+        except OSError:
+            return []
+        return list(files)
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        """Return every job document, newest first.
+
+        Kept for backward compatibility — some callers still use this name.
+        New read paths use the summary projection below to avoid shipping full
+        logs on every read.
+        """
+        return self.iter_all_jobs()
+
+    def iter_all_jobs(self) -> list[dict[str, Any]]:
+        """Return every job document, newest first.
+
+        Kept for a few legacy callers; new read paths use the summary
+        projection below to avoid shipping full logs on every read.
+        """
+        out: list[dict[str, Any]] = []
+        for path in self._list_job_paths():
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                if isinstance(doc, dict):
+                    out.append(doc)
+            except (json.JSONDecodeError, OSError):
+                continue
+        return out
+
+    def list_job_summaries(
+        self,
+        limit: int = 10,
+        before: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int, int | None]:
+        """One page of lightweight job summaries, newest first.
+
+        Returns ``(page, total, next_before)`` so the list view can paginate
+        without loading every full document (and its embedded logs) into the
+        poll loop.
+        """
+        all_paths = self._list_job_paths()
+        total = len(all_paths)
+
+        # cursor pagination — ``before`` is the mtime-ns of the youngest job
+        # already on the current page; the next page is everything older than
+        # that.
+        def before_key(p: Path) -> int:
+            return p.stat().st_mtime_ns
+
+        candidates: list[Path] = []
+        if before is not None:
+            for p in all_paths:
+                if before_key(p) < before:
+                    candidates.append(p)
+                else:
+                    break
+        else:
+            candidates = list(all_paths)
+
+        page: list[dict[str, Any]] = []
+        for path in candidates[:max(0, limit)]:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                if not isinstance(doc, dict):
+                    continue
+                page.append(doc)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        next_before = None
+        if len(page) == limit and page:
+            # Use the mtime of the last job's file as the cursor
+            last_job = page[-1]
+            last_path = self._job_path(last_job.get("_id", ""))
+            if last_path.exists():
+                next_before = last_path.stat().st_mtime_ns
+
+        return page, total, next_before
+
+    # ------------------------------------------------------------------
+    # job log
+    # ------------------------------------------------------------------
+
+    def append_job_log(self, job_id: str, message: str) -> None:
+        """Append a log line to a job's log array."""
+        with self._file_lock(self._job_path(job_id)):
+            job = self.get_job(job_id)
+            if not isinstance(job, dict):
+                job = {}
+            logs = job.get("logs")
+            if not isinstance(logs, list):
+                logs = []
+            logs.append(message)
+            # The job document is rewritten on every append, so an unbounded
+            # log array is disk and bandwidth, not history: one 21-minute
+            # source reached 3 500 lines / 600 KB and every poll shipped it.
+            # The last MAX_JOB_LOGS lines are what 'View logs' actually reads.
+            if len(logs) > self.MAX_JOB_LOGS:
+                logs = logs[-self.MAX_JOB_LOGS:]
+            job["logs"] = logs
+            self.save_job(job)
+
+    # ------------------------------------------------------------------
+    # clip operations
+    # ------------------------------------------------------------------
+
+    def clips_delivered(self, job_id: str, job: dict[str, Any]) -> tuple[int, int]:
+        """Return (rendered_count, promised_count) for a job.
+
+        rendered: number of clip files actually on disk
+        promised: number of clips the job was supposed to produce
+        """
+        if not job_id:
+            return 0, 0
+        clip_dir = self._paths.outputs_dir / job_id
+        rendered = 0
+        if clip_dir.exists():
+            for p in clip_dir.iterdir():
+                if p.is_file() and p.suffix in {".mp4", ".mov", ".webm"}:
+                    rendered += 1
+        promised = int(job.get("clipTarget") or job.get("clipCount") or 0)
+        return rendered, promised
+
+    def get_clip(self, clip_id: str) -> dict[str, Any] | None:
+        """Return a clip document by id, or None.
+
+        ONE argument on purpose: every caller in app/main.py is a per-clip
+        media/action route that only has the clip id, and the clip documents
+        live under data/clips/<clip_id>.json (not under outputs/<job>). The
+        earlier (job_id, clip_id) signature made every one of those routes
+        raise TypeError -> HTTP 500, which is why previews stayed black and
+        MP4 downloads failed.
+        """
+        return self.get_clip_doc(clip_id)
+
+    def list_clips_for_list(self, job_id: str | None = None) -> list[dict[str, Any]]:
+        """Return clips for the clip list endpoint, with share state attached.
+
+        Called by /api/clips. Returns lightweight clip metadata suitable for
+        the dashboard clip list.
+        """
+        if job_id:
+            return self.list_clips(job_id)
+        return self.list_all_clips()
+
+    def _title_from_words(
+        self,
+        candidate: dict[str, Any],
+        words: list[dict[str, Any]] | None,
+    ) -> str | None:
+        """Best available clip title from the transcript, falling back to None.
+
+        Detection already emits a ``hook_text`` for the viral-moment caption; when
+        that exists it is the better first choice because it was written as a hook
+        rather than lifted verbatim from speech. When it is empty we mine a short
+        title from the words whose timestamps overlap the clip window, because a
+        word-based title is more specific than a generic ``"Clip"`` and survives
+        resume/re-detect without needing the LLM again.
+
+        Returns None only when there is genuinely nothing to say; the caller then
+        uses the final ``"Clip"`` default.
+        """
+        if hook := str(candidate.get("hook_text") or "").strip():
+            return hook
+        if not words:
+            return None
+        cut_start = float(candidate.get("start", 0.0) or 0.0)
+        cut_end = float(candidate.get("end", 0.0) or 0.0)
+        if cut_end <= cut_start:
+            return None
+        inside: list[str] = []
+        for w in words:
+            try:
+                ws = float(w.get("start", 0.0) or 0.0)
+                we = float(w.get("end", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if we <= cut_start or ws >= cut_end:
+                continue
+            word = str(w.get("word") or "").strip()
+            if not word:
+                continue
+            inside.append(word)
+        if not inside:
+            return None
+        head = " ".join(inside[:6]).strip()
+        return head[:80] or None
+
+    def create_clips(
+        self,
+        job_id: str,
+        candidates: list[dict[str, Any]],
+        *,
+        detected_source: str | None = None,
+        words: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Record the AI-detected candidate clips for a job.
+
+        Returns the lightweight SUMMARY blob (``jobId``, ``candidateCount``,
+        ``clipCount``, ``detectedSource``, ``detectedAt``, ``clipIds``) — not the
+        clip documents. This said ``list[dict]`` for a while, so callers that
+        trusted the annotation indexed the summary and raised ``KeyError: 0``;
+        read the documents back with ``list_clips(job_id)``.
+
+        Called after the detection stage finishes. Persists one clip document
+        per candidate under ``data/clips/<job_id>/<clip_id>.json`` so the
+        ``/api/clips`` endpoint can return real ``ClipDto`` records (with
+        start/end, renderState, captionCues, shareState, ...) instead of a
+        single summary blob.
+
+        Also writes the lightweight ``data/clips/<job_id>.json`` summary used
+        by the job card ("AI-detected via <source>", candidate count) and
+        patches the job document with the clip target + detected count.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+
+        now_ms = int(time.time() * 1000)
+        clip_ids: list[str] = []
+        for i, c in enumerate(candidates):
+            clip_id = c.get("_id") or self.new_job_id()
+            # Write the minted id BACK onto the candidate object. Downstream
+            # stages (reframe cuts, captions, export) key their work on these
+            # in-place ids; without this, export fabricated ids like clip_000
+            # that have no clip document on disk and crashed the render with
+            # FileNotFoundError on the first clip of every batch.
+            c["_id"] = clip_id
+            order = int(c.get("order", i))
+            start = float(c.get("start", 0.0) or 0.0)
+            end = float(c.get("end", 0.0) or 0.0)
+            if end <= start:
+                end = start + 5.0
+            if end - start < 1.0:
+                end = start + 5.0
+            doc: dict[str, Any] = {
+                "_id": clip_id,
+                "jobId": job_id,
+                "order": order,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "score": float(c.get("score", 0.0) or 0.0),
+                "title": self._title_from_words(c, words) or "Clip",
+                "hookText": str(c.get("hook_text", "") or ""),
+                "transcript": str(c.get("transcript", "") or ""),
+                "hashtags": [str(h) for h in (c.get("hashtags") or [])],
+                "captionCues": [],
+                "aspect": str(c.get("aspect", "9:16") or "9:16"),
+                "videoPath": None,
+                "thumbPath": None,
+                "mediaBytes": None,
+                "mediaWidth": None,
+                "mediaHeight": None,
+                "mediaDurationSec": None,
+                "mediaError": None,
+                "renderState": "pending",
+                "renderMs": None,
+                "shareId": None,
+                "shareState": "missing",
+                "shareDetail": None,
+                "shareUrl": None,
+                "sharePageUrl": None,
+                "translationTracks": None,
+                "detectedSource": detected_source,
+                "createdAt": now_ms,
+            }
+            clip_doc_path = clips_dir / f"{clip_id}.json"
+            tmp = clip_doc_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(clip_doc_path)
+            clip_ids.append(clip_id)
+
+        # lightweight summary blob used by the job card
+        summary = {
+            "jobId": job_id,
+            "candidateCount": len(candidates),
+            "clipCount": len(clip_ids),
+            "detectedSource": detected_source,
+            "detectedAt": now_ms,
+            "clipIds": clip_ids,
+        }
+        summary_path = clips_dir / f"{job_id}.json"
+        tmp = summary_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(summary_path)
+
+        # Drop clip documents from a PREVIOUS detection pass. They are what
+        # made the dashboard show every clip twice — one rendered card from the
+        # old pass and one permanent "Not rendered yet" twin from the new one —
+        # and they accumulated on every Re-detect. Rendered media files stay on
+        # disk and are overwritten by the new pass; only the stale metadata goes.
+        current_ids = set(clip_ids)
+        for old in clips_dir.glob("*.json"):
+            if old.name == summary_path.name:
+                continue
+            try:
+                old_doc = json.loads(old.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if (
+                isinstance(old_doc, dict)
+                and old_doc.get("jobId") == job_id
+                and str(old_doc.get("_id")) not in current_ids
+            ):
+                old.unlink(missing_ok=True)
+
+        # Patch the job document so the UI can show the clip target + detected count
+        job = self.get_job(job_id)
+        if job:
+            job["candidatesDetected"] = len(candidates)
+            job["clipTarget"] = len(clip_ids) or max(1, int((job.get("durationSec") or 0) / 30))
+            job["clipIds"] = clip_ids
+            job["detectedSource"] = detected_source
+            self.write_job(job)
+        return summary
+
+    # ------------------------------------------------------------------
+    # per-clip writes (updated by the render stage / share path)
+    # ------------------------------------------------------------------
+
+    def write_clip(
+        self,
+        clip: str | dict[str, Any],
+        fields: dict[str, Any] | None = None,
+        *,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a clip document, tolerating both call shapes.
+
+        The codebase has two legitimate ways to call this, and both are in use:
+
+        * ``write_clip(clip_doc)`` — the render/share/backfill paths hold the
+          whole document and want it written back after mutating one field.
+        * ``write_clip(clip_id, {"renderState": ...})`` — the pipeline patches
+          a single field without carrying the document around.
+
+        A previous duplicate definition supported only the second shape, so
+        every whole-document caller (Share "Preparing…", Re-render, the share
+        backfill) raised ``TypeError`` -> HTTP 500 instead of writing anything.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        if isinstance(clip, dict):
+            doc = dict(clip)
+            clip_id = str(doc.get("_id") or "")
+            if not clip_id:
+                raise ValueError("write_clip(doc) requires an _id on the document")
+            fields = doc
+            job_id = job_id or doc.get("jobId")
+        else:
+            clip_id = str(clip)
+            fields = dict(fields or {})
+        # A brand-new data dir has no clips/ yet; the first clip of the first
+        # batch used to die with FileNotFoundError on its own tmp file.
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        clip_path = clips_dir / f"{clip_id}.json"
+        if clip_path.exists():
+            existing = json.loads(clip_path.read_text(encoding="utf-8"))
+        else:
+            # Upsert instead of raising. The export stage writes per-clip state
+            # keyed by the cut's clip id; a cut minted before its document
+            # existed (or a legacy `clip_000` id) used to abort the WHOLE
+            # render with FileNotFoundError -> "Pipeline error:
+            # data/clips/clip_000.json", leaving a "complete" batch with zero
+            # playable videos. A state write must never kill a render.
+            existing = {
+                "_id": clip_id,
+                "jobId": job_id or "",
+                "order": int(fields.get("order") or 0),
+                "title": str(fields.get("title") or "Clip"),
+                "start": float(fields.get("start") or 0.0),
+                "end": float(fields.get("end") or 0.0),
+                "renderState": "pending",
+                "createdAt": int(time.time() * 1000),
+            }
+        resolved_job_id = job_id or existing.get("jobId", "")
+        if not resolved_job_id:
+            raise ValueError(f"write_clip({clip_id}) needs a jobId to create the document")
+        merged = {**existing, **fields}
+        merged["_id"] = clip_id
+        merged["jobId"] = resolved_job_id
+        tmp = self._tmp_for(clip_path)
+        tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(clip_path)
+
+        # keep the summary blob's clipIds list in sync (best-effort)
+        if resolved_job_id:
+            summary_path = clips_dir / f"{resolved_job_id}.json"
+            if summary_path.exists():
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                    ids = list(summary.get("clipIds", []) or [])
+                    if clip_id not in ids:
+                        ids.append(clip_id)
+                    summary["clipIds"] = ids
+                    summary_path.with_suffix(".json.tmp").write_text(
+                        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+                    ).replace(summary_path)
+                except Exception:
+                    pass
+        return merged
+
+    def clip_path(self, clip_id: str) -> Path:
+        return self._paths.data_dir / "clips" / f"{clip_id}.json"
+
+    def update_clip(self, clip_id: str, mutate) -> dict[str, Any] | None:
+        """Locked read-modify-write of ONE clip document.
+
+        ``write_clip`` merges the fields it is given onto the CURRENT document,
+        which is safe, but a caller that read the document first and then writes
+        the whole thing back can still lose a concurrent field update. This is
+        the shape the retry/export/share paths should use: read inside the lock,
+        mutate, atomic-write. Returns the new document or None if it vanished.
+        """
+        path = self.clip_path(clip_id)
+        if not path.exists():
+            return None
+        with self._file_lock(path):
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+            if not isinstance(doc, dict):
+                return None
+            mutate(doc)
+            tmp = self._tmp_for(path)
+            tmp.write_text(
+                json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+            return doc
+
+    def list_clip_docs_for_list(self) -> list[dict[str, Any]]:
+        """Every live job's clip documents (the unfiltered /api/clips list)."""
+        out: list[dict[str, Any]] = []
+        for job in self.list_jobs():
+            try:
+                out.extend(self.list_clip_docs(str(job.get("_id") or "")))
+            except Exception:  # noqa: BLE001 - one bad job must not hide the rest
+                continue
+        return out
+
+    def list_clip_docs(self, job_id: str) -> list[dict[str, Any]]:
+        """Return the per-clip documents for one job — the canonical set.
+
+        Two rules, in this order:
+
+        1. **The job document wins.** Its ``clipIds`` / ``clips`` projection is
+           what the dashboard renders and what a resume works from. A stale
+           summary blob in ``data/clips/<jobId>.json`` (written by an earlier
+           detection pass) used to override it, so a batch with 15 delivered
+           clips listed 4 — the exact "the batch shows nothing" bug.
+        2. **One document per order.** Older documents from a previous detection
+           may still exist (their media can still be in the bucket). Returning
+           both made the dashboard show one rendered card and one permanent
+           "not rendered yet" twin, so the rendered one wins.
+
+        Falls back to the summary blob only when the job names no clips at all.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        job = self.get_job(job_id) or {}
+        authoritative: set[str] | None = None
+        for key in ("clipIds", "clips"):
+            value = job.get(key)
+            if isinstance(value, list) and value:
+                ids = {
+                    str(v.get("_id") if isinstance(v, dict) else v) for v in value
+                }
+                ids.discard("")
+                ids.discard("None")
+                if ids:
+                    authoritative = ids
+                    break
+        # No projection on the job at all: the DOCUMENTS are the truth. The
+        # summary blob is only ever a hint, and trusting it is what listed 4
+        # clips for a batch that had 15.
+
+        best: dict[int, tuple[int, dict[str, Any]]] = {}
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            if doc.get("jobId") != job_id:
+                continue
+            if "candidateCount" in doc or "clipIds" in doc:
+                continue  # the summary blob
+            if not doc.get("_id"):
+                continue
+            if authoritative is not None and str(doc["_id"]) not in authoritative:
+                continue
+            order = int(doc.get("order") or 0)
+            rank = (
+                (4 if doc.get("renderState") == "done" else 0)
+                + (2 if doc.get("videoPath") or doc.get("videoKey") else 0)
+                + (1 if doc.get("shareId") else 0)
+            )
+            if order not in best or rank > best[order][0]:
+                best[order] = (rank, doc)
+        return [doc for _order, (_rank, doc) in sorted(best.items())]
+
+    def summary_clip_ids(self, job_id: str) -> list[str]:
+        """Clip ids recorded for this job's current detection, in order."""
+        p = self._paths.data_dir / "clips" / f"{job_id}.json"
+        if not p.exists():
+            return []
+        try:
+            summary = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        ids = summary.get("clipIds") if isinstance(summary, dict) else None
+        return [str(i) for i in ids] if isinstance(ids, list) else []
+
+    def sync_clip_docs(self, job_id: str, cuts: list[dict[str, Any]]) -> list[str]:
+        """Make the job's clip documents match the clips that were actually cut.
+
+        Detection can propose more candidates than reframe is willing to cut
+        (a too-short or overlapping candidate is dropped). Those rejected
+        candidates used to keep their clip documents forever, so the dashboard
+        showed cards that no stage would ever render — a permanent "Not
+        rendered yet" beside every real clip. The cut list is the deliverable,
+        so it wins: rejected documents are deleted and the summary is rewritten
+        to contain exactly the rendered set.
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        ids = [str(c.get("clipId")) for c in cuts if c.get("clipId")]
+        if not ids:
+            return []
+        wanted = set(ids)
+        for p in clips_dir.glob("*.json"):
+            if p.name == f"{job_id}.json":
+                continue
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if (
+                isinstance(doc, dict)
+                and doc.get("jobId") == job_id
+                and str(doc.get("_id")) not in wanted
+            ):
+                p.unlink(missing_ok=True)
+
+        summary_path = clips_dir / f"{job_id}.json"
+        summary: dict[str, Any] = {}
+        if summary_path.exists():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                summary = {}
+        summary.update({"jobId": job_id, "clipIds": ids, "clipCount": len(ids)})
+        tmp = summary_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(summary_path)
+
+        job = self.get_job(job_id)
+        if job:
+            job["clipIds"] = ids
+            job["clipTarget"] = len(ids)
+            self.write_job(job)
+        return ids
+
+    def list_all_clips(self, limit: int = 512) -> list[dict[str, Any]]:
+        """Return clip documents across all LIVE jobs, newest job first.
+
+        Documents whose job no longer exists are skipped: they can never be
+        opened, re-rendered or deleted through the UI, and listing them is what
+        made a deleted batch reappear as a permanent grid of “queued” cards.
+        One document per (job, order) is returned so a pre-fix detection pass
+        cannot show the same clip twice.
+        """
+        out: list[dict[str, Any]] = []
+        clips_dir = self._paths.data_dir / "clips"
+        if not clips_dir.exists():
+            return out
+        # Keep the most complete document per (job, order): a rendered one
+        # beats a pending twin, whatever order the directory happens to list
+        # them in.
+        best: dict[tuple[str, int], tuple[int, dict[str, Any]]] = {}
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            if "candidateCount" in doc or "clipIds" in doc:
+                continue
+            if not doc.get("_id"):
+                continue
+            job_id = str(doc.get("jobId") or "")
+            if not job_id or not self._job_path(job_id).exists():
+                continue
+            key = (job_id, int(doc.get("order") or 0))
+            rank = (
+                (4 if doc.get("renderState") == "done" else 0)
+                + (2 if doc.get("videoPath") else 0)
+                + (1 if doc.get("thumbPath") else 0)
+            )
+            if key not in best or rank > best[key][0]:
+                best[key] = (rank, doc)
+            if len(best) >= limit * 3:
+                break
+        out = [doc for _rank, doc in best.values()][:limit]
+        return out
+
+    def get_clip_doc(self, clip_id: str) -> dict[str, Any] | None:
+        """Return a single clip document by id, or None."""
+        clips_dir = self._paths.data_dir / "clips"
+        p = clips_dir / f"{clip_id}.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def get_clip_doc_safe(self, clip_id: str) -> dict[str, Any] | None:
+        """Return a single clip document by id, or None."""
+        return self.get_clip_doc(clip_id)
+
+    # ------------------------------------------------------------------
+    # legacy clip helpers — rewrite to use the new clip-doc layer
+    # ------------------------------------------------------------------
+
+    def list_clips(self, job_id: str) -> list[dict[str, Any]]:
+        """Return the clip DOCUMENTS for a job (canonical, not a file listing).
+
+        Every caller of this method acts on clip metadata: the re-render and
+        re-transcribe repair paths reset renderState and write the document
+        back, the worker counts finished clips, and /api/dev/verify-clips
+        probes each videoPath. The old implementation walked outputs/ and
+        invented ids from file names ("clip_000"), so those callers wrote to
+        clip documents that did not exist and every repair path answered 500.
+        """
+        return self.list_clip_docs(job_id)
+
+    def get_clip_legacy(self, job_id: str, clip_id: str) -> dict[str, Any] | None:
+        """Legacy (job_id, clip_id) lookup against rendered files.
+
+        Renamed from get_clip: that method now takes a single clip id and
+        reads the canonical clip document, and a duplicate definition here
+        used to silently override it (the HTTP 500 on every clip route).
+        """
+        clips = self.list_clips(job_id)
+        for c in clips:
+            if c.get("_id") == clip_id:
+                return c
+        return None
+
+    def write_clip_legacy(self, job_id: str, clip_data: dict[str, Any]) -> dict[str, Any]:
+        """Legacy write into outputs/<job>/<clip>.json. Keep for callers that still need it."""
+        clip_id = clip_data.get("_id", self.new_job_id())
+        clip_path = self._paths.outputs_dir / job_id / f"{clip_id}.json"
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._tmp_for(clip_path)
+        tmp.write_text(json.dumps(clip_data, indent=2), encoding="utf-8")
+        tmp.replace(clip_path)
+        return clip_data
+
+    # ------------------------------------------------------------------
+    # write_job is an alias for save_job (kept for backward compat)
+    # ------------------------------------------------------------------
+
+    def write_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Persist or overwrite a job document. Alias for save_job."""
+        return self.save_job(job)
+
+    # ------------------------------------------------------------------
+    # output management
+    # ------------------------------------------------------------------
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a snapshot of outputs for external reporting."""
+        clips = self.list_all_clips()
+        return {
+            "clipCount": len(clips),
+            "clips": clips,
+        }
+
+    def materialize(self, job_id: str) -> bool:
+        """Ensure outputs for a job are accessible. Returns True if ok."""
+        return (self._paths.outputs_dir / job_id).exists()
+
+    def drop_local_after_push(self, job_id: str) -> bool:
+        """Drop local clip files after they've been pushed to durable storage."""
+        clip_dir = self._paths.outputs_dir / job_id
+        if clip_dir.exists():
+            import shutil
+            shutil.rmtree(clip_dir, ignore_errors=True)
+            return True
+        return False
+
+    def find_source_file(self, job_id: str) -> Path | None:
+        """Find the source video file for a job.
+
+        Checks both the new uploads dir and the legacy downloads dir
+        (for jobs that were processed before the uploads refactor).
+        """
+        # Legacy downloads dir (pre-uploads-refactor jobs)
+        legacy_dir = self._paths.downloads_dir / job_id
+        if legacy_dir.exists():
+            for p in legacy_dir.iterdir():
+                if p.is_file() and p.suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
+                    return p
+        # New uploads dir
+        for d in _job_source_dirs(self._paths, job_id):
+            if not d.exists():
+                continue
+            for p in d.iterdir():
+                if p.is_file() and p.suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
+                    return p
+        # No local copy. An upload is pushed to durable storage and its local
+        # bytes are dropped on purpose (`_offload_source`), so the source has to
+        # be pulled back from the bucket here. Without this every upload job
+        # died at fetch with "the uploaded file is no longer on the server"
+        # while the file was sitting in the bucket the whole time.
+        return self._materialize_source(job_id)
+
+    def _materialize_source(self, job_id: str) -> Path | None:
+        """Pull a job's source back from durable storage if it was offloaded."""
+        try:
+            from app import objectstore  # local: the store works without it
+
+            cfg = objectstore.config_from_env()
+            if not cfg.enabled:
+                return None
+            job = self.get_job(job_id)
+            name = str((job or {}).get("source") or "").strip()
+            if not name or name == "pending-upload" or "/" in name:
+                return None
+            dest = _uploads_root(self._paths) / job_id / name
+            if objectstore.materialize(objectstore.upload_key(job_id, name), dest, cfg):
+                logger.info(f"[store] job {job_id}: source pulled back from durable storage")
+                return dest
+        except Exception as exc:  # noqa: BLE001 - a missing bucket is not fatal
+            logger.warning(f"[store] job {job_id}: source could not be fetched: {exc}")
+        return None
+
+    def job_source_dir_for_write(self, job_id: str) -> Path:
+        """Return (and create) the directory a job's source file is written to.
+
+        The upload route streams the request body straight into a file under
+        this directory before any other writer touches it, so the directory has
+        to exist here: returning a path that is not there made every upload fail
+        with `FileNotFoundError: …/uploads/<job>/upload.bin` and leave behind a
+        job whose source was never saved.
+        """
+        upload_dir = _uploads_root(self._paths) / job_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        return upload_dir
+
+    def upload_file(self, job_id: str, filename: str, data: bytes) -> Path:
+        """Store an uploaded file for a job."""
+        upload_dir = self.job_source_dir_for_write(job_id)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        path = upload_dir / filename
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+        return path
+
+    def upload_key(self, job_id: str, filename: str) -> str:
+        """Return a storage key for an uploaded file. Simple filename-based key."""
+        return f"{job_id}/{filename}"
+
+    def restore_job(self, job_id: str) -> bool:
+        """Restore a job's state. No-op for local store."""
+        return True
+
+    def config_from_env(self) -> dict[str, Any]:
+        """Return configuration from environment. Empty for local store."""
+        return {}
+
+    def key_for_path(self, path: Path) -> str:
+        """Return a storage key for a given file path."""
+        rel = path.relative_to(self._paths.outputs_dir)
+        return str(rel).replace("\\", "/")

@@ -1,0 +1,31 @@
+# Production supervision for ClipForge.
+#
+# The API and the worker daemon are TWO processes: uvicorn owns the API and
+# spawns `python -m app.workerd` in its own session, so restarting the API never
+# kills a running job. Both stop gracefully: SIGTERM -> `request_stop` /
+# `leave_resumable`, which checkpoints and marks the job interrupted.
+#
+# `stop_grace_period: 60s` is the budget that graceful path needs (a decode
+# window or a clip render has to reach its next checkpoint). Without it Docker
+# sends SIGKILL after 10s and the shutdown looks like an OOM kill.
+services:
+  clipforge:
+    build: .
+    restart: unless-stopped
+    init: true                 # tini reaps the runner/ffmpeg/yt-dlp zombies
+    stop_grace_period: 60s
+    ports:
+      - "8000:8000"
+    environment:
+      CLIPFORGE_DATA_DIR: /data
+    volumes:
+      - clipforge-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  clipforge-data:

@@ -1,0 +1,620 @@
+{
+  "cut": {
+    "order": 0,
+    "start": 0.0,
+    "end": 14.0,
+    "cropBox": {
+      "x": 376,
+      "y": 0,
+      "w": 405,
+      "h": 720
+    },
+    "framingSegments": [
+      {
+        "start": 0.0,
+        "end": 14.0,
+        "mode": "fit",
+        "reason": "golden real reference"
+      }
+    ]
+  },
+  "cues": [
+    {
+      "start": -0.0799999999999983,
+      "end": 1.1000000000000014,
+      "text": "SOLO LO QUE EL",
+      "words": [
+        {
+          "start": -0.0799999999999983,
+          "end": 0.120000000000001,
+          "word": "solo",
+          "conf": 0.766
+        },
+        {
+          "start": 0.120000000000001,
+          "end": 0.28000000000000114,
+          "word": "lo",
+          "conf": 0.847
+        },
+        {
+          "start": 0.28000000000000114,
+          "end": 0.4800000000000004,
+          "word": "que",
+          "conf": 0.997
+        },
+        {
+          "start": 0.4800000000000004,
+          "end": 1.1000000000000014,
+          "word": "el",
+          "conf": 0.765
+        }
+      ],
+      "emphasis": []
+    },
+    {
+      "start": 1.1000000000000014,
+      "end": 2.16,
+      "text": "TURISTA VE. VEAS UN",
+      "words": [
+        {
+          "start": 1.1000000000000014,
+          "end": 1.4200000000000017,
+          "word": "turista",
+          "conf": 0.979
+        },
+        {
+          "start": 1.4200000000000017,
+          "end": 1.620000000000001,
+          "word": "ve.",
+          "conf": 0.869
+        },
+        {
+          "start": 1.8200000000000003,
+          "end": 2.039999999999999,
+          "word": "veas",
+          "conf": 0.951
+        },
+        {
+          "start": 2.039999999999999,
+          "end": 2.16,
+          "word": "un",
+          "conf": 0.992
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "turista",
+          "color": "#1FE01F"
+        },
+        {
+          "word": "veas",
+          "color": "#FFF000"
+        }
+      ]
+    },
+    {
+      "start": 2.16,
+      "end": 3.3000000000000007,
+      "text": "POQUITO DEL CONTRASTE, C\u00d3MO",
+      "words": [
+        {
+          "start": 2.16,
+          "end": 2.3000000000000007,
+          "word": "poquito",
+          "conf": 0.96
+        },
+        {
+          "start": 2.3000000000000007,
+          "end": 2.5600000000000023,
+          "word": "del",
+          "conf": 0.924
+        },
+        {
+          "start": 2.5600000000000023,
+          "end": 3.120000000000001,
+          "word": "contraste,",
+          "conf": 0.99
+        },
+        {
+          "start": 3.1799999999999997,
+          "end": 3.3000000000000007,
+          "word": "c\u00f3mo",
+          "conf": 0.774
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "poquito",
+          "color": "#FF1A1A"
+        },
+        {
+          "word": "contraste,",
+          "color": "#1FE01F"
+        }
+      ]
+    },
+    {
+      "start": 3.3000000000000007,
+      "end": 4.68,
+      "text": "VIVE LA GENTE HUMILDE",
+      "words": [
+        {
+          "start": 3.3000000000000007,
+          "end": 3.460000000000001,
+          "word": "vive",
+          "conf": 0.911
+        },
+        {
+          "start": 3.460000000000001,
+          "end": 3.620000000000001,
+          "word": "la",
+          "conf": 0.983
+        },
+        {
+          "start": 3.620000000000001,
+          "end": 3.8200000000000003,
+          "word": "gente",
+          "conf": 0.999
+        },
+        {
+          "start": 3.8200000000000003,
+          "end": 4.220000000000002,
+          "word": "humilde,",
+          "conf": 0.994
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "humilde,",
+          "color": "#FFF000"
+        },
+        {
+          "word": "gente",
+          "color": "#FF1A1A"
+        }
+      ]
+    },
+    {
+      "start": 4.68,
+      "end": 5.100000000000001,
+      "text": "EL QUE TIENE UN",
+      "words": [
+        {
+          "start": 4.68,
+          "end": 4.800000000000001,
+          "word": "el",
+          "conf": 0.914
+        },
+        {
+          "start": 4.800000000000001,
+          "end": 4.840000000000001,
+          "word": "que",
+          "conf": 0.985
+        },
+        {
+          "start": 4.84,
+          "end": 5.02,
+          "word": "tiene",
+          "conf": 0.995
+        },
+        {
+          "start": 5.02,
+          "end": 5.100000000000001,
+          "word": "un",
+          "conf": 0.93
+        }
+      ],
+      "emphasis": []
+    },
+    {
+      "start": 5.100000000000001,
+      "end": 5.879999999999999,
+      "text": "POQUITO M\u00c1S DE DINERO",
+      "words": [
+        {
+          "start": 5.100000000000001,
+          "end": 5.280000000000001,
+          "word": "poquito",
+          "conf": 0.917
+        },
+        {
+          "start": 5.280000000000001,
+          "end": 5.5,
+          "word": "m\u00e1s",
+          "conf": 0.988
+        },
+        {
+          "start": 5.5,
+          "end": 5.620000000000001,
+          "word": "de",
+          "conf": 0.989
+        },
+        {
+          "start": 5.620000000000001,
+          "end": 5.879999999999999,
+          "word": "dinero",
+          "conf": 0.994
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "poquito",
+          "color": "#1FE01F"
+        },
+        {
+          "word": "dinero",
+          "color": "#FFF000"
+        }
+      ]
+    },
+    {
+      "start": 5.879999999999999,
+      "end": 6.5,
+      "text": "Y LA ZONA TAL",
+      "words": [
+        {
+          "start": 5.879999999999999,
+          "end": 6.060000000000002,
+          "word": "y",
+          "conf": 0.758
+        },
+        {
+          "start": 6.060000000000002,
+          "end": 6.100000000000002,
+          "word": "la",
+          "conf": 0.973
+        },
+        {
+          "start": 6.140000000000001,
+          "end": 6.34,
+          "word": "zona",
+          "conf": 0.994
+        },
+        {
+          "start": 6.34,
+          "end": 6.5,
+          "word": "tal",
+          "conf": 0.797
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "zona",
+          "color": "#FF1A1A"
+        }
+      ]
+    },
+    {
+      "start": 6.5,
+      "end": 7.88,
+      "text": "VEZ POBRE. YO HE",
+      "words": [
+        {
+          "start": 6.5,
+          "end": 7.039999999999999,
+          "word": "vez",
+          "conf": 0.955
+        },
+        {
+          "start": 7.039999999999999,
+          "end": 7.280000000000001,
+          "word": "pobre.",
+          "conf": 0.955
+        },
+        {
+          "start": 7.48,
+          "end": 7.84,
+          "word": "Yo",
+          "conf": 0.039
+        },
+        {
+          "start": 7.84,
+          "end": 7.88,
+          "word": "he",
+          "conf": 0.618
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "pobre.",
+          "color": "#1FE01F"
+        }
+      ]
+    },
+    {
+      "start": 7.879999999999999,
+      "end": 8.46,
+      "text": "VENIDO CON UN AMIGO",
+      "words": [
+        {
+          "start": 7.879999999999999,
+          "end": 8.04,
+          "word": "venido",
+          "conf": 0.976
+        },
+        {
+          "start": 8.04,
+          "end": 8.18,
+          "word": "con",
+          "conf": 0.955
+        },
+        {
+          "start": 8.18,
+          "end": 8.280000000000001,
+          "word": "un",
+          "conf": 0.842
+        },
+        {
+          "start": 8.280000000000001,
+          "end": 8.46,
+          "word": "amigo",
+          "conf": 0.981
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "venido",
+          "color": "#FFF000"
+        },
+        {
+          "word": "amigo",
+          "color": "#FF1A1A"
+        }
+      ]
+    },
+    {
+      "start": 8.46,
+      "end": 9.940000000000001,
+      "text": "ESPA\u00d1OL CON UNA... PERSONA",
+      "words": [
+        {
+          "start": 8.46,
+          "end": 9.100000000000001,
+          "word": "espa\u00f1ol",
+          "conf": 0.894
+        },
+        {
+          "start": 9.100000000000001,
+          "end": 9.419999999999998,
+          "word": "con",
+          "conf": 0.627
+        },
+        {
+          "start": 9.419999999999998,
+          "end": 9.640000000000004,
+          "word": "una...",
+          "conf": 0.586
+        },
+        {
+          "start": 9.640000000000004,
+          "end": 9.760000000000002,
+          "word": "persona",
+          "conf": 0.997
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "espa\u00f1ol",
+          "color": "#1FE01F"
+        },
+        {
+          "word": "persona",
+          "color": "#FFF000"
+        }
+      ]
+    },
+    {
+      "start": 9.940000000000001,
+      "end": 10.559999999999999,
+      "text": "LA QUE TRABAJO Y",
+      "words": [
+        {
+          "start": 9.940000000000001,
+          "end": 9.98,
+          "word": "la",
+          "conf": 0.973
+        },
+        {
+          "start": 10.000000000000004,
+          "end": 10.040000000000003,
+          "word": "que",
+          "conf": 0.992
+        },
+        {
+          "start": 10.080000000000002,
+          "end": 10.360000000000003,
+          "word": "trabajo",
+          "conf": 0.846
+        },
+        {
+          "start": 10.360000000000003,
+          "end": 10.559999999999999,
+          "word": "y",
+          "conf": 0.831
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "trabajo",
+          "color": "#FF1A1A"
+        }
+      ]
+    },
+    {
+      "start": 10.559999999999999,
+      "end": 11.379999999999999,
+      "text": "ME DEC\u00cdA, PERO ESTO",
+      "words": [
+        {
+          "start": 10.559999999999999,
+          "end": 10.66,
+          "word": "me",
+          "conf": 0.923
+        },
+        {
+          "start": 10.66,
+          "end": 10.919999999999998,
+          "word": "dec\u00eda,",
+          "conf": 0.987
+        },
+        {
+          "start": 11.099999999999998,
+          "end": 11.220000000000002,
+          "word": "pero",
+          "conf": 0.377
+        },
+        {
+          "start": 11.220000000000002,
+          "end": 11.379999999999999,
+          "word": "esto",
+          "conf": 0.451
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "dec\u00eda,",
+          "color": "#1FE01F"
+        }
+      ]
+    },
+    {
+      "start": 11.379999999999999,
+      "end": 12.459999999999997,
+      "text": "ES REP\u00daBLICA DOMINICANA SI",
+      "words": [
+        {
+          "start": 11.379999999999999,
+          "end": 11.419999999999998,
+          "word": "es",
+          "conf": 0.954
+        },
+        {
+          "start": 11.440000000000001,
+          "end": 11.7,
+          "word": "Rep\u00fablica",
+          "conf": 0.799
+        },
+        {
+          "start": 11.7,
+          "end": 12.180000000000003,
+          "word": "Dominicana",
+          "conf": 0.984
+        },
+        {
+          "start": 12.180000000000003,
+          "end": 12.459999999999997,
+          "word": "si",
+          "conf": 0.345
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "Rep\u00fablica",
+          "color": "#FFF000"
+        },
+        {
+          "word": "Dominicana",
+          "color": "#FF1A1A"
+        }
+      ]
+    },
+    {
+      "start": 12.459999999999997,
+      "end": 12.940000000000001,
+      "text": "YO NO VINE A",
+      "words": [
+        {
+          "start": 12.459999999999997,
+          "end": 12.620000000000001,
+          "word": "yo",
+          "conf": 0.94
+        },
+        {
+          "start": 12.620000000000001,
+          "end": 12.66,
+          "word": "no",
+          "conf": 0.998
+        },
+        {
+          "start": 12.7,
+          "end": 12.820000000000004,
+          "word": "vine",
+          "conf": 0.937
+        },
+        {
+          "start": 12.820000000000004,
+          "end": 12.940000000000001,
+          "word": "a",
+          "conf": 0.969
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "vine",
+          "color": "#1FE01F"
+        }
+      ]
+    },
+    {
+      "start": 12.940000000000001,
+      "end": 14.84,
+      "text": "ESTE AEROPUERTO, PORQUE TODOS",
+      "words": [
+        {
+          "start": 12.940000000000001,
+          "end": 13.080000000000002,
+          "word": "este",
+          "conf": 0.95
+        },
+        {
+          "start": 13.080000000000002,
+          "end": 13.559999999999999,
+          "word": "aeropuerto,",
+          "conf": 0.978
+        },
+        {
+          "start": 13.599999999999998,
+          "end": 14.260000000000002,
+          "word": "porque",
+          "conf": 0.329
+        },
+        {
+          "start": 14.260000000000002,
+          "end": 14.84,
+          "word": "todos",
+          "conf": 0.869
+        }
+      ],
+      "emphasis": [
+        {
+          "word": "aeropuerto,",
+          "color": "#FFF000"
+        }
+      ]
+    }
+  ],
+  "emoji": [
+    {
+      "i": 13,
+      "emoji": "\ud83d\udc4e",
+      "emotion": "disgust",
+      "intensity": 0.55,
+      "confidence": 0.62,
+      "reason": "keyword match: no",
+      "sensitive": false,
+      "start": 12.46,
+      "end": 13.26,
+      "cueText": "YO NO VINE A"
+    }
+  ],
+  "title": "Best moment",
+  "audioPlan": {
+    "sourceKey": "tests/golden/fixtures/look_source.mp4",
+    "start": 0.0,
+    "end": 14.0,
+    "streamStart": 0.0,
+    "order": 0,
+    "cutStart": 0.0,
+    "cutEnd": 14.0
+  }
+}
