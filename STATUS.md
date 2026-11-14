@@ -13,7 +13,7 @@ No commits could be created. This file is the recovery point.
 
 ## 1. Disk — PARTIAL, TARGET BLOCKED
 - Free before: 874 MB. Free after reclaiming unused model/cache/dependency data: ~2.1 GB
-  after the render/model smoke; `df` currently reports about 2.08 GB free.
+  after the render/model smoke; `df` currently reports **2168 MB free** (last recheck).
 - Removed/avoided: 756 MB unused `Systran/faster-distil-whisper-medium.en` HF cache
   (including a 753 MB orphan blob whose `.refs` survived a failed download), plus ~37 MB
   of regenerable Vite/temp caches. No active job scratch, cookies, env, DB/backups, code,
@@ -26,8 +26,9 @@ No commits could be created. This file is the recovery point.
   bucket; orphan shared blobs are pruned by their real `.refs` targets.
 - **2000 MB target met after cleanup (about 2.1 GB free), but 2.8 GB is not possible
   without removing active runtime dependencies**: `.venv` 1.1G is used by the live API/worker,
-  `node_modules` 408M is used by Vite/Convex, and the remaining `data` is 24M (the paused job's
-  scratch is not deleted).
+  `node_modules` 408M is used by Vite/Convex, and the job scratch is not deleted. The live
+  job's runner was retrying an export at the last check (3 ready, 2 failed on a missing
+  `clip_000.title.png`), so its scratch must stay until it settles or the owner stops it.
 - Removed after verifying they were unused: `.git` (705M; archived first to the bucket at
   `clipforge/backups/clipmake-git-20261114.tgz`, 726,015,735 bytes), two regrown 756 MB
   `distil-medium.en` HuggingFace caches, and unused `node_modules/onnxruntime-node`,
