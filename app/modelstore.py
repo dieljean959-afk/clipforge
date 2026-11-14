@@ -467,6 +467,23 @@ def release_all(log: Callable[[str], None] | None = None) -> dict[str, Any]:
     if wasted and log is not None:
         log(f"[models] dropped {wasted / 1048576:.0f} MB of weights this host cannot load")
     wasted += _prune_orphan_blobs()
+    # A model downloaded by the HuggingFace fallback (the memory ladder can
+    # choose distil-medium.en even when config says small) used to stay in the
+    # cache forever because `release` refuses to delete without a bucket copy.
+    # Adopt that snapshot first, then release the local bytes.  If the bucket
+    # is unavailable, release still refuses and the copy is kept.
+    for name in sorted(names):
+        try:
+            if _snapshot_dir(name) is None:
+                continue
+            have = {
+                str(f.get("key")).rsplit("/", 1)[-1]
+                for f in _bucket_files(name)
+            }
+            if "model.bin" not in have:
+                adopt(name, log, wait_s=0.2)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not fail a job
+            logger.debug(f"[models] bucket adoption before release failed for {name}: {exc}")
     out = {name: release(name, log) for name in sorted(names)}
     if root.is_dir():
         # Never remove a kept copy here: `release()` above already decided
@@ -511,13 +528,20 @@ def prepare(
     data_dir = Path(settings.app.paths.data_dir)
     free = _shutil.disk_usage(data_dir).free
     # The measured small weights are ~464 MB; keep 300 MB for ffmpeg/scratch.
+    # Also preserve the owner's 2000 MB floor: downloading while it would leave
+    # less than that is explicitly reported as blocked rather than filling the
+    # disk and failing halfway through a later stage.
     need = 500 * 1024 * 1024
-    if free < need:
+    floor = 2000 * 1024 * 1024
+    if free < need + floor:
         return {
             "ok": False,
             "model": wanted,
             "state": "blocked",
-            "reason": f"only {free / 1048576:.0f} MB free; need about 500 MB",
+            "reason": (
+                f"only {free / 1048576:.0f} MB free; downloading {wanted} would "
+                "fall below the 2000 MB disk floor, so it stays bucket-only"
+            ),
         }
     started = time.time()
     path = resolve(wanted, log)

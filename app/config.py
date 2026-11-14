@@ -46,6 +46,10 @@ _MODEL_CACHE_ROOT = Path(
 )
 os.environ.setdefault("HF_HOME", str(_MODEL_CACHE_ROOT))
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_MODEL_CACHE_ROOT / "hub"))
+# A job must not fill the small disk with a second copy of a wheel or a
+# cookie jar.  These are process-wide defaults; commands that need a cache can
+# override them explicitly.
+os.environ.setdefault("PIP_NO_CACHE_DIR", "1")
 
 # --------------------------------------------------------------------------- #
 # dotenvx-style secret decryption (Freebuff stores workspace keys encrypted)

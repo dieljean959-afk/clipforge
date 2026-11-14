@@ -1668,6 +1668,12 @@ def _groq_wait_turn(floor_sec: float, key: str = "groq") -> None:
 
 
 def probe_provider(which: str, settings: Settings) -> dict[str, Any]:
+    result = _probe_provider(which, settings)
+    _PROVIDER_PROBE[str(which)] = dict(result)
+    return result
+
+
+def _probe_provider(which: str, settings: Settings) -> dict[str, Any]:
     """One real, minimal chat call for the dashboard's Test button.
 
     Returns only a result class and timing; the key never enters the payload,
@@ -1818,6 +1824,16 @@ def _groq_reply_text(data: dict[str, Any]) -> str:
 #: Detection chunks run concurrently, so this is intentionally sticky for the
 #: job: one fallback anywhere in the batch must label the whole result.
 _CALL_PROVENANCE: dict[str, str] = {"provider": "", "fallback": "", "reason": ""}
+
+#: Last explicit Test result per provider.  Presence-only health is not enough
+#: to show a 402/401/429; this is filled by the dashboard's Test button and is
+#: read by /api/health without making a network call on the request path.
+_PROVIDER_PROBE: dict[str, dict[str, Any]] = {}
+
+
+def provider_health(which: str) -> dict[str, Any] | None:
+    entry = _PROVIDER_PROBE.get(str(which))
+    return dict(entry) if entry else None
 
 
 def _record_provenance(which: str, fallback: str = "", reason: str = "") -> None:

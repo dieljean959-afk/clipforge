@@ -827,6 +827,10 @@ def _build_health_slow() -> dict[str, Any]:
     out["llmGroq"] = _key_status("groq", ("GROQ_API_KEY",))
     out["llmNvidia"] = _key_status("nvidia", ("NVIDIA_API_KEY",))
     out["llmDeepSeek"] = _key_status("deepseek", ("DEEPSEEK_API_KEY",))
+    for _name, _slot in (("groq", "llmGroq"), ("deepseek", "llmDeepSeek"), ("nvidia", "llmNvidia")):
+        probed = llm.provider_health(_name)
+        if probed:
+            out[_slot].update(probed)
     # Hosted ASR is a fallback, not a silent default. The card can show this
     # without a network call; the real model id is discovered on first use.
     out["groqAsr"] = {
