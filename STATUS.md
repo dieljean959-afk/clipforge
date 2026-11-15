@@ -338,3 +338,16 @@ Verified: `tests/test_auth.py` 6 passed (anonymous 401, first signup sets HttpOn
 second signup 403, wrong password 401, signin/signout cycle, automation token), `tsc` clean,
 live `/api/auth/signin` with a wrong password returns `401 {"detail":"Wrong email or password."}`
 and `/api/auth/me` shows signup open again.
+
+## Post-auth end-to-end check (mission close-out)
+
+* A real batch ran through the now-authenticated API (automation token, same gate as a
+  cookie session): source `jNQXAC9IVRw`, 19 s, `language: "auto"`. It finished
+  `stage=complete`, `batchState=finished`, 1/1 clip, English title *Check Out Those Long
+  Trunks*, SRT with real words, download **200** (4.03 MB, h264 1080×1920 30/1).
+* Auto language did **not** fetch `distil-medium.en`: `data/models` stayed at **464 MB** with
+  only `small`, which is the §4 fix working under the new auth layer.
+* Removed a stray `data/models/base` copy (142 MB, not the configured model) and the 287 MB
+  Playwright cache used for the browser pass. Free disk: **1477 MB**, active model kept local.
+* Final counts: **94 tests passed**, `tsc -b --noEmit` clean, `tools/check_locked.py`
+  *LOCKED CONTRACT OK — 12 files match*, `tools/doctor.py` all PASS.
