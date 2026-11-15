@@ -1,31 +1,34 @@
 "use client";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
-import "./chunk-GAOO6IGG.js";
+} from "./chunk-ZRCZ3OV4.js";
+import "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-progress/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var PROGRESS_NAME = "Progress";
 var DEFAULT_MAX = 100;
 var [createProgressContext, createProgressScope] = createContextScope(PROGRESS_NAME);
 var [ProgressProvider, useProgressContext] = createProgressContext(PROGRESS_NAME);
 var Progress = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function Progress2(props, forwardedRef) {
     const {
       __scopeProgress,
       value: valueProp = null,
@@ -57,12 +60,12 @@ var Progress = React.forwardRef(
         ref: forwardedRef
       }
     ) });
-  }
+  }, "Progress")
 );
-Progress.displayName = PROGRESS_NAME;
 var INDICATOR_NAME = "ProgressIndicator";
 var ProgressIndicator = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ProgressIndicator2(props, forwardedRef) {
     const { __scopeProgress, ...indicatorProps } = props;
     const context = useProgressContext(INDICATOR_NAME, __scopeProgress);
     return (0, import_jsx_runtime.jsx)(
@@ -75,27 +78,32 @@ var ProgressIndicator = React.forwardRef(
         ref: forwardedRef
       }
     );
-  }
+  }, "ProgressIndicator")
 );
-ProgressIndicator.displayName = INDICATOR_NAME;
 function defaultGetValueLabel(value, max) {
   return `${Math.round(value / max * 100)}%`;
 }
+__name(defaultGetValueLabel, "defaultGetValueLabel");
 function getProgressState(value, maxValue) {
   return value == null ? "indeterminate" : value === maxValue ? "complete" : "loading";
 }
+__name(getProgressState, "getProgressState");
 function isNumber(value) {
   return typeof value === "number";
 }
+__name(isNumber, "isNumber");
 function isValidMaxNumber(max) {
   return isNumber(max) && !isNaN(max) && max > 0;
 }
+__name(isValidMaxNumber, "isValidMaxNumber");
 function isValidValueNumber(value, max) {
   return isNumber(value) && !isNaN(value) && value <= max && value >= 0;
 }
+__name(isValidValueNumber, "isValidValueNumber");
 function getInvalidMaxError(propValue, componentName) {
   return `Invalid prop \`max\` of value \`${propValue}\` supplied to \`${componentName}\`. Only numbers greater than 0 are valid max values. Defaulting to \`${DEFAULT_MAX}\`.`;
 }
+__name(getInvalidMaxError, "getInvalidMaxError");
 function getInvalidValueError(propValue, componentName) {
   return `Invalid prop \`value\` of value \`${propValue}\` supplied to \`${componentName}\`. The \`value\` prop must be:
   - a positive number
@@ -104,13 +112,12 @@ function getInvalidValueError(propValue, componentName) {
 
 Defaulting to \`null\`.`;
 }
-var Root = Progress;
-var Indicator = ProgressIndicator;
+__name(getInvalidValueError, "getInvalidValueError");
 export {
-  Indicator,
+  ProgressIndicator as Indicator,
   Progress,
   ProgressIndicator,
-  Root,
+  Progress as Root,
   createProgressScope
 };
 //# sourceMappingURL=@radix-ui_react-progress.js.map

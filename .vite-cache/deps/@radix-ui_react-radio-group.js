@@ -1,56 +1,55 @@
 "use client";
 import {
-  usePrevious
-} from "./chunk-RLQSASSA.js";
-import {
-  Item,
-  Root,
+  RovingFocusGroup,
+  RovingFocusGroupItem,
   createRovingFocusGroupScope
-} from "./chunk-RIZNXKLH.js";
+} from "./chunk-CD6LTO34.js";
 import {
   useSize
-} from "./chunk-R3M5WQK6.js";
-import "./chunk-EMF3DAXS.js";
+} from "./chunk-O2ZAVM3M.js";
+import "./chunk-2NL7CCDF.js";
 import {
   useDirection
-} from "./chunk-HXA2JS2N.js";
-import "./chunk-NRHAWQBI.js";
-import "./chunk-JSG27HSD.js";
+} from "./chunk-EMHYOJUE.js";
+import "./chunk-X7Z4QOHD.js";
+import "./chunk-ROQYZUNY.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
+} from "./chunk-NLDEGCMH.js";
 import {
   Presence
-} from "./chunk-JXAX32XB.js";
+} from "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-E24ISM2B.js";
+import "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-radio-group/dist/index.mjs
 var React2 = __toESM(require_react(), 1);
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
 var import_jsx_runtime2 = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var RADIO_NAME = "Radio";
 var [createRadioContext, createRadioScope] = createContextScope(RADIO_NAME);
 var [RadioProviderImpl, useRadioContext] = createRadioContext(RADIO_NAME);
@@ -70,7 +69,7 @@ function RadioProvider(props) {
   } = props;
   const [control, setControl] = React.useState(null);
   const [bubbleInput, setBubbleInput] = React.useState(null);
-  const hasConsumerStoppedPropagationRef = React.useRef(false);
+  const [userClick, setUserClick] = React.useState(null);
   const isFormControl = control ? !!form || !!control.closest("form") : (
     // We set this to true by default so that events bubble to forms without JS (SSR)
     true
@@ -84,24 +83,26 @@ function RadioProvider(props) {
     value,
     control,
     setControl,
-    hasConsumerStoppedPropagationRef,
+    userClick,
+    onUserClick: setUserClick,
     isFormControl,
     bubbleInput,
     setBubbleInput,
-    onCheck: () => onCheck?.()
+    onCheck: __name(() => onCheck?.(), "onCheck")
   };
   return (0, import_jsx_runtime.jsx)(RadioProviderImpl, { scope: __scopeRadio, ...context, children: isFunction(internal_do_not_use_render) ? internal_do_not_use_render(context) : children });
 }
+__name(RadioProvider, "RadioProvider");
 var TRIGGER_NAME = "RadioTrigger";
 var RadioTrigger = React.forwardRef(
-  ({ __scopeRadio, onClick, ...radioProps }, forwardedRef) => {
+  __name(function RadioTrigger2({ __scopeRadio, onClick, ...radioProps }, forwardedRef) {
     const {
       checked,
       disabled,
       value,
       setControl,
       onCheck,
-      hasConsumerStoppedPropagationRef,
+      onUserClick,
       isFormControl,
       bubbleInput
     } = useRadioContext(TRIGGER_NAME, __scopeRadio);
@@ -119,55 +120,24 @@ var RadioTrigger = React.forwardRef(
         ...radioProps,
         ref: composedRefs,
         onClick: composeEventHandlers(onClick, (event) => {
-          if (!checked) onCheck();
+          const hasConsumerStoppedPropagation = event.isPropagationStopped();
+          if (!checked) {
+            onUserClick({ hasConsumerStoppedPropagation });
+            onCheck();
+          }
           if (bubbleInput && isFormControl) {
-            hasConsumerStoppedPropagationRef.current = event.isPropagationStopped();
-            if (!hasConsumerStoppedPropagationRef.current) event.stopPropagation();
+            if (!hasConsumerStoppedPropagation) {
+              event.stopPropagation();
+            }
           }
         })
       }
     );
-  }
+  }, "RadioTrigger")
 );
-RadioTrigger.displayName = TRIGGER_NAME;
-var Radio = React.forwardRef(
-  (props, forwardedRef) => {
-    const { __scopeRadio, name, checked, required, disabled, value, onCheck, form, ...radioProps } = props;
-    return (0, import_jsx_runtime.jsx)(
-      RadioProvider,
-      {
-        __scopeRadio,
-        checked,
-        disabled,
-        required,
-        onCheck,
-        name,
-        form,
-        value,
-        internal_do_not_use_render: ({ isFormControl }) => (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-          (0, import_jsx_runtime.jsx)(
-            RadioTrigger,
-            {
-              ...radioProps,
-              ref: forwardedRef,
-              __scopeRadio
-            }
-          ),
-          isFormControl && (0, import_jsx_runtime.jsx)(
-            RadioBubbleInput,
-            {
-              __scopeRadio
-            }
-          )
-        ] })
-      }
-    );
-  }
-);
-Radio.displayName = RADIO_NAME;
 var INDICATOR_NAME = "RadioIndicator";
 var RadioIndicator = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function RadioIndicator2(props, forwardedRef) {
     const { __scopeRadio, forceMount, ...indicatorProps } = props;
     const context = useRadioContext(INDICATOR_NAME, __scopeRadio);
     return (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || context.checked, children: (0, import_jsx_runtime.jsx)(
@@ -179,12 +149,11 @@ var RadioIndicator = React.forwardRef(
         ref: forwardedRef
       }
     ) });
-  }
+  }, "RadioIndicator")
 );
-RadioIndicator.displayName = INDICATOR_NAME;
 var BUBBLE_INPUT_NAME = "RadioBubbleInput";
 var RadioBubbleInput = React.forwardRef(
-  ({ __scopeRadio, ...props }, forwardedRef) => {
+  __name(function RadioBubbleInput2({ __scopeRadio, onClick, ...props }, forwardedRef) {
     const {
       control,
       checked,
@@ -195,11 +164,14 @@ var RadioBubbleInput = React.forwardRef(
       form,
       bubbleInput,
       setBubbleInput,
-      hasConsumerStoppedPropagationRef
+      userClick
     } = useRadioContext(BUBBLE_INPUT_NAME, __scopeRadio);
     const composedRefs = useComposedRefs(forwardedRef, setBubbleInput);
-    const prevChecked = usePrevious(checked);
     const controlSize = useSize(control);
+    const shouldStopClickPropagationRef = React.useRef(false);
+    const prevCheckedRef = React.useRef(checked);
+    const handledUserClickRef = React.useRef(userClick);
+    const pendingUserClickRef = React.useRef(null);
     React.useEffect(() => {
       const input = bubbleInput;
       if (!input) return;
@@ -209,13 +181,33 @@ var RadioBubbleInput = React.forwardRef(
         "checked"
       );
       const setChecked = descriptor.set;
-      const bubbles = !hasConsumerStoppedPropagationRef.current;
-      if (prevChecked !== checked && setChecked) {
-        const event = new Event("click", { bubbles });
+      if (!setChecked) return;
+      const checkedChanged = prevCheckedRef.current !== checked;
+      prevCheckedRef.current = checked;
+      const isNewUserClick = userClick !== null && userClick !== handledUserClickRef.current;
+      handledUserClickRef.current = userClick;
+      if (isNewUserClick) {
+        pendingUserClickRef.current = checkedChanged ? null : userClick;
+        if (checkedChanged) {
+          setChecked.call(input, checked);
+        }
+        input.dispatchEvent(
+          new Event("click", { bubbles: !userClick.hasConsumerStoppedPropagation })
+        );
+      } else if (checkedChanged) {
+        const pendingUserClick = pendingUserClickRef.current;
+        pendingUserClickRef.current = null;
+        const isPendingUserChange = checked && pendingUserClick !== null;
+        shouldStopClickPropagationRef.current = true;
         setChecked.call(input, checked);
-        input.dispatchEvent(event);
+        input.dispatchEvent(
+          new Event("click", {
+            bubbles: !(isPendingUserChange && pendingUserClick.hasConsumerStoppedPropagation)
+          })
+        );
+        shouldStopClickPropagationRef.current = false;
       }
-    }, [bubbleInput, prevChecked, checked, hasConsumerStoppedPropagationRef]);
+    }, [bubbleInput, checked, userClick]);
     const defaultCheckedRef = React.useRef(checked);
     return (0, import_jsx_runtime.jsx)(
       Primitive.input,
@@ -231,6 +223,11 @@ var RadioBubbleInput = React.forwardRef(
         ...props,
         tabIndex: -1,
         ref: composedRefs,
+        onClick: composeEventHandlers(onClick, (event) => {
+          if (shouldStopClickPropagationRef.current) {
+            event.stopPropagation();
+          }
+        }),
         style: {
           ...props.style,
           ...controlSize,
@@ -245,15 +242,16 @@ var RadioBubbleInput = React.forwardRef(
         }
       }
     );
-  }
+  }, "RadioBubbleInput")
 );
-RadioBubbleInput.displayName = BUBBLE_INPUT_NAME;
 function isFunction(value) {
   return typeof value === "function";
 }
+__name(isFunction, "isFunction");
 function getState(checked) {
   return checked ? "checked" : "unchecked";
 }
+__name(getState, "getState");
 var ARROW_KEYS = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
 var RADIO_GROUP_NAME = "RadioGroup";
 var [createRadioGroupContext, createRadioGroupScope] = createContextScope(RADIO_GROUP_NAME, [
@@ -264,10 +262,11 @@ var useRovingFocusGroupScope = createRovingFocusGroupScope();
 var useRadioScope = createRadioScope();
 var [RadioGroupProvider, useRadioGroupContext] = createRadioGroupContext(RADIO_GROUP_NAME);
 var RadioGroup = React2.forwardRef(
-  (props, forwardedRef) => {
+  __name(function RadioGroup2(props, forwardedRef) {
     const {
       __scopeRadioGroup,
       name,
+      form,
       defaultValue,
       value: valueProp,
       required = false,
@@ -286,17 +285,29 @@ var RadioGroup = React2.forwardRef(
       onChange: onValueChange,
       caller: RADIO_GROUP_NAME
     });
+    const [control, setControl] = React2.useState(null);
+    const composedRefs = useComposedRefs(forwardedRef, setControl);
+    const initialValueRef = React2.useRef(value);
+    React2.useEffect(() => {
+      const associatedForm = form ? control?.ownerDocument.getElementById(form) : control?.closest("form");
+      if (associatedForm instanceof HTMLFormElement) {
+        const reset = __name(() => setValue(initialValueRef.current), "reset");
+        associatedForm.addEventListener("reset", reset);
+        return () => associatedForm.removeEventListener("reset", reset);
+      }
+    }, [control, form, setValue]);
     return (0, import_jsx_runtime2.jsx)(
       RadioGroupProvider,
       {
         scope: __scopeRadioGroup,
         name,
+        form,
         required,
         disabled,
         value,
         onValueChange: setValue,
         children: (0, import_jsx_runtime2.jsx)(
-          Root,
+          RovingFocusGroup,
           {
             asChild: true,
             ...rovingFocusGroupScope,
@@ -312,20 +323,17 @@ var RadioGroup = React2.forwardRef(
                 "data-disabled": disabled ? "" : void 0,
                 dir: direction,
                 ...groupProps,
-                ref: forwardedRef
+                ref: composedRefs
               }
             )
           }
         )
       }
     );
-  }
+  }, "RadioGroup")
 );
-RadioGroup.displayName = RADIO_GROUP_NAME;
-var ITEM_NAME = "RadioGroupItem";
 var ITEM_PROVIDER_NAME = "RadioGroupItemProvider";
 var ITEM_TRIGGER_NAME = "RadioGroupItemTrigger";
-var ITEM_BUBBLE_INPUT_NAME = "RadioGroupItemBubbleInput";
 function RadioGroupItemProvider(props) {
   const {
     __scopeRadioGroup,
@@ -346,6 +354,7 @@ function RadioGroupItemProvider(props) {
       disabled: isDisabled,
       required: context.required,
       name: context.name,
+      form: context.form,
       value,
       onCheck: () => context.onValueChange(value),
       internal_do_not_use_render,
@@ -353,7 +362,8 @@ function RadioGroupItemProvider(props) {
     }
   );
 }
-var RadioGroupItemTrigger = React2.forwardRef((props, forwardedRef) => {
+__name(RadioGroupItemProvider, "RadioGroupItemProvider");
+var RadioGroupItemTrigger = React2.forwardRef(__name(function RadioGroupItemTrigger2(props, forwardedRef) {
   const { __scopeRadioGroup, ...triggerProps } = props;
   const rovingFocusGroupScope = useRovingFocusGroupScope(__scopeRadioGroup);
   const radioScope = useRadioScope(__scopeRadioGroup);
@@ -362,12 +372,12 @@ var RadioGroupItemTrigger = React2.forwardRef((props, forwardedRef) => {
   const composedRefs = useComposedRefs(forwardedRef, ref);
   const isArrowKeyPressedRef = React2.useRef(false);
   React2.useEffect(() => {
-    const handleKeyDown = (event) => {
+    const handleKeyDown = __name((event) => {
       if (ARROW_KEYS.includes(event.key)) {
         isArrowKeyPressedRef.current = true;
       }
-    };
-    const handleKeyUp = () => isArrowKeyPressedRef.current = false;
+    }, "handleKeyDown");
+    const handleKeyUp = __name(() => isArrowKeyPressedRef.current = false, "handleKeyUp");
     document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("keyup", handleKeyUp);
     return () => {
@@ -376,7 +386,7 @@ var RadioGroupItemTrigger = React2.forwardRef((props, forwardedRef) => {
     };
   }, []);
   return (0, import_jsx_runtime2.jsx)(
-    Item,
+    RovingFocusGroupItem,
     {
       asChild: true,
       ...rovingFocusGroupScope,
@@ -400,10 +410,9 @@ var RadioGroupItemTrigger = React2.forwardRef((props, forwardedRef) => {
       )
     }
   );
-});
-RadioGroupItemTrigger.displayName = ITEM_TRIGGER_NAME;
+}, "RadioGroupItemTrigger"));
 var RadioGroupItem = React2.forwardRef(
-  (props, forwardedRef) => {
+  __name(function RadioGroupItem2(props, forwardedRef) {
     const { __scopeRadioGroup, value, disabled, ...itemProps } = props;
     return (0, import_jsx_runtime2.jsx)(
       RadioGroupItemProvider,
@@ -429,24 +438,21 @@ var RadioGroupItem = React2.forwardRef(
         ] })
       }
     );
-  }
+  }, "RadioGroupItem")
 );
-RadioGroupItem.displayName = ITEM_NAME;
-var RadioGroupItemBubbleInput = React2.forwardRef((props, forwardedRef) => {
+var RadioGroupItemBubbleInput = React2.forwardRef(__name(function RadioGroupItemBubbleInput2(props, forwardedRef) {
   const { __scopeRadioGroup, ...bubbleProps } = props;
   const radioScope = useRadioScope(__scopeRadioGroup);
   return (0, import_jsx_runtime2.jsx)(RadioBubbleInput, { ...radioScope, ...bubbleProps, ref: forwardedRef });
-});
-RadioGroupItemBubbleInput.displayName = ITEM_BUBBLE_INPUT_NAME;
-var INDICATOR_NAME2 = "RadioGroupIndicator";
+}, "RadioGroupItemBubbleInput"));
 var RadioGroupIndicator = React2.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function RadioGroupIndicator2(props, forwardedRef) {
     const { __scopeRadioGroup, ...indicatorProps } = props;
     const radioScope = useRadioScope(__scopeRadioGroup);
     return (0, import_jsx_runtime2.jsx)(RadioIndicator, { ...radioScope, ...indicatorProps, ref: forwardedRef });
-  }
+  }, "RadioGroupIndicator")
 );
-RadioGroupIndicator.displayName = INDICATOR_NAME2;
 export {
   RadioGroupIndicator as Indicator,
   RadioGroupItem as Item,

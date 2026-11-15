@@ -1,60 +1,79 @@
 "use client";
 import {
   clamp
-} from "./chunk-TCQMTAGU.js";
+} from "./chunk-T7BBVHN7.js";
 import {
   useDirection
-} from "./chunk-HXA2JS2N.js";
+} from "./chunk-EMHYOJUE.js";
 import {
   useCallbackRef
-} from "./chunk-NRHAWQBI.js";
+} from "./chunk-X7Z4QOHD.js";
 import {
   Presence
-} from "./chunk-JXAX32XB.js";
+} from "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
+} from "./chunk-E24ISM2B.js";
 import {
+  IS_DEVELOPMENT,
   useLayoutEffect2
-} from "./chunk-T6UOJQWQ.js";
+} from "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
+  createSlottable,
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-scroll-area/dist/index.mjs
 var React2 = __toESM(require_react(), 1);
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 function useStateMachine(initialState, machine) {
   return React.useReducer((state, event) => {
     const nextState = machine[state][event];
     return nextState ?? state;
   }, initialState);
 }
+__name(useStateMachine, "useStateMachine");
+var ScrollAreaType = {
+  Auto: "auto",
+  Always: "always",
+  Scroll: "scroll",
+  Hover: "hover"
+};
+var Orientation = {
+  Vertical: "vertical",
+  Horizontal: "horizontal"
+};
+var Direction = {
+  LTR: "ltr",
+  RTL: "rtl"
+};
 var SCROLL_AREA_NAME = "ScrollArea";
 var [createScrollAreaContext, createScrollAreaScope] = createContextScope(SCROLL_AREA_NAME);
 var [ScrollAreaProvider, useScrollAreaContext] = createScrollAreaContext(SCROLL_AREA_NAME);
 var ScrollArea = React2.forwardRef(
-  (props, forwardedRef) => {
+  __name(function ScrollArea2(props, forwardedRef) {
     const {
       __scopeScrollArea,
-      type = "hover",
+      type = ScrollAreaType.Hover,
       dir,
       scrollHideDelay = 600,
       ...scrollAreaProps
@@ -109,16 +128,30 @@ var ScrollArea = React2.forwardRef(
         )
       }
     );
-  }
+  }, "ScrollArea")
 );
-ScrollArea.displayName = SCROLL_AREA_NAME;
 var VIEWPORT_NAME = "ScrollAreaViewport";
+var Slottable = createSlottable(VIEWPORT_NAME);
 var ScrollAreaViewport = React2.forwardRef(
-  (props, forwardedRef) => {
-    const { __scopeScrollArea, children, nonce, ...viewportProps } = props;
+  // blank line to reduce diff noise
+  __name(function ScrollAreaViewport2(props, forwardedRef) {
+    const { __scopeScrollArea, children, nonce, disableImplicitContentElement, ...viewportProps } = props;
     const context = useScrollAreaContext(VIEWPORT_NAME, __scopeScrollArea);
     const ref = React2.useRef(null);
     const composedRefs = useComposedRefs(forwardedRef, ref, context.onViewportChange);
+    const canSlotOntoChildren = React2.isValidElement(children);
+    if (IS_DEVELOPMENT) {
+      const hasWarnedRef = React2.useRef(false);
+      const shouldWarn = props.asChild === true && !disableImplicitContentElement && !canSlotOntoChildren;
+      React2.useEffect(() => {
+        if (shouldWarn && !hasWarnedRef.current) {
+          hasWarnedRef.current = true;
+          console.warn(
+            `${VIEWPORT_NAME}: \`asChild\` expects a single React element child, so its props have been applied to the implicitly rendered content element instead. Wrap the children in a single element, or opt into \`disableImplicitContentElement\` and render a \`ScrollArea.Content\` inside the viewport.`
+          );
+        }
+      }, [shouldWarn]);
+    }
     return (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
       (0, import_jsx_runtime.jsx)(ScrollAreaViewportStyle, { nonce }),
       (0, import_jsx_runtime.jsx)(
@@ -143,15 +176,32 @@ var ScrollAreaViewport = React2.forwardRef(
             overflowY: context.scrollbarYEnabled ? "scroll" : "hidden",
             ...props.style
           },
-          children: (0, import_jsx_runtime.jsx)("div", { ref: context.onContentChange, style: { minWidth: "100%", display: "table" }, children })
+          children: disableImplicitContentElement ? children : canSlotOntoChildren ? (0, import_jsx_runtime.jsx)(Slottable, { child: children, children: (slottable) => (0, import_jsx_runtime.jsx)(
+            ScrollAreaContent,
+            {
+              __scopeScrollArea,
+              children: slottable
+            }
+          ) }) : (
+            // When `children` isn't a single element there is nothing for
+            // `Slot` to redirect onto, so target the wrapper. This mirrors the
+            // old [incorrect] behavior, but it's better than throwing on a
+            // patch update.
+            (0, import_jsx_runtime.jsx)(Slottable, { children: (0, import_jsx_runtime.jsx)(
+              ScrollAreaContent,
+              {
+                __scopeScrollArea,
+                children
+              }
+            ) })
+          )
         }
       )
     ] });
-  }
+  }, "ScrollAreaViewport")
 );
-ScrollAreaViewport.displayName = VIEWPORT_NAME;
 var ScrollAreaViewportStyle = React2.memo(
-  ({ nonce }) => {
+  __name(function ScrollAreaViewportStyle2({ nonce }) {
     return (0, import_jsx_runtime.jsx)(
       "style",
       {
@@ -161,27 +211,50 @@ var ScrollAreaViewportStyle = React2.memo(
         nonce
       }
     );
-  },
+  }, "ScrollAreaViewportStyle"),
   (prevProps, nextProps) => prevProps.nonce === nextProps.nonce
 );
+var CONTENT_NAME = "ScrollAreaContent";
+var ScrollAreaContent = React2.forwardRef(__name(function ScrollAreaContent2(props, forwardedRef) {
+  const { __scopeScrollArea, children, ...contentProps } = props;
+  const context = useScrollAreaContext(CONTENT_NAME, __scopeScrollArea);
+  const composedRefs = useComposedRefs(forwardedRef, context.onContentChange);
+  return (
+    // `display: table` ensures our content div will match the size of its
+    // children in both horizontal and vertical axis so we can determine if
+    // scroll width/height changed and recalculate thumb sizes. This doesn't
+    // account for children with *percentage* widths that change. We'll wait to
+    // see what use-cases consumers come up with there before trying to resolve
+    // it.
+    (0, import_jsx_runtime.jsx)(
+      Primitive.div,
+      {
+        ...contentProps,
+        ref: composedRefs,
+        style: { minWidth: "100%", display: "table", ...props.style },
+        children
+      }
+    )
+  );
+}, "ScrollAreaContent"));
 var SCROLLBAR_NAME = "ScrollAreaScrollbar";
 var ScrollAreaScrollbar = React2.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ScrollAreaScrollbar2(props, forwardedRef) {
     const { forceMount, ...scrollbarProps } = props;
     const context = useScrollAreaContext(SCROLLBAR_NAME, props.__scopeScrollArea);
     const { onScrollbarXEnabledChange, onScrollbarYEnabledChange } = context;
-    const isHorizontal = props.orientation === "horizontal";
+    const isHorizontal = props.orientation === Orientation.Horizontal;
     React2.useEffect(() => {
       isHorizontal ? onScrollbarXEnabledChange(true) : onScrollbarYEnabledChange(true);
       return () => {
         isHorizontal ? onScrollbarXEnabledChange(false) : onScrollbarYEnabledChange(false);
       };
     }, [isHorizontal, onScrollbarXEnabledChange, onScrollbarYEnabledChange]);
-    return context.type === "hover" ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarHover, { ...scrollbarProps, ref: forwardedRef, forceMount }) : context.type === "scroll" ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarScroll, { ...scrollbarProps, ref: forwardedRef, forceMount }) : context.type === "auto" ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarAuto, { ...scrollbarProps, ref: forwardedRef, forceMount }) : context.type === "always" ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarVisible, { ...scrollbarProps, ref: forwardedRef, "data-state": "visible" }) : null;
-  }
+    return context.type === ScrollAreaType.Hover ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarHover, { ...scrollbarProps, ref: forwardedRef, forceMount }) : context.type === ScrollAreaType.Scroll ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarScroll, { ...scrollbarProps, ref: forwardedRef, forceMount }) : context.type === ScrollAreaType.Auto ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarAuto, { ...scrollbarProps, ref: forwardedRef, forceMount }) : context.type === ScrollAreaType.Always ? (0, import_jsx_runtime.jsx)(ScrollAreaScrollbarVisible, { ...scrollbarProps, ref: forwardedRef, "data-state": "visible" }) : null;
+  }, "ScrollAreaScrollbar")
 );
-ScrollAreaScrollbar.displayName = SCROLLBAR_NAME;
-var ScrollAreaScrollbarHover = React2.forwardRef((props, forwardedRef) => {
+var ScrollAreaScrollbarHover = React2.forwardRef(__name(function ScrollAreaScrollbarHover2(props, forwardedRef) {
   const { forceMount, ...scrollbarProps } = props;
   const context = useScrollAreaContext(SCROLLBAR_NAME, props.__scopeScrollArea);
   const [visible, setVisible] = React2.useState(false);
@@ -189,13 +262,13 @@ var ScrollAreaScrollbarHover = React2.forwardRef((props, forwardedRef) => {
     const scrollArea = context.scrollArea;
     let hideTimer = 0;
     if (scrollArea) {
-      const handlePointerEnter = () => {
+      const handlePointerEnter = __name(() => {
         window.clearTimeout(hideTimer);
         setVisible(true);
-      };
-      const handlePointerLeave = () => {
+      }, "handlePointerEnter");
+      const handlePointerLeave = __name(() => {
         hideTimer = window.setTimeout(() => setVisible(false), context.scrollHideDelay);
-      };
+      }, "handlePointerLeave");
       scrollArea.addEventListener("pointerenter", handlePointerEnter);
       scrollArea.addEventListener("pointerleave", handlePointerLeave);
       return () => {
@@ -213,11 +286,11 @@ var ScrollAreaScrollbarHover = React2.forwardRef((props, forwardedRef) => {
       ref: forwardedRef
     }
   ) });
-});
-var ScrollAreaScrollbarScroll = React2.forwardRef((props, forwardedRef) => {
+}, "ScrollAreaScrollbarHover"));
+var ScrollAreaScrollbarScroll = React2.forwardRef(__name(function ScrollAreaScrollbarScroll2(props, forwardedRef) {
   const { forceMount, ...scrollbarProps } = props;
   const context = useScrollAreaContext(SCROLLBAR_NAME, props.__scopeScrollArea);
-  const isHorizontal = props.orientation === "horizontal";
+  const isHorizontal = props.orientation === Orientation.Horizontal;
   const debounceScrollEnd = useDebounceCallback(() => send("SCROLL_END"), 100);
   const [state, send] = useStateMachine("hidden", {
     hidden: {
@@ -248,7 +321,7 @@ var ScrollAreaScrollbarScroll = React2.forwardRef((props, forwardedRef) => {
     const scrollDirection = isHorizontal ? "scrollLeft" : "scrollTop";
     if (viewport) {
       let prevScrollPos = viewport[scrollDirection];
-      const handleScroll = () => {
+      const handleScroll = __name(() => {
         const scrollPos = viewport[scrollDirection];
         const hasScrollInDirectionChanged = prevScrollPos !== scrollPos;
         if (hasScrollInDirectionChanged) {
@@ -256,7 +329,7 @@ var ScrollAreaScrollbarScroll = React2.forwardRef((props, forwardedRef) => {
           debounceScrollEnd();
         }
         prevScrollPos = scrollPos;
-      };
+      }, "handleScroll");
       viewport.addEventListener("scroll", handleScroll);
       return () => viewport.removeEventListener("scroll", handleScroll);
     }
@@ -271,12 +344,12 @@ var ScrollAreaScrollbarScroll = React2.forwardRef((props, forwardedRef) => {
       onPointerLeave: composeEventHandlers(props.onPointerLeave, () => send("POINTER_LEAVE"))
     }
   ) });
-});
-var ScrollAreaScrollbarAuto = React2.forwardRef((props, forwardedRef) => {
+}, "ScrollAreaScrollbarScroll"));
+var ScrollAreaScrollbarAuto = React2.forwardRef(__name(function ScrollAreaScrollbarAuto2(props, forwardedRef) {
   const context = useScrollAreaContext(SCROLLBAR_NAME, props.__scopeScrollArea);
   const { forceMount, ...scrollbarProps } = props;
   const [visible, setVisible] = React2.useState(false);
-  const isHorizontal = props.orientation === "horizontal";
+  const isHorizontal = props.orientation === Orientation.Horizontal;
   const handleResize = useDebounceCallback(() => {
     if (context.viewport) {
       const isOverflowX = context.viewport.offsetWidth < context.viewport.scrollWidth;
@@ -294,9 +367,9 @@ var ScrollAreaScrollbarAuto = React2.forwardRef((props, forwardedRef) => {
       ref: forwardedRef
     }
   ) });
-});
-var ScrollAreaScrollbarVisible = React2.forwardRef((props, forwardedRef) => {
-  const { orientation = "vertical", ...scrollbarProps } = props;
+}, "ScrollAreaScrollbarAuto"));
+var ScrollAreaScrollbarVisible = React2.forwardRef(__name(function ScrollAreaScrollbarVisible2(props, forwardedRef) {
+  const { orientation = Orientation.Vertical, ...scrollbarProps } = props;
   const context = useScrollAreaContext(SCROLLBAR_NAME, props.__scopeScrollArea);
   const thumbRef = React2.useRef(null);
   const pointerOffsetRef = React2.useRef(0);
@@ -311,14 +384,15 @@ var ScrollAreaScrollbarVisible = React2.forwardRef((props, forwardedRef) => {
     sizes,
     onSizesChange: setSizes,
     hasThumb: Boolean(thumbRatio > 0 && thumbRatio < 1),
-    onThumbChange: (thumb) => thumbRef.current = thumb,
-    onThumbPointerUp: () => pointerOffsetRef.current = 0,
-    onThumbPointerDown: (pointerPos) => pointerOffsetRef.current = pointerPos
+    onThumbChange: __name((thumb) => thumbRef.current = thumb, "onThumbChange"),
+    onThumbPointerUp: __name(() => pointerOffsetRef.current = 0, "onThumbPointerUp"),
+    onThumbPointerDown: __name((pointerPos) => pointerOffsetRef.current = pointerPos, "onThumbPointerDown")
   };
   function getScrollPosition(pointerPos, dir) {
     return getScrollPositionFromPointer(pointerPos, pointerOffsetRef.current, sizes, dir);
   }
-  if (orientation === "horizontal") {
+  __name(getScrollPosition, "getScrollPosition");
+  if (orientation === Orientation.Horizontal) {
     return (0, import_jsx_runtime.jsx)(
       ScrollAreaScrollbarX,
       {
@@ -342,7 +416,7 @@ var ScrollAreaScrollbarVisible = React2.forwardRef((props, forwardedRef) => {
       }
     );
   }
-  if (orientation === "vertical") {
+  if (orientation === Orientation.Vertical) {
     return (0, import_jsx_runtime.jsx)(
       ScrollAreaScrollbarY,
       {
@@ -365,8 +439,8 @@ var ScrollAreaScrollbarVisible = React2.forwardRef((props, forwardedRef) => {
     );
   }
   return null;
-});
-var ScrollAreaScrollbarX = React2.forwardRef((props, forwardedRef) => {
+}, "ScrollAreaScrollbarVisible"));
+var ScrollAreaScrollbarX = React2.forwardRef(__name(function ScrollAreaScrollbarX2(props, forwardedRef) {
   const { sizes, onSizesChange, ...scrollbarProps } = props;
   const context = useScrollAreaContext(SCROLLBAR_NAME, props.__scopeScrollArea);
   const [computedStyle, setComputedStyle] = React2.useState();
@@ -384,8 +458,8 @@ var ScrollAreaScrollbarX = React2.forwardRef((props, forwardedRef) => {
       sizes,
       style: {
         bottom: 0,
-        left: context.dir === "rtl" ? "var(--radix-scroll-area-corner-width)" : 0,
-        right: context.dir === "ltr" ? "var(--radix-scroll-area-corner-width)" : 0,
+        left: context.dir === Direction.RTL ? "var(--radix-scroll-area-corner-width)" : 0,
+        right: context.dir === Direction.LTR ? "var(--radix-scroll-area-corner-width)" : 0,
         "--radix-scroll-area-thumb-width": getThumbSize(sizes) + "px",
         ...props.style
       },
@@ -415,8 +489,8 @@ var ScrollAreaScrollbarX = React2.forwardRef((props, forwardedRef) => {
       }
     }
   );
-});
-var ScrollAreaScrollbarY = React2.forwardRef((props, forwardedRef) => {
+}, "ScrollAreaScrollbarX"));
+var ScrollAreaScrollbarY = React2.forwardRef(__name(function ScrollAreaScrollbarY2(props, forwardedRef) {
   const { sizes, onSizesChange, ...scrollbarProps } = props;
   const context = useScrollAreaContext(SCROLLBAR_NAME, props.__scopeScrollArea);
   const [computedStyle, setComputedStyle] = React2.useState();
@@ -434,8 +508,8 @@ var ScrollAreaScrollbarY = React2.forwardRef((props, forwardedRef) => {
       sizes,
       style: {
         top: 0,
-        right: context.dir === "ltr" ? 0 : void 0,
-        left: context.dir === "rtl" ? 0 : void 0,
+        right: context.dir === Direction.LTR ? 0 : void 0,
+        left: context.dir === Direction.RTL ? 0 : void 0,
         bottom: "var(--radix-scroll-area-corner-height)",
         "--radix-scroll-area-thumb-height": getThumbSize(sizes) + "px",
         ...props.style
@@ -466,9 +540,9 @@ var ScrollAreaScrollbarY = React2.forwardRef((props, forwardedRef) => {
       }
     }
   );
-});
+}, "ScrollAreaScrollbarY"));
 var [ScrollbarProvider, useScrollbarContext] = createScrollAreaContext(SCROLLBAR_NAME);
-var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+var ScrollAreaScrollbarImpl = React2.forwardRef(__name(function ScrollAreaScrollbarImpl2(props, forwardedRef) {
   const {
     __scopeScrollArea,
     sizes,
@@ -499,12 +573,13 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
       onDragScroll({ x, y });
     }
   }
+  __name(handleDragScroll, "handleDragScroll");
   React2.useEffect(() => {
-    const handleWheel = (event) => {
+    const handleWheel = __name((event) => {
       const element = event.target;
       const isScrollbarWheel = scrollbar?.contains(element);
       if (isScrollbarWheel) handleWheelScroll(event, maxScrollPos);
-    };
+    }, "handleWheel");
     document.addEventListener("wheel", handleWheel, { passive: false });
     return () => document.removeEventListener("wheel", handleWheel, { passive: false });
   }, [viewport, scrollbar, maxScrollPos, handleWheelScroll]);
@@ -553,17 +628,19 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
       )
     }
   );
-});
+}, "ScrollAreaScrollbarImpl"));
 var THUMB_NAME = "ScrollAreaThumb";
 var ScrollAreaThumb = React2.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ScrollAreaThumb2(props, forwardedRef) {
     const { forceMount, ...thumbProps } = props;
     const scrollbarContext = useScrollbarContext(THUMB_NAME, props.__scopeScrollArea);
     return (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || scrollbarContext.hasThumb, children: (0, import_jsx_runtime.jsx)(ScrollAreaThumbImpl, { ref: forwardedRef, ...thumbProps }) });
-  }
+  }, "ScrollAreaThumb")
 );
 var ScrollAreaThumbImpl = React2.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ScrollAreaThumbImpl2(props, forwardedRef) {
     const { __scopeScrollArea, style, ...thumbProps } = props;
     const scrollAreaContext = useScrollAreaContext(THUMB_NAME, __scopeScrollArea);
     const scrollbarContext = useScrollbarContext(THUMB_NAME, __scopeScrollArea);
@@ -579,14 +656,14 @@ var ScrollAreaThumbImpl = React2.forwardRef(
     React2.useEffect(() => {
       const viewport = scrollAreaContext.viewport;
       if (viewport) {
-        const handleScroll = () => {
+        const handleScroll = __name(() => {
           debounceScrollEnd();
           if (!removeUnlinkedScrollListenerRef.current) {
             const listener = addUnlinkedScrollListener(viewport, onThumbPositionChange);
             removeUnlinkedScrollListenerRef.current = listener;
             onThumbPositionChange();
           }
-        };
+        }, "handleScroll");
         onThumbPositionChange();
         viewport.addEventListener("scroll", handleScroll);
         return () => viewport.removeEventListener("scroll", handleScroll);
@@ -613,25 +690,25 @@ var ScrollAreaThumbImpl = React2.forwardRef(
         onPointerUp: composeEventHandlers(props.onPointerUp, scrollbarContext.onThumbPointerUp)
       }
     );
-  }
+  }, "ScrollAreaThumbImpl")
 );
-ScrollAreaThumb.displayName = THUMB_NAME;
 var CORNER_NAME = "ScrollAreaCorner";
 var ScrollAreaCorner = React2.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ScrollAreaCorner2(props, forwardedRef) {
     const context = useScrollAreaContext(CORNER_NAME, props.__scopeScrollArea);
     const hasBothScrollbarsVisible = Boolean(context.scrollbarX && context.scrollbarY);
-    const hasCorner = context.type !== "scroll" && hasBothScrollbarsVisible;
+    const hasCorner = context.type !== ScrollAreaType.Scroll && hasBothScrollbarsVisible;
     return hasCorner ? (0, import_jsx_runtime.jsx)(ScrollAreaCornerImpl, { ...props, ref: forwardedRef }) : null;
-  }
+  }, "ScrollAreaCorner")
 );
-ScrollAreaCorner.displayName = CORNER_NAME;
-var ScrollAreaCornerImpl = React2.forwardRef((props, forwardedRef) => {
+var ScrollAreaCornerImpl = React2.forwardRef(__name(function ScrollAreaCornerImpl2(props, forwardedRef) {
   const { __scopeScrollArea, ...cornerProps } = props;
   const context = useScrollAreaContext(CORNER_NAME, __scopeScrollArea);
   const [width, setWidth] = React2.useState(0);
   const [height, setHeight] = React2.useState(0);
   const hasSize = Boolean(width && height);
+  const { onCornerWidthChange, onCornerHeightChange } = context;
   useResizeObserver(context.scrollbarX, () => {
     const height2 = context.scrollbarX?.offsetHeight || 0;
     context.onCornerHeightChange(height2);
@@ -642,6 +719,12 @@ var ScrollAreaCornerImpl = React2.forwardRef((props, forwardedRef) => {
     context.onCornerWidthChange(width2);
     setWidth(width2);
   });
+  React2.useEffect(() => {
+    return () => {
+      onCornerWidthChange(0);
+      onCornerHeightChange(0);
+    };
+  }, [onCornerWidthChange, onCornerHeightChange]);
   return hasSize ? (0, import_jsx_runtime.jsx)(
     Primitive.div,
     {
@@ -651,28 +734,31 @@ var ScrollAreaCornerImpl = React2.forwardRef((props, forwardedRef) => {
         width,
         height,
         position: "absolute",
-        right: context.dir === "ltr" ? 0 : void 0,
-        left: context.dir === "rtl" ? 0 : void 0,
+        right: context.dir === Direction.LTR ? 0 : void 0,
+        left: context.dir === Direction.RTL ? 0 : void 0,
         bottom: 0,
         ...props.style
       }
     }
   ) : null;
-});
+}, "ScrollAreaCornerImpl"));
 function toInt(value) {
   return value ? parseInt(value, 10) : 0;
 }
+__name(toInt, "toInt");
 function getThumbRatio(viewportSize, contentSize) {
   const ratio = viewportSize / contentSize;
   return isNaN(ratio) ? 0 : ratio;
 }
+__name(getThumbRatio, "getThumbRatio");
 function getThumbSize(sizes) {
   const ratio = getThumbRatio(sizes.viewport, sizes.content);
   const scrollbarPadding = sizes.scrollbar.paddingStart + sizes.scrollbar.paddingEnd;
   const thumbSize = (sizes.scrollbar.size - scrollbarPadding) * ratio;
   return Math.max(thumbSize, 18);
 }
-function getScrollPositionFromPointer(pointerPos, pointerOffset, sizes, dir = "ltr") {
+__name(getThumbSize, "getThumbSize");
+function getScrollPositionFromPointer(pointerPos, pointerOffset, sizes, dir = Direction.LTR) {
   const thumbSizePx = getThumbSize(sizes);
   const thumbCenter = thumbSizePx / 2;
   const offset = pointerOffset || thumbCenter;
@@ -680,21 +766,23 @@ function getScrollPositionFromPointer(pointerPos, pointerOffset, sizes, dir = "l
   const minPointerPos = sizes.scrollbar.paddingStart + offset;
   const maxPointerPos = sizes.scrollbar.size - sizes.scrollbar.paddingEnd - thumbOffsetFromEnd;
   const maxScrollPos = sizes.content - sizes.viewport;
-  const scrollRange = dir === "ltr" ? [0, maxScrollPos] : [maxScrollPos * -1, 0];
+  const scrollRange = dir === Direction.LTR ? [0, maxScrollPos] : [maxScrollPos * -1, 0];
   const interpolate = linearScale([minPointerPos, maxPointerPos], scrollRange);
   return interpolate(pointerPos);
 }
-function getThumbOffsetFromScroll(scrollPos, sizes, dir = "ltr") {
+__name(getScrollPositionFromPointer, "getScrollPositionFromPointer");
+function getThumbOffsetFromScroll(scrollPos, sizes, dir = Direction.LTR) {
   const thumbSizePx = getThumbSize(sizes);
   const scrollbarPadding = sizes.scrollbar.paddingStart + sizes.scrollbar.paddingEnd;
   const scrollbar = sizes.scrollbar.size - scrollbarPadding;
   const maxScrollPos = sizes.content - sizes.viewport;
   const maxThumbPos = scrollbar - thumbSizePx;
-  const scrollClampRange = dir === "ltr" ? [0, maxScrollPos] : [maxScrollPos * -1, 0];
+  const scrollClampRange = dir === Direction.LTR ? [0, maxScrollPos] : [maxScrollPos * -1, 0];
   const scrollWithoutMomentum = clamp(scrollPos, scrollClampRange);
   const interpolate = linearScale([0, maxScrollPos], [0, maxThumbPos]);
   return interpolate(scrollWithoutMomentum);
 }
+__name(getThumbOffsetFromScroll, "getThumbOffsetFromScroll");
 function linearScale(input, output) {
   return (value) => {
     if (input[0] === input[1] || output[0] === output[1]) return output[0];
@@ -702,23 +790,27 @@ function linearScale(input, output) {
     return output[0] + ratio * (value - input[0]);
   };
 }
+__name(linearScale, "linearScale");
 function isScrollingWithinScrollbarBounds(scrollPos, maxScrollPos) {
   return scrollPos > 0 && scrollPos < maxScrollPos;
 }
-var addUnlinkedScrollListener = (node, handler = () => {
+__name(isScrollingWithinScrollbarBounds, "isScrollingWithinScrollbarBounds");
+var addUnlinkedScrollListener = __name((node, handler = () => {
 }) => {
   let prevPosition = { left: node.scrollLeft, top: node.scrollTop };
   let rAF = 0;
-  (function loop() {
+  function loop() {
     const position = { left: node.scrollLeft, top: node.scrollTop };
     const isHorizontalScroll = prevPosition.left !== position.left;
     const isVerticalScroll = prevPosition.top !== position.top;
     if (isHorizontalScroll || isVerticalScroll) handler();
     prevPosition = position;
     rAF = window.requestAnimationFrame(loop);
-  })();
+  }
+  __name(loop, "loop");
+  loop();
   return () => window.cancelAnimationFrame(rAF);
-};
+}, "addUnlinkedScrollListener");
 function useDebounceCallback(callback, delay) {
   const handleCallback = useCallbackRef(callback);
   const debounceTimerRef = React2.useRef(0);
@@ -728,6 +820,7 @@ function useDebounceCallback(callback, delay) {
     debounceTimerRef.current = window.setTimeout(handleCallback, delay);
   }, [handleCallback, delay]);
 }
+__name(useDebounceCallback, "useDebounceCallback");
 function useResizeObserver(element, onResize) {
   const handleResize = useCallbackRef(onResize);
   useLayoutEffect2(() => {
@@ -745,22 +838,20 @@ function useResizeObserver(element, onResize) {
     }
   }, [element, handleResize]);
 }
-var Root = ScrollArea;
-var Viewport = ScrollAreaViewport;
-var Scrollbar = ScrollAreaScrollbar;
-var Thumb = ScrollAreaThumb;
-var Corner = ScrollAreaCorner;
+__name(useResizeObserver, "useResizeObserver");
 export {
-  Corner,
-  Root,
+  ScrollAreaContent as Content,
+  ScrollAreaCorner as Corner,
+  ScrollArea as Root,
   ScrollArea,
+  ScrollAreaContent,
   ScrollAreaCorner,
   ScrollAreaScrollbar,
   ScrollAreaThumb,
   ScrollAreaViewport,
-  Scrollbar,
-  Thumb,
-  Viewport,
+  ScrollAreaScrollbar as Scrollbar,
+  ScrollAreaThumb as Thumb,
+  ScrollAreaViewport as Viewport,
   createScrollAreaScope
 };
 //# sourceMappingURL=@radix-ui_react-scroll-area.js.map

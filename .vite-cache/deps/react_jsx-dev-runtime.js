@@ -1,9 +1,9 @@
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __commonJS
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/react/cjs/react-jsx-dev-runtime.development.js
 var require_react_jsx_dev_runtime_development = __commonJS({
@@ -28,6 +28,8 @@ var require_react_jsx_dev_runtime_development = __commonJS({
             return "SuspenseList";
           case REACT_ACTIVITY_TYPE:
             return "Activity";
+          case REACT_VIEW_TRANSITION_TYPE:
+            return "ViewTransition";
         }
         if ("object" === typeof type)
           switch ("number" === typeof type.tag && console.error(
@@ -219,7 +221,7 @@ var require_react_jsx_dev_runtime_development = __commonJS({
       function isValidElement(object) {
         return "object" === typeof object && null !== object && object.$$typeof === REACT_ELEMENT_TYPE;
       }
-      var React = require_react(), REACT_ELEMENT_TYPE = Symbol.for("react.transitional.element"), REACT_PORTAL_TYPE = Symbol.for("react.portal"), REACT_FRAGMENT_TYPE = Symbol.for("react.fragment"), REACT_STRICT_MODE_TYPE = Symbol.for("react.strict_mode"), REACT_PROFILER_TYPE = Symbol.for("react.profiler"), REACT_CONSUMER_TYPE = Symbol.for("react.consumer"), REACT_CONTEXT_TYPE = Symbol.for("react.context"), REACT_FORWARD_REF_TYPE = Symbol.for("react.forward_ref"), REACT_SUSPENSE_TYPE = Symbol.for("react.suspense"), REACT_SUSPENSE_LIST_TYPE = Symbol.for("react.suspense_list"), REACT_MEMO_TYPE = Symbol.for("react.memo"), REACT_LAZY_TYPE = Symbol.for("react.lazy"), REACT_ACTIVITY_TYPE = Symbol.for("react.activity"), REACT_CLIENT_REFERENCE = Symbol.for("react.client.reference"), ReactSharedInternals = React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE, hasOwnProperty = Object.prototype.hasOwnProperty, isArrayImpl = Array.isArray, createTask = console.createTask ? console.createTask : function() {
+      var React = require_react(), REACT_ELEMENT_TYPE = Symbol.for("react.transitional.element"), REACT_PORTAL_TYPE = Symbol.for("react.portal"), REACT_FRAGMENT_TYPE = Symbol.for("react.fragment"), REACT_STRICT_MODE_TYPE = Symbol.for("react.strict_mode"), REACT_PROFILER_TYPE = Symbol.for("react.profiler"), REACT_CONSUMER_TYPE = Symbol.for("react.consumer"), REACT_CONTEXT_TYPE = Symbol.for("react.context"), REACT_FORWARD_REF_TYPE = Symbol.for("react.forward_ref"), REACT_SUSPENSE_TYPE = Symbol.for("react.suspense"), REACT_SUSPENSE_LIST_TYPE = Symbol.for("react.suspense_list"), REACT_MEMO_TYPE = Symbol.for("react.memo"), REACT_LAZY_TYPE = Symbol.for("react.lazy"), REACT_ACTIVITY_TYPE = Symbol.for("react.activity"), REACT_VIEW_TRANSITION_TYPE = Symbol.for("react.view_transition"), REACT_CLIENT_REFERENCE = Symbol.for("react.client.reference"), ReactSharedInternals = React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE, hasOwnProperty = Object.prototype.hasOwnProperty, isArrayImpl = Array.isArray, createTask = console.createTask ? console.createTask : function() {
         return null;
       };
       React = {
@@ -238,12 +240,18 @@ var require_react_jsx_dev_runtime_development = __commonJS({
       exports.Fragment = REACT_FRAGMENT_TYPE;
       exports.jsxDEV = function(type, config, maybeKey, isStaticChildren) {
         var trackActualOwner = 1e4 > ReactSharedInternals.recentlyCreatedOwnerStacks++;
+        if (trackActualOwner) {
+          var previousStackTraceLimit = Error.stackTraceLimit;
+          Error.stackTraceLimit = 10;
+          var debugStackDEV = Error("react-stack-top-frame");
+          Error.stackTraceLimit = previousStackTraceLimit;
+        } else debugStackDEV = unknownOwnerDebugStack;
         return jsxDEVImpl(
           type,
           config,
           maybeKey,
           isStaticChildren,
-          trackActualOwner ? Error("react-stack-top-frame") : unknownOwnerDebugStack,
+          debugStackDEV,
           trackActualOwner ? createTask(getTaskName(type)) : unknownOwnerDebugTask
         );
       };

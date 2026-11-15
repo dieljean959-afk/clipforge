@@ -1,14 +1,14 @@
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
+} from "./chunk-XOQ4UB3A.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __export,
   __require,
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/framer-motion/dist/es/components/AnimatePresence/index.mjs
 var import_jsx_runtime3 = __toESM(require_jsx_runtime(), 1);
@@ -2293,10 +2293,8 @@ var acceleratedValues = /* @__PURE__ */ new Set([
   "opacity",
   "clipPath",
   "filter",
-  "transform"
-  // TODO: Can be accelerated but currently disabled until https://issues.chromium.org/issues/41491098 is resolved
-  // or until we implement support for linear() easing.
-  // "background-color"
+  "transform",
+  "backgroundColor"
 ]);
 
 // node_modules/motion-dom/dist/es/animation/waapi/utils/is-browser-color.mjs
@@ -2327,7 +2325,7 @@ var supportsWaapi = memo(() => Object.hasOwnProperty.call(Element.prototype, "an
 function supportsBrowserAnimation(options) {
   const { motionValue: motionValue2, name, repeatDelay, repeatType, damping, type, keyframes: keyframes2 } = options;
   const subject = motionValue2?.owner?.current;
-  if (!(subject instanceof HTMLElement)) {
+  if (!(subject instanceof HTMLElement) && !(subject instanceof SVGElement)) {
     return false;
   }
   const { onUpdate, transformTemplate } = motionValue2.owner.getProps();
@@ -6087,6 +6085,10 @@ var HTMLVisualElement = class extends DOMVisualElement {
     this.type = "html";
     this.renderInstance = renderHTML;
   }
+  mount(instance) {
+    invariant(Boolean(instance.style), "motion.create() components must forward their ref to a HTML or SVG element", "custom-component-ref");
+    super.mount(instance);
+  }
   readValueFromInstance(instance, key) {
     if (transformProps.has(key)) {
       return this.projection?.isProjecting ? defaultTransformValue(key) : readTransformValue(instance, key);
@@ -8457,7 +8459,7 @@ function PopChild({ children, isPresent: isPresent2, anchorX, anchorY, root, pop
     direction: "ltr"
   });
   const { nonce } = (0, import_react6.useContext)(MotionConfigContext);
-  const childRef = children.props?.ref ?? children?.ref;
+  const childRef = pop !== false ? children.props?.ref ?? children?.ref : void 0;
   const composedRef = useComposedRefs(ref, childRef);
   (0, import_react6.useInsertionEffect)(() => {
     const { width, height, top, left, right, bottom, direction } = size.current;

@@ -1,79 +1,94 @@
 "use client";
 import {
-  Content,
-  Root,
-  Trigger,
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
   createCollapsibleScope
-} from "./chunk-FESPIB27.js";
+} from "./chunk-PZZ2JUSS.js";
 import {
-  createCollection
-} from "./chunk-EMF3DAXS.js";
+  createCollection2
+} from "./chunk-2NL7CCDF.js";
 import {
   useDirection
-} from "./chunk-HXA2JS2N.js";
+} from "./chunk-EMHYOJUE.js";
 import {
   useId
-} from "./chunk-JSG27HSD.js";
+} from "./chunk-ROQYZUNY.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
-import "./chunk-JXAX32XB.js";
+} from "./chunk-NLDEGCMH.js";
+import "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-E24ISM2B.js";
+import "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-accordion/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var AccordionType = {
+  Single: "single",
+  Multiple: "multiple"
+};
+var Orientation = {
+  Vertical: "vertical",
+  Horizontal: "horizontal"
+};
+var Direction = {
+  LTR: "ltr",
+  RTL: "rtl"
+};
 var ACCORDION_NAME = "Accordion";
 var ACCORDION_KEYS = ["Home", "End", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"];
-var [Collection, useCollection, createCollectionScope] = createCollection(ACCORDION_NAME);
+var [Collection, { useGetCollection, createCollectionScope }] = createCollection2(ACCORDION_NAME);
 var [createAccordionContext, createAccordionScope] = createContextScope(ACCORDION_NAME, [
   createCollectionScope,
   createCollapsibleScope
 ]);
 var useCollapsibleScope = createCollapsibleScope();
 var Accordion = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function Accordion2(props, forwardedRef) {
     const { type, ...accordionProps } = props;
     const singleProps = accordionProps;
     const multipleProps = accordionProps;
-    return (0, import_jsx_runtime.jsx)(Collection.Provider, { scope: props.__scopeAccordion, children: type === "multiple" ? (0, import_jsx_runtime.jsx)(AccordionImplMultiple, { ...multipleProps, ref: forwardedRef }) : (0, import_jsx_runtime.jsx)(AccordionImplSingle, { ...singleProps, ref: forwardedRef }) });
-  }
+    return (0, import_jsx_runtime.jsx)(Collection.Provider, { scope: props.__scopeAccordion, children: type === AccordionType.Multiple ? (0, import_jsx_runtime.jsx)(AccordionImplMultiple, { ...multipleProps, ref: forwardedRef }) : (0, import_jsx_runtime.jsx)(AccordionImplSingle, { ...singleProps, ref: forwardedRef }) });
+  }, "Accordion")
 );
-Accordion.displayName = ACCORDION_NAME;
 var [AccordionValueProvider, useAccordionValueContext] = createAccordionContext(ACCORDION_NAME);
 var [AccordionCollapsibleProvider, useAccordionCollapsibleContext] = createAccordionContext(
   ACCORDION_NAME,
   { collapsible: false }
 );
 var AccordionImplSingle = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function AccordionImplSingle2(props, forwardedRef) {
     const {
       value: valueProp,
       defaultValue,
-      onValueChange = () => {
-      },
+      onValueChange = __name(() => {
+      }, "onValueChange"),
       collapsible = false,
       ...accordionSingleProps
     } = props;
@@ -93,14 +108,14 @@ var AccordionImplSingle = React.forwardRef(
         children: (0, import_jsx_runtime.jsx)(AccordionCollapsibleProvider, { scope: props.__scopeAccordion, collapsible, children: (0, import_jsx_runtime.jsx)(AccordionImpl, { ...accordionSingleProps, ref: forwardedRef }) })
       }
     );
-  }
+  }, "AccordionImplSingle")
 );
-var AccordionImplMultiple = React.forwardRef((props, forwardedRef) => {
+var AccordionImplMultiple = React.forwardRef(__name(function AccordionImplMultiple2(props, forwardedRef) {
   const {
     value: valueProp,
     defaultValue,
-    onValueChange = () => {
-    },
+    onValueChange = __name(() => {
+    }, "onValueChange"),
     ...accordionMultipleProps
   } = props;
   const [value, setValue] = useControllableState({
@@ -127,39 +142,50 @@ var AccordionImplMultiple = React.forwardRef((props, forwardedRef) => {
       children: (0, import_jsx_runtime.jsx)(AccordionCollapsibleProvider, { scope: props.__scopeAccordion, collapsible: true, children: (0, import_jsx_runtime.jsx)(AccordionImpl, { ...accordionMultipleProps, ref: forwardedRef }) })
     }
   );
-});
+}, "AccordionImplMultiple"));
 var [AccordionImplProvider, useAccordionContext] = createAccordionContext(ACCORDION_NAME);
 var AccordionImpl = React.forwardRef(
-  (props, forwardedRef) => {
-    const { __scopeAccordion, disabled, dir, orientation = "vertical", ...accordionProps } = props;
+  __name(function AccordionImpl2(props, forwardedRef) {
+    const {
+      __scopeAccordion,
+      disabled,
+      dir,
+      orientation = Orientation.Vertical,
+      ...accordionProps
+    } = props;
     const accordionRef = React.useRef(null);
     const composedRefs = useComposedRefs(accordionRef, forwardedRef);
-    const getItems = useCollection(__scopeAccordion);
+    const getCollection = useGetCollection(__scopeAccordion);
     const direction = useDirection(dir);
-    const isDirectionLTR = direction === "ltr";
+    const isDirectionLTR = direction === Direction.LTR;
     const handleKeyDown = composeEventHandlers(props.onKeyDown, (event) => {
-      if (!ACCORDION_KEYS.includes(event.key)) return;
+      if (!ACCORDION_KEYS.includes(event.key)) {
+        return;
+      }
+      const collection = getCollection();
       const target = event.target;
-      const triggerCollection = getItems().filter((item) => !item.ref.current?.disabled);
-      const triggerIndex = triggerCollection.findIndex((item) => item.ref.current === target);
-      const triggerCount = triggerCollection.length;
-      if (triggerIndex === -1) return;
+      const triggerCollection = collection.filter(([, item]) => !item.element.disabled);
+      const triggerIndex = triggerCollection.findIndex(([, item]) => item.element === target);
+      const triggerCount = triggerCollection.size;
+      if (triggerIndex === -1) {
+        return;
+      }
       event.preventDefault();
       let nextIndex = triggerIndex;
       const homeIndex = 0;
       const endIndex = triggerCount - 1;
-      const moveNext = () => {
+      const moveNext = __name(() => {
         nextIndex = triggerIndex + 1;
         if (nextIndex > endIndex) {
           nextIndex = homeIndex;
         }
-      };
-      const movePrev = () => {
+      }, "moveNext");
+      const movePrev = __name(() => {
         nextIndex = triggerIndex - 1;
         if (nextIndex < homeIndex) {
           nextIndex = endIndex;
         }
-      };
+      }, "movePrev");
       switch (event.key) {
         case "Home":
           nextIndex = homeIndex;
@@ -168,7 +194,7 @@ var AccordionImpl = React.forwardRef(
           nextIndex = endIndex;
           break;
         case "ArrowRight":
-          if (orientation === "horizontal") {
+          if (orientation === Orientation.Horizontal) {
             if (isDirectionLTR) {
               moveNext();
             } else {
@@ -177,12 +203,12 @@ var AccordionImpl = React.forwardRef(
           }
           break;
         case "ArrowDown":
-          if (orientation === "vertical") {
+          if (orientation === Orientation.Vertical) {
             moveNext();
           }
           break;
         case "ArrowLeft":
-          if (orientation === "horizontal") {
+          if (orientation === Orientation.Horizontal) {
             if (isDirectionLTR) {
               movePrev();
             } else {
@@ -191,13 +217,13 @@ var AccordionImpl = React.forwardRef(
           }
           break;
         case "ArrowUp":
-          if (orientation === "vertical") {
+          if (orientation === Orientation.Vertical) {
             movePrev();
           }
           break;
       }
       const clampedIndex = nextIndex % triggerCount;
-      triggerCollection[clampedIndex].ref.current?.focus();
+      triggerCollection.at(clampedIndex)?.element.focus();
     });
     return (0, import_jsx_runtime.jsx)(
       AccordionImplProvider,
@@ -217,12 +243,12 @@ var AccordionImpl = React.forwardRef(
         ) })
       }
     );
-  }
+  }, "AccordionImpl")
 );
 var ITEM_NAME = "AccordionItem";
 var [AccordionItemProvider, useAccordionItemContext] = createAccordionContext(ITEM_NAME);
 var AccordionItem = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function AccordionItem2(props, forwardedRef) {
     const { __scopeAccordion, value, ...accordionItemProps } = props;
     const accordionContext = useAccordionContext(ITEM_NAME, __scopeAccordion);
     const valueContext = useAccordionValueContext(ITEM_NAME, __scopeAccordion);
@@ -238,7 +264,7 @@ var AccordionItem = React.forwardRef(
         disabled,
         triggerId,
         children: (0, import_jsx_runtime.jsx)(
-          Root,
+          Collapsible,
           {
             "data-orientation": accordionContext.orientation,
             "data-state": getState(open),
@@ -258,12 +284,12 @@ var AccordionItem = React.forwardRef(
         )
       }
     );
-  }
+  }, "AccordionItem")
 );
-AccordionItem.displayName = ITEM_NAME;
 var HEADER_NAME = "AccordionHeader";
 var AccordionHeader = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function AccordionHeader2(props, forwardedRef) {
     const { __scopeAccordion, ...headerProps } = props;
     const accordionContext = useAccordionContext(ACCORDION_NAME, __scopeAccordion);
     const itemContext = useAccordionItemContext(HEADER_NAME, __scopeAccordion);
@@ -277,19 +303,19 @@ var AccordionHeader = React.forwardRef(
         ref: forwardedRef
       }
     );
-  }
+  }, "AccordionHeader")
 );
-AccordionHeader.displayName = HEADER_NAME;
 var TRIGGER_NAME = "AccordionTrigger";
 var AccordionTrigger = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function AccordionTrigger2(props, forwardedRef) {
     const { __scopeAccordion, ...triggerProps } = props;
     const accordionContext = useAccordionContext(ACCORDION_NAME, __scopeAccordion);
     const itemContext = useAccordionItemContext(TRIGGER_NAME, __scopeAccordion);
     const collapsibleContext = useAccordionCollapsibleContext(TRIGGER_NAME, __scopeAccordion);
     const collapsibleScope = useCollapsibleScope(__scopeAccordion);
     return (0, import_jsx_runtime.jsx)(Collection.ItemSlot, { scope: __scopeAccordion, children: (0, import_jsx_runtime.jsx)(
-      Trigger,
+      CollapsibleTrigger,
       {
         "aria-disabled": itemContext.open && !collapsibleContext.collapsible || void 0,
         "data-orientation": accordionContext.orientation,
@@ -299,18 +325,18 @@ var AccordionTrigger = React.forwardRef(
         ref: forwardedRef
       }
     ) });
-  }
+  }, "AccordionTrigger")
 );
-AccordionTrigger.displayName = TRIGGER_NAME;
 var CONTENT_NAME = "AccordionContent";
 var AccordionContent = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function AccordionContent2(props, forwardedRef) {
     const { __scopeAccordion, ...contentProps } = props;
     const accordionContext = useAccordionContext(ACCORDION_NAME, __scopeAccordion);
     const itemContext = useAccordionItemContext(CONTENT_NAME, __scopeAccordion);
     const collapsibleScope = useCollapsibleScope(__scopeAccordion);
     return (0, import_jsx_runtime.jsx)(
-      Content,
+      CollapsibleContent,
       {
         role: "region",
         "aria-labelledby": itemContext.triggerId,
@@ -325,28 +351,23 @@ var AccordionContent = React.forwardRef(
         }
       }
     );
-  }
+  }, "AccordionContent")
 );
-AccordionContent.displayName = CONTENT_NAME;
 function getState(open) {
   return open ? "open" : "closed";
 }
-var Root2 = Accordion;
-var Item = AccordionItem;
-var Header = AccordionHeader;
-var Trigger2 = AccordionTrigger;
-var Content2 = AccordionContent;
+__name(getState, "getState");
 export {
   Accordion,
   AccordionContent,
   AccordionHeader,
   AccordionItem,
   AccordionTrigger,
-  Content2 as Content,
-  Header,
-  Item,
-  Root2 as Root,
-  Trigger2 as Trigger,
+  AccordionContent as Content,
+  AccordionHeader as Header,
+  AccordionItem as Item,
+  Accordion as Root,
+  AccordionTrigger as Trigger,
   createAccordionScope
 };
 //# sourceMappingURL=@radix-ui_react-accordion.js.map

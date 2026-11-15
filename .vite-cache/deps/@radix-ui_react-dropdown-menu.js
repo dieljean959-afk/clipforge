@@ -1,66 +1,69 @@
 "use client";
 import {
-  Anchor2,
-  Arrow2,
-  CheckboxItem,
-  Content2,
-  Group,
-  Item2,
-  ItemIndicator,
-  Label,
-  Portal,
-  RadioGroup,
-  RadioItem,
-  Root3,
-  Separator,
-  Sub,
-  SubContent,
-  SubTrigger,
+  Menu,
+  MenuAnchor,
+  MenuArrow,
+  MenuCheckboxItem,
+  MenuContent,
+  MenuGroup,
+  MenuItem,
+  MenuItemIndicator,
+  MenuLabel,
+  MenuPortal,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuSub,
+  MenuSubContent,
+  MenuSubTrigger,
   createMenuScope
-} from "./chunk-HWFTJFBB.js";
-import "./chunk-RIZNXKLH.js";
-import "./chunk-322JQO6F.js";
-import "./chunk-R3M5WQK6.js";
-import "./chunk-EMF3DAXS.js";
-import "./chunk-HXA2JS2N.js";
-import "./chunk-C257UVSV.js";
-import "./chunk-GP3D6AGI.js";
-import "./chunk-7QZJCKEB.js";
-import "./chunk-NRHAWQBI.js";
+} from "./chunk-Y3FSNPSL.js";
+import "./chunk-CD6LTO34.js";
+import "./chunk-5GE3UBVK.js";
+import "./chunk-O2ZAVM3M.js";
+import "./chunk-2NL7CCDF.js";
+import "./chunk-EMHYOJUE.js";
+import "./chunk-QFUDUECV.js";
+import "./chunk-KHPBFKCS.js";
+import "./chunk-ZAPJPNAP.js";
+import "./chunk-X7Z4QOHD.js";
 import {
   useId
-} from "./chunk-JSG27HSD.js";
+} from "./chunk-ROQYZUNY.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
-import "./chunk-JXAX32XB.js";
+} from "./chunk-NLDEGCMH.js";
+import "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-E24ISM2B.js";
+import "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
+import "./chunk-BYNCKTIQ.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-dropdown-menu/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var DROPDOWN_MENU_NAME = "DropdownMenu";
 var [createDropdownMenuContext, createDropdownMenuScope] = createContextScope(
   DROPDOWN_MENU_NAME,
@@ -68,7 +71,7 @@ var [createDropdownMenuContext, createDropdownMenuScope] = createContextScope(
 );
 var useMenuScope = createMenuScope();
 var [DropdownMenuProvider, useDropdownMenuContext] = createDropdownMenuContext(DROPDOWN_MENU_NAME);
-var DropdownMenu = (props) => {
+var DropdownMenu = __name((props) => {
   const {
     __scopeDropdownMenu,
     children,
@@ -97,19 +100,19 @@ var DropdownMenu = (props) => {
       onOpenChange: setOpen,
       onOpenToggle: React.useCallback(() => setOpen((prevOpen) => !prevOpen), [setOpen]),
       modal,
-      children: (0, import_jsx_runtime.jsx)(Root3, { ...menuScope, open, onOpenChange: setOpen, dir, modal, children })
+      children: (0, import_jsx_runtime.jsx)(Menu, { ...menuScope, open, onOpenChange: setOpen, dir, modal, children })
     }
   );
-};
-DropdownMenu.displayName = DROPDOWN_MENU_NAME;
+}, "DropdownMenu");
 var TRIGGER_NAME = "DropdownMenuTrigger";
 var DropdownMenuTrigger = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function DropdownMenuTrigger2(props, forwardedRef) {
     const { __scopeDropdownMenu, disabled = false, ...triggerProps } = props;
     const context = useDropdownMenuContext(TRIGGER_NAME, __scopeDropdownMenu);
     const menuScope = useMenuScope(__scopeDropdownMenu);
     const composedRefs = useComposedRefs(forwardedRef, context.triggerRef);
-    return (0, import_jsx_runtime.jsx)(Anchor2, { asChild: true, ...menuScope, children: (0, import_jsx_runtime.jsx)(
+    return (0, import_jsx_runtime.jsx)(MenuAnchor, { asChild: true, ...menuScope, children: (0, import_jsx_runtime.jsx)(
       Primitive.button,
       {
         type: "button",
@@ -136,25 +139,23 @@ var DropdownMenuTrigger = React.forwardRef(
         })
       }
     ) });
-  }
+  }, "DropdownMenuTrigger")
 );
-DropdownMenuTrigger.displayName = TRIGGER_NAME;
-var PORTAL_NAME = "DropdownMenuPortal";
-var DropdownMenuPortal = (props) => {
+var DropdownMenuPortal = __name((props) => {
   const { __scopeDropdownMenu, ...portalProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
-  return (0, import_jsx_runtime.jsx)(Portal, { ...menuScope, ...portalProps });
-};
-DropdownMenuPortal.displayName = PORTAL_NAME;
+  return (0, import_jsx_runtime.jsx)(MenuPortal, { ...menuScope, ...portalProps });
+}, "DropdownMenuPortal");
 var CONTENT_NAME = "DropdownMenuContent";
 var DropdownMenuContent = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function DropdownMenuContent2(props, forwardedRef) {
     const { __scopeDropdownMenu, ...contentProps } = props;
     const context = useDropdownMenuContext(CONTENT_NAME, __scopeDropdownMenu);
     const menuScope = useMenuScope(__scopeDropdownMenu);
     const hasInteractedOutsideRef = React.useRef(false);
     return (0, import_jsx_runtime.jsx)(
-      Content2,
+      MenuContent,
       {
         id: context.contentId,
         "aria-labelledby": context.triggerId,
@@ -185,81 +186,66 @@ var DropdownMenuContent = React.forwardRef(
         }
       }
     );
-  }
+  }, "DropdownMenuContent")
 );
-DropdownMenuContent.displayName = CONTENT_NAME;
-var GROUP_NAME = "DropdownMenuGroup";
 var DropdownMenuGroup = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function DropdownMenuGroup2(props, forwardedRef) {
     const { __scopeDropdownMenu, ...groupProps } = props;
     const menuScope = useMenuScope(__scopeDropdownMenu);
-    return (0, import_jsx_runtime.jsx)(Group, { ...menuScope, ...groupProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuGroup, { ...menuScope, ...groupProps, ref: forwardedRef });
+  }, "DropdownMenuGroup")
 );
-DropdownMenuGroup.displayName = GROUP_NAME;
-var LABEL_NAME = "DropdownMenuLabel";
 var DropdownMenuLabel = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function DropdownMenuLabel2(props, forwardedRef) {
     const { __scopeDropdownMenu, ...labelProps } = props;
     const menuScope = useMenuScope(__scopeDropdownMenu);
-    return (0, import_jsx_runtime.jsx)(Label, { ...menuScope, ...labelProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuLabel, { ...menuScope, ...labelProps, ref: forwardedRef });
+  }, "DropdownMenuLabel")
 );
-DropdownMenuLabel.displayName = LABEL_NAME;
-var ITEM_NAME = "DropdownMenuItem";
 var DropdownMenuItem = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function DropdownMenuItem2(props, forwardedRef) {
     const { __scopeDropdownMenu, ...itemProps } = props;
     const menuScope = useMenuScope(__scopeDropdownMenu);
-    return (0, import_jsx_runtime.jsx)(Item2, { ...menuScope, ...itemProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuItem, { ...menuScope, ...itemProps, ref: forwardedRef });
+  }, "DropdownMenuItem")
 );
-DropdownMenuItem.displayName = ITEM_NAME;
-var CHECKBOX_ITEM_NAME = "DropdownMenuCheckboxItem";
-var DropdownMenuCheckboxItem = React.forwardRef((props, forwardedRef) => {
+var DropdownMenuCheckboxItem = React.forwardRef(__name(function DropdownMenuCheckboxItem2(props, forwardedRef) {
   const { __scopeDropdownMenu, ...checkboxItemProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
-  return (0, import_jsx_runtime.jsx)(CheckboxItem, { ...menuScope, ...checkboxItemProps, ref: forwardedRef });
-});
-DropdownMenuCheckboxItem.displayName = CHECKBOX_ITEM_NAME;
-var RADIO_GROUP_NAME = "DropdownMenuRadioGroup";
-var DropdownMenuRadioGroup = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuCheckboxItem, { ...menuScope, ...checkboxItemProps, ref: forwardedRef });
+}, "DropdownMenuCheckboxItem"));
+var DropdownMenuRadioGroup = React.forwardRef(__name(function DropdownMenuRadioGroup2(props, forwardedRef) {
   const { __scopeDropdownMenu, ...radioGroupProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
-  return (0, import_jsx_runtime.jsx)(RadioGroup, { ...menuScope, ...radioGroupProps, ref: forwardedRef });
-});
-DropdownMenuRadioGroup.displayName = RADIO_GROUP_NAME;
-var RADIO_ITEM_NAME = "DropdownMenuRadioItem";
-var DropdownMenuRadioItem = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuRadioGroup, { ...menuScope, ...radioGroupProps, ref: forwardedRef });
+}, "DropdownMenuRadioGroup"));
+var DropdownMenuRadioItem = React.forwardRef(__name(function DropdownMenuRadioItem2(props, forwardedRef) {
   const { __scopeDropdownMenu, ...radioItemProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
-  return (0, import_jsx_runtime.jsx)(RadioItem, { ...menuScope, ...radioItemProps, ref: forwardedRef });
-});
-DropdownMenuRadioItem.displayName = RADIO_ITEM_NAME;
-var INDICATOR_NAME = "DropdownMenuItemIndicator";
-var DropdownMenuItemIndicator = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuRadioItem, { ...menuScope, ...radioItemProps, ref: forwardedRef });
+}, "DropdownMenuRadioItem"));
+var DropdownMenuItemIndicator = React.forwardRef(__name(function DropdownMenuItemIndicator2(props, forwardedRef) {
   const { __scopeDropdownMenu, ...itemIndicatorProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
-  return (0, import_jsx_runtime.jsx)(ItemIndicator, { ...menuScope, ...itemIndicatorProps, ref: forwardedRef });
-});
-DropdownMenuItemIndicator.displayName = INDICATOR_NAME;
-var SEPARATOR_NAME = "DropdownMenuSeparator";
-var DropdownMenuSeparator = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuItemIndicator, { ...menuScope, ...itemIndicatorProps, ref: forwardedRef });
+}, "DropdownMenuItemIndicator"));
+var DropdownMenuSeparator = React.forwardRef(__name(function DropdownMenuSeparator2(props, forwardedRef) {
   const { __scopeDropdownMenu, ...separatorProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
-  return (0, import_jsx_runtime.jsx)(Separator, { ...menuScope, ...separatorProps, ref: forwardedRef });
-});
-DropdownMenuSeparator.displayName = SEPARATOR_NAME;
-var ARROW_NAME = "DropdownMenuArrow";
+  return (0, import_jsx_runtime.jsx)(MenuSeparator, { ...menuScope, ...separatorProps, ref: forwardedRef });
+}, "DropdownMenuSeparator"));
 var DropdownMenuArrow = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function DropdownMenuArrow2(props, forwardedRef) {
     const { __scopeDropdownMenu, ...arrowProps } = props;
     const menuScope = useMenuScope(__scopeDropdownMenu);
-    return (0, import_jsx_runtime.jsx)(Arrow2, { ...menuScope, ...arrowProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuArrow, { ...menuScope, ...arrowProps, ref: forwardedRef });
+  }, "DropdownMenuArrow")
 );
-DropdownMenuArrow.displayName = ARROW_NAME;
-var DropdownMenuSub = (props) => {
+var DropdownMenuSub = __name((props) => {
   const { __scopeDropdownMenu, children, open: openProp, onOpenChange, defaultOpen } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
   const [open, setOpen] = useControllableState({
@@ -268,21 +254,18 @@ var DropdownMenuSub = (props) => {
     onChange: onOpenChange,
     caller: "DropdownMenuSub"
   });
-  return (0, import_jsx_runtime.jsx)(Sub, { ...menuScope, open, onOpenChange: setOpen, children });
-};
-var SUB_TRIGGER_NAME = "DropdownMenuSubTrigger";
-var DropdownMenuSubTrigger = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuSub, { ...menuScope, open, onOpenChange: setOpen, children });
+}, "DropdownMenuSub");
+var DropdownMenuSubTrigger = React.forwardRef(__name(function DropdownMenuSubTrigger2(props, forwardedRef) {
   const { __scopeDropdownMenu, ...subTriggerProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
-  return (0, import_jsx_runtime.jsx)(SubTrigger, { ...menuScope, ...subTriggerProps, ref: forwardedRef });
-});
-DropdownMenuSubTrigger.displayName = SUB_TRIGGER_NAME;
-var SUB_CONTENT_NAME = "DropdownMenuSubContent";
-var DropdownMenuSubContent = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuSubTrigger, { ...menuScope, ...subTriggerProps, ref: forwardedRef });
+}, "DropdownMenuSubTrigger"));
+var DropdownMenuSubContent = React.forwardRef(__name(function DropdownMenuSubContent2(props, forwardedRef) {
   const { __scopeDropdownMenu, ...subContentProps } = props;
   const menuScope = useMenuScope(__scopeDropdownMenu);
   return (0, import_jsx_runtime.jsx)(
-    SubContent,
+    MenuSubContent,
     {
       ...menuScope,
       ...subContentProps,
@@ -300,28 +283,11 @@ var DropdownMenuSubContent = React.forwardRef((props, forwardedRef) => {
       }
     }
   );
-});
-DropdownMenuSubContent.displayName = SUB_CONTENT_NAME;
-var Root2 = DropdownMenu;
-var Trigger = DropdownMenuTrigger;
-var Portal2 = DropdownMenuPortal;
-var Content22 = DropdownMenuContent;
-var Group2 = DropdownMenuGroup;
-var Label2 = DropdownMenuLabel;
-var Item22 = DropdownMenuItem;
-var CheckboxItem2 = DropdownMenuCheckboxItem;
-var RadioGroup2 = DropdownMenuRadioGroup;
-var RadioItem2 = DropdownMenuRadioItem;
-var ItemIndicator2 = DropdownMenuItemIndicator;
-var Separator2 = DropdownMenuSeparator;
-var Arrow22 = DropdownMenuArrow;
-var Sub2 = DropdownMenuSub;
-var SubTrigger2 = DropdownMenuSubTrigger;
-var SubContent2 = DropdownMenuSubContent;
+}, "DropdownMenuSubContent"));
 export {
-  Arrow22 as Arrow,
-  CheckboxItem2 as CheckboxItem,
-  Content22 as Content,
+  DropdownMenuArrow as Arrow,
+  DropdownMenuCheckboxItem as CheckboxItem,
+  DropdownMenuContent as Content,
   DropdownMenu,
   DropdownMenuArrow,
   DropdownMenuCheckboxItem,
@@ -338,19 +304,19 @@ export {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-  Group2 as Group,
-  Item22 as Item,
-  ItemIndicator2 as ItemIndicator,
-  Label2 as Label,
-  Portal2 as Portal,
-  RadioGroup2 as RadioGroup,
-  RadioItem2 as RadioItem,
-  Root2 as Root,
-  Separator2 as Separator,
-  Sub2 as Sub,
-  SubContent2 as SubContent,
-  SubTrigger2 as SubTrigger,
-  Trigger,
+  DropdownMenuGroup as Group,
+  DropdownMenuItem as Item,
+  DropdownMenuItemIndicator as ItemIndicator,
+  DropdownMenuLabel as Label,
+  DropdownMenuPortal as Portal,
+  DropdownMenuRadioGroup as RadioGroup,
+  DropdownMenuRadioItem as RadioItem,
+  DropdownMenu as Root,
+  DropdownMenuSeparator as Separator,
+  DropdownMenuSub as Sub,
+  DropdownMenuSubContent as SubContent,
+  DropdownMenuSubTrigger as SubTrigger,
+  DropdownMenuTrigger as Trigger,
   createDropdownMenuScope
 };
 //# sourceMappingURL=@radix-ui_react-dropdown-menu.js.map

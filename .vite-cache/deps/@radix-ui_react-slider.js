@@ -1,49 +1,56 @@
 "use client";
 import {
   clamp
-} from "./chunk-TCQMTAGU.js";
-import {
-  usePrevious
-} from "./chunk-RLQSASSA.js";
+} from "./chunk-T7BBVHN7.js";
 import {
   useSize
-} from "./chunk-R3M5WQK6.js";
+} from "./chunk-O2ZAVM3M.js";
 import {
   createCollection
-} from "./chunk-EMF3DAXS.js";
+} from "./chunk-2NL7CCDF.js";
 import {
   useDirection
-} from "./chunk-HXA2JS2N.js";
+} from "./chunk-EMHYOJUE.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
+} from "./chunk-NLDEGCMH.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-E24ISM2B.js";
+import "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-slider/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var Orientation = {
+  Vertical: "vertical",
+  Horizontal: "horizontal"
+};
+var Direction = {
+  LTR: "ltr",
+  RTL: "rtl"
+};
 var PAGE_KEYS = ["PageUp", "PageDown"];
 var ARROW_KEYS = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
 var BACK_KEYS = {
@@ -59,21 +66,23 @@ var [createSliderContext, createSliderScope] = createContextScope(SLIDER_NAME, [
 ]);
 var [SliderProvider, useSliderContext] = createSliderContext(SLIDER_NAME);
 var Slider = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function Slider2(props, forwardedRef) {
     const {
       name,
       min = 0,
       max = 100,
       step = 1,
-      orientation = "horizontal",
+      orientation = Orientation.Horizontal,
       disabled = false,
       minStepsBetweenThumbs = 0,
+      preserveThumbOrder = false,
       defaultValue = [min],
       value,
-      onValueChange = () => {
-      },
-      onValueCommit = () => {
-      },
+      onValueChange = __name(() => {
+      }, "onValueChange"),
+      onValueCommit = __name(() => {
+      }, "onValueCommit"),
       inverted = false,
       form,
       ...sliderProps
@@ -81,12 +90,15 @@ var Slider = React.forwardRef(
     const thumbRefs = React.useRef(/* @__PURE__ */ new Set());
     const valueIndexToChangeRef = React.useRef(0);
     const isKeyboardInteractionRef = React.useRef(false);
-    const isHorizontal = orientation === "horizontal";
+    const [userRequestedValues, setUserRequestedValues] = React.useState(null);
+    const isHorizontal = orientation === Orientation.Horizontal;
     const SliderOrientation = isHorizontal ? SliderHorizontal : SliderVertical;
+    const [control, setControl] = React.useState(null);
+    const composedRefs = useComposedRefs(forwardedRef, setControl);
     const [values = [], setValues] = useControllableState({
       prop: value,
       defaultProp: defaultValue,
-      onChange: (value2) => {
+      onChange: __name((value2) => {
         const thumbs = [...thumbRefs.current];
         thumbs[valueIndexToChangeRef.current]?.focus({
           preventScroll: true,
@@ -94,38 +106,70 @@ var Slider = React.forwardRef(
         });
         isKeyboardInteractionRef.current = false;
         onValueChange(value2);
-      }
+      }, "onChange")
     });
     const valuesBeforeSlideStartRef = React.useRef(values);
+    const initialValuesRef = React.useRef(values);
+    React.useEffect(() => {
+      const associatedForm = form ? control?.ownerDocument.getElementById(form) : control?.closest("form");
+      if (associatedForm instanceof HTMLFormElement) {
+        const reset = __name(() => setValues(initialValuesRef.current), "reset");
+        associatedForm.addEventListener("reset", reset);
+        return () => associatedForm.removeEventListener("reset", reset);
+      }
+    }, [control, form, setValues]);
     function handleSlideStart(value2) {
       const closestIndex = getClosestValueIndex(values, value2);
       updateValues(value2, closestIndex);
     }
+    __name(handleSlideStart, "handleSlideStart");
     function handleSlideMove(value2) {
       updateValues(value2, valueIndexToChangeRef.current);
     }
+    __name(handleSlideMove, "handleSlideMove");
     function handleSlideEnd() {
-      const prevValue = valuesBeforeSlideStartRef.current[valueIndexToChangeRef.current];
-      const nextValue = values[valueIndexToChangeRef.current];
-      const hasChanged = nextValue !== prevValue;
+      const hasChanged = String(values) !== String(valuesBeforeSlideStartRef.current);
       if (hasChanged) onValueCommit(values);
     }
+    __name(handleSlideEnd, "handleSlideEnd");
     function updateValues(value2, atIndex, { commit } = { commit: false }) {
       const decimalCount = getDecimalCount(step);
       const snapToStep = roundValue(Math.round((value2 - min) / step) * step + min, decimalCount);
       const nextValue = clamp(snapToStep, [min, max]);
+      const minStepsDistance = minStepsBetweenThumbs * step;
+      function getNextValues(prevValues) {
+        const constrainedValue = preserveThumbOrder ? clamp(nextValue, [
+          prevValues[atIndex - 1] === void 0 ? min : prevValues[atIndex - 1] + minStepsDistance,
+          prevValues[atIndex + 1] === void 0 ? max : prevValues[atIndex + 1] - minStepsDistance
+        ]) : nextValue;
+        const nextValues = getNextSortedValues(prevValues, constrainedValue, atIndex);
+        if (!hasMinStepsBetweenValues(nextValues, minStepsDistance)) {
+          return null;
+        }
+        return {
+          nextValues,
+          changedIndex: preserveThumbOrder ? atIndex : nextValues.indexOf(constrainedValue),
+          hasChanged: String(nextValues) !== String(prevValues)
+        };
+      }
+      __name(getNextValues, "getNextValues");
+      const requested = getNextValues(values);
+      if (requested?.hasChanged) {
+        setUserRequestedValues(requested.nextValues);
+      }
       setValues((prevValues = []) => {
-        const nextValues = getNextSortedValues(prevValues, nextValue, atIndex);
-        if (hasMinStepsBetweenValues(nextValues, minStepsBetweenThumbs * step)) {
-          valueIndexToChangeRef.current = nextValues.indexOf(nextValue);
-          const hasChanged = String(nextValues) !== String(prevValues);
-          if (hasChanged && commit) onValueCommit(nextValues);
-          return hasChanged ? nextValues : prevValues;
-        } else {
+        const next = getNextValues(prevValues);
+        if (!next) {
           return prevValues;
         }
+        valueIndexToChangeRef.current = next.changedIndex;
+        if (next.hasChanged && commit) {
+          onValueCommit(next.nextValues);
+        }
+        return next.hasChanged ? next.nextValues : prevValues;
       });
     }
+    __name(updateValues, "updateValues");
     return (0, import_jsx_runtime.jsx)(
       SliderProvider,
       {
@@ -139,13 +183,14 @@ var Slider = React.forwardRef(
         values,
         orientation,
         form,
+        userRequestedValues,
         children: (0, import_jsx_runtime.jsx)(Collection.Provider, { scope: props.__scopeSlider, children: (0, import_jsx_runtime.jsx)(Collection.Slot, { scope: props.__scopeSlider, children: (0, import_jsx_runtime.jsx)(
           SliderOrientation,
           {
             "aria-disabled": disabled,
             "data-disabled": disabled ? "" : void 0,
             ...sliderProps,
-            ref: forwardedRef,
+            ref: composedRefs,
             onPointerDown: composeEventHandlers(sliderProps.onPointerDown, () => {
               if (!disabled) {
                 valuesBeforeSlideStartRef.current = values;
@@ -178,17 +223,21 @@ var Slider = React.forwardRef(
                 const multiplier = isSkipKey ? 10 : 1;
                 const atIndex = valueIndexToChangeRef.current;
                 const value2 = values[atIndex];
-                const stepInDirection = step * multiplier * stepDirection;
-                updateValues(value2 + stepInDirection, atIndex, { commit: true });
+                const nextValue = getNextStepValue(value2, {
+                  min,
+                  step,
+                  direction: stepDirection,
+                  multiplier
+                });
+                updateValues(nextValue, atIndex, { commit: true });
               }
             }
           }
         ) }) })
       }
     );
-  }
+  }, "Slider")
 );
-Slider.displayName = SLIDER_NAME;
 var [SliderOrientationProvider, useSliderOrientationContext] = createSliderContext(SLIDER_NAME, {
   startEdge: "left",
   endEdge: "right",
@@ -196,7 +245,8 @@ var [SliderOrientationProvider, useSliderOrientationContext] = createSliderConte
   direction: 1
 });
 var SliderHorizontal = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function SliderHorizontal2(props, forwardedRef) {
     const {
       min,
       max,
@@ -212,7 +262,7 @@ var SliderHorizontal = React.forwardRef(
     const composedRefs = useComposedRefs(forwardedRef, setSlider);
     const rectRef = React.useRef(void 0);
     const direction = useDirection(dir);
-    const isDirectionLTR = direction === "ltr";
+    const isDirectionLTR = direction === Direction.LTR;
     const isSlidingFromLeft = isDirectionLTR && !inverted || !isDirectionLTR && inverted;
     function getValueFromPointer(pointerPosition) {
       const rect = rectRef.current || slider.getBoundingClientRect();
@@ -222,6 +272,7 @@ var SliderHorizontal = React.forwardRef(
       rectRef.current = rect;
       return value(pointerPosition - rect.left);
     }
+    __name(getValueFromPointer, "getValueFromPointer");
     return (0, import_jsx_runtime.jsx)(
       SliderOrientationProvider,
       {
@@ -262,10 +313,10 @@ var SliderHorizontal = React.forwardRef(
         )
       }
     );
-  }
+  }, "SliderHorizontal")
 );
 var SliderVertical = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function SliderVertical2(props, forwardedRef) {
     const {
       min,
       max,
@@ -288,6 +339,7 @@ var SliderVertical = React.forwardRef(
       rectRef.current = rect;
       return value(pointerPosition - rect.top);
     }
+    __name(getValueFromPointer, "getValueFromPointer");
     return (0, import_jsx_runtime.jsx)(
       SliderOrientationProvider,
       {
@@ -327,10 +379,10 @@ var SliderVertical = React.forwardRef(
         )
       }
     );
-  }
+  }, "SliderVertical")
 );
 var SliderImpl = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function SliderImpl2(props, forwardedRef) {
     const {
       __scopeSlider,
       onSlideStart,
@@ -382,11 +434,11 @@ var SliderImpl = React.forwardRef(
         })
       }
     );
-  }
+  }, "SliderImpl")
 );
 var TRACK_NAME = "SliderTrack";
 var SliderTrack = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function SliderTrack2(props, forwardedRef) {
     const { __scopeSlider, ...trackProps } = props;
     const context = useSliderContext(TRACK_NAME, __scopeSlider);
     return (0, import_jsx_runtime.jsx)(
@@ -398,12 +450,11 @@ var SliderTrack = React.forwardRef(
         ref: forwardedRef
       }
     );
-  }
+  }, "SliderTrack")
 );
-SliderTrack.displayName = TRACK_NAME;
 var RANGE_NAME = "SliderRange";
 var SliderRange = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function SliderRange2(props, forwardedRef) {
     const { __scopeSlider, ...rangeProps } = props;
     const context = useSliderContext(RANGE_NAME, __scopeSlider);
     const orientation = useSliderOrientationContext(RANGE_NAME, __scopeSlider);
@@ -429,9 +480,8 @@ var SliderRange = React.forwardRef(
         }
       }
     );
-  }
+  }, "SliderRange")
 );
-SliderRange.displayName = RANGE_NAME;
 var THUMB_NAME = "SliderThumb";
 var [SliderThumbContextProvider, useSliderThumbContext] = createSliderContext(THUMB_NAME);
 var THUMB_PROVIDER_NAME = "SliderThumbProvider";
@@ -476,10 +526,11 @@ function SliderThumbProvider(props) {
   };
   return (0, import_jsx_runtime.jsx)(SliderThumbContextProvider, { scope: __scopeSlider, ...thumbContext, children: isFunction(internal_do_not_use_render) ? internal_do_not_use_render(thumbContext) : children });
 }
-SliderThumbProvider.displayName = THUMB_PROVIDER_NAME;
+__name(SliderThumbProvider, "SliderThumbProvider");
 var THUMB_TRIGGER_NAME = "SliderThumbTrigger";
 var SliderThumbTrigger = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function SliderThumbTrigger2(props, forwardedRef) {
     const { __scopeSlider, ...thumbProps } = props;
     const context = useSliderContext(THUMB_TRIGGER_NAME, __scopeSlider);
     const orientation = useSliderOrientationContext(THUMB_TRIGGER_NAME, __scopeSlider);
@@ -521,11 +572,10 @@ var SliderThumbTrigger = React.forwardRef(
         ) })
       }
     );
-  }
+  }, "SliderThumbTrigger")
 );
-SliderThumbTrigger.displayName = THUMB_TRIGGER_NAME;
 var SliderThumb = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function SliderThumb2(props, forwardedRef) {
     const { __scopeSlider, name, ...thumbProps } = props;
     return (0, import_jsx_runtime.jsx)(
       SliderThumbProvider,
@@ -551,28 +601,45 @@ var SliderThumb = React.forwardRef(
         ] })
       }
     );
-  }
+  }, "SliderThumb")
 );
-SliderThumb.displayName = THUMB_NAME;
 var BUBBLE_INPUT_NAME = "SliderBubbleInput";
 var SliderBubbleInput = React.forwardRef(
-  ({ __scopeSlider, ...props }, forwardedRef) => {
-    const { value, name, form } = useSliderThumbContext(BUBBLE_INPUT_NAME, __scopeSlider);
+  // blank line to reduce diff noise
+  __name(function SliderBubbleInput2({ __scopeSlider, onInput, ...props }, forwardedRef) {
+    const { index, value, name, form } = useSliderThumbContext(BUBBLE_INPUT_NAME, __scopeSlider);
+    const { userRequestedValues } = useSliderContext(BUBBLE_INPUT_NAME, __scopeSlider);
     const ref = React.useRef(null);
     const composedRefs = useComposedRefs(ref, forwardedRef);
-    const prevValue = usePrevious(value);
+    const shouldStopInputPropagationRef = React.useRef(false);
+    const prevValueRef = React.useRef(value);
+    const handledUserRequestedValuesRef = React.useRef(userRequestedValues);
+    const prevUserRequestedValuesRef = React.useRef(userRequestedValues);
     React.useEffect(() => {
       const input = ref.current;
-      if (!input) return;
+      if (!input) {
+        return;
+      }
       const inputProto = window.HTMLInputElement.prototype;
       const descriptor = Object.getOwnPropertyDescriptor(inputProto, "value");
       const setValue = descriptor.set;
-      if (prevValue !== value && setValue) {
+      const prevValue = prevValueRef.current;
+      const valueChanged = prevValue !== value;
+      prevValueRef.current = value;
+      const isUserRequestFromThisRender = userRequestedValues !== prevUserRequestedValuesRef.current;
+      prevUserRequestedValuesRef.current = userRequestedValues;
+      if (valueChanged && setValue) {
+        const hasUnhandledUserRequest = userRequestedValues !== handledUserRequestedValuesRef.current;
+        handledUserRequestedValuesRef.current = userRequestedValues;
+        const requestedValue = userRequestedValues?.[index];
+        const isUserInteraction = hasUnhandledUserRequest && (isUserRequestFromThisRender && requestedValue !== prevValue || requestedValue === value);
+        shouldStopInputPropagationRef.current = !isUserInteraction;
         const event = new Event("input", { bubbles: true });
         setValue.call(input, value);
         input.dispatchEvent(event);
+        shouldStopInputPropagationRef.current = false;
       }
-    }, [prevValue, value]);
+    }, [index, value, userRequestedValues]);
     return (0, import_jsx_runtime.jsx)(
       Primitive.input,
       {
@@ -581,23 +648,29 @@ var SliderBubbleInput = React.forwardRef(
         form,
         ...props,
         ref: composedRefs,
-        defaultValue: value
+        defaultValue: value,
+        onInput: composeEventHandlers(onInput, (event) => {
+          if (shouldStopInputPropagationRef.current) {
+            event.stopPropagation();
+          }
+        })
       }
     );
-  }
+  }, "SliderBubbleInput")
 );
-SliderBubbleInput.displayName = BUBBLE_INPUT_NAME;
 function getNextSortedValues(prevValues = [], nextValue, atIndex) {
   const nextValues = [...prevValues];
   nextValues[atIndex] = nextValue;
   return nextValues.sort((a, b) => a - b);
 }
+__name(getNextSortedValues, "getNextSortedValues");
 function convertValueToPercentage(value, min, max) {
   const maxSteps = max - min;
   const percentPerStep = 100 / maxSteps;
   const percentage = percentPerStep * (value - min);
   return clamp(percentage, [0, 100]);
 }
+__name(convertValueToPercentage, "convertValueToPercentage");
 function getLabel(index, totalValues) {
   if (totalValues > 2) {
     return `Value ${index + 1} of ${totalValues}`;
@@ -607,21 +680,25 @@ function getLabel(index, totalValues) {
     return void 0;
   }
 }
+__name(getLabel, "getLabel");
 function getClosestValueIndex(values, nextValue) {
   if (values.length === 1) return 0;
   const distances = values.map((value) => Math.abs(value - nextValue));
   const closestDistance = Math.min(...distances);
   return distances.indexOf(closestDistance);
 }
+__name(getClosestValueIndex, "getClosestValueIndex");
 function getThumbInBoundsOffset(width, left, direction) {
   const halfWidth = width / 2;
   const halfPercent = 50;
   const offset = linearScale([0, halfPercent], [0, halfWidth]);
   return (halfWidth - offset(left) * direction) * direction;
 }
+__name(getThumbInBoundsOffset, "getThumbInBoundsOffset");
 function getStepsBetweenValues(values) {
   return values.slice(0, -1).map((value, index) => values[index + 1] - value);
 }
+__name(getStepsBetweenValues, "getStepsBetweenValues");
 function hasMinStepsBetweenValues(values, minStepsBetweenValues) {
   if (minStepsBetweenValues > 0) {
     const stepsBetweenValues = getStepsBetweenValues(values);
@@ -630,6 +707,7 @@ function hasMinStepsBetweenValues(values, minStepsBetweenValues) {
   }
   return true;
 }
+__name(hasMinStepsBetweenValues, "hasMinStepsBetweenValues");
 function linearScale(input, output) {
   return (value) => {
     if (input[0] === input[1] || output[0] === output[1]) return output[0];
@@ -637,6 +715,7 @@ function linearScale(input, output) {
     return output[0] + ratio * (value - input[0]);
   };
 }
+__name(linearScale, "linearScale");
 function getDecimalCount(value) {
   if (!Number.isFinite(value)) return 0;
   const str = value.toString();
@@ -649,13 +728,37 @@ function getDecimalCount(value) {
   const decimalPart = str.split(".")[1];
   return decimalPart ? decimalPart.length : 0;
 }
+__name(getDecimalCount, "getDecimalCount");
 function roundValue(value, decimalCount) {
   const rounder = Math.pow(10, decimalCount);
   return Math.round(value * rounder) / rounder;
 }
+__name(roundValue, "roundValue");
+function getNextStepValue(value, {
+  min,
+  step,
+  direction,
+  multiplier
+}) {
+  const decimalCount = getDecimalCount(step);
+  const stepsFromMin = (value - min) / step;
+  const nearestSteps = Math.round(stepsFromMin);
+  const isAligned = roundValue(nearestSteps * step + min, decimalCount) === roundValue(value, decimalCount);
+  let nextSteps;
+  if (isAligned) {
+    nextSteps = nearestSteps + multiplier * direction;
+  } else if (direction > 0) {
+    nextSteps = Math.ceil(stepsFromMin);
+  } else {
+    nextSteps = Math.floor(stepsFromMin);
+  }
+  return roundValue(nextSteps * step + min, decimalCount);
+}
+__name(getNextStepValue, "getNextStepValue");
 function isFunction(value) {
   return typeof value === "function";
 }
+__name(isFunction, "isFunction");
 export {
   SliderRange as Range,
   Slider as Root,

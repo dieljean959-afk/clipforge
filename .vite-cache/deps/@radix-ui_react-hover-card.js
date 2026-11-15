@@ -1,52 +1,55 @@
 "use client";
 import {
-  Anchor,
-  Arrow,
-  Content,
-  Root2,
+  Popper,
+  PopperAnchor,
+  PopperArrow,
+  PopperContent,
   createPopperScope
-} from "./chunk-322JQO6F.js";
-import "./chunk-R3M5WQK6.js";
+} from "./chunk-5GE3UBVK.js";
+import "./chunk-O2ZAVM3M.js";
 import {
-  Portal
-} from "./chunk-GP3D6AGI.js";
+  Portal,
+  useFocusScopeBranch
+} from "./chunk-KHPBFKCS.js";
 import {
   DismissableLayer
-} from "./chunk-7QZJCKEB.js";
-import "./chunk-NRHAWQBI.js";
+} from "./chunk-ZAPJPNAP.js";
+import "./chunk-X7Z4QOHD.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
+} from "./chunk-NLDEGCMH.js";
 import {
   Presence
-} from "./chunk-JXAX32XB.js";
+} from "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-E24ISM2B.js";
+import "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-hover-card/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var originalBodyUserSelect;
 var HOVERCARD_NAME = "HoverCard";
 var [createHoverCardContext, createHoverCardScope] = createContextScope(HOVERCARD_NAME, [
@@ -54,7 +57,7 @@ var [createHoverCardContext, createHoverCardScope] = createContextScope(HOVERCAR
 ]);
 var usePopperScope = createPopperScope();
 var [HoverCardProvider, useHoverCardContext] = createHoverCardContext(HOVERCARD_NAME);
-var HoverCard = (props) => {
+var HoverCard = __name((props) => {
   const {
     __scopeHoverCard,
     children,
@@ -103,18 +106,18 @@ var HoverCard = (props) => {
       onDismiss: handleDismiss,
       hasSelectionRef,
       isPointerDownOnContentRef,
-      children: (0, import_jsx_runtime.jsx)(Root2, { ...popperScope, children })
+      children: (0, import_jsx_runtime.jsx)(Popper, { ...popperScope, children })
     }
   );
-};
-HoverCard.displayName = HOVERCARD_NAME;
+}, "HoverCard");
 var TRIGGER_NAME = "HoverCardTrigger";
 var HoverCardTrigger = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function HoverCardTrigger2(props, forwardedRef) {
     const { __scopeHoverCard, ...triggerProps } = props;
     const context = useHoverCardContext(TRIGGER_NAME, __scopeHoverCard);
     const popperScope = usePopperScope(__scopeHoverCard);
-    return (0, import_jsx_runtime.jsx)(Anchor, { asChild: true, ...popperScope, children: (0, import_jsx_runtime.jsx)(
+    return (0, import_jsx_runtime.jsx)(PopperAnchor, { asChild: true, ...popperScope, children: (0, import_jsx_runtime.jsx)(
       Primitive.a,
       {
         "data-state": context.open ? "open" : "closed",
@@ -127,22 +130,21 @@ var HoverCardTrigger = React.forwardRef(
         onTouchStart: composeEventHandlers(props.onTouchStart, (event) => event.preventDefault())
       }
     ) });
-  }
+  }, "HoverCardTrigger")
 );
-HoverCardTrigger.displayName = TRIGGER_NAME;
 var PORTAL_NAME = "HoverCardPortal";
 var [PortalProvider, usePortalContext] = createHoverCardContext(PORTAL_NAME, {
   forceMount: void 0
 });
-var HoverCardPortal = (props) => {
+var HoverCardPortal = __name((props) => {
   const { __scopeHoverCard, forceMount, children, container } = props;
   const context = useHoverCardContext(PORTAL_NAME, __scopeHoverCard);
   return (0, import_jsx_runtime.jsx)(PortalProvider, { scope: __scopeHoverCard, forceMount, children: (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || context.open, children: (0, import_jsx_runtime.jsx)(Portal, { asChild: true, container, children }) }) });
-};
-HoverCardPortal.displayName = PORTAL_NAME;
+}, "HoverCardPortal");
 var CONTENT_NAME = "HoverCardContent";
 var HoverCardContent = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function HoverCardContent2(props, forwardedRef) {
     const portalContext = usePortalContext(CONTENT_NAME, props.__scopeHoverCard);
     const { forceMount = portalContext.forceMount, ...contentProps } = props;
     const context = useHoverCardContext(CONTENT_NAME, props.__scopeHoverCard);
@@ -156,10 +158,9 @@ var HoverCardContent = React.forwardRef(
         ref: forwardedRef
       }
     ) });
-  }
+  }, "HoverCardContent")
 );
-HoverCardContent.displayName = CONTENT_NAME;
-var HoverCardContentImpl = React.forwardRef((props, forwardedRef) => {
+var HoverCardContentImpl = React.forwardRef(__name(function HoverCardContentImpl2(props, forwardedRef) {
   const {
     __scopeHoverCard,
     onEscapeKeyDown,
@@ -171,7 +172,9 @@ var HoverCardContentImpl = React.forwardRef((props, forwardedRef) => {
   const context = useHoverCardContext(CONTENT_NAME, __scopeHoverCard);
   const popperScope = usePopperScope(__scopeHoverCard);
   const ref = React.useRef(null);
-  const composedRefs = useComposedRefs(forwardedRef, ref);
+  const [branchNode, setBranchNode] = React.useState(null);
+  const composedRefs = useComposedRefs(forwardedRef, ref, setBranchNode);
+  useFocusScopeBranch(branchNode);
   const [containSelection, setContainSelection] = React.useState(false);
   React.useEffect(() => {
     if (containSelection) {
@@ -187,14 +190,14 @@ var HoverCardContentImpl = React.forwardRef((props, forwardedRef) => {
   }, [containSelection]);
   React.useEffect(() => {
     if (ref.current) {
-      const handlePointerUp = () => {
+      const handlePointerUp = __name(() => {
         setContainSelection(false);
         context.isPointerDownOnContentRef.current = false;
         setTimeout(() => {
           const hasSelection = document.getSelection()?.toString() !== "";
           if (hasSelection) context.hasSelectionRef.current = true;
         });
-      };
+      }, "handlePointerUp");
       document.addEventListener("pointerup", handlePointerUp);
       return () => {
         document.removeEventListener("pointerup", handlePointerUp);
@@ -222,7 +225,7 @@ var HoverCardContentImpl = React.forwardRef((props, forwardedRef) => {
       }),
       onDismiss: context.onDismiss,
       children: (0, import_jsx_runtime.jsx)(
-        Content,
+        PopperContent,
         {
           ...popperScope,
           ...contentProps,
@@ -252,45 +255,40 @@ var HoverCardContentImpl = React.forwardRef((props, forwardedRef) => {
       )
     }
   );
-});
-var ARROW_NAME = "HoverCardArrow";
+}, "HoverCardContentImpl"));
 var HoverCardArrow = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function HoverCardArrow2(props, forwardedRef) {
     const { __scopeHoverCard, ...arrowProps } = props;
     const popperScope = usePopperScope(__scopeHoverCard);
-    return (0, import_jsx_runtime.jsx)(Arrow, { ...popperScope, ...arrowProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(PopperArrow, { ...popperScope, ...arrowProps, ref: forwardedRef });
+  }, "HoverCardArrow")
 );
-HoverCardArrow.displayName = ARROW_NAME;
 function excludeTouch(eventHandler) {
   return (event) => event.pointerType === "touch" ? void 0 : eventHandler();
 }
+__name(excludeTouch, "excludeTouch");
 function getTabbableNodes(container) {
   const nodes = [];
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, {
-    acceptNode: (node) => {
+    acceptNode: __name((node) => {
       return node.tabIndex >= 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-    }
+    }, "acceptNode")
   });
   while (walker.nextNode()) nodes.push(walker.currentNode);
   return nodes;
 }
-var Root22 = HoverCard;
-var Trigger = HoverCardTrigger;
-var Portal2 = HoverCardPortal;
-var Content2 = HoverCardContent;
-var Arrow2 = HoverCardArrow;
+__name(getTabbableNodes, "getTabbableNodes");
 export {
-  Arrow2 as Arrow,
-  Content2 as Content,
+  HoverCardArrow as Arrow,
+  HoverCardContent as Content,
   HoverCard,
   HoverCardArrow,
   HoverCardContent,
   HoverCardPortal,
   HoverCardTrigger,
-  Portal2 as Portal,
-  Root22 as Root,
-  Trigger,
+  HoverCardPortal as Portal,
+  HoverCard as Root,
+  HoverCardTrigger as Trigger,
   createHoverCardScope
 };
 //# sourceMappingURL=@radix-ui_react-hover-card.js.map

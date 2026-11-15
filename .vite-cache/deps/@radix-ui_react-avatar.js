@@ -1,42 +1,54 @@
 "use client";
 import {
   useCallbackRef
-} from "./chunk-NRHAWQBI.js";
+} from "./chunk-X7Z4QOHD.js";
 import {
+  IS_DEVELOPMENT,
   useLayoutEffect2
-} from "./chunk-T6UOJQWQ.js";
+} from "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
-import "./chunk-GAOO6IGG.js";
+} from "./chunk-ZRCZ3OV4.js";
+import "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-avatar/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var AVATAR_NAME = "Avatar";
 var [createAvatarContext, createAvatarScope] = createContextScope(AVATAR_NAME);
+var ImageLoadingStatus = {
+  Idle: "idle",
+  Loading: "loading",
+  Loaded: "loaded",
+  Error: "error"
+};
 var STATIC_IMAGE_COUNT_STATE = [
   0,
   () => void 0
 ];
 var [AvatarProvider, useAvatarContext] = createAvatarContext(AVATAR_NAME);
 var Avatar = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function Avatar2(props, forwardedRef) {
     const { __scopeAvatar, ...avatarProps } = props;
-    const [imageLoadingStatus, setImageLoadingStatus] = React.useState("idle");
+    const [imageLoadingStatus, setImageLoadingStatus] = React.useState(
+      ImageLoadingStatus.Idle
+    );
     const [imageCount, setImageCount] = useImageCount();
     return (0, import_jsx_runtime.jsx)(
       AvatarProvider,
@@ -49,12 +61,11 @@ var Avatar = React.forwardRef(
         children: (0, import_jsx_runtime.jsx)(Primitive.span, { ...avatarProps, ref: forwardedRef })
       }
     );
-  }
+  }, "Avatar")
 );
-Avatar.displayName = AVATAR_NAME;
 var IMAGE_NAME = "AvatarImage";
 var AvatarImage = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function AvatarImage2(props, forwardedRef) {
     const { __scopeAvatar, src, onLoadingStatusChange, ...imageProps } = props;
     const context = useAvatarContext(IMAGE_NAME, __scopeAvatar);
     useUpdateImageCount(context.setImageCount);
@@ -75,13 +86,12 @@ var AvatarImage = React.forwardRef(
         handleLoadingStatusChange(imageLoadingStatus);
       }
     }, [imageLoadingStatus, handleLoadingStatusChange]);
-    return imageLoadingStatus === "loaded" ? (0, import_jsx_runtime.jsx)(Primitive.img, { ...imageProps, ref: forwardedRef, src }) : null;
-  }
+    return imageLoadingStatus === ImageLoadingStatus.Loaded ? (0, import_jsx_runtime.jsx)(Primitive.img, { ...imageProps, ref: forwardedRef, src }) : null;
+  }, "AvatarImage")
 );
-AvatarImage.displayName = IMAGE_NAME;
 var FALLBACK_NAME = "AvatarFallback";
 var AvatarFallback = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function AvatarFallback2(props, forwardedRef) {
     const { __scopeAvatar, delayMs, ...fallbackProps } = props;
     const context = useAvatarContext(FALLBACK_NAME, __scopeAvatar);
     const [canRender, setCanRender] = React.useState(delayMs === void 0);
@@ -91,10 +101,9 @@ var AvatarFallback = React.forwardRef(
         return () => window.clearTimeout(timerId);
       }
     }, [delayMs]);
-    return canRender && context.imageLoadingStatus !== "loaded" ? (0, import_jsx_runtime.jsx)(Primitive.span, { ...fallbackProps, ref: forwardedRef }) : null;
-  }
+    return canRender && context.imageLoadingStatus !== ImageLoadingStatus.Loaded ? (0, import_jsx_runtime.jsx)(Primitive.span, { ...fallbackProps, ref: forwardedRef }) : null;
+  }, "AvatarFallback")
 );
-AvatarFallback.displayName = FALLBACK_NAME;
 function useImageLoadingStatus(src, {
   loadingStatus,
   setLoadingStatus,
@@ -103,15 +112,15 @@ function useImageLoadingStatus(src, {
 }) {
   useLayoutEffect2(() => {
     if (!src) {
-      setLoadingStatus("error");
+      setLoadingStatus(ImageLoadingStatus.Error);
       return;
     }
     const image = new window.Image();
-    const handleLoad = (event) => {
+    const handleLoad = __name((event) => {
       const image2 = event.currentTarget;
       setLoadingStatus(getImageLoadingStatus(image2));
-    };
-    const handleError = () => setLoadingStatus("error");
+    }, "handleLoad");
+    const handleError = __name(() => setLoadingStatus(ImageLoadingStatus.Error), "handleError");
     image.addEventListener("load", handleLoad);
     image.addEventListener("error", handleError);
     if (referrerPolicy) {
@@ -123,17 +132,19 @@ function useImageLoadingStatus(src, {
     return () => {
       image.removeEventListener("load", handleLoad);
       image.removeEventListener("error", handleError);
-      setLoadingStatus("idle");
+      setLoadingStatus(ImageLoadingStatus.Idle);
     };
   }, [src, crossOrigin, referrerPolicy, setLoadingStatus]);
   return loadingStatus;
 }
+__name(useImageLoadingStatus, "useImageLoadingStatus");
 function getImageLoadingStatus(image) {
-  return image.complete ? image.naturalWidth > 0 ? "loaded" : "error" : "loading";
+  return image.complete ? image.naturalWidth > 0 ? ImageLoadingStatus.Loaded : ImageLoadingStatus.Error : ImageLoadingStatus.Loading;
 }
+__name(getImageLoadingStatus, "getImageLoadingStatus");
 function useImageCount() {
   let state = STATIC_IMAGE_COUNT_STATE;
-  if (true) {
+  if (IS_DEVELOPMENT) {
     state = React.useState(0);
     const [imageCount] = state;
     const hasWarnedRef = React.useRef(false);
@@ -148,8 +159,9 @@ function useImageCount() {
   }
   return state;
 }
+__name(useImageCount, "useImageCount");
 function useUpdateImageCount(setImageCount) {
-  if (true) {
+  if (IS_DEVELOPMENT) {
     React.useEffect(() => {
       setImageCount((imageCount) => imageCount + 1);
       return () => {
@@ -158,6 +170,7 @@ function useUpdateImageCount(setImageCount) {
     }, [setImageCount]);
   }
 }
+__name(useUpdateImageCount, "useUpdateImageCount");
 export {
   Avatar,
   AvatarFallback,

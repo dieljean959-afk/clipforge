@@ -1,64 +1,94 @@
 "use client";
 import {
-  Root
-} from "./chunk-4B4PRMA7.js";
-import {
-  usePrevious
-} from "./chunk-RLQSASSA.js";
+  VisuallyHidden
+} from "./chunk-4SUJ7VX2.js";
 import {
   createCollection
-} from "./chunk-EMF3DAXS.js";
+} from "./chunk-2NL7CCDF.js";
 import {
   useDirection
-} from "./chunk-HXA2JS2N.js";
+} from "./chunk-EMHYOJUE.js";
 import {
   DismissableLayer
-} from "./chunk-7QZJCKEB.js";
+} from "./chunk-ZAPJPNAP.js";
 import {
   useCallbackRef
-} from "./chunk-NRHAWQBI.js";
+} from "./chunk-X7Z4QOHD.js";
 import {
   useId
-} from "./chunk-JSG27HSD.js";
+} from "./chunk-ROQYZUNY.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
+} from "./chunk-NLDEGCMH.js";
 import {
   Presence
-} from "./chunk-JXAX32XB.js";
+} from "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
+} from "./chunk-E24ISM2B.js";
 import {
   useLayoutEffect2
-} from "./chunk-T6UOJQWQ.js";
+} from "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive,
   dispatchDiscreteCustomEvent
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
+  createSlottable,
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
+} from "./chunk-XOQ4UB3A.js";
 import {
   require_react_dom
-} from "./chunk-GMNIVPK7.js";
+} from "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-navigation-menu/dist/index.mjs
-var React = __toESM(require_react(), 1);
+var React2 = __toESM(require_react(), 1);
 var ReactDOM = __toESM(require_react_dom(), 1);
+
+// node_modules/@radix-ui/react-use-previous/dist/index.mjs
+var React = __toESM(require_react(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+function usePrevious(value) {
+  const ref = React.useRef({ value, previous: value });
+  return React.useMemo(() => {
+    if (ref.current.value !== value) {
+      ref.current.previous = ref.current.value;
+      ref.current.value = value;
+    }
+    return ref.current.previous;
+  }, [value]);
+}
+__name(usePrevious, "usePrevious");
+
+// node_modules/@radix-ui/react-navigation-menu/dist/index.mjs
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp2 = Object.defineProperty;
+var __name2 = (target, value) => __defProp2(target, "name", { value, configurable: true });
+var ActivationMode = {
+  Automatic: "automatic",
+  Manual: "manual"
+};
+var Orientation = {
+  Vertical: "vertical",
+  Horizontal: "horizontal"
+};
+var Direction = {
+  LTR: "ltr",
+  RTL: "rtl"
+};
 var NAVIGATION_MENU_NAME = "NavigationMenu";
 var [Collection, useCollection, createCollectionScope] = createCollection(NAVIGATION_MENU_NAME);
 var [FocusGroupCollection, useFocusGroupCollection, createFocusGroupCollectionScope] = createCollection(NAVIGATION_MENU_NAME);
@@ -68,8 +98,8 @@ var [createNavigationMenuContext, createNavigationMenuScope] = createContextScop
 );
 var [NavigationMenuProviderImpl, useNavigationMenuContext] = createNavigationMenuContext(NAVIGATION_MENU_NAME);
 var [ViewportContentProvider, useViewportContentContext] = createNavigationMenuContext(NAVIGATION_MENU_NAME);
-var NavigationMenu = React.forwardRef(
-  (props, forwardedRef) => {
+var NavigationMenu = React2.forwardRef(
+  __name2(function NavigationMenu2(props, forwardedRef) {
     const {
       __scopeNavigationMenu,
       value: valueProp,
@@ -77,20 +107,21 @@ var NavigationMenu = React.forwardRef(
       defaultValue,
       delayDuration = 200,
       skipDelayDuration = 300,
-      orientation = "horizontal",
+      orientation = Orientation.Horizontal,
       dir,
+      activationMode = ActivationMode.Automatic,
       ...NavigationMenuProps
     } = props;
-    const [navigationMenu, setNavigationMenu] = React.useState(null);
+    const [navigationMenu, setNavigationMenu] = React2.useState(null);
     const composedRef = useComposedRefs(forwardedRef, setNavigationMenu);
     const direction = useDirection(dir);
-    const openTimerRef = React.useRef(0);
-    const closeTimerRef = React.useRef(0);
-    const skipDelayTimerRef = React.useRef(0);
-    const [isOpenDelayed, setIsOpenDelayed] = React.useState(true);
+    const openTimerRef = React2.useRef(0);
+    const closeTimerRef = React2.useRef(0);
+    const skipDelayTimerRef = React2.useRef(0);
+    const [isOpenDelayed, setIsOpenDelayed] = React2.useState(true);
     const [value, setValue] = useControllableState({
       prop: valueProp,
-      onChange: (value2) => {
+      onChange: __name2((value2) => {
         const isOpen = value2 !== "";
         const hasSkipDelayDuration = skipDelayDuration > 0;
         if (isOpen) {
@@ -104,22 +135,22 @@ var NavigationMenu = React.forwardRef(
           );
         }
         onValueChange?.(value2);
-      },
+      }, "onChange"),
       defaultProp: defaultValue ?? "",
       caller: NAVIGATION_MENU_NAME
     });
-    const startCloseTimer = React.useCallback(() => {
+    const startCloseTimer = React2.useCallback(() => {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = window.setTimeout(() => setValue(""), 150);
     }, [setValue]);
-    const handleOpen = React.useCallback(
+    const handleOpen = React2.useCallback(
       (itemValue) => {
         window.clearTimeout(closeTimerRef.current);
         setValue(itemValue);
       },
       [setValue]
     );
-    const handleDelayedOpen = React.useCallback(
+    const handleDelayedOpen = React2.useCallback(
       (itemValue) => {
         const isOpenItem = value === itemValue;
         if (isOpenItem) {
@@ -133,7 +164,7 @@ var NavigationMenu = React.forwardRef(
       },
       [value, setValue, delayDuration]
     );
-    React.useEffect(() => {
+    React2.useEffect(() => {
       return () => {
         window.clearTimeout(openTimerRef.current);
         window.clearTimeout(closeTimerRef.current);
@@ -148,18 +179,34 @@ var NavigationMenu = React.forwardRef(
         value,
         dir: direction,
         orientation,
+        activationMode,
         rootNavigationMenu: navigationMenu,
         onTriggerEnter: (itemValue) => {
-          window.clearTimeout(openTimerRef.current);
-          if (isOpenDelayed) handleDelayedOpen(itemValue);
-          else handleOpen(itemValue);
+          if (activationMode === ActivationMode.Automatic) {
+            window.clearTimeout(openTimerRef.current);
+            if (isOpenDelayed) {
+              handleDelayedOpen(itemValue);
+            } else {
+              handleOpen(itemValue);
+            }
+          }
         },
         onTriggerLeave: () => {
-          window.clearTimeout(openTimerRef.current);
-          startCloseTimer();
+          if (activationMode === ActivationMode.Automatic) {
+            window.clearTimeout(openTimerRef.current);
+            startCloseTimer();
+          }
         },
-        onContentEnter: () => window.clearTimeout(closeTimerRef.current),
-        onContentLeave: startCloseTimer,
+        onContentEnter: () => {
+          if (activationMode === ActivationMode.Automatic) {
+            window.clearTimeout(closeTimerRef.current);
+          }
+        },
+        onContentLeave: () => {
+          if (activationMode === ActivationMode.Automatic) {
+            startCloseTimer();
+          }
+        },
         onItemSelect: (itemValue) => {
           setValue((prevValue) => prevValue === itemValue ? "" : itemValue);
         },
@@ -176,21 +223,24 @@ var NavigationMenu = React.forwardRef(
         )
       }
     );
-  }
+  }, "NavigationMenu")
 );
-NavigationMenu.displayName = NAVIGATION_MENU_NAME;
 var SUB_NAME = "NavigationMenuSub";
-var NavigationMenuSub = React.forwardRef(
-  (props, forwardedRef) => {
+var NavigationMenuSub = React2.forwardRef(
+  // blank line to reduce diff noise
+  __name2(function NavigationMenuSub2(props, forwardedRef) {
     const {
       __scopeNavigationMenu,
       value: valueProp,
       onValueChange,
       defaultValue,
-      orientation = "horizontal",
+      orientation = Orientation.Horizontal,
+      activationMode: activationModeProp,
+      disableToggle = true,
       ...subProps
     } = props;
     const context = useNavigationMenuContext(SUB_NAME, __scopeNavigationMenu);
+    const activationMode = activationModeProp ?? context.activationMode;
     const [value, setValue] = useControllableState({
       prop: valueProp,
       onChange: onValueChange,
@@ -205,23 +255,30 @@ var NavigationMenuSub = React.forwardRef(
         value,
         dir: context.dir,
         orientation,
+        activationMode,
         rootNavigationMenu: context.rootNavigationMenu,
-        onTriggerEnter: (itemValue) => setValue(itemValue),
-        onItemSelect: (itemValue) => setValue(itemValue),
+        onTriggerEnter: (itemValue) => {
+          if (activationMode === ActivationMode.Automatic) {
+            setValue(itemValue);
+          }
+        },
+        onItemSelect: (itemValue) => {
+          setValue((prevValue) => disableToggle || prevValue !== itemValue ? itemValue : "");
+        },
         onItemDismiss: () => setValue(""),
         children: (0, import_jsx_runtime.jsx)(Primitive.div, { "data-orientation": orientation, ...subProps, ref: forwardedRef })
       }
     );
-  }
+  }, "NavigationMenuSub")
 );
-NavigationMenuSub.displayName = SUB_NAME;
-var NavigationMenuProvider = (props) => {
+var NavigationMenuProvider = __name2((props) => {
   const {
     scope,
     isRootMenu,
     rootNavigationMenu,
     dir,
     orientation,
+    activationMode,
     children,
     value,
     onItemSelect,
@@ -231,9 +288,9 @@ var NavigationMenuProvider = (props) => {
     onContentEnter,
     onContentLeave
   } = props;
-  const [viewport, setViewport] = React.useState(null);
-  const [viewportContent, setViewportContent] = React.useState(/* @__PURE__ */ new Map());
-  const [indicatorTrack, setIndicatorTrack] = React.useState(null);
+  const [viewport, setViewport] = React2.useState(null);
+  const [viewportContent, setViewportContent] = React2.useState(/* @__PURE__ */ new Map());
+  const [indicatorTrack, setIndicatorTrack] = React2.useState(null);
   return (0, import_jsx_runtime.jsx)(
     NavigationMenuProviderImpl,
     {
@@ -245,6 +302,7 @@ var NavigationMenuProvider = (props) => {
       baseId: useId(),
       dir,
       orientation,
+      activationMode,
       viewport,
       onViewportChange: setViewport,
       indicatorTrack,
@@ -255,13 +313,13 @@ var NavigationMenuProvider = (props) => {
       onContentLeave: useCallbackRef(onContentLeave),
       onItemSelect: useCallbackRef(onItemSelect),
       onItemDismiss: useCallbackRef(onItemDismiss),
-      onViewportContentChange: React.useCallback((contentValue, contentData) => {
+      onViewportContentChange: React2.useCallback((contentValue, contentData) => {
         setViewportContent((prevContent) => {
           prevContent.set(contentValue, contentData);
           return new Map(prevContent);
         });
       }, []),
-      onViewportContentRemove: React.useCallback((contentValue) => {
+      onViewportContentRemove: React2.useCallback((contentValue) => {
         setViewportContent((prevContent) => {
           if (!prevContent.has(contentValue)) return prevContent;
           prevContent.delete(contentValue);
@@ -271,38 +329,39 @@ var NavigationMenuProvider = (props) => {
       children: (0, import_jsx_runtime.jsx)(Collection.Provider, { scope, children: (0, import_jsx_runtime.jsx)(ViewportContentProvider, { scope, items: viewportContent, children }) })
     }
   );
-};
+}, "NavigationMenuProvider");
 var LIST_NAME = "NavigationMenuList";
-var NavigationMenuList = React.forwardRef(
-  (props, forwardedRef) => {
+var NavigationMenuList = React2.forwardRef(
+  // blank line to reduce diff noise
+  __name2(function NavigationMenuList2(props, forwardedRef) {
     const { __scopeNavigationMenu, ...listProps } = props;
     const context = useNavigationMenuContext(LIST_NAME, __scopeNavigationMenu);
     const list = (0, import_jsx_runtime.jsx)(Primitive.ul, { "data-orientation": context.orientation, ...listProps, ref: forwardedRef });
     return (0, import_jsx_runtime.jsx)(Primitive.div, { style: { position: "relative" }, ref: context.onIndicatorTrackChange, children: (0, import_jsx_runtime.jsx)(Collection.Slot, { scope: __scopeNavigationMenu, children: context.isRootMenu ? (0, import_jsx_runtime.jsx)(FocusGroup, { asChild: true, children: list }) : list }) });
-  }
+  }, "NavigationMenuList")
 );
-NavigationMenuList.displayName = LIST_NAME;
 var ITEM_NAME = "NavigationMenuItem";
 var [NavigationMenuItemContextProvider, useNavigationMenuItemContext] = createNavigationMenuContext(ITEM_NAME);
-var NavigationMenuItem = React.forwardRef(
-  (props, forwardedRef) => {
+var NavigationMenuItem = React2.forwardRef(
+  // blank line to reduce diff noise
+  __name2(function NavigationMenuItem2(props, forwardedRef) {
     const { __scopeNavigationMenu, value: valueProp, ...itemProps } = props;
     const autoValue = useId();
     const value = valueProp || autoValue || "LEGACY_REACT_AUTO_VALUE";
-    const contentRef = React.useRef(null);
-    const triggerRef = React.useRef(null);
-    const focusProxyRef = React.useRef(null);
-    const restoreContentTabOrderRef = React.useRef(() => {
+    const contentRef = React2.useRef(null);
+    const triggerRef = React2.useRef(null);
+    const focusProxyRef = React2.useRef(null);
+    const restoreContentTabOrderRef = React2.useRef(() => {
     });
-    const wasEscapeCloseRef = React.useRef(false);
-    const handleContentEntry = React.useCallback((side = "start") => {
+    const wasEscapeCloseRef = React2.useRef(false);
+    const handleContentEntry = React2.useCallback((side = "start") => {
       if (contentRef.current) {
         restoreContentTabOrderRef.current();
         const candidates = getTabbableCandidates(contentRef.current);
         if (candidates.length) focusFirst(side === "start" ? candidates : candidates.reverse());
       }
     }, []);
-    const handleContentExit = React.useCallback(() => {
+    const handleContentExit = React2.useCallback(() => {
       if (contentRef.current) {
         const candidates = getTabbableCandidates(contentRef.current);
         if (candidates.length) restoreContentTabOrderRef.current = removeFromTabOrder(candidates);
@@ -324,20 +383,19 @@ var NavigationMenuItem = React.forwardRef(
         children: (0, import_jsx_runtime.jsx)(Primitive.li, { ...itemProps, ref: forwardedRef })
       }
     );
-  }
+  }, "NavigationMenuItem")
 );
-NavigationMenuItem.displayName = ITEM_NAME;
 var TRIGGER_NAME = "NavigationMenuTrigger";
-var NavigationMenuTrigger = React.forwardRef((props, forwardedRef) => {
+var NavigationMenuTrigger = React2.forwardRef(__name2(function NavigationMenuTrigger2(props, forwardedRef) {
   const { __scopeNavigationMenu, disabled, ...triggerProps } = props;
   const context = useNavigationMenuContext(TRIGGER_NAME, props.__scopeNavigationMenu);
   const itemContext = useNavigationMenuItemContext(TRIGGER_NAME, props.__scopeNavigationMenu);
-  const ref = React.useRef(null);
+  const ref = React2.useRef(null);
   const composedRefs = useComposedRefs(ref, itemContext.triggerRef, forwardedRef);
   const triggerId = makeTriggerId(context.baseId, itemContext.value);
   const contentId = makeContentId(context.baseId, itemContext.value);
-  const hasPointerMoveOpenedRef = React.useRef(false);
-  const wasClickCloseRef = React.useRef(false);
+  const hasPointerMoveOpenedRef = React2.useRef(false);
+  const wasClickCloseRef = React2.useRef(false);
   const open = itemContext.value === context.value;
   return (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
     (0, import_jsx_runtime.jsx)(Collection.ItemSlot, { scope: __scopeNavigationMenu, value: itemContext.value, children: (0, import_jsx_runtime.jsx)(FocusGroupItem, { asChild: true, children: (0, import_jsx_runtime.jsx)(
@@ -377,7 +435,7 @@ var NavigationMenuTrigger = React.forwardRef((props, forwardedRef) => {
           wasClickCloseRef.current = open;
         }),
         onKeyDown: composeEventHandlers(props.onKeyDown, (event) => {
-          const verticalEntryKey = context.dir === "rtl" ? "ArrowLeft" : "ArrowRight";
+          const verticalEntryKey = context.dir === Direction.RTL ? "ArrowLeft" : "ArrowRight";
           const entryKey = { horizontal: "ArrowDown", vertical: verticalEntryKey }[context.orientation];
           if (open && event.key === entryKey) {
             itemContext.onEntryKeyDown();
@@ -388,7 +446,7 @@ var NavigationMenuTrigger = React.forwardRef((props, forwardedRef) => {
     ) }) }),
     open && (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
       (0, import_jsx_runtime.jsx)(
-        Root,
+        VisuallyHidden,
         {
           "aria-hidden": true,
           tabIndex: 0,
@@ -407,12 +465,11 @@ var NavigationMenuTrigger = React.forwardRef((props, forwardedRef) => {
       context.viewport && (0, import_jsx_runtime.jsx)("span", { "aria-owns": contentId })
     ] })
   ] });
-});
-NavigationMenuTrigger.displayName = TRIGGER_NAME;
-var LINK_NAME = "NavigationMenuLink";
+}, "NavigationMenuTrigger"));
 var LINK_SELECT = "navigationMenu.linkSelect";
-var NavigationMenuLink = React.forwardRef(
-  (props, forwardedRef) => {
+var NavigationMenuLink = React2.forwardRef(
+  // blank line to reduce diff noise
+  __name2(function NavigationMenuLink2(props, forwardedRef) {
     const { __scopeNavigationMenu, active, onSelect, ...linkProps } = props;
     return (0, import_jsx_runtime.jsx)(FocusGroupItem, { asChild: true, children: (0, import_jsx_runtime.jsx)(
       Primitive.a,
@@ -443,11 +500,10 @@ var NavigationMenuLink = React.forwardRef(
         )
       }
     ) });
-  }
+  }, "NavigationMenuLink")
 );
-NavigationMenuLink.displayName = LINK_NAME;
 var INDICATOR_NAME = "NavigationMenuIndicator";
-var NavigationMenuIndicator = React.forwardRef((props, forwardedRef) => {
+var NavigationMenuIndicator = React2.forwardRef(__name2(function NavigationMenuIndicator2(props, forwardedRef) {
   const { forceMount, ...indicatorProps } = props;
   const context = useNavigationMenuContext(INDICATOR_NAME, props.__scopeNavigationMenu);
   const isVisible = Boolean(context.value);
@@ -455,31 +511,30 @@ var NavigationMenuIndicator = React.forwardRef((props, forwardedRef) => {
     (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || isVisible, children: (0, import_jsx_runtime.jsx)(NavigationMenuIndicatorImpl, { ...indicatorProps, ref: forwardedRef }) }),
     context.indicatorTrack
   ) : null;
-});
-NavigationMenuIndicator.displayName = INDICATOR_NAME;
-var NavigationMenuIndicatorImpl = React.forwardRef((props, forwardedRef) => {
+}, "NavigationMenuIndicator"));
+var NavigationMenuIndicatorImpl = React2.forwardRef(__name2(function NavigationMenuIndicatorImpl2(props, forwardedRef) {
   const { __scopeNavigationMenu, ...indicatorProps } = props;
   const context = useNavigationMenuContext(INDICATOR_NAME, __scopeNavigationMenu);
   const getItems = useCollection(__scopeNavigationMenu);
-  const [activeTrigger, setActiveTrigger] = React.useState(
+  const [activeTrigger, setActiveTrigger] = React2.useState(
     null
   );
-  const [position, setPosition] = React.useState(null);
-  const isHorizontal = context.orientation === "horizontal";
+  const [position, setPosition] = React2.useState(null);
+  const isHorizontal = context.orientation === Orientation.Horizontal;
   const isVisible = Boolean(context.value);
-  React.useEffect(() => {
+  React2.useEffect(() => {
     const items = getItems();
     const triggerNode = items.find((item) => item.value === context.value)?.ref.current;
     if (triggerNode) setActiveTrigger(triggerNode);
   }, [getItems, context.value]);
-  const handlePositionChange = () => {
+  const handlePositionChange = __name2(() => {
     if (activeTrigger) {
       setPosition({
         size: isHorizontal ? activeTrigger.offsetWidth : activeTrigger.offsetHeight,
         offset: isHorizontal ? activeTrigger.offsetLeft : activeTrigger.offsetTop
       });
     }
-  };
+  }, "handlePositionChange");
   useResizeObserver(activeTrigger, handlePositionChange);
   useResizeObserver(context.indicatorTrack, handlePositionChange);
   return position ? (0, import_jsx_runtime.jsx)(
@@ -495,24 +550,27 @@ var NavigationMenuIndicatorImpl = React.forwardRef((props, forwardedRef) => {
         ...isHorizontal ? {
           left: 0,
           width: position.size + "px",
-          transform: `translateX(${position.offset}px)`
+          transform: `translateX(${position.offset}px)`,
+          "--radix-navigation-menu-indicator-translate-x": `${position.offset}px`
         } : {
           top: 0,
           height: position.size + "px",
-          transform: `translateY(${position.offset}px)`
+          transform: `translateY(${position.offset}px)`,
+          "--radix-navigation-menu-indicator-translate-y": `${position.offset}px`
         },
         ...indicatorProps.style
       }
     }
   ) : null;
-});
+}, "NavigationMenuIndicatorImpl"));
 var CONTENT_NAME = "NavigationMenuContent";
-var NavigationMenuContent = React.forwardRef((props, forwardedRef) => {
+var NavigationMenuContent = React2.forwardRef(__name2(function NavigationMenuContent2(props, forwardedRef) {
   const { forceMount, ...contentProps } = props;
   const context = useNavigationMenuContext(CONTENT_NAME, props.__scopeNavigationMenu);
   const itemContext = useNavigationMenuItemContext(CONTENT_NAME, props.__scopeNavigationMenu);
   const composedRefs = useComposedRefs(itemContext.contentRef, forwardedRef);
   const open = itemContext.value === context.value;
+  const openState = getOpenState(open);
   const commonProps = {
     value: itemContext.value,
     triggerRef: itemContext.triggerRef,
@@ -525,7 +583,7 @@ var NavigationMenuContent = React.forwardRef((props, forwardedRef) => {
   return !context.viewport ? (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || open, children: (0, import_jsx_runtime.jsx)(
     NavigationMenuContentImpl,
     {
-      "data-state": getOpenState(open),
+      "data-state": openState,
       ...commonProps,
       ref: composedRefs,
       onPointerEnter: composeEventHandlers(props.onPointerEnter, context.onContentEnter),
@@ -539,10 +597,17 @@ var NavigationMenuContent = React.forwardRef((props, forwardedRef) => {
         ...commonProps.style
       }
     }
-  ) }) : (0, import_jsx_runtime.jsx)(ViewportContentMounter, { forceMount, ...commonProps, ref: composedRefs });
-});
-NavigationMenuContent.displayName = CONTENT_NAME;
-var ViewportContentMounter = React.forwardRef((props, forwardedRef) => {
+  ) }) : (0, import_jsx_runtime.jsx)(
+    ViewportContentMounter,
+    {
+      "data-state": openState,
+      forceMount,
+      ...commonProps,
+      ref: composedRefs
+    }
+  );
+}, "NavigationMenuContent"));
+var ViewportContentMounter = React2.forwardRef(__name2(function ViewportContentMounter2(props, forwardedRef) {
   const context = useNavigationMenuContext(CONTENT_NAME, props.__scopeNavigationMenu);
   const { onViewportContentChange, onViewportContentRemove } = context;
   useLayoutEffect2(() => {
@@ -555,9 +620,9 @@ var ViewportContentMounter = React.forwardRef((props, forwardedRef) => {
     return () => onViewportContentRemove(props.value);
   }, [props.value, onViewportContentRemove]);
   return null;
-});
+}, "ViewportContentMounter"));
 var ROOT_CONTENT_DISMISS = "navigationMenu.rootContentDismiss";
-var NavigationMenuContentImpl = React.forwardRef((props, forwardedRef) => {
+var NavigationMenuContentImpl = React2.forwardRef(__name2(function NavigationMenuContentImpl2(props, forwardedRef) {
   const {
     __scopeNavigationMenu,
     value,
@@ -569,29 +634,29 @@ var NavigationMenuContentImpl = React.forwardRef((props, forwardedRef) => {
     ...contentProps
   } = props;
   const context = useNavigationMenuContext(CONTENT_NAME, __scopeNavigationMenu);
-  const ref = React.useRef(null);
+  const ref = React2.useRef(null);
   const composedRefs = useComposedRefs(ref, forwardedRef);
   const triggerId = makeTriggerId(context.baseId, value);
   const contentId = makeContentId(context.baseId, value);
   const getItems = useCollection(__scopeNavigationMenu);
-  const prevMotionAttributeRef = React.useRef(null);
+  const prevMotionAttributeRef = React2.useRef(null);
   const { onItemDismiss } = context;
-  React.useEffect(() => {
+  React2.useEffect(() => {
     const content = ref.current;
     if (context.isRootMenu && content) {
-      const handleClose = () => {
+      const handleClose = __name2(() => {
         onItemDismiss();
         onRootContentClose();
         if (content.contains(document.activeElement)) triggerRef.current?.focus();
-      };
+      }, "handleClose");
       content.addEventListener(ROOT_CONTENT_DISMISS, handleClose);
       return () => content.removeEventListener(ROOT_CONTENT_DISMISS, handleClose);
     }
   }, [context.isRootMenu, props.value, triggerRef, onItemDismiss, onRootContentClose]);
-  const motionAttribute = React.useMemo(() => {
+  const motionAttribute = React2.useMemo(() => {
     const items = getItems();
     const values = items.map((item) => item.value);
-    if (context.dir === "rtl") values.reverse();
+    if (context.dir === Direction.RTL) values.reverse();
     const index = values.indexOf(context.value);
     const prevIndex = values.indexOf(context.previousValue);
     const isSelected = value === context.value;
@@ -627,7 +692,12 @@ var NavigationMenuContentImpl = React.forwardRef((props, forwardedRef) => {
       onFocusOutside: composeEventHandlers(props.onFocusOutside, (event) => {
         onContentFocusOutside();
         const target = event.target;
-        if (context.rootNavigationMenu?.contains(target)) event.preventDefault();
+        const relatedTarget = event.detail.originalEvent.relatedTarget;
+        const focusMovedIntoMenu = context.rootNavigationMenu?.contains(target);
+        const focusCameFromMenu = context.rootNavigationMenu?.contains(relatedTarget);
+        if (focusMovedIntoMenu || !focusCameFromMenu) {
+          event.preventDefault();
+        }
       }),
       onPointerDownOutside: composeEventHandlers(props.onPointerDownOutside, (event) => {
         const target = event.target;
@@ -656,16 +726,16 @@ var NavigationMenuContentImpl = React.forwardRef((props, forwardedRef) => {
       })
     }
   ) });
-});
+}, "NavigationMenuContentImpl"));
 var VIEWPORT_NAME = "NavigationMenuViewport";
-var NavigationMenuViewport = React.forwardRef((props, forwardedRef) => {
+var Slottable = createSlottable(VIEWPORT_NAME);
+var NavigationMenuViewport = React2.forwardRef(__name2(function NavigationMenuViewport2(props, forwardedRef) {
   const { forceMount, ...viewportProps } = props;
   const context = useNavigationMenuContext(VIEWPORT_NAME, props.__scopeNavigationMenu);
   const open = Boolean(context.value);
   return (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || open, children: (0, import_jsx_runtime.jsx)(NavigationMenuViewportImpl, { ...viewportProps, ref: forwardedRef }) });
-});
-NavigationMenuViewport.displayName = VIEWPORT_NAME;
-var NavigationMenuViewportImpl = React.forwardRef((props, forwardedRef) => {
+}, "NavigationMenuViewport"));
+var NavigationMenuViewportImpl = React2.forwardRef(__name2(function NavigationMenuViewportImpl2(props, forwardedRef) {
   const { __scopeNavigationMenu, children, ...viewportImplProps } = props;
   const context = useNavigationMenuContext(VIEWPORT_NAME, __scopeNavigationMenu);
   const composedRefs = useComposedRefs(forwardedRef, context.onViewportChange);
@@ -673,17 +743,17 @@ var NavigationMenuViewportImpl = React.forwardRef((props, forwardedRef) => {
     CONTENT_NAME,
     props.__scopeNavigationMenu
   );
-  const [size, setSize] = React.useState(null);
-  const [content, setContent] = React.useState(null);
+  const [size, setSize] = React2.useState(null);
+  const [content, setContent] = React2.useState(null);
   const viewportWidth = size ? size?.width + "px" : void 0;
   const viewportHeight = size ? size?.height + "px" : void 0;
   const open = Boolean(context.value);
   const activeContentValue = open ? context.value : context.previousValue;
-  const handleSizeChange = () => {
+  const handleSizeChange = __name2(() => {
     if (content) setSize({ width: content.offsetWidth, height: content.offsetHeight });
-  };
+  }, "handleSizeChange");
   useResizeObserver(content, handleSizeChange);
-  return (0, import_jsx_runtime.jsx)(
+  return (0, import_jsx_runtime.jsxs)(
     Primitive.div,
     {
       "data-state": getOpenState(open),
@@ -699,28 +769,31 @@ var NavigationMenuViewportImpl = React.forwardRef((props, forwardedRef) => {
       },
       onPointerEnter: composeEventHandlers(props.onPointerEnter, context.onContentEnter),
       onPointerLeave: composeEventHandlers(props.onPointerLeave, whenMouse(context.onContentLeave)),
-      children: Array.from(viewportContentContext.items).map(([value, { ref, forceMount, ...props2 }]) => {
-        const isActive = activeContentValue === value;
-        return (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || isActive, children: (0, import_jsx_runtime.jsx)(
-          NavigationMenuViewportItem,
-          {
-            ...props2,
-            contentRef: ref,
-            isActive,
-            onActiveContentChange: setContent
-          }
-        ) }, value);
-      })
+      children: [
+        (0, import_jsx_runtime.jsx)(Slottable, { children }),
+        Array.from(viewportContentContext.items).map(([value, { ref, forceMount, ...props2 }]) => {
+          const isActive = activeContentValue === value;
+          return (0, import_jsx_runtime.jsx)(Presence, { present: forceMount || isActive, children: (0, import_jsx_runtime.jsx)(
+            NavigationMenuViewportItem,
+            {
+              ...props2,
+              contentRef: ref,
+              isActive,
+              onActiveContentChange: setContent
+            }
+          ) }, value);
+        })
+      ]
     }
   );
-});
-var NavigationMenuViewportItem = ({
+}, "NavigationMenuViewportImpl"));
+var NavigationMenuViewportItem = __name2(({
   contentRef,
   isActive,
   onActiveContentChange,
   ...props
 }) => {
-  const handleContentChange = React.useCallback(
+  const handleContentChange = React2.useCallback(
     (node) => {
       if (isActive && node) {
         onActiveContentChange(node);
@@ -730,19 +803,19 @@ var NavigationMenuViewportItem = ({
   );
   const composedRefs = useComposedRefs(contentRef, handleContentChange);
   return (0, import_jsx_runtime.jsx)(NavigationMenuContentImpl, { ...props, ref: composedRefs });
-};
+}, "NavigationMenuViewportItem");
 var FOCUS_GROUP_NAME = "FocusGroup";
-var FocusGroup = React.forwardRef(
-  (props, forwardedRef) => {
+var FocusGroup = React2.forwardRef(
+  __name2(function FocusGroup2(props, forwardedRef) {
     const { __scopeNavigationMenu, ...groupProps } = props;
     const context = useNavigationMenuContext(FOCUS_GROUP_NAME, __scopeNavigationMenu);
     return (0, import_jsx_runtime.jsx)(FocusGroupCollection.Provider, { scope: __scopeNavigationMenu, children: (0, import_jsx_runtime.jsx)(FocusGroupCollection.Slot, { scope: __scopeNavigationMenu, children: (0, import_jsx_runtime.jsx)(Primitive.div, { dir: context.dir, ...groupProps, ref: forwardedRef }) }) });
-  }
+  }, "FocusGroup")
 );
 var ARROW_KEYS = ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"];
 var FOCUS_GROUP_ITEM_NAME = "FocusGroupItem";
-var FocusGroupItem = React.forwardRef(
-  (props, forwardedRef) => {
+var FocusGroupItem = React2.forwardRef(
+  __name2(function FocusGroupItem2(props, forwardedRef) {
     const { __scopeNavigationMenu, ...groupProps } = props;
     const getItems = useFocusGroupCollection(__scopeNavigationMenu);
     const context = useNavigationMenuContext(FOCUS_GROUP_ITEM_NAME, __scopeNavigationMenu);
@@ -755,7 +828,7 @@ var FocusGroupItem = React.forwardRef(
           const isFocusNavigationKey = ["Home", "End", ...ARROW_KEYS].includes(event.key);
           if (isFocusNavigationKey) {
             let candidateNodes = getItems().map((item) => item.ref.current);
-            const prevItemKey = context.dir === "rtl" ? "ArrowRight" : "ArrowLeft";
+            const prevItemKey = context.dir === Direction.RTL ? "ArrowRight" : "ArrowLeft";
             const prevKeys = [prevItemKey, "ArrowUp", "End"];
             if (prevKeys.includes(event.key)) candidateNodes.reverse();
             if (ARROW_KEYS.includes(event.key)) {
@@ -768,20 +841,21 @@ var FocusGroupItem = React.forwardRef(
         })
       }
     ) });
-  }
+  }, "FocusGroupItem")
 );
 function getTabbableCandidates(container) {
   const nodes = [];
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, {
-    acceptNode: (node) => {
+    acceptNode: __name2((node) => {
       const isHiddenInput = node.tagName === "INPUT" && node.type === "hidden";
       if (node.disabled || node.hidden || isHiddenInput) return NodeFilter.FILTER_SKIP;
       return node.tabIndex >= 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-    }
+    }, "acceptNode")
   });
   while (walker.nextNode()) nodes.push(walker.currentNode);
   return nodes;
 }
+__name2(getTabbableCandidates, "getTabbableCandidates");
 function focusFirst(candidates) {
   const previouslyFocusedElement = document.activeElement;
   return candidates.some((candidate) => {
@@ -790,6 +864,7 @@ function focusFirst(candidates) {
     return document.activeElement !== previouslyFocusedElement;
   });
 }
+__name2(focusFirst, "focusFirst");
 function removeFromTabOrder(candidates) {
   candidates.forEach((candidate) => {
     candidate.dataset.tabindex = candidate.getAttribute("tabindex") || "";
@@ -802,6 +877,7 @@ function removeFromTabOrder(candidates) {
     });
   };
 }
+__name2(removeFromTabOrder, "removeFromTabOrder");
 function useResizeObserver(element, onResize) {
   const handleResize = useCallbackRef(onResize);
   useLayoutEffect2(() => {
@@ -819,33 +895,29 @@ function useResizeObserver(element, onResize) {
     }
   }, [element, handleResize]);
 }
+__name2(useResizeObserver, "useResizeObserver");
 function getOpenState(open) {
   return open ? "open" : "closed";
 }
+__name2(getOpenState, "getOpenState");
 function makeTriggerId(baseId, value) {
   return `${baseId}-trigger-${value}`;
 }
+__name2(makeTriggerId, "makeTriggerId");
 function makeContentId(baseId, value) {
   return `${baseId}-content-${value}`;
 }
+__name2(makeContentId, "makeContentId");
 function whenMouse(handler) {
   return (event) => event.pointerType === "mouse" ? handler(event) : void 0;
 }
-var Root2 = NavigationMenu;
-var Sub = NavigationMenuSub;
-var List = NavigationMenuList;
-var Item = NavigationMenuItem;
-var Trigger = NavigationMenuTrigger;
-var Link = NavigationMenuLink;
-var Indicator = NavigationMenuIndicator;
-var Content = NavigationMenuContent;
-var Viewport = NavigationMenuViewport;
+__name2(whenMouse, "whenMouse");
 export {
-  Content,
-  Indicator,
-  Item,
-  Link,
-  List,
+  NavigationMenuContent as Content,
+  NavigationMenuIndicator as Indicator,
+  NavigationMenuItem as Item,
+  NavigationMenuLink as Link,
+  NavigationMenuList as List,
   NavigationMenu,
   NavigationMenuContent,
   NavigationMenuIndicator,
@@ -855,10 +927,10 @@ export {
   NavigationMenuSub,
   NavigationMenuTrigger,
   NavigationMenuViewport,
-  Root2 as Root,
-  Sub,
-  Trigger,
-  Viewport,
+  NavigationMenu as Root,
+  NavigationMenuSub as Sub,
+  NavigationMenuTrigger as Trigger,
+  NavigationMenuViewport as Viewport,
   createNavigationMenuScope
 };
 //# sourceMappingURL=@radix-ui_react-navigation-menu.js.map

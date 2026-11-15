@@ -1,72 +1,77 @@
 "use client";
 import {
-  Anchor2,
-  Arrow2,
-  CheckboxItem,
-  Content2,
-  Group,
-  Item2,
-  ItemIndicator,
-  Label,
-  Portal,
-  RadioGroup,
-  RadioItem,
-  Root3,
-  Separator,
-  Sub,
-  SubContent,
-  SubTrigger,
+  Menu,
+  MenuAnchor,
+  MenuArrow,
+  MenuCheckboxItem,
+  MenuContent,
+  MenuGroup,
+  MenuItem,
+  MenuItemIndicator,
+  MenuLabel,
+  MenuPortal,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuSub,
+  MenuSubContent,
+  MenuSubTrigger,
   createMenuScope
-} from "./chunk-HWFTJFBB.js";
-import "./chunk-RIZNXKLH.js";
-import "./chunk-322JQO6F.js";
-import "./chunk-R3M5WQK6.js";
-import "./chunk-EMF3DAXS.js";
-import "./chunk-HXA2JS2N.js";
-import "./chunk-C257UVSV.js";
-import "./chunk-GP3D6AGI.js";
-import "./chunk-7QZJCKEB.js";
-import "./chunk-NRHAWQBI.js";
-import "./chunk-JSG27HSD.js";
+} from "./chunk-Y3FSNPSL.js";
+import "./chunk-CD6LTO34.js";
+import "./chunk-5GE3UBVK.js";
+import "./chunk-O2ZAVM3M.js";
+import "./chunk-2NL7CCDF.js";
+import "./chunk-EMHYOJUE.js";
+import "./chunk-QFUDUECV.js";
+import "./chunk-KHPBFKCS.js";
+import "./chunk-ZAPJPNAP.js";
+import "./chunk-X7Z4QOHD.js";
+import "./chunk-ROQYZUNY.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
-import "./chunk-JXAX32XB.js";
+} from "./chunk-NLDEGCMH.js";
+import "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-E24ISM2B.js";
+import {
+  IS_DEVELOPMENT
+} from "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
-import "./chunk-GAOO6IGG.js";
+} from "./chunk-ZRCZ3OV4.js";
+import "./chunk-IEVOZGNX.js";
+import "./chunk-BYNCKTIQ.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-context-menu/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var CONTEXT_MENU_NAME = "ContextMenu";
 var [createContextMenuContext, createContextMenuScope] = createContextScope(CONTEXT_MENU_NAME, [
   createMenuScope
 ]);
 var useMenuScope = createMenuScope();
 var [ContextMenuProvider, useContextMenuContext] = createContextMenuContext(CONTEXT_MENU_NAME);
-var ContextMenu = (props) => {
+var ContextMenu = __name((props) => {
   const { __scopeContextMenu, children, onOpenChange, open: openProp, dir, modal = true } = props;
   const hasInteractedRef = React.useRef(false);
-  if (true) {
+  if (IS_DEVELOPMENT) {
     const hasWarnedRef = React.useRef(false);
     React.useEffect(() => {
       if (openProp === true && !hasInteractedRef.current && !hasWarnedRef.current) {
@@ -92,35 +97,40 @@ var ContextMenu = (props) => {
       onOpenChange: setOpen,
       modal,
       hasInteractedRef,
-      children: (0, import_jsx_runtime.jsx)(Root3, { ...menuScope, dir, open, onOpenChange: setOpen, modal, children })
+      children: (0, import_jsx_runtime.jsx)(Menu, { ...menuScope, dir, open, onOpenChange: setOpen, modal, children })
     }
   );
-};
-ContextMenu.displayName = CONTEXT_MENU_NAME;
+}, "ContextMenu");
 var TRIGGER_NAME = "ContextMenuTrigger";
 var ContextMenuTrigger = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ContextMenuTrigger2(props, forwardedRef) {
     const { __scopeContextMenu, disabled = false, ...triggerProps } = props;
     const context = useContextMenuContext(TRIGGER_NAME, __scopeContextMenu);
     const menuScope = useMenuScope(__scopeContextMenu);
-    const pointRef = React.useRef({ x: 0, y: 0 });
-    const virtualRef = React.useRef({
-      getBoundingClientRect: () => DOMRect.fromRect({ width: 0, height: 0, ...pointRef.current })
-    });
+    const [point, setPoint] = React.useState({ x: 0, y: 0 });
+    const virtualRef = React.useMemo(
+      () => ({
+        current: {
+          getBoundingClientRect: __name(() => DOMRect.fromRect({ width: 0, height: 0, ...point }), "getBoundingClientRect")
+        }
+      }),
+      [point]
+    );
     const longPressTimerRef = React.useRef(0);
     const clearLongPress = React.useCallback(
       () => window.clearTimeout(longPressTimerRef.current),
       []
     );
-    const handleOpen = (event) => {
+    const handleOpen = __name((event) => {
       context.hasInteractedRef.current = true;
-      pointRef.current = { x: event.clientX, y: event.clientY };
+      setPoint({ x: event.clientX, y: event.clientY });
       context.onOpenChange(true);
-    };
+    }, "handleOpen");
     React.useEffect(() => clearLongPress, [clearLongPress]);
     React.useEffect(() => void (disabled && clearLongPress()), [disabled, clearLongPress]);
     return (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-      (0, import_jsx_runtime.jsx)(Anchor2, { ...menuScope, virtualRef }),
+      (0, import_jsx_runtime.jsx)(MenuAnchor, { ...menuScope, virtualRef }),
       (0, import_jsx_runtime.jsx)(
         Primitive.span,
         {
@@ -150,32 +160,30 @@ var ContextMenuTrigger = React.forwardRef(
         }
       )
     ] });
-  }
+  }, "ContextMenuTrigger")
 );
-ContextMenuTrigger.displayName = TRIGGER_NAME;
-var PORTAL_NAME = "ContextMenuPortal";
-var ContextMenuPortal = (props) => {
+var ContextMenuPortal = __name((props) => {
   const { __scopeContextMenu, ...portalProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
-  return (0, import_jsx_runtime.jsx)(Portal, { ...menuScope, ...portalProps });
-};
-ContextMenuPortal.displayName = PORTAL_NAME;
+  return (0, import_jsx_runtime.jsx)(MenuPortal, { ...menuScope, ...portalProps });
+}, "ContextMenuPortal");
 var CONTENT_NAME = "ContextMenuContent";
 var ContextMenuContent = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ContextMenuContent2(props, forwardedRef) {
     const { __scopeContextMenu, ...contentProps } = props;
     const context = useContextMenuContext(CONTENT_NAME, __scopeContextMenu);
     const menuScope = useMenuScope(__scopeContextMenu);
     const hasInteractedOutsideRef = React.useRef(false);
     return (0, import_jsx_runtime.jsx)(
-      Content2,
+      MenuContent,
       {
         ...menuScope,
-        ...contentProps,
-        ref: forwardedRef,
         side: "right",
         sideOffset: 2,
         align: "start",
+        ...contentProps,
+        ref: forwardedRef,
         onCloseAutoFocus: (event) => {
           props.onCloseAutoFocus?.(event);
           if (!event.defaultPrevented && hasInteractedOutsideRef.current) {
@@ -200,82 +208,67 @@ var ContextMenuContent = React.forwardRef(
         }
       }
     );
-  }
+  }, "ContextMenuContent")
 );
-ContextMenuContent.displayName = CONTENT_NAME;
-var GROUP_NAME = "ContextMenuGroup";
 var ContextMenuGroup = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ContextMenuGroup2(props, forwardedRef) {
     const { __scopeContextMenu, ...groupProps } = props;
     const menuScope = useMenuScope(__scopeContextMenu);
-    return (0, import_jsx_runtime.jsx)(Group, { ...menuScope, ...groupProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuGroup, { ...menuScope, ...groupProps, ref: forwardedRef });
+  }, "ContextMenuGroup")
 );
-ContextMenuGroup.displayName = GROUP_NAME;
-var LABEL_NAME = "ContextMenuLabel";
 var ContextMenuLabel = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ContextMenuLabel2(props, forwardedRef) {
     const { __scopeContextMenu, ...labelProps } = props;
     const menuScope = useMenuScope(__scopeContextMenu);
-    return (0, import_jsx_runtime.jsx)(Label, { ...menuScope, ...labelProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuLabel, { ...menuScope, ...labelProps, ref: forwardedRef });
+  }, "ContextMenuLabel")
 );
-ContextMenuLabel.displayName = LABEL_NAME;
-var ITEM_NAME = "ContextMenuItem";
 var ContextMenuItem = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ContextMenuItem2(props, forwardedRef) {
     const { __scopeContextMenu, ...itemProps } = props;
     const menuScope = useMenuScope(__scopeContextMenu);
-    return (0, import_jsx_runtime.jsx)(Item2, { ...menuScope, ...itemProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuItem, { ...menuScope, ...itemProps, ref: forwardedRef });
+  }, "ContextMenuItem")
 );
-ContextMenuItem.displayName = ITEM_NAME;
-var CHECKBOX_ITEM_NAME = "ContextMenuCheckboxItem";
-var ContextMenuCheckboxItem = React.forwardRef((props, forwardedRef) => {
+var ContextMenuCheckboxItem = React.forwardRef(__name(function ContextMenuCheckboxItem2(props, forwardedRef) {
   const { __scopeContextMenu, ...checkboxItemProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
-  return (0, import_jsx_runtime.jsx)(CheckboxItem, { ...menuScope, ...checkboxItemProps, ref: forwardedRef });
-});
-ContextMenuCheckboxItem.displayName = CHECKBOX_ITEM_NAME;
-var RADIO_GROUP_NAME = "ContextMenuRadioGroup";
-var ContextMenuRadioGroup = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuCheckboxItem, { ...menuScope, ...checkboxItemProps, ref: forwardedRef });
+}, "ContextMenuCheckboxItem"));
+var ContextMenuRadioGroup = React.forwardRef(__name(function ContextMenuRadioGroup2(props, forwardedRef) {
   const { __scopeContextMenu, ...radioGroupProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
-  return (0, import_jsx_runtime.jsx)(RadioGroup, { ...menuScope, ...radioGroupProps, ref: forwardedRef });
-});
-ContextMenuRadioGroup.displayName = RADIO_GROUP_NAME;
-var RADIO_ITEM_NAME = "ContextMenuRadioItem";
-var ContextMenuRadioItem = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuRadioGroup, { ...menuScope, ...radioGroupProps, ref: forwardedRef });
+}, "ContextMenuRadioGroup"));
+var ContextMenuRadioItem = React.forwardRef(__name(function ContextMenuRadioItem2(props, forwardedRef) {
   const { __scopeContextMenu, ...radioItemProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
-  return (0, import_jsx_runtime.jsx)(RadioItem, { ...menuScope, ...radioItemProps, ref: forwardedRef });
-});
-ContextMenuRadioItem.displayName = RADIO_ITEM_NAME;
-var INDICATOR_NAME = "ContextMenuItemIndicator";
-var ContextMenuItemIndicator = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuRadioItem, { ...menuScope, ...radioItemProps, ref: forwardedRef });
+}, "ContextMenuRadioItem"));
+var ContextMenuItemIndicator = React.forwardRef(__name(function ContextMenuItemIndicator2(props, forwardedRef) {
   const { __scopeContextMenu, ...itemIndicatorProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
-  return (0, import_jsx_runtime.jsx)(ItemIndicator, { ...menuScope, ...itemIndicatorProps, ref: forwardedRef });
-});
-ContextMenuItemIndicator.displayName = INDICATOR_NAME;
-var SEPARATOR_NAME = "ContextMenuSeparator";
-var ContextMenuSeparator = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuItemIndicator, { ...menuScope, ...itemIndicatorProps, ref: forwardedRef });
+}, "ContextMenuItemIndicator"));
+var ContextMenuSeparator = React.forwardRef(__name(function ContextMenuSeparator2(props, forwardedRef) {
   const { __scopeContextMenu, ...separatorProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
-  return (0, import_jsx_runtime.jsx)(Separator, { ...menuScope, ...separatorProps, ref: forwardedRef });
-});
-ContextMenuSeparator.displayName = SEPARATOR_NAME;
-var ARROW_NAME = "ContextMenuArrow";
+  return (0, import_jsx_runtime.jsx)(MenuSeparator, { ...menuScope, ...separatorProps, ref: forwardedRef });
+}, "ContextMenuSeparator"));
 var ContextMenuArrow = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ContextMenuArrow2(props, forwardedRef) {
     const { __scopeContextMenu, ...arrowProps } = props;
     const menuScope = useMenuScope(__scopeContextMenu);
-    return (0, import_jsx_runtime.jsx)(Arrow2, { ...menuScope, ...arrowProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuArrow, { ...menuScope, ...arrowProps, ref: forwardedRef });
+  }, "ContextMenuArrow")
 );
-ContextMenuArrow.displayName = ARROW_NAME;
 var SUB_NAME = "ContextMenuSub";
-var ContextMenuSub = (props) => {
+var ContextMenuSub = __name((props) => {
   const { __scopeContextMenu, children, onOpenChange, open: openProp, defaultOpen } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
   const [open, setOpen] = useControllableState({
@@ -284,22 +277,18 @@ var ContextMenuSub = (props) => {
     onChange: onOpenChange,
     caller: SUB_NAME
   });
-  return (0, import_jsx_runtime.jsx)(Sub, { ...menuScope, open, onOpenChange: setOpen, children });
-};
-ContextMenuSub.displayName = SUB_NAME;
-var SUB_TRIGGER_NAME = "ContextMenuSubTrigger";
-var ContextMenuSubTrigger = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuSub, { ...menuScope, open, onOpenChange: setOpen, children });
+}, "ContextMenuSub");
+var ContextMenuSubTrigger = React.forwardRef(__name(function ContextMenuSubTrigger2(props, forwardedRef) {
   const { __scopeContextMenu, ...triggerItemProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
-  return (0, import_jsx_runtime.jsx)(SubTrigger, { ...menuScope, ...triggerItemProps, ref: forwardedRef });
-});
-ContextMenuSubTrigger.displayName = SUB_TRIGGER_NAME;
-var SUB_CONTENT_NAME = "ContextMenuSubContent";
-var ContextMenuSubContent = React.forwardRef((props, forwardedRef) => {
+  return (0, import_jsx_runtime.jsx)(MenuSubTrigger, { ...menuScope, ...triggerItemProps, ref: forwardedRef });
+}, "ContextMenuSubTrigger"));
+var ContextMenuSubContent = React.forwardRef(__name(function ContextMenuSubContent2(props, forwardedRef) {
   const { __scopeContextMenu, ...subContentProps } = props;
   const menuScope = useMenuScope(__scopeContextMenu);
   return (0, import_jsx_runtime.jsx)(
-    SubContent,
+    MenuSubContent,
     {
       ...menuScope,
       ...subContentProps,
@@ -317,31 +306,15 @@ var ContextMenuSubContent = React.forwardRef((props, forwardedRef) => {
       }
     }
   );
-});
-ContextMenuSubContent.displayName = SUB_CONTENT_NAME;
+}, "ContextMenuSubContent"));
 function whenTouchOrPen(handler) {
   return (event) => event.pointerType !== "mouse" ? handler(event) : void 0;
 }
-var Root2 = ContextMenu;
-var Trigger = ContextMenuTrigger;
-var Portal2 = ContextMenuPortal;
-var Content22 = ContextMenuContent;
-var Group2 = ContextMenuGroup;
-var Label2 = ContextMenuLabel;
-var Item22 = ContextMenuItem;
-var CheckboxItem2 = ContextMenuCheckboxItem;
-var RadioGroup2 = ContextMenuRadioGroup;
-var RadioItem2 = ContextMenuRadioItem;
-var ItemIndicator2 = ContextMenuItemIndicator;
-var Separator2 = ContextMenuSeparator;
-var Arrow22 = ContextMenuArrow;
-var Sub2 = ContextMenuSub;
-var SubTrigger2 = ContextMenuSubTrigger;
-var SubContent2 = ContextMenuSubContent;
+__name(whenTouchOrPen, "whenTouchOrPen");
 export {
-  Arrow22 as Arrow,
-  CheckboxItem2 as CheckboxItem,
-  Content22 as Content,
+  ContextMenuArrow as Arrow,
+  ContextMenuCheckboxItem as CheckboxItem,
+  ContextMenuContent as Content,
   ContextMenu,
   ContextMenuArrow,
   ContextMenuCheckboxItem,
@@ -358,19 +331,19 @@ export {
   ContextMenuSubContent,
   ContextMenuSubTrigger,
   ContextMenuTrigger,
-  Group2 as Group,
-  Item22 as Item,
-  ItemIndicator2 as ItemIndicator,
-  Label2 as Label,
-  Portal2 as Portal,
-  RadioGroup2 as RadioGroup,
-  RadioItem2 as RadioItem,
-  Root2 as Root,
-  Separator2 as Separator,
-  Sub2 as Sub,
-  SubContent2 as SubContent,
-  SubTrigger2 as SubTrigger,
-  Trigger,
+  ContextMenuGroup as Group,
+  ContextMenuItem as Item,
+  ContextMenuItemIndicator as ItemIndicator,
+  ContextMenuLabel as Label,
+  ContextMenuPortal as Portal,
+  ContextMenuRadioGroup as RadioGroup,
+  ContextMenuRadioItem as RadioItem,
+  ContextMenu as Root,
+  ContextMenuSeparator as Separator,
+  ContextMenuSub as Sub,
+  ContextMenuSubContent as SubContent,
+  ContextMenuSubTrigger as SubTrigger,
+  ContextMenuTrigger as Trigger,
   createContextMenuScope
 };
 //# sourceMappingURL=@radix-ui_react-context-menu.js.map

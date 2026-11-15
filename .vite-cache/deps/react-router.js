@@ -1,11 +1,11 @@
 "use client";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __commonJS,
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/cookie/dist/index.js
 var require_dist = __commonJS({
@@ -439,7 +439,7 @@ var require_set_cookie = __commonJS({
   }
 });
 
-// node_modules/react-router/dist/development/chunk-KS7C4IRE.mjs
+// node_modules/react-router/dist/development/chunk-6KYCQHYJ.mjs
 var React = __toESM(require_react(), 1);
 var React2 = __toESM(require_react(), 1);
 var React3 = __toESM(require_react(), 1);
@@ -1221,13 +1221,16 @@ function matchPathImpl(pattern, pathname, matcher, compiledParams) {
   let match = pathname.match(matcher);
   if (!match) return null;
   let matchedPathname = match[0];
-  let pathnameBase = matchedPathname.replace(/(.)\/+$/, "$1");
+  let pathnameBase = removeTrailingSlash(matchedPathname, 1);
   let captureGroups = match.slice(1);
   let params = compiledParams.reduce(
     (memo2, { paramName, isOptional }, index) => {
       if (paramName === "*") {
         let splatValue = captureGroups[index] || "";
-        pathnameBase = matchedPathname.slice(0, matchedPathname.length - splatValue.length).replace(/(.)\/+$/, "$1");
+        pathnameBase = removeTrailingSlash(
+          matchedPathname.slice(0, matchedPathname.length - splatValue.length),
+          1
+        );
       }
       const value = captureGroups[index];
       if (isOptional && !value) {
@@ -1317,7 +1320,7 @@ function resolvePath(to, fromPathname = "/") {
   let pathname;
   if (toPathname) {
     toPathname = removeDoubleSlashes(toPathname);
-    if (toPathname.startsWith("/")) {
+    if (toPathname.startsWith("/") || toPathname.startsWith("\\")) {
       pathname = resolvePathname(toPathname.substring(1), "/");
     } else {
       pathname = resolvePathname(toPathname, fromPathname);
@@ -1405,7 +1408,13 @@ function resolveTo(toArg, routePathnames, locationPathname, isPathRelative = fal
 }
 var removeDoubleSlashes = (path) => path.replace(/[\\/]{2,}/g, "/");
 var joinPaths = (paths) => removeDoubleSlashes(paths.join("/"));
-var removeTrailingSlash = (path) => path.replace(/\/+$/, "");
+function removeTrailingSlash(path, minLength = 0) {
+  let end = path.length;
+  while (end > minLength && path.charCodeAt(end - 1) === 47) {
+    end--;
+  }
+  return end === path.length ? path : path.slice(0, end);
+}
 var normalizePathname = (pathname) => removeTrailingSlash(pathname).replace(/^\/*/, "/");
 var normalizeSearch = (search) => !search || search === "?" ? "" : search.startsWith("?") ? search : "?" + search;
 var normalizeHash = (hash) => !hash || hash === "#" ? "" : hash.startsWith("#") ? hash : "#" + hash;
@@ -1774,6 +1783,49 @@ function isPlainObject(thing) {
   }
   const proto = Object.getPrototypeOf(thing);
   return proto === Object.prototype || proto === null || Object.getOwnPropertyNames(proto).sort().join("\0") === objectProtoNames;
+}
+var DEFAULT_NAVIGATION_URL = new URL("http://localhost");
+function getNavigatorCurrentUrl(navigator) {
+  if (navigator.createURL) {
+    return navigator.createURL("/");
+  }
+  try {
+    return new URL(navigator.createHref("/"), DEFAULT_NAVIGATION_URL);
+  } catch {
+    return DEFAULT_NAVIGATION_URL;
+  }
+}
+function isSameOrigin(a, b) {
+  return a.origin === b.origin && (a.origin !== "null" || a.protocol === b.protocol && a.host === b.host);
+}
+function isExplicitUrl(destination, target) {
+  if (destination.startsWith("//")) {
+    return true;
+  }
+  let protocol = target.protocol.toLowerCase();
+  if (!destination.toLowerCase().startsWith(protocol)) {
+    return false;
+  }
+  return target.host === "" || destination.slice(protocol.length).startsWith("//");
+}
+function validateNavigationTarget(original, resolved, currentUrl, externalPolicy) {
+  let originalUrl = null;
+  try {
+    originalUrl = original == null ? null : new URL(original, currentUrl);
+  } catch {
+  }
+  let resolvedUrl = new URL(resolved, currentUrl);
+  let originalIsExternal = originalUrl != null && !isSameOrigin(originalUrl, currentUrl);
+  let resolvedIsExternal = !isSameOrigin(resolvedUrl, currentUrl);
+  if (externalPolicy === "reject") {
+    if (originalIsExternal || resolvedIsExternal) {
+      throw new Error("External navigation is not allowed");
+    }
+  } else if (resolvedIsExternal) {
+    if (originalUrl == null || !isExplicitUrl(original, originalUrl) || !isSameOrigin(originalUrl, resolvedUrl)) {
+      throw new Error("External navigation is not allowed");
+    }
+  }
 }
 var validMutationMethodsArr = [
   "POST",
@@ -2200,7 +2252,7 @@ function createRouter(init) {
       init.history.replace(location, location.state);
     }
     let viewTransitionOpts;
-    if (pendingAction === "POP") {
+    if (pendingAction === "POP" && !isUninterruptedRevalidation && location !== state.location) {
       let priorPaths = appliedViewTransitions.get(state.location.pathname);
       if (priorPaths && priorPaths.has(location.pathname)) {
         viewTransitionOpts = {
@@ -2288,11 +2340,21 @@ function createRouter(init) {
         ...opts.mask
       };
       maskPath = {
-        pathname: "",
-        search: "",
-        hash: "",
-        ...partialPath
+        pathname: partialPath.pathname ?? "",
+        search: partialPath.search ?? "",
+        hash: partialPath.hash ?? ""
       };
+      if (PROTOCOL_RELATIVE_URL_REGEX.test(maskPath.pathname)) {
+        throw new Error("External navigation is not allowed");
+      } else if (maskPath.pathname.startsWith("\\")) {
+        maskPath.pathname = maskPath.pathname.replace(/^\\+/, "/");
+      }
+      validateNavigationTarget(
+        typeof opts.mask === "string" ? opts.mask : createPath(opts.mask),
+        createPath(maskPath),
+        init.history.createURL("/"),
+        "reject"
+      );
     }
     let currentLocation = state.location;
     let nextLocation = createLocation(
@@ -2306,6 +2368,12 @@ function createRouter(init) {
       ...nextLocation,
       ...init.history.encodeLocation(nextLocation)
     };
+    validateNavigationTarget(
+      to == null ? init.history.createHref(state.location) : typeof to === "string" ? to : createPath(to),
+      init.history.createHref(nextLocation.mask || nextLocation),
+      init.history.createURL("/"),
+      "reject"
+    );
     let userReplace = opts && opts.replace != null ? opts.replace : void 0;
     let historyAction = "PUSH";
     if (userReplace === true) {
@@ -3316,11 +3384,19 @@ function createRouter(init) {
     }
     let location = redirect2.response.headers.get("Location");
     invariant(location, "Expected a Location header on the redirect Response");
+    let originalLocation = location;
+    let currentUrl = new URL(request.url);
     location = normalizeRedirectLocation(
       location,
-      new URL(request.url),
+      currentUrl,
       basename,
       init.history
+    );
+    validateNavigationTarget(
+      originalLocation,
+      location,
+      currentUrl,
+      "allow-explicit"
     );
     let redirectLocation = createLocation(state.location, location, {
       _isRedirect: true
@@ -3840,6 +3916,7 @@ function createRouter(init) {
     // Passthrough to history-aware createHref used by useHref so we get proper
     // hash-aware URLs in DOM paths
     createHref: (to) => init.history.createHref(to),
+    createURL: (to) => init.history.createURL(to),
     encodeLocation: (to) => init.history.encodeLocation(to),
     getFetcher,
     resetFetcher,
@@ -3895,6 +3972,10 @@ function createStaticHandler(routes, opts) {
     manifest
   );
   let routeBranches = flattenAndRankRoutes(dataRoutes);
+  let matchCost = routeBranches.reduce(
+    (total, branch) => total + branch.routesMeta.length,
+    0
+  );
   async function query(request, {
     requestContext,
     filterMatchesToLoad,
@@ -4516,6 +4597,7 @@ function createStaticHandler(routes, opts) {
   }
   return {
     dataRoutes,
+    _matchCost: matchCost,
     _internalRouteBranches: routeBranches,
     query,
     queryRoute
@@ -6371,6 +6453,12 @@ function useNavigateUnstable() {
       if (dataRouterContext == null && basename !== "/") {
         path.pathname = path.pathname === "/" ? basename : joinPaths([basename, path.pathname]);
       }
+      validateNavigationTarget(
+        typeof to === "string" ? to : createPath(to),
+        navigator.createHref(path),
+        getNavigatorCurrentUrl(navigator),
+        "reject"
+      );
       (!!options.replace ? navigator.replace : navigator.push)(
         path,
         options.state,
@@ -6613,7 +6701,7 @@ function RSCErrorHandler({
   children,
   error
 }) {
-  let { basename } = React2.useContext(NavigationContext);
+  let { basename, navigator } = React2.useContext(NavigationContext);
   if (typeof error === "object" && error && "digest" in error && typeof error.digest === "string") {
     let redirect2 = decodeRedirectErrorDigest(error.digest);
     if (redirect2) {
@@ -6621,6 +6709,12 @@ function RSCErrorHandler({
       if (existingRedirect) throw existingRedirect;
       let parsed = parseToInfo(redirect2.location, basename);
       let target = parsed.absoluteURL || parsed.to;
+      validateNavigationTarget(
+        redirect2.location,
+        target,
+        getNavigatorCurrentUrl(navigator),
+        "allow-explicit"
+      );
       if (hasInvalidProtocol(target)) {
         throw new Error("Invalid redirect location");
       }
@@ -7344,6 +7438,7 @@ function RouterProvider({
   let navigator = React3.useMemo(() => {
     return {
       createHref: router.createHref,
+      createURL: router.createURL,
       encodeLocation: router.encodeLocation,
       go: (n) => router.navigate(n),
       push: (to, state2, opts) => router.navigate(to, {
@@ -7476,7 +7571,7 @@ function Navigate({
     // the router loaded. We can help them understand how to avoid that.
     `<Navigate> may be used only in the context of a <Router> component.`
   );
-  let { static: isStatic } = React3.useContext(NavigationContext);
+  let { static: isStatic, navigator } = React3.useContext(NavigationContext);
   warning(
     !isStatic,
     `<Navigate> must not be used on the initial render in a <StaticRouter>. This is a no-op, but you should modify your code so the <Navigate> is only ever rendered in response to some user interaction or state change.`
@@ -7489,6 +7584,12 @@ function Navigate({
     getResolveToMatches(matches),
     locationPathname,
     relative === "path"
+  );
+  validateNavigationTarget(
+    typeof to === "string" ? to : createPath(to),
+    navigator.createHref(path),
+    getNavigatorCurrentUrl(navigator),
+    "reject"
   );
   let jsonPath = JSON.stringify(path);
   React3.useEffect(() => {
@@ -8187,6 +8288,7 @@ function hydrate(index) {
         set(-0);
         continue;
     }
+    validateIndex(index2, values.length);
     if (hydrated[index2]) {
       set(hydrated[index2]);
       continue;
@@ -8275,6 +8377,7 @@ function hydrate(index) {
             set(obj);
             continue;
           case TYPE_PROMISE:
+            validateIndex(b, values.length);
             if (hydrated[b]) {
               set(hydrated[index2] = hydrated[b]);
             } else {
@@ -8290,6 +8393,7 @@ function hydrate(index) {
             set(error);
             continue;
           case TYPE_PREVIOUS_RESOLVED:
+            validateIndex(b, values.length);
             set(hydrated[index2] = hydrated[b]);
             continue;
           default:
@@ -8354,7 +8458,12 @@ function hydrate(index) {
           }
         ]);
         postRun.push(() => {
-          object[r[0]] = r[1];
+          Object.defineProperty(object, r[0], {
+            value: r[1],
+            enumerable: true,
+            configurable: true,
+            writable: true
+          });
         });
       }
       set(object);
@@ -8365,6 +8474,11 @@ function hydrate(index) {
     postRun.pop()();
   }
   return result;
+}
+function validateIndex(index, length) {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= length) {
+    throw new SyntaxError();
+  }
 }
 async function decode(readable, options) {
   const { plugins } = options ?? {};
@@ -8627,6 +8741,9 @@ var ESCAPE_LOOKUP = {
 var ESCAPE_REGEX = /[&><\u2028\u2029]/g;
 function escapeHtml(html) {
   return html.replace(ESCAPE_REGEX, (match) => ESCAPE_LOOKUP[match]);
+}
+function escapeAttribute(value) {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 function invariant2(value, message) {
   if (value === false || value === null || typeof value === "undefined") {
@@ -9809,6 +9926,13 @@ function getPathsWithAncestors(paths) {
 function isFogOfWarEnabled(routeDiscovery, ssr) {
   return routeDiscovery.mode === "lazy" && ssr === true;
 }
+var MANIFEST_MATCH_COST_LIMIT = 5e4;
+var MANIFEST_MATCH_COST_SEGMENT_THRESHOLD = 10;
+function shouldUseInitialRouteDiscovery(pathname, matchCost = 0) {
+  let segmentCount = pathname.split("/").length - 1;
+  let ancestorCount = Math.max(segmentCount - 1, 0);
+  return ancestorCount * pathname.length + 1 > URL_LIMIT || segmentCount > MANIFEST_MATCH_COST_SEGMENT_THRESHOLD && segmentCount * matchCost > MANIFEST_MATCH_COST_LIMIT;
+}
 function getPartialManifest({ sri, ...manifest }, router) {
   let routeIds = new Set(router.state.matches.map((m) => m.route.id));
   let segments = router.state.location.pathname.split("/").filter(Boolean);
@@ -10729,7 +10853,7 @@ var isBrowser2 = typeof window !== "undefined" && typeof window.document !== "un
 try {
   if (isBrowser2) {
     window.__reactRouterVersion = // @ts-expect-error
-    "7.18.1";
+    "7.18.5";
   }
 } catch (e) {
 }
@@ -11892,7 +12016,7 @@ function encodeLocation(to) {
   };
 }
 
-// node_modules/react-router/dist/development/chunk-IJF3QNGC.mjs
+// node_modules/react-router/dist/development/chunk-JAHXRPFV.mjs
 var React12 = __toESM(require_react(), 1);
 var React22 = __toESM(require_react(), 1);
 var import_cookie = __toESM(require_dist(), 1);
@@ -12554,18 +12678,25 @@ function prependCookies(parentHeaders, childHeaders) {
 function throwIfPotentialCSRFAttack(request, allowedActionOrigins) {
   let originHeader = request.headers.get("origin");
   let originDomain = null;
+  let originUrl = null;
   try {
-    originDomain = typeof originHeader === "string" && originHeader !== "null" ? new URL(originHeader).host : originHeader;
+    if (typeof originHeader === "string" && originHeader !== "null") {
+      originUrl = new URL(originHeader);
+      originDomain = originUrl.host;
+    } else {
+      originDomain = originHeader;
+    }
   } catch {
     throw new Error(
       `\`origin\` header is not a valid URL. Aborting the action.`
     );
   }
-  let host = new URL(request.url).host;
-  if (originDomain && originDomain !== host) {
+  let requestUrl = new URL(request.url);
+  let originMatchesRequest = originUrl ? originUrl.origin === requestUrl.origin : originDomain === requestUrl.host;
+  if (originDomain && !originMatchesRequest) {
     if (!isAllowedOrigin(originDomain, allowedActionOrigins)) {
       throw new Error(
-        "The `request.url` host does not match `origin` header from a forwarded action request. Aborting the action."
+        "The `request.url` origin does not match `origin` header from a forwarded action request. Aborting the action."
       );
     }
   }
@@ -13268,10 +13399,17 @@ async function handleDocumentRequest(serverMode, build, staticHandler, request, 
       actionData: context.actionData,
       errors: context.errors
     };
+    let routeDiscovery = build.routeDiscovery;
+    if (isFogOfWarEnabled(routeDiscovery, build.ssr) && shouldUseInitialRouteDiscovery(
+      context.location.pathname,
+      staticHandler._matchCost
+    )) {
+      routeDiscovery = { ...routeDiscovery, mode: "initial" };
+    }
     let baseServerHandoff = {
       basename: build.basename,
       future: build.future,
-      routeDiscovery: build.routeDiscovery,
+      routeDiscovery,
       ssr: build.ssr,
       isSpaMode: isSpaMode2
     };
@@ -13294,7 +13432,7 @@ async function handleDocumentRequest(serverMode, build, staticHandler, request, 
       renderMeta: {},
       future: build.future,
       ssr: build.ssr,
-      routeDiscovery: build.routeDiscovery,
+      routeDiscovery,
       isSpaMode: isSpaMode2,
       serializeError: (err) => serializeError(err, serverMode)
     };
@@ -13971,7 +14109,7 @@ async function routeRSCServerRequest({
           }
           controller.enqueue(
             new TextEncoder().encode(
-              `<meta http-equiv="refresh" content="0;url=${escapeHtml(renderRedirect.location)}"/>`
+              `<meta http-equiv="refresh" content="0;url=${escapeAttribute(renderRedirect.location)}"/>`
             )
           );
         }
@@ -14091,7 +14229,7 @@ async function routeRSCServerRequest({
             }
             controller.enqueue(
               new TextEncoder().encode(
-                `<meta http-equiv="refresh" content="0;url=${escapeHtml(retryRedirect.location)}"/>`
+                `<meta http-equiv="refresh" content="0;url=${escapeAttribute(retryRedirect.location)}"/>`
               )
             );
           }

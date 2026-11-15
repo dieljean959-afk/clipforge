@@ -1,74 +1,81 @@
 "use client";
 import {
-  Anchor2,
-  Arrow2,
-  CheckboxItem,
-  Content2,
-  Group,
-  Item2,
-  ItemIndicator,
-  Label,
-  Portal,
-  RadioGroup,
-  RadioItem,
-  Root3,
-  Separator,
-  Sub,
-  SubContent,
-  SubTrigger,
+  Menu,
+  MenuAnchor,
+  MenuArrow,
+  MenuCheckboxItem,
+  MenuContent,
+  MenuGroup,
+  MenuItem,
+  MenuItemIndicator,
+  MenuLabel,
+  MenuPortal,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuSub,
+  MenuSubContent,
+  MenuSubTrigger,
   createMenuScope
-} from "./chunk-HWFTJFBB.js";
+} from "./chunk-Y3FSNPSL.js";
 import {
-  Item,
-  Root,
+  RovingFocusGroup,
+  RovingFocusGroupItem,
   createRovingFocusGroupScope
-} from "./chunk-RIZNXKLH.js";
-import "./chunk-322JQO6F.js";
-import "./chunk-R3M5WQK6.js";
+} from "./chunk-CD6LTO34.js";
+import "./chunk-5GE3UBVK.js";
+import "./chunk-O2ZAVM3M.js";
 import {
   createCollection
-} from "./chunk-EMF3DAXS.js";
+} from "./chunk-2NL7CCDF.js";
 import {
   useDirection
-} from "./chunk-HXA2JS2N.js";
-import "./chunk-C257UVSV.js";
-import "./chunk-GP3D6AGI.js";
-import "./chunk-7QZJCKEB.js";
-import "./chunk-NRHAWQBI.js";
+} from "./chunk-EMHYOJUE.js";
+import "./chunk-QFUDUECV.js";
+import "./chunk-KHPBFKCS.js";
+import "./chunk-ZAPJPNAP.js";
+import "./chunk-X7Z4QOHD.js";
 import {
   useId
-} from "./chunk-JSG27HSD.js";
+} from "./chunk-ROQYZUNY.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
-import "./chunk-JXAX32XB.js";
+} from "./chunk-NLDEGCMH.js";
+import "./chunk-ETDQP2KF.js";
 import {
   composeEventHandlers
-} from "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-E24ISM2B.js";
+import "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
+} from "./chunk-ZRCZ3OV4.js";
 import {
   useComposedRefs
-} from "./chunk-GAOO6IGG.js";
+} from "./chunk-IEVOZGNX.js";
+import "./chunk-BYNCKTIQ.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-menubar/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var Direction = {
+  LTR: "ltr",
+  RTL: "rtl"
+};
 var MENUBAR_NAME = "Menubar";
 var [Collection, useCollection, createCollectionScope] = createCollection(MENUBAR_NAME);
 var [createMenubarContext, createMenubarScope] = createContextScope(MENUBAR_NAME, [
@@ -79,7 +86,8 @@ var useMenuScope = createMenuScope();
 var useRovingFocusGroupScope = createRovingFocusGroupScope();
 var [MenubarContextProvider, useMenubarContext] = createMenubarContext(MENUBAR_NAME);
 var Menubar = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function Menubar2(props, forwardedRef) {
     const {
       __scopeMenubar,
       value: valueProp,
@@ -121,7 +129,7 @@ var Menubar = React.forwardRef(
         dir: direction,
         loop,
         children: (0, import_jsx_runtime.jsx)(Collection.Provider, { scope: __scopeMenubar, children: (0, import_jsx_runtime.jsx)(Collection.Slot, { scope: __scopeMenubar, children: (0, import_jsx_runtime.jsx)(
-          Root,
+          RovingFocusGroup,
           {
             asChild: true,
             ...rovingFocusGroupScope,
@@ -135,12 +143,11 @@ var Menubar = React.forwardRef(
         ) }) })
       }
     );
-  }
+  }, "Menubar")
 );
-Menubar.displayName = MENUBAR_NAME;
 var MENU_NAME = "MenubarMenu";
 var [MenubarMenuProvider, useMenubarMenuContext] = createMenubarContext(MENU_NAME);
-var MenubarMenu = (props) => {
+var MenubarMenu = __name((props) => {
   const { __scopeMenubar, value: valueProp, ...menuProps } = props;
   const autoValue = useId();
   const value = valueProp || autoValue || "LEGACY_REACT_AUTO_VALUE";
@@ -162,7 +169,7 @@ var MenubarMenu = (props) => {
       contentId: useId(),
       wasKeyboardTriggerOpenRef,
       children: (0, import_jsx_runtime.jsx)(
-        Root3,
+        Menu,
         {
           ...menuScope,
           open,
@@ -176,11 +183,10 @@ var MenubarMenu = (props) => {
       )
     }
   );
-};
-MenubarMenu.displayName = MENU_NAME;
+}, "MenubarMenu");
 var TRIGGER_NAME = "MenubarTrigger";
 var MenubarTrigger = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function MenubarTrigger2(props, forwardedRef) {
     const { __scopeMenubar, disabled = false, ...triggerProps } = props;
     const rovingFocusGroupScope = useRovingFocusGroupScope(__scopeMenubar);
     const menuScope = useMenuScope(__scopeMenubar);
@@ -191,13 +197,13 @@ var MenubarTrigger = React.forwardRef(
     const [isFocused, setIsFocused] = React.useState(false);
     const open = context.value === menuContext.value;
     return (0, import_jsx_runtime.jsx)(Collection.ItemSlot, { scope: __scopeMenubar, value: menuContext.value, disabled, children: (0, import_jsx_runtime.jsx)(
-      Item,
+      RovingFocusGroupItem,
       {
         asChild: true,
         ...rovingFocusGroupScope,
         focusable: !disabled,
         tabStopId: menuContext.value,
-        children: (0, import_jsx_runtime.jsx)(Anchor2, { asChild: true, ...menuScope, children: (0, import_jsx_runtime.jsx)(
+        children: (0, import_jsx_runtime.jsx)(MenuAnchor, { asChild: true, ...menuScope, children: (0, import_jsx_runtime.jsx)(
           Primitive.button,
           {
             type: "button",
@@ -240,19 +246,16 @@ var MenubarTrigger = React.forwardRef(
         ) })
       }
     ) });
-  }
+  }, "MenubarTrigger")
 );
-MenubarTrigger.displayName = TRIGGER_NAME;
-var PORTAL_NAME = "MenubarPortal";
-var MenubarPortal = (props) => {
+var MenubarPortal = __name((props) => {
   const { __scopeMenubar, ...portalProps } = props;
   const menuScope = useMenuScope(__scopeMenubar);
-  return (0, import_jsx_runtime.jsx)(Portal, { ...menuScope, ...portalProps });
-};
-MenubarPortal.displayName = PORTAL_NAME;
+  return (0, import_jsx_runtime.jsx)(MenuPortal, { ...menuScope, ...portalProps });
+}, "MenubarPortal");
 var CONTENT_NAME = "MenubarContent";
 var MenubarContent = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function MenubarContent2(props, forwardedRef) {
     const { __scopeMenubar, align = "start", ...contentProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
     const context = useMenubarContext(CONTENT_NAME, __scopeMenubar);
@@ -260,7 +263,7 @@ var MenubarContent = React.forwardRef(
     const getItems = useCollection(__scopeMenubar);
     const hasInteractedOutsideRef = React.useRef(false);
     return (0, import_jsx_runtime.jsx)(
-      Content2,
+      MenuContent,
       {
         id: menuContext.contentId,
         "aria-labelledby": menuContext.triggerId,
@@ -295,7 +298,7 @@ var MenubarContent = React.forwardRef(
               const target = event.target;
               const targetIsSubTrigger = target.hasAttribute("data-radix-menubar-subtrigger");
               const isKeyDownInsideSubMenu = target.closest("[data-radix-menubar-content]") !== event.currentTarget;
-              const prevMenuKey = context.dir === "rtl" ? "ArrowRight" : "ArrowLeft";
+              const prevMenuKey = context.dir === Direction.RTL ? "ArrowRight" : "ArrowLeft";
               const isPrevKey = prevMenuKey === event.key;
               const isNextKey = !isPrevKey;
               if (isNextKey && targetIsSubTrigger) return;
@@ -324,90 +327,75 @@ var MenubarContent = React.forwardRef(
         }
       }
     );
-  }
+  }, "MenubarContent")
 );
-MenubarContent.displayName = CONTENT_NAME;
-var GROUP_NAME = "MenubarGroup";
 var MenubarGroup = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function MenubarGroup2(props, forwardedRef) {
     const { __scopeMenubar, ...groupProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(Group, { ...menuScope, ...groupProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuGroup, { ...menuScope, ...groupProps, ref: forwardedRef });
+  }, "MenubarGroup")
 );
-MenubarGroup.displayName = GROUP_NAME;
-var LABEL_NAME = "MenubarLabel";
 var MenubarLabel = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function MenubarLabel2(props, forwardedRef) {
     const { __scopeMenubar, ...labelProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(Label, { ...menuScope, ...labelProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuLabel, { ...menuScope, ...labelProps, ref: forwardedRef });
+  }, "MenubarLabel")
 );
-MenubarLabel.displayName = LABEL_NAME;
-var ITEM_NAME = "MenubarItem";
 var MenubarItem = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function MenubarItem2(props, forwardedRef) {
     const { __scopeMenubar, ...itemProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(Item2, { ...menuScope, ...itemProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuItem, { ...menuScope, ...itemProps, ref: forwardedRef });
+  }, "MenubarItem")
 );
-MenubarItem.displayName = ITEM_NAME;
-var CHECKBOX_ITEM_NAME = "MenubarCheckboxItem";
 var MenubarCheckboxItem = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function MenubarCheckboxItem2(props, forwardedRef) {
     const { __scopeMenubar, ...checkboxItemProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(CheckboxItem, { ...menuScope, ...checkboxItemProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuCheckboxItem, { ...menuScope, ...checkboxItemProps, ref: forwardedRef });
+  }, "MenubarCheckboxItem")
 );
-MenubarCheckboxItem.displayName = CHECKBOX_ITEM_NAME;
-var RADIO_GROUP_NAME = "MenubarRadioGroup";
 var MenubarRadioGroup = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function MenubarRadioGroup2(props, forwardedRef) {
     const { __scopeMenubar, ...radioGroupProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(RadioGroup, { ...menuScope, ...radioGroupProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuRadioGroup, { ...menuScope, ...radioGroupProps, ref: forwardedRef });
+  }, "MenubarRadioGroup")
 );
-MenubarRadioGroup.displayName = RADIO_GROUP_NAME;
-var RADIO_ITEM_NAME = "MenubarRadioItem";
 var MenubarRadioItem = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function MenubarRadioItem2(props, forwardedRef) {
     const { __scopeMenubar, ...radioItemProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(RadioItem, { ...menuScope, ...radioItemProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuRadioItem, { ...menuScope, ...radioItemProps, ref: forwardedRef });
+  }, "MenubarRadioItem")
 );
-MenubarRadioItem.displayName = RADIO_ITEM_NAME;
-var INDICATOR_NAME = "MenubarItemIndicator";
-var MenubarItemIndicator = React.forwardRef((props, forwardedRef) => {
+var MenubarItemIndicator = React.forwardRef(__name(function MenubarItemIndicator2(props, forwardedRef) {
   const { __scopeMenubar, ...itemIndicatorProps } = props;
   const menuScope = useMenuScope(__scopeMenubar);
-  return (0, import_jsx_runtime.jsx)(ItemIndicator, { ...menuScope, ...itemIndicatorProps, ref: forwardedRef });
-});
-MenubarItemIndicator.displayName = INDICATOR_NAME;
-var SEPARATOR_NAME = "MenubarSeparator";
+  return (0, import_jsx_runtime.jsx)(MenuItemIndicator, { ...menuScope, ...itemIndicatorProps, ref: forwardedRef });
+}, "MenubarItemIndicator"));
 var MenubarSeparator = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function MenubarSeparator2(props, forwardedRef) {
     const { __scopeMenubar, ...separatorProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(Separator, { ...menuScope, ...separatorProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuSeparator, { ...menuScope, ...separatorProps, ref: forwardedRef });
+  }, "MenubarSeparator")
 );
-MenubarSeparator.displayName = SEPARATOR_NAME;
-var ARROW_NAME = "MenubarArrow";
 var MenubarArrow = React.forwardRef(
-  (props, forwardedRef) => {
+  __name(function MenubarArrow2(props, forwardedRef) {
     const { __scopeMenubar, ...arrowProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
-    return (0, import_jsx_runtime.jsx)(Arrow2, { ...menuScope, ...arrowProps, ref: forwardedRef });
-  }
+    return (0, import_jsx_runtime.jsx)(MenuArrow, { ...menuScope, ...arrowProps, ref: forwardedRef });
+  }, "MenubarArrow")
 );
-MenubarArrow.displayName = ARROW_NAME;
 var SUB_NAME = "MenubarSub";
-var MenubarSub = (props) => {
+var MenubarSub = __name((props) => {
   const { __scopeMenubar, children, open: openProp, onOpenChange, defaultOpen } = props;
   const menuScope = useMenuScope(__scopeMenubar);
   const [open, setOpen] = useControllableState({
@@ -416,16 +404,15 @@ var MenubarSub = (props) => {
     onChange: onOpenChange,
     caller: SUB_NAME
   });
-  return (0, import_jsx_runtime.jsx)(Sub, { ...menuScope, open, onOpenChange: setOpen, children });
-};
-MenubarSub.displayName = SUB_NAME;
-var SUB_TRIGGER_NAME = "MenubarSubTrigger";
+  return (0, import_jsx_runtime.jsx)(MenuSub, { ...menuScope, open, onOpenChange: setOpen, children });
+}, "MenubarSub");
 var MenubarSubTrigger = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function MenubarSubTrigger2(props, forwardedRef) {
     const { __scopeMenubar, ...subTriggerProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
     return (0, import_jsx_runtime.jsx)(
-      SubTrigger,
+      MenuSubTrigger,
       {
         "data-radix-menubar-subtrigger": "",
         ...menuScope,
@@ -433,16 +420,15 @@ var MenubarSubTrigger = React.forwardRef(
         ref: forwardedRef
       }
     );
-  }
+  }, "MenubarSubTrigger")
 );
-MenubarSubTrigger.displayName = SUB_TRIGGER_NAME;
-var SUB_CONTENT_NAME = "MenubarSubContent";
 var MenubarSubContent = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function MenubarSubContent2(props, forwardedRef) {
     const { __scopeMenubar, ...subContentProps } = props;
     const menuScope = useMenuScope(__scopeMenubar);
     return (0, import_jsx_runtime.jsx)(
-      SubContent,
+      MenuSubContent,
       {
         ...menuScope,
         "data-radix-menubar-content": "",
@@ -461,38 +447,21 @@ var MenubarSubContent = React.forwardRef(
         }
       }
     );
-  }
+  }, "MenubarSubContent")
 );
-MenubarSubContent.displayName = SUB_CONTENT_NAME;
 function wrapArray(array, startIndex) {
   return array.map((_, index) => array[(startIndex + index) % array.length]);
 }
-var Root32 = Menubar;
-var Menu = MenubarMenu;
-var Trigger = MenubarTrigger;
-var Portal2 = MenubarPortal;
-var Content22 = MenubarContent;
-var Group2 = MenubarGroup;
-var Label2 = MenubarLabel;
-var Item3 = MenubarItem;
-var CheckboxItem2 = MenubarCheckboxItem;
-var RadioGroup2 = MenubarRadioGroup;
-var RadioItem2 = MenubarRadioItem;
-var ItemIndicator2 = MenubarItemIndicator;
-var Separator2 = MenubarSeparator;
-var Arrow22 = MenubarArrow;
-var Sub2 = MenubarSub;
-var SubTrigger2 = MenubarSubTrigger;
-var SubContent2 = MenubarSubContent;
+__name(wrapArray, "wrapArray");
 export {
-  Arrow22 as Arrow,
-  CheckboxItem2 as CheckboxItem,
-  Content22 as Content,
-  Group2 as Group,
-  Item3 as Item,
-  ItemIndicator2 as ItemIndicator,
-  Label2 as Label,
-  Menu,
+  MenubarArrow as Arrow,
+  MenubarCheckboxItem as CheckboxItem,
+  MenubarContent as Content,
+  MenubarGroup as Group,
+  MenubarItem as Item,
+  MenubarItemIndicator as ItemIndicator,
+  MenubarLabel as Label,
+  MenubarMenu as Menu,
   Menubar,
   MenubarArrow,
   MenubarCheckboxItem,
@@ -510,15 +479,15 @@ export {
   MenubarSubContent,
   MenubarSubTrigger,
   MenubarTrigger,
-  Portal2 as Portal,
-  RadioGroup2 as RadioGroup,
-  RadioItem2 as RadioItem,
-  Root32 as Root,
-  Separator2 as Separator,
-  Sub2 as Sub,
-  SubContent2 as SubContent,
-  SubTrigger2 as SubTrigger,
-  Trigger,
+  MenubarPortal as Portal,
+  MenubarRadioGroup as RadioGroup,
+  MenubarRadioItem as RadioItem,
+  Menubar as Root,
+  MenubarSeparator as Separator,
+  MenubarSub as Sub,
+  MenubarSubContent as SubContent,
+  MenubarSubTrigger as SubTrigger,
+  MenubarTrigger as Trigger,
   createMenubarScope
 };
 //# sourceMappingURL=@radix-ui_react-menubar.js.map

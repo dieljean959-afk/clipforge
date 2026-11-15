@@ -1,69 +1,74 @@
 "use client";
 import {
   Toggle
-} from "./chunk-TKZ5NAP5.js";
+} from "./chunk-VN325B3D.js";
 import {
-  Item,
-  Root,
+  RovingFocusGroup,
+  RovingFocusGroupItem,
   createRovingFocusGroupScope
-} from "./chunk-RIZNXKLH.js";
-import "./chunk-EMF3DAXS.js";
+} from "./chunk-CD6LTO34.js";
+import "./chunk-2NL7CCDF.js";
 import {
   useDirection
-} from "./chunk-HXA2JS2N.js";
-import "./chunk-NRHAWQBI.js";
-import "./chunk-JSG27HSD.js";
+} from "./chunk-EMHYOJUE.js";
+import "./chunk-X7Z4QOHD.js";
+import "./chunk-ROQYZUNY.js";
 import {
   useControllableState
-} from "./chunk-IFXKPRT2.js";
-import "./chunk-FASKNQ62.js";
-import "./chunk-T6UOJQWQ.js";
+} from "./chunk-NLDEGCMH.js";
+import "./chunk-E24ISM2B.js";
+import "./chunk-V4XET5H7.js";
 import {
   createContextScope
-} from "./chunk-RLRN53BT.js";
+} from "./chunk-NYJQAXGL.js";
 import {
   Primitive
-} from "./chunk-WJBSKEQX.js";
-import "./chunk-GAOO6IGG.js";
+} from "./chunk-ZRCZ3OV4.js";
+import "./chunk-IEVOZGNX.js";
 import {
   require_jsx_runtime
-} from "./chunk-BJIITAPU.js";
-import "./chunk-GMNIVPK7.js";
+} from "./chunk-XOQ4UB3A.js";
+import "./chunk-4U7QFG22.js";
 import {
   require_react
-} from "./chunk-JI3JN37G.js";
+} from "./chunk-7KAG3XWH.js";
 import {
   __toESM
-} from "./chunk-PR4QN5HX.js";
+} from "./chunk-M2PPBBZ4.js";
 
 // node_modules/@radix-ui/react-toggle-group/dist/index.mjs
 var React = __toESM(require_react(), 1);
 var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var TOGGLE_GROUP_NAME = "ToggleGroup";
+var ToggleGroupType = {
+  Single: "single",
+  Multiple: "multiple"
+};
 var [createToggleGroupContext, createToggleGroupScope] = createContextScope(TOGGLE_GROUP_NAME, [
   createRovingFocusGroupScope
 ]);
 var useRovingFocusGroupScope = createRovingFocusGroupScope();
-var ToggleGroup = React.forwardRef((props, forwardedRef) => {
+var ToggleGroup = React.forwardRef(__name(function ToggleGroup2(props, forwardedRef) {
   const { type, ...toggleGroupProps } = props;
-  if (type === "single") {
+  if (type === ToggleGroupType.Single) {
     const singleProps = toggleGroupProps;
     return (0, import_jsx_runtime.jsx)(ToggleGroupImplSingle, { role: "radiogroup", ...singleProps, ref: forwardedRef });
   }
-  if (type === "multiple") {
+  if (type === ToggleGroupType.Multiple) {
     const multipleProps = toggleGroupProps;
     return (0, import_jsx_runtime.jsx)(ToggleGroupImplMultiple, { role: "toolbar", ...multipleProps, ref: forwardedRef });
   }
   throw new Error(`Missing prop \`type\` expected on \`${TOGGLE_GROUP_NAME}\``);
-});
-ToggleGroup.displayName = TOGGLE_GROUP_NAME;
+}, "ToggleGroup"));
 var [ToggleGroupValueProvider, useToggleGroupValueContext] = createToggleGroupContext(TOGGLE_GROUP_NAME);
-var ToggleGroupImplSingle = React.forwardRef((props, forwardedRef) => {
+var ToggleGroupImplSingle = React.forwardRef(__name(function ToggleGroupImplSingle2(props, forwardedRef) {
   const {
     value: valueProp,
     defaultValue,
-    onValueChange = () => {
-    },
+    onValueChange = __name(() => {
+    }, "onValueChange"),
     ...toggleGroupSingleProps
   } = props;
   const [value, setValue] = useControllableState({
@@ -76,20 +81,20 @@ var ToggleGroupImplSingle = React.forwardRef((props, forwardedRef) => {
     ToggleGroupValueProvider,
     {
       scope: props.__scopeToggleGroup,
-      type: "single",
+      type: ToggleGroupType.Single,
       value: React.useMemo(() => value ? [value] : [], [value]),
       onItemActivate: setValue,
       onItemDeactivate: React.useCallback(() => setValue(""), [setValue]),
       children: (0, import_jsx_runtime.jsx)(ToggleGroupImpl, { ...toggleGroupSingleProps, ref: forwardedRef })
     }
   );
-});
-var ToggleGroupImplMultiple = React.forwardRef((props, forwardedRef) => {
+}, "ToggleGroupImplSingle"));
+var ToggleGroupImplMultiple = React.forwardRef(__name(function ToggleGroupImplMultiple2(props, forwardedRef) {
   const {
     value: valueProp,
     defaultValue,
-    onValueChange = () => {
-    },
+    onValueChange = __name(() => {
+    }, "onValueChange"),
     ...toggleGroupMultipleProps
   } = props;
   const [value, setValue] = useControllableState({
@@ -110,18 +115,18 @@ var ToggleGroupImplMultiple = React.forwardRef((props, forwardedRef) => {
     ToggleGroupValueProvider,
     {
       scope: props.__scopeToggleGroup,
-      type: "multiple",
+      type: ToggleGroupType.Multiple,
       value,
       onItemActivate: handleButtonActivate,
       onItemDeactivate: handleButtonDeactivate,
       children: (0, import_jsx_runtime.jsx)(ToggleGroupImpl, { ...toggleGroupMultipleProps, ref: forwardedRef })
     }
   );
-});
-ToggleGroup.displayName = TOGGLE_GROUP_NAME;
+}, "ToggleGroupImplMultiple"));
 var [ToggleGroupContext, useToggleGroupContext] = createToggleGroupContext(TOGGLE_GROUP_NAME);
 var ToggleGroupImpl = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ToggleGroupImpl2(props, forwardedRef) {
     const {
       __scopeToggleGroup,
       disabled = false,
@@ -135,7 +140,7 @@ var ToggleGroupImpl = React.forwardRef(
     const direction = useDirection(dir);
     const commonProps = { dir: direction, ...toggleGroupProps };
     return (0, import_jsx_runtime.jsx)(ToggleGroupContext, { scope: __scopeToggleGroup, rovingFocus, disabled, children: rovingFocus ? (0, import_jsx_runtime.jsx)(
-      Root,
+      RovingFocusGroup,
       {
         asChild: true,
         ...rovingFocusGroupScope,
@@ -145,11 +150,12 @@ var ToggleGroupImpl = React.forwardRef(
         children: (0, import_jsx_runtime.jsx)(Primitive.div, { ...commonProps, ref: forwardedRef })
       }
     ) : (0, import_jsx_runtime.jsx)(Primitive.div, { ...commonProps, ref: forwardedRef }) });
-  }
+  }, "ToggleGroupImpl")
 );
 var ITEM_NAME = "ToggleGroupItem";
 var ToggleGroupItem = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ToggleGroupItem2(props, forwardedRef) {
     const valueContext = useToggleGroupValueContext(ITEM_NAME, props.__scopeToggleGroup);
     const context = useToggleGroupContext(ITEM_NAME, props.__scopeToggleGroup);
     const rovingFocusGroupScope = useRovingFocusGroupScope(props.__scopeToggleGroup);
@@ -158,7 +164,7 @@ var ToggleGroupItem = React.forwardRef(
     const commonProps = { ...props, pressed, disabled };
     const ref = React.useRef(null);
     return context.rovingFocus ? (0, import_jsx_runtime.jsx)(
-      Item,
+      RovingFocusGroupItem,
       {
         asChild: true,
         ...rovingFocusGroupScope,
@@ -168,15 +174,15 @@ var ToggleGroupItem = React.forwardRef(
         children: (0, import_jsx_runtime.jsx)(ToggleGroupItemImpl, { ...commonProps, ref: forwardedRef })
       }
     ) : (0, import_jsx_runtime.jsx)(ToggleGroupItemImpl, { ...commonProps, ref: forwardedRef });
-  }
+  }, "ToggleGroupItem")
 );
-ToggleGroupItem.displayName = ITEM_NAME;
 var ToggleGroupItemImpl = React.forwardRef(
-  (props, forwardedRef) => {
+  // blank line to reduce diff noise
+  __name(function ToggleGroupItemImpl2(props, forwardedRef) {
     const { __scopeToggleGroup, value, ...itemProps } = props;
     const valueContext = useToggleGroupValueContext(ITEM_NAME, __scopeToggleGroup);
     const singleProps = { role: "radio", "aria-checked": props.pressed, "aria-pressed": void 0 };
-    const typeProps = valueContext.type === "single" ? singleProps : void 0;
+    const typeProps = valueContext.type === ToggleGroupType.Single ? singleProps : void 0;
     return (0, import_jsx_runtime.jsx)(
       Toggle,
       {
@@ -192,7 +198,7 @@ var ToggleGroupItemImpl = React.forwardRef(
         }
       }
     );
-  }
+  }, "ToggleGroupItemImpl")
 );
 export {
   ToggleGroupItem as Item,
