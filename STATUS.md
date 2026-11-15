@@ -143,7 +143,7 @@ Bugs found and fixed in this pass (all with real reproduction):
 | pyasn1 | 0.6.4 (4) | **0.6.5** | |
 | setuptools | 79.0.1 (3) | **84.2.1** | |
 | certifi | 2026.7.22 (2) | **2026.10.23** | |
-| protobuf | 4.25.9 (2) | 4.25.9 | **cannot move**: `mediapipe 0.10.21` declares `protobuf<5,>=4.25.3`; 5.x breaks speaker framing, which is a visible change. Accepted risk, upstream-pinned. |
+| protobuf | 4.25.9 (2) | 4.25.9 | **tried 5.29.6 and reverted**: MediaPipe's graph text-format fails to parse (`libprotobuf ERROR text_format.cc:335 … Expected identifier, got: \`) because the bundled `.binarypb` uses escaped octal bytes; face detection then dies with `RuntimeError: Failed to parse`. Same frame, same boxes as before after the revert. Blocked upstream by `mediapipe 0.10.21`'s `protobuf<5`. |
 
 `bun audit` 43 (20 high) → **16 (12 high)**, and every remaining one is a devDependency or the
 platform SDK: `brace-expansion`/`minimatch` (eslint globs), `browserslist`,
@@ -176,6 +176,22 @@ Tailwind (`/src/index.css` 207 KB), `/api/health` 200, `doctor.py` all PASS, 88 
 | Social connect | `POST /api/social/youtube/connect` | 409 "Add YOUTUBE_CLIENT_ID…" (honest, not 500) |
 
 Not exercised: the destructive `bulk-delete` and an applied Reset.
+
+### Real browser pass (headless Chromium, 1440×900)
+
+Installed Playwright + Chromium headless shell into `data/pw` (removed afterwards), pointed it at
+the running dev server, and drove the three routes after the dependency upgrades:
+
+| route | result |
+|---|---|
+| `/` | 6 sections, h1 "Turn one long video into ten viral clips.", CTAs *Start clipping — free* / *Open dashboard*, no horizontal overflow, **0 console/page errors** |
+| `/auth` | sign-in form rendered (email + password, "Sign in"/"Create account"), no errors |
+| `/dashboard` | "The forge" / "New batch" / "Your batches", **3 `<video>` elements all `readyState ≥ 2`** (real clip playback), dark tokens applied (`rgb(10,10,11)` bg, `rgb(231,231,233)` text), fonts `loaded`, **no horizontal overflow at 1440**, 0 errors, no broken images |
+
+Screenshots: `data/proof/ui_landing.png`, `ui_auth.png`, `ui_dashboard.png`. The API calls the
+page makes (`/api/clips/<id>/video?s=…`) answer 206 through the Vite proxy; an earlier run's
+"404/ERR_ABORTED" no longer reproduces after the page settles (video elements cancel their
+range requests on navigation).
 
 ---
 
@@ -281,9 +297,12 @@ removed, `data/models/hf` (752 MB unused, twice) deleted.
 
 1. **Git** — commits and `git diff --stat` refused by the host. Inventory above instead.
 2. ~~`tools/check_locked.py`~~ — re-baselined, contract OK (one-line manifest change).
-3. **Browser click-through** — no browser control in this session; the API pass above covers
-   every button's endpoint, not the rendered page.
-4. **protobuf 4.25.9** — pinned by `mediapipe` (`protobuf<5`); an upgrade needs mediapipe to
-   move first or a swap of the framing model.
+3. **Button-by-button clicks in a browser** — a headless Chromium pass now covers the three
+   routes, console errors, layout and video readiness (above), and the API pass covers every
+   button's endpoint; what is still not automated is clicking each control in sequence
+   (pause→resume, retry dialog, reset preview).
+4. **protobuf 4.25.9** — 5.29.6 was installed, failed MediaPipe graph parsing
+   (`Expected identifier, got: \`), and was reverted; unblocking needs mediapipe ≥0.11 or a
+   different framing model.
 5. **Dev-only bun advisories** (16) — fixes are majors that break eslint's glob chain or the
    `@vly-ai/integrations` SDK; runtime deps are clean.
