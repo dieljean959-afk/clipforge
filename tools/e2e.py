@@ -31,12 +31,27 @@ POLL_SEC = 15.0
 DEFAULT_BUDGET_SEC = 3600.0
 
 
+def _local_token() -> str:
+    """The API requires a session; scripts use data/auth/automation.token."""
+    import os
+
+    base = Path(os.getenv("CLIPFORGE_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")))
+    try:
+        return (base / "auth" / "automation.token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _req(base: str, path: str, body: dict | None = None, timeout: float = 30.0) -> dict:
     data = None if body is None else json.dumps(body).encode()
+    headers = {"Content-Type": "application/json"}
+    token = _local_token()
+    if token:
+        headers["X-ClipForge-Token"] = token
     req = urllib.request.Request(
         base.rstrip("/") + path,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST" if body is not None else "GET",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:

@@ -463,12 +463,18 @@ def check_routes(settings: Settings) -> list[Check]:
         ("/api/storage/reset", "POST", b'{"scope":"bucket","apply":false}',
          "route /api/storage/reset (bucket dry-run)"),
     )
+    try:
+        from app import auth as _auth  # noqa: PLC0415 - local token for the probe
+
+        _probe_token = _auth.automation_token()
+    except Exception:  # noqa: BLE001 - probes still run, just unauthenticated
+        _probe_token = ""
     for path, method, data, name in probes:
         try:
-            req = urllib.request.Request(
-                base + path, method=method, data=data,
-                headers={"Content-Type": "application/json"} if data else {},
-            )
+            headers = {"Content-Type": "application/json"} if data else {}
+            if _probe_token:
+                headers["X-ClipForge-Token"] = _probe_token
+            req = urllib.request.Request(base + path, method=method, data=data, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 checks.append(Check(name, "ok", f"HTTP {resp.status}"))
         except urllib.error.HTTPError as exc:

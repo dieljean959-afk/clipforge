@@ -2,9 +2,9 @@ import '@vly-ai/integrations';
 import { Toaster } from "@/components/ui/sonner";
 import React, { StrictMode, useEffect, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Route, Routes, useLocation } from "react-router";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router";
 import "./index.css";
-import { useSession, AuthProvider } from "@/lib/auth";
+import { useSession, AuthProvider, RequireAuth } from "@/lib/auth";
 import { AuthPage } from "./pages/Auth";
 
 
@@ -13,8 +13,14 @@ const Landing = lazy(() => import("./pages/Landing.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
-function PublicDashboard() {
-  return <Dashboard />;
+function ProtectedDashboard() {
+  // The API refuses every route without a session, so the page must too:
+  // signing out or opening the URL fresh lands on /auth?returnTo=/dashboard.
+  return (
+    <RequireAuth returnTo="/dashboard">
+      <Dashboard />
+    </RequireAuth>
+  );
 }
 
 // The Vly dev toolbar is CHROME, not app: it renders nothing unless the
@@ -138,15 +144,15 @@ function BootCleanup() {
 }
 
 function AuthRouteContent() {
-  // The dashboard is public. The auth page stays reachable at /auth for anyone
-  // who still wants an account, but the app no longer forces a sign-in gate.
-  //
-  // `?returnTo=` is honoured here, not in the Landing links: the caller already
-  // knows where it wants the visitor to land, so the auth page just relays it
-  // to AuthPage after a successful sign-in/up.
-  useSession();
+  // `?returnTo=` is honoured here: the caller already knows where it wants the
+  // visitor to land, so the auth page just relays it after sign-in/up. An
+  // already-signed-in visitor never sees the form again.
+  const { user, loaded } = useSession();
   const returnTo = useLocation().search;
   const target = new URLSearchParams(returnTo).get("returnTo");
+  if (loaded && user) {
+    return <Navigate to={target ?? "/dashboard"} replace />;
+  }
   return <AuthPage returnTo={target ?? "/dashboard"} />;
 }
 const rootEl = document.getElementById("root");
@@ -243,7 +249,12 @@ createRoot(rootEl).render(
               <Routes>
                 <Route path="/" element={<Landing />} />
                 <Route path="/auth" element={<AuthRouteContent />} />
-                <Route path="/dashboard" element={<PublicDashboard />} />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <ProtectedDashboard />
+                  }
+                />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </Suspense>

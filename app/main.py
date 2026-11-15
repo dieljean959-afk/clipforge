@@ -35,6 +35,7 @@ import shutil
 from pydantic import BaseModel, Field
 
 from app import (
+    auth,
     clipcount,
     config,
     diskreset,
@@ -980,7 +981,7 @@ async def _resource_monitor() -> None:
 
 
 @app.get("/api/health")
-def health() -> dict:
+def health(request: Request) -> dict:
     """The dashboard's status card, answered from a prebuilt snapshot (~1 ms).
 
     It must never walk the disk, spawn ffmpeg, call the worker daemon over a
@@ -990,6 +991,18 @@ def health() -> dict:
     merges them with the cheap live bits and never omits `worker`.
     """
     boot.mark_health()
+    # Anonymous callers (uptime checks, the proxy) get liveness only. Disk,
+    # bucket, model and job detail need a session: this route is reachable
+    # without one so a 401 never looks like "the app is down".
+    if not auth.session_user(request.cookies.get(auth.COOKIE_NAME)) and not auth.is_automation_token(
+        request.headers.get("x-clipforge-token")
+    ):
+        return {
+            "ok": True,
+            "version": app.version,
+            "apiUptimeMs": int((time.time() - _STARTED_AT) * 1000),
+            "authRequired": True,
+        }
     with _HEALTH_LOCK:
         slow = dict(_HEALTH_SLOW)
         age_ms = int((time.time() - _HEALTH_SLOW_AT) * 1000) if _HEALTH_SLOW_AT else None
@@ -1066,6 +1079,67 @@ def health() -> dict:
         },
     }
     return payload
+
+
+class _AuthBody(BaseModel):
+    email: str = Field(default="", max_length=200)
+    password: str = Field(default="", max_length=256)
+    name: str | None = Field(default=None, max_length=80)
+
+
+def _https(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
+    return proto == "https"
+
+
+def _set_session(response: Response, request: Request, token: str) -> None:
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        token,
+        max_age=auth.SESSION_DAYS * 86400,
+        httponly=True,
+        samesite="lax",
+        secure=_https(request),
+        path="/",
+    )
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict:
+    """Who am I? Also tells the UI whether the first-account form is open."""
+    user = auth.session_user(request.cookies.get(auth.COOKIE_NAME))
+    return {"ok": True, "user": user, "signupOpen": auth.signup_open()}
+
+
+@app.post("/api/auth/signup")
+def auth_signup(body: _AuthBody, request: Request, response: Response) -> dict:
+    """Bootstrap the owner account. Refused once a user exists."""
+    try:
+        user = auth.create_user(body.email, body.password, body.name)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    token = auth.create_session(str(user["id"]))
+    _set_session(response, request, token)
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/auth/signin")
+def auth_signin(body: _AuthBody, request: Request, response: Response) -> dict:
+    user = auth.authenticate(body.email, body.password)
+    if not user:
+        raise HTTPException(401, "Wrong email or password.")
+    token = auth.create_session(str(user["id"]))
+    _set_session(response, request, token)
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/auth/signout")
+def auth_signout(request: Request, response: Response) -> dict:
+    auth.delete_session(request.cookies.get(auth.COOKIE_NAME))
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return {"ok": True}
 
 
 @app.get("/api/status")
@@ -1154,6 +1228,39 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
         status_code=422,
         content={"error": f"validation error: {exc.errors()}", "request_id": rid},
         headers={"x-request-id": rid},
+    )
+
+
+#: Routes that must answer without a session. `/api/health` keeps its shape but
+#: returns a slim body to anonymous callers (below); share links live under /s.
+_PUBLIC_API_PREFIXES = ("api/auth/",)
+_PUBLIC_API_PATHS = {"api/health"}
+
+
+@app.middleware("http")
+async def _require_session(request: Request, call_next):
+    """Close the port: every /api route needs a session or the local token.
+
+    Before this, anyone who could reach the port could submit jobs, read clips
+    and delete media. The UI already had a login screen and a `RequireAuth`
+    wrapper, but no backend ever checked the session.
+    """
+    path = request.url.path.lstrip("/")
+    is_api = path == "api" or path.startswith("api/")
+    if not is_api or request.method == "OPTIONS":
+        return await call_next(request)
+    if path in _PUBLIC_API_PATHS or path.startswith(_PUBLIC_API_PREFIXES):
+        return await call_next(request)
+    if auth.session_user(request.cookies.get(auth.COOKIE_NAME)):
+        request.state.user = auth.session_user(request.cookies.get(auth.COOKIE_NAME))
+        return await call_next(request)
+    if auth.is_automation_token(request.headers.get("x-clipforge-token")):
+        request.state.user = {"id": "automation", "email": "automation"}
+        return await call_next(request)
+    return JSONResponse(
+        status_code=401,
+        content={"error": "Sign in required.", "authRequired": True},
+        headers={"WWW-Authenticate": "Cookie"},
     )
 
 

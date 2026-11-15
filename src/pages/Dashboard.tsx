@@ -24,6 +24,7 @@ import { CaptionStyleDialog } from "@/components/clipmake/CaptionStyleDialog";
 import { GroqUsageBadge } from "@/components/clipmake/GroqUsageBadge";
 import { copyClipMeta, buildClipSrt } from "@/lib/clip-export";
 import { useJobs, useClips, useHealth } from "@/hooks/use-poll";
+import { useSession } from "@/lib/auth";
 import type { ClipDto, UsageDto, VerifyClipsDto } from "@/lib/api";
 import { fmtAgo, fmtClock, fmtDate, fmtDurationLong, batchLabel } from "@/lib/clipmake";
 import { cn } from "@/lib/utils";
@@ -80,6 +81,7 @@ function ClipGridSkeleton() {
 }
 
 export default function Dashboard() {
+  const { signOut } = useSession();
   const {
     jobs,
     error: apiError,
@@ -287,6 +289,18 @@ export default function Dashboard() {
               <a href="/">
                 Landing
               </a>
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="cursor-pointer text-xs text-muted-foreground"
+              onClick={async () => {
+                await signOut();
+                window.location.href = "/auth?returnTo=/dashboard";
+              }}
+            >
+              Sign out
             </Button>
           </div>
         </div>

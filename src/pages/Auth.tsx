@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Loader2 } from "lucide-react";
-import { useSession, signIn, signUp } from "@/lib/auth";
+import { useSession } from "@/lib/auth";
 
 interface AuthPageProps {
   returnTo?: string;
@@ -15,8 +15,13 @@ interface AuthPageProps {
 
 export function AuthPage({ returnTo = "/dashboard" }: AuthPageProps) {
   const navigate = useNavigate();
-  const { signingIn, signingUp, weakError } = useSession();
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const { signingIn, signingUp, weakError, signupOpen, signIn, signUp } = useSession();
+  const [mode, setModeState] = useState<"signin" | "signup">("signin");
+  const setMode = (next: "signin" | "signup") => {
+    // The first account bootstraps the owner; afterwards the API refuses
+    // sign-ups, so the tab is not offered at all.
+    setModeState(next === "signup" && !signupOpen ? "signin" : next);
+  };
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -85,18 +90,20 @@ export function AuthPage({ returnTo = "/dashboard" }: AuthPageProps) {
               >
                 Sign in
               </Button>
-              <Button
-                type="button"
-                variant={mode === "signup" ? "default" : "ghost"}
-                size="sm"
-                className="cursor-pointer"
-                onClick={() => {
-                  setMode("signup");
-                  setLocalError(null);
-                }}
-              >
-                Create account
-              </Button>
+              {signupOpen && (
+                <Button
+                  type="button"
+                  variant={mode === "signup" ? "default" : "ghost"}
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={() => {
+                    setMode("signup");
+                    setLocalError(null);
+                  }}
+                >
+                  Create account
+                </Button>
+              )}
             </div>
 
             {mode === "signup" && (

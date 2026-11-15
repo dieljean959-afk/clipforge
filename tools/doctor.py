@@ -21,13 +21,27 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+def _local_token() -> str:
+    """The API needs a session; local tooling uses data/auth/automation.token."""
+    import os
+
+    base = Path(os.getenv("CLIPFORGE_DATA_DIR", str(ROOT / "data"))) / "auth"
+    try:
+        return (base / "automation.token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _api(path: str, timeout: float = 5.0):
     import urllib.error
     import urllib.request
 
     url = f"http://127.0.0.1:8000{path}"
+    token = _local_token()
+    headers = {"X-ClipForge-Token": token} if token else {}
+    req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
         try:

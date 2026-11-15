@@ -34,6 +34,8 @@ export type SessionUser = {
 export type Session = {
   user: SessionUser | null;
   loaded: boolean;
+  /** First-account form is open until an owner exists. */
+  signupOpen: boolean;
   _hint?: string | undefined;
 };
 
@@ -58,9 +60,8 @@ const API_BASE = (typeof window !== "undefined" ? (import.meta.env?.VITE_API_BAS
   .replace(/\/+$/, "");
 
 async function fetchMe(): Promise<Session> {
-  if (!API_BASE) {
-    return { user: null, loaded: true };
-  }
+  // API_BASE is "" for the normal same-origin deployment: the request still
+  // has to go out, because the session lives in a cookie the backend checks.
   try {
     const res = await fetch(`${API_BASE}/api/auth/me`, {
       method: "GET",
@@ -68,21 +69,27 @@ async function fetchMe(): Promise<Session> {
       headers: { Accept: "application/json" },
     });
     if (res.status === 401) {
-      return { user: null, loaded: true };
+      return { user: null, loaded: true, signupOpen: false };
     }
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
-    const body = (await res.json()) as { ok?: boolean; user?: SessionUser };
+    const body = (await res.json()) as {
+      ok?: boolean;
+      user?: SessionUser;
+      signupOpen?: boolean;
+    };
     return {
       user: body.ok && body.user ? body.user : null,
       loaded: true,
+      signupOpen: body.signupOpen !== false,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "network error";
     return {
       user: null,
       loaded: true,
+      signupOpen: false,
       _hint: message,
     };
   }
@@ -92,9 +99,6 @@ async function postAuth(
   path: string,
   body: Record<string, unknown>,
 ): Promise<void> {
-  if (!API_BASE) {
-    throw new Error("no backend configured");
-  }
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     credentials: "include",
@@ -123,6 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSessionInner] = useState<Session>({
     user: null,
     loaded: false,
+    signupOpen: false,
   });
   const [signingIn, setSigningIn] = useState(false);
   const [signingUp, setSigningUp] = useState(false);
@@ -137,7 +142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     setWeakError(null);
-    setSessionInner({ user: null, loaded: false });
+    setSessionInner({ user: null, loaded: false, signupOpen: false });
     const next = await fetchMe();
     setSessionInner(next);
     if (next.user === null && next.loaded && next._hint) {
@@ -202,16 +207,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     setWeakError(null);
     try {
-      if (API_BASE) {
-        await fetch(`${API_BASE}/api/auth/signout`, {
-          method: "POST",
-          credentials: "include",
-        }).catch(() => {
-          /* best effort */
-        });
-      }
+      // Same-origin (`API_BASE` is "") still has to hit the server: the cookie
+      // is what keeps the session alive, so clearing only local state left a
+      // valid session behind and /auth bounced straight back to the dashboard.
+      await fetch(`${API_BASE}/api/auth/signout`, {
+        method: "POST",
+        credentials: "include",
+      }).catch(() => {
+        /* best effort */
+      });
     } finally {
-      setSessionInner({ user: null, loaded: true });
+      setSessionInner({ user: null, loaded: true, signupOpen: false });
     }
   }, []);
 
@@ -262,7 +268,7 @@ export function RequireAuth({
   children: ReactNode;
   returnTo?: string;
 }) {
-  const { user, loaded, refresh } = useSession();
+  const { user, loaded } = useSession();
 
   useEffect(() => {
     if (!loaded) return;
@@ -270,10 +276,11 @@ export function RequireAuth({
       const params = new URLSearchParams();
       params.set("returnTo", returnTo ?? "/dashboard");
       window.location.href = `/auth?${params}`;
-      return;
     }
-    refresh();
-  }, [user, loaded, returnTo, refresh]);
+    // No `refresh()` here: it resets `loaded` to false, which re-armed this
+    // effect after every fetch and left the dashboard rendering `null`
+    // forever. AuthProvider already revalidates the session on mount.
+  }, [user, loaded, returnTo]);
 
   if (!loaded) {
     return null;
@@ -286,14 +293,8 @@ export function RequireAuth({
   return children;
 }
 
-export const signIn = /* kept as a stable top-level import target */
-  (AuthProvider as unknown as { prototype: { signIn: AuthActions["signIn"] } }).prototype
-  .signIn;
-
-export const signUp = /* kept as a stable top-level import target */
-  (AuthProvider as unknown as { prototype: { signUp: AuthActions["signUp"] } }).prototype
-  .signUp;
-
-export const signOut = /* kept as a stable top-level import target */
-  (AuthProvider as unknown as { prototype: { signOut: AuthActions["signOut"] } }).prototype
-  .signOut;
+// There used to be top-level `signIn`/`signUp`/`signOut` "stable import
+// targets" here, built by reading them off `AuthProvider.prototype`. A function
+// component has no such prototype members, so all three were `undefined`:
+// pressing "Create account" produced `signUp is not a function`. The hooks are
+// the only real API — `useSession()` returns them.
