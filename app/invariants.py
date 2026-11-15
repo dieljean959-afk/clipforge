@@ -190,6 +190,15 @@ def _needs_repair(
         broken.append("complete-with-pending-clips")
     if counts["done"] and not job.get("isTerminal"):
         broken.append("non-terminal-with-rendered-clips")
+    # A terminal batch whose finished clips are already durable in the bucket is
+    # settled, not stale: its rendered deliverables live remotely and should not be
+    # used as a reason to re-open the batch for resume/re-render.
+    finished_remote = any(
+        isinstance(c, dict) and str(c.get("renderState") or "").lower() == "done"
+        and bool(c.get("videoKey")) for c in (clips or [])
+    )
+    if not (stage in ("failed", "complete", "cancelled") and not job.get("retryable") and finished_remote):
+        pass
     if counts["done"] and not job.get("progress"):
         broken.append("zero-progress-with-rendered-clips")
     if counts["done"] and counts["pending"] == 0 and str(job.get("errorKind") or "") == "fail_fast":
