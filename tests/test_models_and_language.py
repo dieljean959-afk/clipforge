@@ -33,9 +33,14 @@ def test_auto_never_picks_an_english_only_model() -> None:
         assert ladder[0] == "small", "multilingual small must lead the ladder"
 
 
-def test_english_may_use_the_fast_english_model() -> None:
-    assert model_ladder("en")[0] == "distil-medium.en"
-    assert model_ladder("EN")[0] == "distil-medium.en"
+def test_english_uses_the_configured_multilingual_model() -> None:
+    """distil-medium.en is gone from the ladder: a forced-English batch pulled
+    its 752 MB, filled the disk and left the job waiting for space, for no
+    quality gain (4.7% vs 10.1% WER on this host)."""
+    for language in ("en", "EN", "english"):
+        ladder = model_ladder(language)
+        assert "distil-medium.en" not in ladder
+        assert ladder[0] == "small"
 
 
 # --------------------------------------------------------------------------- #

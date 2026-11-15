@@ -590,18 +590,47 @@ def model_ladder(language: str | None) -> list[str]:
     `small` is multilingual and is the configured model; it is also the model
     the owner's probe measured at 4.7% WER versus 10.1% for `small.en`.
     """
-    lang = (language or "").strip().lower()
-    if lang in {"en", "english"}:
-        # small.en is deliberately absent: on this host's own LibriSpeech run it
-        # scored WORSE than plain small (10.1% vs 4.7% WER) while costing the
-        # same 461 MB of cache, so it was a step that could only waste a
-        # download and 461 MB of disk.
-        names = ["distil-medium.en", "small", "base"]
-    else:
-        # "" / "auto" / any explicit non-English code: multilingual only.
-        names = ["small", "base", "tiny"]
-    fits = [m for m in names if asr_quality.fits(m)]
+    # `distil-medium.en` is deliberately NOT in this ladder any more. It is an
+    # English-only 752 MB download that the config already warned could never be
+    # loaded on this host; a forced-English batch pulled it anyway, filled the
+    # disk and left the job "Waiting for disk space". Multilingual `small`
+    # measured 4.7% WER against small.en's 10.1% here, so there is no quality
+    # argument left for the extra weights either.
+    names = ["small", "base", "tiny"]
+    fits = [m for m in names if asr_quality.fits(m) and _disk_allows(m)]
     return fits or ["tiny"]
+
+
+#: Free space that must remain AFTER a model download. A batch that fills the
+#: disk mid-transcription is worse than one that decodes with a smaller model.
+_DISK_FLOOR_MB = 1024.0
+
+
+def _disk_allows(model: str) -> bool:
+    """Would downloading `model` leave the 1 GB floor intact?
+
+    A model already on disk costs nothing, so it is always allowed. Otherwise
+    the download size is the peak-RSS figure from app.asr_quality (measured for
+    these models) plus the floor.
+    """
+    import shutil
+
+    try:
+        from app.config import load_config  # noqa: PLC0415
+
+        settings = load_config(quiet=True)
+        free_mb = shutil.disk_usage(settings.app.paths.data_dir).free / (1024 * 1024)
+    except Exception:  # noqa: BLE001 - never block decoding over a probe
+        return True
+    try:
+        from app import modelstore  # noqa: PLC0415
+
+        if modelstore.local_dir(model).exists():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    need = float(asr_quality.MEASURED_PEAK_MB.get(model) or 900.0)
+    return free_mb >= need + _DISK_FLOOR_MB
 
 
 def _window_speech_sec(w_start: float, w_end: float,

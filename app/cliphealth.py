@@ -27,6 +27,11 @@ _LOCK = threading.Lock()
 _THREAD: threading.Thread | None = None
 
 
+#: How many legacy clips may be measured per pass. Each probe is one presigned
+#: ffprobe; a long queue would make the monitor slow instead of useful.
+PROBE_BUDGET = 6
+
+
 def check(store: Any, settings: Any, *, limit: int = 512) -> dict[str, Any]:
     """HEAD + ranged 206 + stored fps for every done clip (cheap)."""
     from app import objectstore
@@ -37,6 +42,7 @@ def check(store: Any, settings: Any, *, limit: int = 512) -> dict[str, Any]:
         clips = store.list_all_clips(limit=limit)
     except Exception as exc:  # noqa: BLE001 - a monitor must not break the app
         return {"ok": False, "error": f"cannot list clips: {exc}", "checked": 0, "bad": 0, "items": []}
+    probed = 0
     for clip in clips:
         if str(clip.get("renderState") or "") not in {"done", "complete", "rendered", "uploaded"}:
             continue
@@ -50,11 +56,30 @@ def check(store: Any, settings: Any, *, limit: int = 512) -> dict[str, Any]:
             local = Path(str(path)) if path else None
         except Exception:  # noqa: BLE001
             local = None
-        if not clip.get("fps"):
-            issues.append("no stored fps")
-        if not clip.get("mediaDurationSec"):
-            issues.append("no stored duration")
-        key = objectstore.key_for_path(str(path), settings.app.paths.outputs_dir) if path else None
+        # A durable clip stores its bucket object in `videoKey`; the old code
+        # only derived a key from a LOCAL videoPath, so every offloaded clip that
+        # had already dropped its local copy reported "no local file and no bucket
+        # key" even though the object was there and playable.
+        key = str(clip.get("videoKey") or "") or (
+            objectstore.key_for_path(str(path), settings.app.paths.outputs_dir) if path else None
+        )
+        if not clip.get("fps") or not clip.get("mediaDurationSec"):
+            # Legacy rows never stored these; measure them once through the
+            # bucket (real ffprobe, not a guess) and remember the answer.
+            if key and probed < PROBE_BUDGET:
+                measured = _probe_from_bucket(key)
+                probed += 1
+                if measured:
+                    try:
+                        store.write_clip(cid, measured,
+                                         job_id=str(clip.get("jobId") or "") or None)
+                        clip.update(measured)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(f"[clip-health] could not store probe for {cid}: {exc}")
+            if not clip.get("fps"):
+                issues.append("no stored fps")
+            if not clip.get("mediaDurationSec"):
+                issues.append("no stored duration")
         head = objectstore.head(key) if key else None
         if local is not None and local.exists() and local.stat().st_size > 0:
             if int(clip.get("mediaBytes") or 0) and local.stat().st_size != int(clip.get("mediaBytes") or 0):
@@ -130,6 +155,65 @@ def check(store: Any, settings: Any, *, limit: int = 512) -> dict[str, Any]:
         _REPORT.clear()
         _REPORT.update(report)
     return report
+
+
+def _probe_from_bucket(key: str) -> dict[str, Any] | None:
+    """ffprobe a DURABLE clip through its presigned URL.
+
+    A clip whose local copy was dropped has no other way to know its fps or
+    duration. The contract check needs those numbers, so measure them once and
+    store the real values rather than forever reporting "no stored fps".
+    """
+    import json as _json
+    import subprocess
+
+    from app import objectstore  # noqa: PLC0415
+
+    url = objectstore.presign(key, expires=300)
+    if not url:
+        return None
+    try:
+        got = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format",
+             "-of", "json", url],
+            capture_output=True, text=True, timeout=25,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"[clip-health] ffprobe {key} failed: {exc}")
+        return None
+    if got.returncode != 0 or not got.stdout.strip():
+        logger.warning(f"[clip-health] ffprobe {key}: {got.stderr.strip()[:180]}")
+        return None
+    try:
+        data = _json.loads(got.stdout)
+    except _json.JSONDecodeError:
+        return None
+    video = next((s for s in data.get("streams") or [] if s.get("codec_type") == "video"), None)
+    audio = next((s for s in data.get("streams") or [] if s.get("codec_type") == "audio"), None)
+    out: dict[str, Any] = {}
+    if video:
+        rate = str(video.get("r_frame_rate") or "")
+        if "/" in rate:
+            num, _, den = rate.partition("/")
+            try:
+                out["fps"] = round(float(num) / float(den), 3) if float(den) else None
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        else:
+            try:
+                out["fps"] = round(float(rate), 3)
+            except (TypeError, ValueError):
+                pass
+        out["mediaWidth"] = video.get("width")
+        out["mediaHeight"] = video.get("height")
+    if audio:
+        out["hasAudio"] = True
+    duration = (data.get("format") or {}).get("duration")
+    try:
+        out["mediaDurationSec"] = round(float(duration), 3)
+    except (TypeError, ValueError):
+        pass
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def report() -> dict[str, Any]:
