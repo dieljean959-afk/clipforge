@@ -576,15 +576,30 @@ class Attempt:
 
 
 def model_ladder(language: str | None) -> list[str]:
-    """Largest model that this host can hold, then strictly smaller ones."""
-    if language and language != "en":
-        names = ["small", "base", "tiny"]
-    else:
+    """Largest model that this host can hold, then strictly smaller ones.
+
+    English-only weights are used ONLY when the language is KNOWN to be
+    English. The old condition was `if language and language != "en"`, so
+    language=None — which is exactly what "auto" passes — fell into the
+    English branch and chose `distil-medium.en`. On a Spanish source that model
+    has no Spanish vocabulary at all: it transcribes Spanish as mangled
+    English (the real batch produced "Guegles are in car's...") and reports
+    language="en" with full confidence, so the per-job language lock recorded
+    the wrong language and every later window stayed English.
+
+    `small` is multilingual and is the configured model; it is also the model
+    the owner's probe measured at 4.7% WER versus 10.1% for `small.en`.
+    """
+    lang = (language or "").strip().lower()
+    if lang in {"en", "english"}:
         # small.en is deliberately absent: on this host's own LibriSpeech run it
         # scored WORSE than plain small (10.1% vs 4.7% WER) while costing the
         # same 461 MB of cache, so it was a step that could only waste a
         # download and 461 MB of disk.
         names = ["distil-medium.en", "small", "base"]
+    else:
+        # "" / "auto" / any explicit non-English code: multilingual only.
+        names = ["small", "base", "tiny"]
     fits = [m for m in names if asr_quality.fits(m)]
     return fits or ["tiny"]
 

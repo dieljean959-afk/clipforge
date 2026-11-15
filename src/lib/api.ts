@@ -106,6 +106,17 @@ export interface JobDto {
   requestedClips?: number;
   readyClips?: number;
   failedClips?: number;
+  /** Batch-level verdict written by the finalizer. "finished" and
+   *  "finished_with_failures" are both BATCHES WITH CLIPS and belong in
+   *  "Your batches"; the terminal `stage` alone could not express that. */
+  batchState?: "finished" | "finished_with_failures" | "failed" | null;
+  finishedWithFailures?: boolean;
+  /** Set by the finalizer. A batch with clips and a finish stamp is done even
+   *  when its status word is "failed" because some renders were lost. */
+  finishedAt?: number | null;
+  /** Present when the terminal write failed; Retry finishes finalizing
+   *  without re-rendering anything. */
+  errorKind?: string | null;
   /** Exact shortfall sentence when the candidate list ran out. */
   unmetReason?: string | null;
   /** Seconds of source video, probed server-side. */
@@ -409,6 +420,9 @@ export interface HealthDto {
     path?: string | null;
     sizeMb?: number;
     configured?: boolean;
+    /** required = needed by the default clip path, optional = feature-only,
+     *  unused = left behind and safe for the idle sweeper to release. */
+    policy?: "required" | "optional" | "unused" | string;
   }[];
   /** Real transcription facts: engine, RTF this host measured, host limits. */
   asr?: {

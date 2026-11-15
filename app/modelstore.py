@@ -440,6 +440,144 @@ def _unusable(name: str) -> bool:
         return False
 
 
+def active_model_name() -> tuple[str, str]:
+    """The model the CURRENT configuration will load, as (name, note).
+
+    Reads the same resolver the pipeline uses, so the Reset dialog protects the
+    model a real job would actually need — not a name hard-coded here. Falls
+    back to the configured value when the resolver cannot answer (a missing
+    optional dependency is not a reason to delete the wrong weights).
+    """
+    try:
+        from app.config import load_config
+        from app.hostlimits import resolved_model
+
+        settings = load_config(quiet=True)
+        name, note = resolved_model(settings.whisper.model)
+        return str(name or settings.whisper.model), str(note or "")
+    except Exception:  # noqa: BLE001 - accounting must never crash the dialog
+        try:
+            from app.config import load_config
+
+            return str(load_config(quiet=True).whisper.model), ""
+        except Exception:
+            return "", ""
+
+
+def active_local_bytes(name: str) -> int:
+    """Bytes on disk for one model, counting BOTH places it can live."""
+    return _tree_bytes(local_dir(name)) + sum(_tree_bytes(p) for p in _hf_repos(name))
+
+
+def releasable(active: str | None = None, *, keep_active_local: bool = True) -> dict[str, Any]:
+    """What a release pass can ACTUALLY free, and why the rest is kept.
+
+    The Reset dialog used to promise `sum(status().localBytes)` — every byte under
+    data/models — while the apply path only releases what `release_all()` dares
+    to. On this host that promised 2263 MB and delivered 2.1 MB (the leftover
+    metadata), because the big item was an ORPHAN HuggingFace blob that belongs
+    to no model directory and was therefore invisible to per-model accounting.
+
+    So both numbers come from this one function: the dialog's preview and the
+    apply's reason list. A byte is counted as freeable only when it would really
+    go — unused model (re-downloadable, no bucket check needed), a disabled
+    "keep active model local" with a verified bucket copy, or an orphan blob.
+    """
+    active = (active or "").strip()
+    freeable = 0
+    items: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    cache = _hf_cache_root()
+
+    names: set[str] = set()
+    root = _root()
+    if root.is_dir():
+        names.update(p.name for p in root.iterdir() if p.is_dir())
+    if cache.is_dir():
+        for repo in cache.glob("models--*faster-whisper-*"):
+            names.add(repo.name.split("faster-whisper-", 1)[-1])
+
+    for name in sorted(names):
+        # local_dir + every HF repo for the same model. Counted ONCE: adding the
+        # local dir twice was a 2x over-report in the preview, which is the same
+        # class of lie as the 2263 MB promise.
+        size = active_local_bytes(name)
+        if size <= 0:
+            continue
+        if name == active:
+            if keep_active_local:
+                kept.append({
+                    "what": f"model {name}",
+                    "mb": round(size / 1048576, 1),
+                    "why": "active model kept local (setting: Keep active model local)",
+                })
+                continue
+            ok, why = verify(name)
+            if not ok:
+                kept.append({
+                    "what": f"model {name}",
+                    "mb": round(size / 1048576, 1),
+                    "why": f"active model has no verified bucket copy ({why})",
+                })
+                continue
+            freeable += size
+            items.append({"what": f"model {name}", "mb": round(size / 1048576, 1),
+                          "why": "verified in the bucket"})
+            continue
+        if _unusable(name):
+            freeable += size
+            items.append({"what": f"model {name}", "mb": round(size / 1048576, 1),
+                          "why": "cannot load on this host; re-downloadable"})
+            continue
+        # Unused model: re-downloadable, so no bucket verification is required.
+        freeable += size
+        items.append({"what": f"model {name}", "mb": round(size / 1048576, 1),
+                      "why": "unused by the current configuration; re-downloadable"})
+
+    # Orphan blobs (bytes with no repo pointing at them). These are pure waste
+    # and are what the old accounting missed entirely.
+    try:
+        orphans = _orphan_bytes()
+    except Exception:  # noqa: BLE001 - accounting must not fail the dialog
+        orphans = 0
+    if orphans:
+        freeable += orphans
+        items.append({"what": "orphan model blobs", "mb": round(orphans / 1048576, 1),
+                      "why": "no model directory references them; re-downloadable"})
+
+    return {
+        "bytes": freeable,
+        "mb": round(freeable / 1048576, 1),
+        "items": items,
+        "kept": kept,
+    }
+
+
+def _orphan_bytes() -> int:
+    """Bytes of HF blobs that no surviving repo/snapshot references."""
+    cache = _hf_cache_root()
+    if not cache.is_dir():
+        return 0
+    total = 0
+    for blob_root in cache.rglob("blobs"):
+        if not blob_root.is_dir():
+            continue
+        referenced: set[str] = set()
+        for ref in blob_root.parent.rglob("*"):
+            if ref.is_symlink():
+                try:
+                    referenced.add(str(ref.resolve()))
+                except OSError:
+                    continue
+        for blob in blob_root.rglob("*"):
+            if blob.is_file() and not blob.is_symlink() and str(blob) not in referenced:
+                try:
+                    total += blob.stat().st_size
+                except OSError:
+                    continue
+    return total
+
+
 def release_all(log: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Drop transient models; the configured small copy stays on disk."""
     names: set[str] = set()

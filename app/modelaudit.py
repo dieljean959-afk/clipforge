@@ -174,20 +174,77 @@ def provider_model(settings: Any) -> dict[str, Any]:
 
 
 def quick(settings: Any) -> list[dict[str, Any]]:
-    """Cheap state for /api/health — no hashes, no model loads."""
-    return (
+    """Cheap state for /api/health — no hashes, no model loads.
+
+    Carries the policy label so the status card can show which models are
+    required, optional or unused, and the size of each one.
+    """
+    entries = (
         whisper_models(settings)
         + face_models()
         + optional_models(settings)
         + [provider_model(settings)]
     )
+    for entry in entries:
+        entry.setdefault("policy", classify(entry))
+    return entries
+
+
+#: Policy labels. "required" must exist for the default clip path, "optional"
+#: is loaded only for a specific feature, "unused" is left behind by an older
+#: configuration and is safe to release (it is re-downloadable).
+POLICY_REQUIRED = "required"
+POLICY_OPTIONAL = "optional"
+POLICY_UNUSED = "unused"
+
+
+def classify(entry: dict[str, Any]) -> str:
+    """The policy label for one audit entry.
+
+    Derived from the entry itself (role/state/reason) so the registry cannot
+    drift from the audit: anything the default Whisper or reframe path needs is
+    required, forced-alignment weights are optional, and anything the host has
+    declared unloadable is unused and may be swept.
+    """
+    state = str(entry.get("state") or "")
+    role = str(entry.get("role") or "")
+    reason = str(entry.get("reason") or "").lower()
+    if "cannot load" in reason or "too large" in reason or "unloadable" in reason:
+        return POLICY_UNUSED
+    if role in {"transcribe", "transcription", "reframe"}:
+        # The ACTIVE transcription weights are required even while they live in
+        # the bucket rather than on this disk (state "bucket-only"): the batch
+        # restores them, so sweeping them must not be described as "unused".
+        return POLICY_REQUIRED
+    if role.startswith("forced-alignment") or state == "optional":
+        return POLICY_OPTIONAL
+    return POLICY_REQUIRED if state == "ready" else POLICY_OPTIONAL
+
+
+def registry(settings: Any) -> list[dict[str, Any]]:
+    """Every model with its policy label — what the status card and sweeper read.
+
+    The idle sweeper only ever removes POLICY_UNUSED entries, and the download
+    path only ever fetches entries marked required for the current config: no
+    extra model is downloaded silently.
+    """
+    out: list[dict[str, Any]] = []
+    for entry in (whisper_models(settings) + face_models()
+                  + optional_models(settings) + [provider_model(settings)]):
+        item = dict(entry)
+        item["policy"] = classify(entry)
+        out.append(item)
+    return out
 
 
 def audit(settings: Any) -> list[dict[str, Any]]:
-    """Doctor/CLI view with real SHA-256 hashes."""
-    return (
+    """Doctor/CLI view with real SHA-256 hashes and policy labels."""
+    entries = (
         whisper_models(settings, hash_files=True)
         + face_models(hash_files=True)
         + optional_models(settings, hash_files=True)
         + [provider_model(settings)]
     )
+    for entry in entries:
+        entry.setdefault("policy", classify(entry))
+    return entries

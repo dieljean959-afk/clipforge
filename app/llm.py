@@ -262,7 +262,24 @@ def _load_google_module():
     return genai
 
 
-def build_prompt(chunk: list[dict], cfg: GeminiConfig, start_index: int = 0) -> str:
+#: What to call the transcript's language inside a detection prompt. The model
+#: writes titles, hooks and hashtags for a Spanish video in English when it is
+#: not told otherwise — that is the "titles are not in the video's language"
+#: bug, and it is a prompt-level omission, not a model failure.
+_LANGUAGE_NAMES = {
+    "en": "English", "es": "Spanish", "pt": "Portuguese", "fr": "French",
+    "de": "German", "it": "Italian", "nl": "Dutch", "pl": "Polish",
+    "ru": "Russian", "tr": "Turkish", "id": "Indonesian", "hi": "Hindi",
+    "ja": "Japanese", "ko": "Korean", "zh": "Chinese", "ar": "Arabic",
+}
+
+
+def build_prompt(
+    chunk: list[dict],
+    cfg: GeminiConfig,
+    start_index: int = 0,
+    language: str | None = None,
+) -> str:
     """Prompt with globally-numbered words; the model picks index ranges.
 
     The per-chunk ask is deliberately NOT the global clip cap. Asking a 2-minute
@@ -273,11 +290,26 @@ def build_prompt(chunk: list[dict], cfg: GeminiConfig, start_index: int = 0) -> 
     gives a much better pool to rank.
     """
     per_chunk = max(3, min(8, cfg.max_clips))
+    lang = (language or "").strip().lower()
+    spoken = _LANGUAGE_NAMES.get(lang)
+    language_rule = ""
+    if spoken:
+        language_rule = (
+            f"\nThe transcript is in {spoken}. Write `title` and `hook_text` in "
+            f"{spoken} too — the SAME language as the transcript, never a "
+            "translation. Keep accents and punctuation (á é í ó ú ñ ü ¿ ¡) "
+            "exactly as a native writer would use them.\n"
+        )
+    else:
+        language_rule = (
+            "\nWrite `title` and `hook_text` in the transcript's OWN language. "
+            "Never translate them into English.\n"
+        )
     lines = ["NUMBERED TRANSCRIPT (word index, seconds):"]
     for i, w in enumerate(chunk):
         lines.append(f'[{start_index + i}] {w["start"]:.2f}s {w["word"]}')
     transcript_text = "\n".join(lines)
-    return f"""You select the most viral short-form clips from a video transcript.
+    return f"""You select the most viral short-form clips from a video transcript.{language_rule}
 Every transcript line starts with a [word_index]. Identify clip-worthy moments
 BY WORD INDEX RANGE — do NOT output timestamps, the indices are the contract.
 Timing window: clips must be {cfg.min_clip_sec}-{cfg.max_clip_sec} seconds long
@@ -2261,6 +2293,7 @@ def detect_clips(
     chunk_cache: ChunkCache | None = None,
     should_pause=None,
     report: dict[str, Any] | None = None,
+    language: str | None = None,
 ) -> list[dict[str, Any]]:
     """Full detection: chunk → LLM (word indices) → resolve timings → gate.
 
@@ -2431,7 +2464,8 @@ def detect_clips(
         start_index, chunk_words_for_chunk = chunks[index]
         try:
             prefetched[index] = call_llm(
-                build_prompt(chunk_words_for_chunk, cfg, start_index=start_index),
+                build_prompt(chunk_words_for_chunk, cfg, start_index=start_index,
+                             language=language),
                 settings,
             )
         except BaseException as exc:  # noqa: BLE001 - re-raised in order below
@@ -2522,7 +2556,7 @@ def detect_clips(
                 f"[llm] chunk {i + 1}/{len(chunks)}: reusing {len(cached)} cached candidates"
             )
             continue
-        prompt = build_prompt(chunk, cfg, start_index=start_index)
+        prompt = build_prompt(chunk, cfg, start_index=start_index, language=language)
         # ONE BAD CHUNK MUST NOT FAIL THE JOB. This is the single most
         # important behaviour change in this stage: a 20-chunk run that lost
         # chunk 3 to a malformed reply threw away 19 chunks that had already

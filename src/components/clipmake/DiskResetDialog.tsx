@@ -84,6 +84,23 @@ export function DiskResetDialog({ onApplied }: { onApplied?: (scope: Scope) => v
           : ((scope === "bucket" ? out : out.bucket) as Plan | undefined) ?? null;
       const localMb = Number(local?.freedMb ?? 0);
       const bucketMb = Number(bucket?.freedMb ?? out.freedMb ?? 0);
+      // Per-category honesty: the promise and the result came from different
+      // numbers once ("would free 2263 MB" → "freed 2.1 MB") and the toast
+      // never said which item refused or why. Now it does.
+      const breakdown = (local?.categories ?? [])
+        .filter((c) => Number(c.mb ?? 0) > 0)
+        .sort((a, b) => Number(b.mb) - Number(a.mb))
+        .slice(0, 4)
+        .map((c) => `${c.name} ${Number(c.mb).toFixed(0)} MB`)
+        .join(" · ");
+      const skipped = (local?.kept ?? []) as { what?: string; mb?: number; why?: string }[];
+      const skippedText = skipped.length
+        ? `Skipped ${skipped.reduce((n, k) => n + Number(k.mb ?? 0), 0).toFixed(0)} MB: ` +
+          skipped
+            .slice(0, 3)
+            .map((k) => `${k.what} — ${k.why}`)
+            .join("; ")
+        : "";
       toast.success(
         scope === "bucket"
           ? `Freed ${bucketMb.toFixed(1)} MB bucket`
@@ -93,7 +110,13 @@ export function DiskResetDialog({ onApplied }: { onApplied?: (scope: Scope) => v
         {
           description:
             scope === "local"
-              ? `Disk now has ${Number(out.freeAfterMb ?? 0).toFixed(0)} MB free.`
+              ? [
+                  breakdown,
+                  `Disk now has ${Number(out.freeAfterMb ?? 0).toFixed(0)} MB free.`,
+                  skippedText,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
               : `${Number(bucket?.usageBeforeMb ?? 0).toFixed(1)} → ${Number(bucket?.usageAfterMb ?? 0).toFixed(1)} MB used · ${bucket?.deletedObjects ?? 0} object(s), ${bucket?.abortedUploads ?? 0} multipart upload(s) removed.`,
         },
       );
@@ -233,9 +256,22 @@ export function DiskResetDialog({ onApplied }: { onApplied?: (scope: Scope) => v
               )}
 
               {(plan.kept?.length ?? 0) > 0 && (
-                <p className="text-[11px] leading-snug text-muted-foreground">
-                  Kept {plan.kept?.length} live or unverified item{(plan.kept?.length ?? 0) === 1 ? "" : "s"}.
-                </p>
+                <div className="space-y-0.5 text-[11px] leading-snug text-muted-foreground">
+                  <p>
+                    Skipped{" "}
+                    {((plan.kept ?? []) as { mb?: number }[])
+                      .reduce((n, k) => n + Number(k.mb ?? 0), 0)
+                      .toFixed(0)}{" "}
+                    MB — not promised, not freed:
+                  </p>
+                  {((plan.kept ?? []) as { what?: string; mb?: number; why?: string }[])
+                    .slice(0, 4)
+                    .map((k, i) => (
+                      <p key={`${k.what}-${i}`} className="font-mono text-[10px]">
+                        {k.what} · {Number(k.mb ?? 0).toFixed(0)} MB · {k.why}
+                      </p>
+                    ))}
+                </div>
               )}
 
               {(plan.failures?.length ?? 0) > 0 && (

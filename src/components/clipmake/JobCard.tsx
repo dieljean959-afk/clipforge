@@ -39,6 +39,7 @@ import {
   fmtDate,
   fmtDurationLong,
   fmtEta,
+  MAX_ETA_SEC,
   batchLabel,
   overallStatus,
   silenceMs,
@@ -445,18 +446,23 @@ export function JobCard({
             </span>
             <span className="flex shrink-0 items-center gap-2 font-mono tabular-nums text-muted-foreground">
               {/* live ETA — measured once progress exists, RTF-prior before that */}
-              {typeof job.stageEtaSec === "number" && (
+              {typeof job.stageEtaSec === "number" && job.stageEtaSec <= MAX_ETA_SEC && (
                 <span
                   className="text-primary/80"
                   title={
                     job.etaSource === "measured"
-                      ? "Estimated from measured progress"
+                      ? "Estimated from measured progress on this attempt"
                       : "Estimated from this host's average transcription speed (RTF)"
                   }
                 >
                   ~{fmtEta(job.stageEtaSec)} left
                 </span>
               )}
+              {/* No honest number yet: say "estimating…" rather than print one. */}
+              {job.status === "running" &&
+                (typeof job.stageEtaSec !== "number" || job.stageEtaSec > MAX_ETA_SEC) && (
+                  <span className="text-muted-foreground/70">estimating…</span>
+                )}
               {Math.round(job.progress)}%
             </span>
           </div>
@@ -474,7 +480,7 @@ export function JobCard({
                       : "Queued — waiting for the worker to claim it.")
                   : "Working — the worker has claimed this job."}
             </span>
-            {typeof job.totalEtaSec === "number" && (
+            {typeof job.totalEtaSec === "number" && job.totalEtaSec <= MAX_ETA_SEC && (
               <span>
                 whole job ~{fmtEta(job.totalEtaSec)}
                 {job.etaSource !== "measured" && " (estimate)"}
@@ -686,6 +692,41 @@ export function JobCard({
               {sourceLabel(job)}
             </DialogDescription>
           </DialogHeader>
+          {/* Where the time went, before the raw log: one row per stage with
+              the measured seconds and the stage's share of the whole run. A
+              timeline is the only way to see that detection ate 10,000 s. */}
+          {(job.stageTimings?.length ?? 0) > 0 && (
+            <div className="space-y-1 rounded-lg border p-2 text-[11px]">
+              <p className="flex items-center justify-between font-medium">
+                <span>Stage timeline</span>
+                <span className="font-mono text-muted-foreground">
+                  {fmtEta((job.stageTimings ?? []).reduce((n, t) => n + Number(t.sec || 0), 0))}{" "}
+                  total
+                </span>
+              </p>
+              {(job.stageTimings ?? []).map((t) => {
+                const totalSec = (job.stageTimings ?? []).reduce(
+                  (n, x) => n + Number(x.sec || 0),
+                  0,
+                );
+                const share = totalSec > 0 ? (Number(t.sec || 0) / totalSec) * 100 : 0;
+                return (
+                  <div key={t.stage} className="flex items-center gap-2">
+                    <span className="w-24 shrink-0 truncate text-muted-foreground">{t.stage}</span>
+                    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                      <span
+                        className="block h-full rounded-full bg-primary/70"
+                        style={{ width: `${Math.max(2, Math.min(100, share))}%` }}
+                      />
+                    </span>
+                    <span className="w-16 shrink-0 text-right font-mono tabular-nums">
+                      {fmtEta(Number(t.sec || 0))}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="max-h-80 overflow-y-auto rounded-lg border bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
             {logs.length === 0 ? (
               <p>No worker events logged yet.</p>

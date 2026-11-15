@@ -1265,6 +1265,13 @@ _MARKER_WORDS = (
     "laughter", "risas", "sighs", "sighing", "coughs", "coughing",
     "silence", "crosstalk", "noise", "static", "beep", "bleep",
     "cheering", "cheers", "applauding", "clapping",
+    # Spanish. Whisper's Spanish output uses its own marker vocabulary, and the
+    # English-only list let "[ininteligible]" and "[Música de fondo]" through
+    # into burned-in captions on a Spanish source.
+    "ininteligible", "incomprensible", "risa", "suspiros", "suspiro",
+    "tos", "gritos", "vitores", "vítores", "abucheos", "aplausos",
+    "silencio", "ruido", "estática", "estatica", "música de fondo",
+    "aplaudiendo", "coreando", "cantando",
 )
 _MARKER_RE = re.compile(
     r"[\[\(]\s*(?:" + "|".join(_MARKER_WORDS) + r")\b[^\]\)]{0,30}[\]\)]",

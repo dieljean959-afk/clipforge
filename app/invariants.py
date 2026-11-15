@@ -32,6 +32,8 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from app.jobstatus import _RUNNING_ONLY_FIELDS
+
 #: renderState values that mean "this clip has a playable master".
 RENDERED_STATES = frozenset({"done", "complete", "rendered", "uploaded"})
 #: renderState values that mean "this clip will not render without a retry".
@@ -72,6 +74,48 @@ def _clip_state(clip: dict[str, Any]) -> str:
     if clip.get("videoPath") or clip.get("videoKey") or clip.get("mediaKey"):
         return "done"
     return "pending"
+
+
+#: A render is treated as live only while its last real progress is this
+#: recent. The pipeline's own stall watchdog fires at 120 s; anything older is
+#: a dead process, not a slow encode.
+LIVE_RENDER_SEC = 180.0
+
+
+def _is_live_render(job: dict[str, Any]) -> bool:
+    """Is a process actually working on this job right now?
+
+    Progress timestamps only: a stage string is a claim, and the claim is what
+    was wrong. An old job with no stamps is dead and may be rebuilt.
+    """
+    stage = str(job.get("stage") or "")
+    if stage not in {"rendering", "export", "exporting", "reframe", "captions"}:
+        return False
+    now = time.time() * 1000
+    stamps = [
+        job.get("lastProgressAt"),
+        job.get("heartbeatAt"),
+        job.get("unitsChangedAt"),
+    ]
+    fresh = [
+        float(s) for s in stamps
+        if isinstance(s, (int, float)) and s > 0 and (now - float(s)) < LIVE_RENDER_SEC * 1000
+    ]
+    return bool(fresh)
+
+
+def _clip_rank(clip: dict[str, Any]) -> int:
+    """How complete a clip document is: a verified remote render wins.
+
+    Same ranking the store uses when two documents claim one order. It is
+    repeated here so a repair picks the deliverable, not the older twin that
+    still has a local path but no bucket key.
+    """
+    return (
+        (4 if _clip_state(clip) == "done" else 0)
+        + (2 if clip.get("videoKey") else 0)
+        + (1 if clip.get("videoPath") else 0)
+    )
 
 
 def restore_clip_docs(store: Any, job: dict[str, Any]) -> int:
@@ -235,12 +279,30 @@ def repair_job(
     done, failed, pending = counts["done"], counts["failed"], counts["pending"]
     total = counts["total"]
 
-    # Keep the projected list in the same order as the documents.
-    ordered = sorted(clips, key=lambda c: (int(c.get("order") or 0), str(c.get("_id"))))
+    # Keep the projected list in the same order as the documents, one document
+    # per ORDER (a pre-fix detection pass can leave a rendered twin).
+    by_order: dict[int, dict[str, Any]] = {}
+    for c in sorted(clips, key=lambda c: (int(c.get("order") or 0), str(c.get("_id")))):
+        order = int(c.get("order") or 0)
+        prev = by_order.get(order)
+        if prev is None or _clip_rank(c) > _clip_rank(prev):
+            by_order[order] = c
+    ordered = [by_order[k] for k in sorted(by_order)]
+    clips = ordered
+    done = sum(1 for c in ordered if _clip_state(c) == "done")
+    failed = sum(1 for c in ordered if _clip_state(c) == "failed")
+    pending = len(ordered) - done - failed
+    total = len(ordered)
+    label = partial_success_label({"done": done, "failed": failed, "pending": pending, "total": total})
     job["clips"] = ordered
     job["clipCount"] = done
     if total:
         job["clipTarget"] = max(int(job.get("clipTarget") or 0), total)
+    # The card reads readyClips/failedClips, not clipCount. A repair that wrote
+    # only clipCount left a batch with three verified clips showing zero ready.
+    job["readyClips"] = done
+    job["failedClips"] = failed
+    job["renderFailures"] = failed
     if pending:
         # Not finished: leave a real, resumable checkpoint instead of a green
         # batch with invisible pending candidates. 99 is deliberate — the
@@ -292,6 +354,152 @@ def repair_job(
         logger.debug(f"[invariants] could not append log for {jid}: {exc}")
     logger.warning(f"[invariants] job {jid} repaired ({reason}) → {label}")
     return job
+
+
+def rebuild_batches(store: Any, *, apply: bool = True) -> dict[str, Any]:
+    """Rebuild missing batch records from the clip documents that exist.
+
+    The failure this repairs: clips ARE rendered and uploaded (the bucket grew
+    from 0.88 GB to 1.57 GB) but the batch-level document was never finalised,
+    so "Your batches" listed nothing while the videos sat in the bucket.
+
+    Rules, in order:
+      * the clip ROWS are the truth, and ALL of them are read — the job's own
+        projection is exactly what is missing when a batch was never finalised;
+      * only delivered rows become the batch's clip list: cards for candidates
+        that never rendered are not part of a finished batch (they are reported
+        as `unmetReason` instead);
+      * the write is bookkeeping only — nothing is re-rendered, re-downloaded
+        or deleted;
+      * a batch that is actively rendering is never touched.
+    """
+    report: dict[str, Any] = {"checked": 0, "rebuilt": 0, "jobs": []}
+    try:
+        jobs = list(store.list_jobs())
+    except Exception as exc:  # noqa: BLE001 - a repair pass must not die
+        logger.warning(f"[invariants] rebuild: could not list jobs: {exc}")
+        return report
+    now_ms = int(time.time() * 1000)
+    for job in jobs:
+        jid = str(job.get("_id") or "")
+        if not jid:
+            continue
+        report["checked"] += 1
+        try:
+            docs = store.list_clip_docs_any_authority(jid) if hasattr(
+                store, "list_clip_docs_any_authority"
+            ) else _clips_for(store, job)
+            delivered = [c for c in docs if _clip_state(c) == "done"]
+            if not delivered:
+                continue
+            delivered.sort(key=lambda c: (int(c.get("order") or 0), str(c.get("_id"))))
+            before = {
+                "status": job.get("status"),
+                "stage": job.get("stage"),
+                "readyClips": int(job.get("readyClips") or 0),
+                "clipCount": int(job.get("clipCount") or 0),
+                "isTerminal": job.get("isTerminal"),
+                "finishedAt": job.get("finishedAt"),
+            }
+            if (
+                before["readyClips"] >= len(delivered)
+                and before["clipCount"] >= len(delivered)
+                and before["isTerminal"]
+                and before["finishedAt"]
+            ):
+                continue  # already a correct, listed batch
+            # Only a LIVE render is off limits. "stage says rendering" is not
+            # the same thing as "a process is working": the batch that started
+            # this whole repair was parked on `rendering` with no worker behind
+            # it, and refusing to rebuild it left its clips listed nowhere.
+            if _is_live_render(job):
+                report["jobs"].append({"jobId": jid, "skipped": "job is actively rendering"})
+                continue
+            entry: dict[str, Any] = {
+                "jobId": jid,
+                "before": before,
+                "delivered": len(delivered),
+                "candidates": len(docs),
+                "applied": bool(apply),
+            }
+            if apply:
+                failed = [c for c in docs if _clip_state(c) == "failed"]
+                counts = {
+                    "done": len(delivered),
+                    "failed": len(failed),
+                    "pending": max(0, len(docs) - len(delivered) - len(failed)),
+                    "total": len(docs),
+                }
+                labels = partial_success_label(counts)
+                job["clips"] = delivered
+                job["clipIds"] = [str(c.get("_id")) for c in delivered]
+                job["clipCount"] = len(delivered)
+                job["readyClips"] = len(delivered)
+                job["failedClips"] = len(failed)
+                job["renderFailures"] = len(failed)
+                job["clipTarget"] = max(int(job.get("clipTarget") or 0), counts["total"])
+                job["progress"] = 100
+                job["progressMax"] = 100
+                job["stage"] = "complete"
+                job["status"] = "complete"
+                job["isTerminal"] = True
+                job["interrupted"] = False
+                job["retryable"] = False
+                job["errorKind"] = None
+                job["errorAction"] = None
+                job["error"] = None
+                job["errorDetail"] = None
+                job["failedStage"] = None
+                job["finishedAt"] = job.get("finishedAt") or job.get("completedAt") or now_ms
+                job["completedAt"] = job.get("completedAt") or job["finishedAt"]
+                job["batchState"] = (
+                    "finished_with_failures" if counts["failed"] else "finished"
+                )
+                job["finishedWithFailures"] = bool(counts["failed"])
+                job["progressDetail"] = (
+                    labels
+                    if counts["failed"]
+                    else f"{len(delivered)} clip{'s' if len(delivered) != 1 else ''} ready"
+                ) + "."
+                if counts["pending"]:
+                    job["unmetReason"] = (
+                        f"{counts['pending']} candidate clip(s) never rendered in the "
+                        "attempt that produced this batch. The delivered clips are safe "
+                        "and downloadable."
+                    )
+                # A rebuilt batch is settled: no running-only field may survive
+                # or the card renders a spinner beside a finished batch.
+                for field in _RUNNING_ONLY_FIELDS:
+                    job.pop(field, None)
+                store.write_job(job)
+                entry["after"] = {
+                    "status": job.get("status"),
+                    "stage": job.get("stage"),
+                    "readyClips": job.get("readyClips"),
+                    "clipCount": job.get("clipCount"),
+                    "isTerminal": job.get("isTerminal"),
+                    "finishedAt": job.get("finishedAt"),
+                    "batchState": job.get("batchState"),
+                }
+                report["rebuilt"] += 1
+                logger.warning(
+                    f"[invariants] rebuilt batch {jid}: {len(delivered)} delivered clip(s), "
+                    f"{counts['pending']} candidate(s) never rendered "
+                    f"(was readyClips={before['readyClips']}, finishedAt={before['finishedAt']})"
+                )
+                try:
+                    store.append_job_log(
+                        jid,
+                        "[invariants] batch record rebuilt from verified clip rows "
+                        f"({len(delivered)} ready) — nothing was re-rendered",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            report["jobs"].append(entry)
+        except Exception as exc:  # noqa: BLE001 - one bad job must not stop the pass
+            logger.warning(f"[invariants] rebuild failed for {jid}: {exc}")
+            report["jobs"].append({"jobId": jid, "error": str(exc)[:300]})
+    return report
 
 
 def check_and_repair(
@@ -381,6 +589,14 @@ def start_periodic(
         while True:
             time.sleep(interval_sec)
             try:
+                # Same order as boot: rebuild missing batch records from the
+                # clip rows first, then reconcile. A finished batch that fell
+                # out of the list because its record was never written comes
+                # back on the next pass, without anyone pressing a button.
+                try:
+                    rebuild_batches(store, apply=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[invariants] periodic rebuild failed: {exc}")
                 check_and_repair(store, paths, log=log)
             except Exception as exc:  # noqa: BLE001 - a checker must never die loudly here
                 logger.warning(f"[invariants] periodic check failed: {exc}")

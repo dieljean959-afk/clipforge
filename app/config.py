@@ -959,6 +959,11 @@ class WhisperConfig:
     engine: str = "auto"
     # How many 30s windows the engine decodes in one batched pass.
     batch_size: int = 8
+    # Keep ONE local copy of the ACTIVE model (default on). Off means the model
+    # is restored from the bucket on demand and released after the batch, which
+    # costs a download every run but keeps the disk free. Reset never touches
+    # this copy while the flag is on — and never lies about being able to.
+    keep_local: bool = True
 
     @property
     def resolved_compute(self) -> str:
@@ -1670,6 +1675,8 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         language=str(w.get("language", "auto")),
         engine=engine,
         batch_size=batch_size,
+        keep_local=(str(w.get("keep_local", True)).strip().lower()
+                   in {"1", "true", "yes", "on"}),
     )
 
     g = raw.get("gemini", {})

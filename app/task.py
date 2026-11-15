@@ -70,6 +70,15 @@ class _PauseRequested(Exception):
     """
 
 
+class _AlreadySettled(Exception):
+    """The batch was finalised while this run was working on it.
+
+    Not an error: another writer already produced the terminal verdict (a
+    repair pass, a second runner, a user Retry elsewhere). The run stops at the
+    next stage boundary and leaves every rendered clip where it is.
+    """
+
+
 
 
 #: How often a long, silent step re-asserts that the pipeline is alive.
@@ -422,6 +431,43 @@ class Pipeline:
         self.store.append_job_log(job_id, f"FAILED at {stage}: {message}")
         logger.error(f"[job {job_id}] FAILED at {stage}: {message}")
 
+    def _fail_job_only(
+        self, job_id: str, message: str, *, error_kind: str, retryable: bool,
+    ) -> None:
+        """Write a terminal verdict WITHOUT blaming or mutating a stage.
+
+        Used by finalize, where every stage already succeeded and only the
+        batch write failed. Marking `export` failed here would make the stage
+        chips say the render broke, and the retry would look like a re-render.
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            return
+        now_ms = int(time.time() * 1000)
+        job.update({
+            "stage": "failed",
+            "status": "failed",
+            "failedStage": "exporting",
+            "isTerminal": True,
+            "retryable": retryable,
+            "errorKind": error_kind,
+            "errorAction": "resume",
+            "finishedAt": now_ms,
+            "completedAt": now_ms,
+            "error": message,
+            "errorDetail": None,
+            "interrupted": False,
+            "progress": 0.0,
+            "progressDetail": "Finalizing failed — retry writes the batch record.",
+            "stageEtaSec": None,
+            "totalEtaSec": None,
+            "stagePlan": None,
+            "lastProgressAt": now_ms,
+        })
+        self.store.write_job(job)
+        self.store.append_job_log(job_id, f"FINALIZE FAILED: {message}")
+        logger.error(f"[job {job_id}] FINALIZE FAILED: {message}")
+
     # ------------------------------------------------------------------
     # temp cleanup (the method whose absence was never reached, but must exist)
     # ------------------------------------------------------------------
@@ -582,6 +628,16 @@ class Pipeline:
         # detection's first "finding" write, and detection then reported
         # nothing until its last chunk. `store.update_job` closes that window.
         def apply(job: dict[str, Any]) -> None:
+            # A TERMINAL BATCH IS IMMUTABLE. The old code let a still-running
+            # child (a process the worker had already stopped tracking) write
+            # "running / transcribing" straight over a finalised batch — the
+            # mirror image of the re-queue loop, and the reason a finished
+            # batch could fall out of "Your batches" minutes after appearing.
+            current = str(job.get("status") or job.get("stage") or "")
+            if job.get("isTerminal") is True and current in {
+                "complete", "failed", "cancelled", "paused", "deleting",
+            }:
+                return
             self._apply_progress(
                 job_id, job, stage, pct, detail, now_ms, fraction,
                 unit_label=unit_label, units_done=units_done, units_total=units_total,
@@ -671,12 +727,30 @@ class Pipeline:
         if prior_eta_sec is not None:
             self._prior_eta_sec = float(prior_eta_sec)
 
-        elapsed = max(0.0, (now_ms - (job.get("stageStartedAt") or now_ms)) / 1000)
+        # TWO clocks, on purpose:
+        #   * `stageStartedAt` is the DISPLAY clock. It deliberately survives a
+        #     resume (so the stage pill does not restart at 0:00) and is what
+        #     the card shows.
+        #   * `stageRunStartedAt` is the ATTEMPT clock: when this process began
+        #     working on the stage. Only this one may be divided by progress.
+        # Dividing the cumulative clock by a per-attempt fraction produced the
+        # real "~2693 min left" reading: hours of earlier attempts divided by a
+        # few percent of this one.
+        run_start = job.get("stageRunStartedAt")
+        if not same_stage or not isinstance(run_start, (int, float)) or run_start > now_ms:
+            run_start = now_ms
+        elapsed = max(0.0, (now_ms - run_start) / 1000)
+        display_elapsed = max(0.0, (now_ms - (job.get("stageStartedAt") or now_ms)) / 1000)
         stage_eta, eta_source = eta.estimate(
             elapsed_sec=elapsed,
             fraction=fraction,
             prior_remaining_sec=self._prior_eta_sec,
         )
+        stage_eta = eta.clamp_eta(stage_eta)
+        # "estimating…" is honest; a 50-hour number is not. When the measured
+        # number is unusable and there is no prior, say so.
+        if stage_eta is None:
+            eta_source = "unknown"
         # A countable stage (clips rendered, chunks done) extrapolates far
         # better on cost-per-unit than on a percentage: the first clip pays for
         # probing and filter-graph setup, and clips are not all the same length,
@@ -727,8 +801,10 @@ class Pipeline:
             "unitsDone": units_done,
             "unitsTotal": units_total,
             "stageEtaSec": None if stage_eta is None else round(stage_eta, 1),
-            "totalEtaSec": total_eta,
+            "totalEtaSec": eta.clamp_eta(total_eta),
             "etaSource": eta_source,
+            "stageRunStartedAt": run_start,
+            "stageElapsedSec": round(display_elapsed, 1),
             "stagePlan": plan,
             "lastProgressAt": now_ms,
             # Progress-only clock. `lastProgressAt` is also refreshed by the
@@ -913,10 +989,20 @@ class Pipeline:
         reuses an existing non-empty track instead of paying for the same LLM
         calls twice.
         """
+        job = self.store.get_job(job_id) or {}
+        # captionLanguage is written by the caption stage from the DETECTED
+        # language, so an Auto job still labels its own language correctly.
+        language = str(job.get("captionLanguage") or "").strip().lower()
+        if not language:
+            configured = str(job.get("language") or "").strip().lower()
+            language = "" if configured in ("", "auto") else configured
         return translate.write_tracks(
             self.settings.app.paths.outputs_dir / job_id,
             clip_index, cues, self.settings,
             log=lambda line: self._log(job_id, line),
+            # The clip's captions are in this language: its SRT track must be
+            # the verbatim source track, not a translation into it.
+            language=language or None,
         )
 
     @staticmethod
@@ -980,6 +1066,16 @@ class Pipeline:
             # disk; the job reports itself paused and resume picks it up from
             # the same stage via the ordinary stage-marker resume.
             self.mark_paused(job_id, str(pause) or "the current stage")
+        except _AlreadySettled as settled:
+            # Someone else already wrote the terminal verdict for this batch.
+            # Do NOT touch the document: it is correct, and this process is now
+            # redundant. This is the "terminal states never reopen" rule seen
+            # from the worker's side.
+            self._log(
+                job_id,
+                f"run stopped: batch already settled as {settled} — "
+                "this attempt did no further work",
+            )
 
         except llm.DetectionPaused as pause:
             self.mark_paused(job_id, "finding")
@@ -1140,10 +1236,27 @@ class Pipeline:
             if fresh:
                 job.clear()
                 job.update(fresh)
+            # A batch finalised while this child was working (a repair pass, a
+            # second runner, a user action) must not be dragged back through
+            # the remaining stages. Stopping at a stage boundary keeps the
+            # delivered clips and costs nothing.
+            from app import jobstatus as _jobstatus
+
+            if not _jobstatus.is_requeueable(job):
+                self._log(
+                    job_id,
+                    f"stopping before '{stage}': the batch is already settled "
+                    f"({job.get('status')}/{job.get('stage')})",
+                )
+                raise _AlreadySettled(job.get("stage") or "complete")
             self._mark_stage_running(job_id, stage)
             try:
                 with ledger.stage(stage):
                     result = fn()
+            except _AlreadySettled:
+                # A settled batch is not a failed stage: leave the chips and
+                # the document exactly as the finalizer wrote them.
+                raise
             except BaseException:
                 self._mark_stage_failed(job_id, stage, *self._fail_args_for(sys.exc_info()))
                 raise
@@ -1178,11 +1291,23 @@ class Pipeline:
         try:
             _run_stage("export", lambda: self._stage_export(job, src, ws))
 
+            # ORDER IS A CORRECTNESS PROPERTY. Finalize FIRST, then clean up.
+            #
+            # The old order ran `_cleanup_job_scratch(full=True)` here — which
+            # deletes data/work/<job>, the only place the resume markers lived
+            # — and only afterwards called `_finish`. A host restart in that
+            # window (or a `_finish` that raised, which the run's generic
+            # handler turned into "Pipeline error" on a batch whose clips were
+            # already in the bucket) left a document that was not terminal and
+            # a workspace with no checkpoints: the next boot re-queued it and it
+            # streamed the whole 23:36 source again. That is the loop.
+            self._finalize(job_id, time.time() - t_start)
+
             # A finished batch must give back ITS OWN scratch. That is the only
             # hard check: the global free-space delta moves for reasons the
             # batch does not own (model cache, logs, WAL, other jobs) and using
             # it as a verdict failed a batch whose verified clips were already
-            # in the bucket. Clean first, then verify the folder is gone.
+            # in the bucket. Clean after finalize, then verify the folder is gone.
             self._cleanup_job_scratch(job_id, full=True)
             ok, why = ledger.scratch_check()
             self._log(job_id, f"[disk] scratch check: {why}")
@@ -1219,7 +1344,6 @@ class Pipeline:
             # Information only, always logged, never a gate.
             _within, delta = ledger.global_delta()
             self._log(job_id, f"[disk] free-space delta (info): {delta}")
-            self._finish(job_id, time.time() - t_start)
             self._mark_stage_done(job_id, "export")
         finally:
             ledger.stop()
@@ -1265,6 +1389,26 @@ class Pipeline:
 
     def _stage_fetch(self, job: dict[str, Any], ws: StageWorkspace) -> Any:
         job_id = job["_id"]
+        # THE JOB DOCUMENT IS THE DURABLE CHECKPOINT, the workspace is scratch.
+        # `_cleanup_job_scratch(full=True)` deletes data/work/<job>, so a kill
+        # after a cleanup (or after any full sweep) left `ws.is_done("fetch")`
+        # FALSE for a source whose objects were still in the bucket — and the
+        # next boot streamed the entire video again. That is the "back at
+        # Fetching 40%" loop on this 23:36 source. `sourceStream` on the job
+        # document is written by the capture and survives every sweep, so it
+        # is checked first and verified with HEAD.
+        doc_meta = job.get("sourceStream") or {}
+        if doc_meta.get("videoKey"):
+            remote = self._remote_from_meta(job_id, doc_meta)
+            if remote is not None and self._remote_source_intact(remote, job_id):
+                held = len(remote.sections) or 1
+                self._log(
+                    job_id,
+                    f"resume: reusing the source recorded on the job ({held} object(s), "
+                    f"{remote.method}) — verified in the bucket, nothing re-downloaded",
+                )
+                self._progress(job_id, "grabbing", 100, "Source reused from the bucket")
+                return remote
         if ws.is_done("fetch"):
             # A bucket source has no local path to stat: `done_meta["path"]` is
             # an OBJECT KEY, so the old `Path(key).exists()` check was always
@@ -2069,6 +2213,13 @@ class Pipeline:
             # evenly spaced clips instead of failing a job whose source simply
             # has no speech in it.
             duration_sec=duration_sec,
+            # The transcript's own language, so titles/hooks/hashtags come back
+            # in the video's language instead of the model's default English.
+            # For an auto job this is the language LOCKED at transcription.
+            language=(str(job.get("language") or "")
+                      if str(job.get("language") or "").lower() not in ("", "auto")
+                      else str((ws.read_json("transcribe", "words.json") or {})
+                               .get("language") or "")),
             on_log=on_log,
             on_progress=on_progress,
             report=report,
@@ -2271,6 +2422,11 @@ class Pipeline:
                 recorded or translate.guess_language(transcript) or "en"
             )
             self._log(job_id, f"caption language: {caption_language} (auto)")
+        # Persist the resolved language: the SRT/VTT writer must label the
+        # VERBATIM track with it (an Auto job has no "es" on the job document,
+        # so the sidecar writer used to fall back to the English default).
+        if str(job.get("captionLanguage") or "") != str(caption_language or ""):
+            self._patch_job(job_id, captionLanguage=str(caption_language or ""))
 
         # THE resolved caption object for this batch: preset defaults + the
         # dashboard's sliders + the job's own preset/emoji choice. Reading
@@ -3104,9 +3260,73 @@ class Pipeline:
     # finish
     # ------------------------------------------------------------------
 
+    #: How many times finalize is retried before the batch is reported as
+    #: "finalize failed". Deliberately small and finalize-ONLY: a finalize
+    #: failure says nothing about the render, and re-running the pipeline
+    #: because bookkeeping failed is what re-downloaded a finished source.
+    FINALIZE_ATTEMPTS = 5
+
+    def _finalize(self, job_id: str, elapsed_sec: float) -> None:
+        """Write the terminal verdict exactly once, retrying ONLY this step.
+
+        A verified batch whose clips are all in the bucket must never be sent
+        back through fetch/transcribe because the bookkeeping write failed. So
+        this is its own bounded retry (5 attempts, exponential backoff) with a
+        visible "Finalizing…" state; on exhaustion the job is failed with an
+        errorKind that the retry endpoint understands as finalize-only.
+        """
+        last: BaseException | None = None
+        for attempt in range(1, self.FINALIZE_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    self._progress(
+                        job_id, "exporting", 100,
+                        f"Finalizing… retry {attempt} of {self.FINALIZE_ATTEMPTS} "
+                        f"({last})",
+                    )
+                self._finish(job_id, elapsed_sec)
+                return
+            except Exception as exc:  # noqa: BLE001 - retried, then reported
+                last = exc
+                logger.warning(
+                    f"[job {job_id}] finalize attempt {attempt} failed: {exc}"
+                )
+                self._log(
+                    job_id,
+                    f"finalize attempt {attempt}/{self.FINALIZE_ATTEMPTS} failed: {exc}",
+                )
+                if attempt < self.FINALIZE_ATTEMPTS:
+                    time.sleep(min(8.0, 0.5 * (2 ** (attempt - 1))))
+        # The clips are still on disk/bucket; only the batch record is missing.
+        # Retry here means "finish finalizing", never "render again".
+        self._fail_job_only(
+            job_id,
+            "Finalizing failed — the rendered clips are safe, only the batch "
+            f"record could not be written ({last}). Retry finishes finalizing; "
+            "nothing is re-rendered.",
+            error_kind="finalize",
+            retryable=True,
+        )
+
     def _finish(self, job_id: str, elapsed_sec: float) -> None:
         job = self.store.get_job(job_id)
         if job is None:
+            return
+        # IDEMPOTENT. A finalize retried after a crash (or a second call from
+        # the repair endpoint) must not restamp finishedAt or rewrite counts
+        # that a later repair already reconciled. "Already finalized with ready
+        # clips" is the done state, so returning here is correct, not a no-op
+        # bug: the clips and their bucket keys are the deliverable.
+        if (
+            job.get("isTerminal") is True
+            and str(job.get("stage") or "") in {"complete", "failed"}
+            and int(job.get("readyClips") or 0) > 0
+            and job.get("finishedAt")
+        ):
+            logger.info(
+                f"[job {job_id}] finalize skipped: already terminal as "
+                f"{job.get('stage')} with {job.get('readyClips')} ready clip(s)"
+            )
             return
         now_ms = int(time.time() * 1000)
         # A terminal verdict must be written ONCE, here: the document used to be
@@ -3165,6 +3385,16 @@ class Pipeline:
             "readyClips": counts["done"],
             "failedClips": counts["failed"],
             "renderFailures": counts["failed"],
+            # The batch-level verdict the UI lists on. "complete" is the
+            # terminal STAGE; a batch that delivered some clips and lost
+            # others is FINISHED WITH FAILURES, not an unfinished batch and not
+            # a success. Recording that distinction here is what lets "Your
+            # batches" list it (see Dashboard.doneJobs).
+            "batchState": (
+                "finished_with_failures" if counts["failed"] and counts["done"]
+                else ("failed" if counts["failed"] and not counts["done"] else "finished")
+            ),
+            "finishedWithFailures": bool(counts["failed"] and counts["done"]),
             # The projection lives in the same document as the counts, so a
             # reader never sees "1 clip ready" with an empty clips list.
             "clips": clips,

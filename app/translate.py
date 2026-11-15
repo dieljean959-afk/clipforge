@@ -258,6 +258,7 @@ def write_tracks(
     log: Any = None,
     job_id: str | None = None,
     use_stage_workspace: bool = False,
+    language: str | None = None,
 ) -> list[dict[str, Any]]:
     """Write per-language SRT/VTT sidecars for one clip.
 
@@ -284,6 +285,13 @@ def write_tracks(
         source_lang = getattr(source_lang, "source_lang", "en") or "en"
     else:
         source_lang = "en"
+    # A Spanish job must emit its SPANISH track verbatim. The configured
+    # source_lang is a default for unlabelled cues; when the job knows the
+    # video's language (locked at transcription), that wins — otherwise the
+    # Spanish cues were treated as English, the "en" track got the Spanish
+    # text and the "es" track was a machine round-trip back into Spanish.
+    if language:
+        source_lang = str(language).strip().lower()
     for lang in _target_langs(settings):
         is_source = lang == source_lang
         records = _selected_cues(cues, lang, is_source)

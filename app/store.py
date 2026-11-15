@@ -855,6 +855,43 @@ class LocalStore:
                 best[order] = (rank, doc)
         return [doc for _order, (_rank, doc) in sorted(best.items())]
 
+    def list_clip_docs_any_authority(self, job_id: str) -> list[dict[str, Any]]:
+        """Every clip document for a job, ignoring the job's own projection.
+
+        `list_clip_docs` deliberately lets the job document win, because a
+        stale summary blob must not shrink a delivered batch. That is right for
+        DISPLAY, and wrong for REPAIR: when the batch record was never written,
+        the projection names nothing (or names a pre-fix set) and the documents
+        that DO exist are exactly the evidence needed to rebuild it.
+
+        One document per order, the most complete one (a verified remote render
+        beats a local-only twin).
+        """
+        clips_dir = self._paths.data_dir / "clips"
+        best: dict[int, tuple[int, dict[str, Any]]] = {}
+        if not clips_dir.exists():
+            return []
+        for p in sorted(clips_dir.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(doc, dict) or doc.get("jobId") != job_id:
+                continue
+            if "candidateCount" in doc or "clipIds" in doc:
+                continue  # the summary blob, not a clip
+            if not doc.get("_id"):
+                continue
+            order = int(doc.get("order") or 0)
+            rank = (
+                (4 if doc.get("renderState") == "done" else 0)
+                + (2 if doc.get("videoKey") else 0)
+                + (1 if doc.get("videoPath") or doc.get("thumbPath") else 0)
+            )
+            if order not in best or rank > best[order][0]:
+                best[order] = (rank, doc)
+        return [doc for _order, (_rank, doc) in sorted(best.items())]
+
     def summary_clip_ids(self, job_id: str) -> list[str]:
         """Clip ids recorded for this job's current detection, in order."""
         p = self._paths.data_dir / "clips" / f"{job_id}.json"

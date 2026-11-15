@@ -260,7 +260,16 @@ def offload_job(store: Any, paths: Any, job_id: str) -> None:
                 # again still work, and a later re-render re-fetches from the
                 # URL (telling the user first) when it is gone.
                 job = store.get_job(job_id) or {}
-                if job.get("status") == "complete":
+                # Delete the source only for a batch that is FINALISED and has
+                # clips. The old test was `status == "complete"` alone, which
+                # could drop the source of a batch whose finalize had not landed
+                # yet (or that produced no clips at all) — and the resume then
+                # had nothing to HEAD-check and re-downloaded the video.
+                if (
+                    job.get("status") == "complete"
+                    and job.get("isTerminal") is True
+                    and int(job.get("readyClips") or job.get("clipCount") or 0) > 0
+                ):
                     dropped = delete_source_objects(job_id)
                     if dropped:
                         logger.info(

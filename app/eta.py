@@ -162,14 +162,47 @@ def store(data_dir: Path) -> RtfStore:
 # ETA maths
 # --------------------------------------------------------------------------- #
 
+#: Hard ceiling on any ETA the app will show. The real incident read
+#: "~2693 min left, whole job ~2983 min" (about 50 hours) for a 23:36 source,
+#: because `elapsed` was the CUMULATIVE stage clock across attempts while
+#: `fraction` was the new attempt's progress: 48,853 s of previous attempts
+#: divided by 4% of this one. Nothing above a day is ever a usable estimate,
+#: so it is clamped and relabelled rather than printed.
+MAX_ETA_SEC = 24 * 3600
+
+
+def clamp_eta(sec: float | None) -> float | None:
+    """Clamp any estimate into a sane range (none above 24 h)."""
+    if sec is None:
+        return None
+    try:
+        value = float(sec)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value < 0:  # NaN or negative
+        return None
+    return min(value, float(MAX_ETA_SEC))
+
+
 def eta_from_progress(elapsed_sec: float, fraction: float) -> float | None:
-    """Linear extrapolation: elapsed / done * remaining. None until meaningful."""
+    """Linear extrapolation: elapsed / done * remaining. None until meaningful.
+
+    `elapsed_sec` MUST be time spent on THIS attempt of the stage. A cumulative
+    clock (which deliberately survives resumes so the stage pill does not reset)
+    combined with a per-attempt fraction is the 50-hour ETA above; the caller
+    passes the attempt clock here and the display clock only for the pill.
+    """
     if fraction < 0.05 or elapsed_sec <= 0.5:
         return None
     if fraction >= 0.999:
         return 0.0
     projected_total = elapsed_sec / fraction
-    return max(0.0, projected_total - elapsed_sec)
+    remaining = max(0.0, projected_total - elapsed_sec)
+    # Guard the division-by-near-zero shape explicitly: a fraction that rounded
+    # up from almost nothing projects a total time nothing can be based on.
+    if remaining > MAX_ETA_SEC:
+        return None
+    return remaining
 
 
 def eta_from_prior(audio_seconds: float, rtf: float) -> float:
@@ -349,4 +382,5 @@ def build_plan(
 
 
 def plan_total_sec(plan: list[dict[str, Any]]) -> float:
-    return round(sum(float(p.get("sec") or 0.0) for p in plan), 1)
+    total = sum(float(p.get("sec") or 0.0) for p in plan)
+    return round(float(clamp_eta(total) or 0.0), 1)

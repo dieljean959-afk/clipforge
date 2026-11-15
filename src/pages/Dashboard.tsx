@@ -114,8 +114,28 @@ export default function Dashboard() {
       j.status === "deleting" ||
       (!j.isTerminal && (j.status === "running" || j.status === "queued")),
   );
-  const doneJobs = allJobs.filter((j) => j.status === "complete");
-  const failedJobs = allJobs.filter((j) => j.status === "failed");
+  // "Your batches" is a list of BATCHES THAT HAVE CLIPS, not of documents
+  // whose status string happens to be "complete". The batch record is only
+  // written by the finalizer, so a batch whose clips are all verified in the
+  // bucket but whose finalize write was lost (host restart after export) read
+  // as "No finished batches yet" while its videos sat in the bucket. A batch
+  // that delivered clips and lost some renders is FINISHED WITH FAILURES — it
+  // belongs here too, and it used to be filtered out twice (`status` is
+  // "failed" for those).
+  const hasDeliveredClips = (j: (typeof allJobs)[number]) =>
+    Number(j.readyClips ?? 0) > 0 || Number(j.clipCount ?? 0) > 0;
+  const isFinishedBatch = (j: (typeof allJobs)[number]) =>
+    j.status === "complete" ||
+    Boolean(j.finishedAt) ||
+    Boolean(j.isTerminal) ||
+    j.batchState === "finished" ||
+    j.batchState === "finished_with_failures";
+  const doneJobs = allJobs.filter((j) => isFinishedBatch(j) && hasDeliveredClips(j));
+  // A failed job that DID deliver clips is a finished batch, not a crash: it
+  // is listed in "Your batches" above and must not appear twice.
+  const failedJobs = allJobs.filter(
+    (j) => j.status === "failed" && !hasDeliveredClips(j),
+  );
   // Paused batches are settled, but they are not complete and not failed, so
   // they used to match none of the sections above: a paused batch disappeared
   // from the page entirely while still holding its files (and its delete

@@ -223,13 +223,15 @@ def footprint(settings: Any, *, max_age: float = 30.0) -> dict[str, Any]:
     now = time.time()
     if _FOOTPRINT and now - _FOOTPRINT_AT < max_age:
         return dict(_FOOTPRINT)
+    # What the MODEL FOLDER actually holds, once. The old sum walked
+    # modelstore.status()['models'], which treats the whole `hf` cache as one
+    # pseudo-model and misses orphan blobs entirely — one shape over-reports,
+    # the other under-reports, and the card said "model 2263 MB" for a folder
+    # that has since read 756 MB.
     try:
         from app import modelstore
 
-        model_bytes = sum(
-            int(v.get("localBytes") or 0)
-            for v in (modelstore.status().get("models") or {}).values()
-        )
+        model_bytes = _tree_bytes(modelstore._root())
     except Exception:  # noqa: BLE001
         model_bytes = 0
     paths = settings.app.paths
@@ -444,24 +446,33 @@ def reset(store: Any, settings: Any, *, apply: bool = False) -> dict[str, Any]:
 
     # ---- 6. model copies (bucket-verified by modelstore) -----------------
     model_bytes = 0
+    model_kept: list[dict[str, Any]] = []
     try:
         from app import modelstore
 
-        status = modelstore.status()
-        model_bytes = sum(
-            int(v.get("localBytes") or 0)
-            for v in (status.get("models") or {}).values()
+        active, _note = modelstore.active_model_name()
+        plan = modelstore.releasable(
+            active,
+            keep_active_local=bool(getattr(settings.whisper, "keep_local", True))
+            if hasattr(settings, "whisper") else True,
         )
+        model_bytes = int(plan.get("bytes") or 0)
+        model_kept = list(plan.get("kept") or [])
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[reset] model status failed: {exc}")
+        active = ""
     if model_bytes:
         cats.append({
             "name": "local model copies",
             "mb": _mb(model_bytes),
             "count": 1,
             "paths": [str(Path(paths.data_dir) / "models")],
-            "note": "modelstore verifies each bucket object before releasing",
+            "note": "only copies that can really go: unused models are re-downloadable",
         })
+    elif model_kept:
+        # Nothing freeable: say so in the dialog instead of showing 0 MB
+        # silently. This is the honest form of the "Would free 2263 MB" lie.
+        kept.extend(model_kept)
 
     # ---- 7. apply ---------------------------------------------------------
     if apply:

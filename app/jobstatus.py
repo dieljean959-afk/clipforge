@@ -148,6 +148,56 @@ def is_terminal(job: dict[str, Any]) -> bool:
     return status_of(job) in TERMINAL_STAGES
 
 
+def is_requeueable(job: dict[str, Any]) -> bool:
+    """May this job be put back on the queue by ANY recovery path?
+
+    The loop this closes, seen on a real 23:36 job: every API boot re-queued a
+    job whose document still said `interrupted: true` from an attempt that had
+    already been settled, so the batch restarted at "Fetching video" — downloading
+    the source again and restarting its ETA — on every restart, forever. The
+    document also already carried `isTerminal: true` and `retryable: false`; no
+    recovery path looked.
+
+    A job is only ever re-queued when it is NOT settled. Settled means any of:
+    a terminal stage, an explicit `isTerminal`, an explicit false `retryable`,
+    or a recorded terminal verdict (`finishedAt` plus a finished status).
+
+    Deliberate escape hatch: a user action (Retry / Run again) calls
+    `allow_retry()` first, which re-opens the document explicitly. Recovery
+    paths must never do that on their own.
+    """
+    if status_of(job) in TERMINAL_STAGES:
+        return False
+    if job.get("isTerminal") is True:
+        return False
+    if job.get("retryable") is False:
+        return False
+    if job.get("finishedAt") and status_of(job) in {"complete", "failed", "paused"}:
+        return False
+    return True
+
+
+def allow_retry(job: dict[str, Any]) -> dict[str, Any]:
+    """Re-open a settled job for ONE explicit user retry.
+
+    Recovery code must never call this; only a request handler that a human
+    triggered (Retry, Run again) may. It clears the terminal verdict so the
+    state machine's own guard does not refuse the re-queue the user asked for.
+    """
+    job["isTerminal"] = False
+    job["retryable"] = True
+    job["interrupted"] = True
+    job["interruptReason"] = job.get("interruptReason") or "Re-opened by the user."
+    job["finishedAt"] = None
+    job["completedAt"] = None
+    # A terminal STAGE is also terminal state; leaving it as "failed" would
+    # keep `status_of()` at "failed" and the requeue guard would refuse the
+    # retry the user just asked for.
+    job["stage"] = "queued"
+    job["status"] = "queued"
+    return job
+
+
 def active_stage(job: dict[str, Any]) -> str | None:
     """The stage a RUNNING job is on, else None."""
     if status_of(job) != "running":

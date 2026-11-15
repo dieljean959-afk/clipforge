@@ -250,10 +250,21 @@ export function fmtDurationLong(sec: number | null | undefined): string {
  * Human ETA: "~2 min left" / "~45s left". Pairs with the per-stage unit line
  * ("4 of 11 min processed") in the job card.
  */
+/** Never show an ETA above this. The server clamps at the same value; this is
+ *  the belt to that braces, because "~2693 min left" was rendered from a value
+ *  the backend should not have produced and the UI accepted anyway. */
+export const MAX_ETA_SEC = 24 * 60 * 60;
+
 export function fmtEta(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return "any moment";
   if (sec < 90) return `${Math.max(1, Math.round(sec))}s`;
-  return `${Math.round(sec / 60)} min`;
+  if (sec > MAX_ETA_SEC) return "estimating…";
+  if (sec < 3600) return `${Math.round(sec / 60)} min`;
+  // Past an hour, minutes stop meaning anything: "1 h 20 min" is readable,
+  // "80 min" beside a 45-minute job reads as a bug.
+  const hours = Math.floor(sec / 3600);
+  const mins = Math.round((sec - hours * 3600) / 60);
+  return mins > 0 ? `${hours} h ${mins} min` : `${hours} h`;
 }
 
 /**

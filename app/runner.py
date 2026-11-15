@@ -304,15 +304,44 @@ def main(argv: list[str]) -> int:
     # The worker's supervisor reads this event to turn the Fetching chip
     # active; without it every job shows four grey chips.
     job = store.get_job(job_id)
+    # THE LOOP STARTS HERE. This block used to write `stage: "fetch", progress:
+    # 0` unconditionally, before the pipeline had looked at a single
+    # checkpoint. So every runner launch — including the one a boot restarted
+    # for a batch that was already finished — put the card back on "Fetching
+    # video / Downloading 40%" and restarted the stage clock that produced
+    # "~2693 min left". Two guards now: a settled job is not run at all, and a
+    # job whose source is already captured is never re-labelled as fetching.
+    from app import jobstatus as _jobstatus
+
+    if job is not None and not _jobstatus.is_requeueable(job):
+        sys.stderr.write(
+            f"[runner] job {job_id} is settled "
+            f"({job.get('status')}/{job.get('stage')}, "
+            f"isTerminal={job.get('isTerminal')}) — refusing to run it\n"
+        )
+        return 0
     if job is not None:
-        job.update({
-            "stage": "fetch",
-            "stageStartedAt": int(time.time() * 1000),
-            "progress": 0,
-            "progressDetail": "Stage: fetch — starting",
-        })
-        store.write_job(job)
-        store.append_job_log(job_id, "Stage: fetch — starting")
+        has_source = bool((job.get("sourceStream") or {}).get("videoKey"))
+        update: dict[str, object] = {}
+        if not has_source:
+            update.update({
+                "stage": "fetch",
+                "stageStartedAt": int(time.time() * 1000),
+                "progress": 0,
+                "progressDetail": "Stage: fetch — starting",
+            })
+        else:
+            # The capture is already in the bucket: announce a resume, keep the
+            # existing stage and clock, and do NOT reset progress.
+            update["progressDetail"] = "Resuming — source already captured"
+        if update:
+            job.update(update)
+            store.write_job(job)
+        store.append_job_log(
+            job_id,
+            "Stage: fetch — starting" if not has_source
+            else "Resume — source already in the bucket, not fetching again",
+        )
     # Keep large native allocations from pushing the process into swap-less
     # OOM territory where the kernel picks a victim.
     #

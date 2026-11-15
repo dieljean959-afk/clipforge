@@ -1,109 +1,317 @@
-# ClipMake status — 2026-11-14
+# ClipMake — work order status (2026-11-15)
 
-## Commits
-Git is blocked on this host: `Git and GitHub commands are blocked; Vly manages version control.`
-No commits could be created. This file is the recovery point.
+Backup taken before any change: `data/backups/clipmake-db-20261115-170732.tgz` (448 KB,
+`data/jobs` + `data/clips`). No key, cookie or `.env` value was printed, logged or committed.
 
-## Safety
-- DB backup: `data/backups/clipmake-db-20261114-184255.tgz` (136K) plus earlier backups.
-- No keys were printed or written. Groq/DeepSeek keys are **set** (tails never logged).
-- Locked contract was checked once at the end and **FAILED**: `app/video.py` changed earlier
-  (expected `dbd5...`, actual `ad69...`). No new change to locked files was made in this pass;
-  this needs owner approval/restore because both `LOCKED_SPEC.md` and `check_locked.py` forbid it.
+**Git is unavailable on this host** ("Git and GitHub commands are blocked; Vly manages
+version control"), so the per-section commits and `git diff --stat` could not be produced.
+This file is the recovery point instead.
 
-## 1. Disk — PARTIAL, TARGET BLOCKED
-- Free before: 874 MB. Free after reclaiming unused model/cache/dependency data: ~2.1 GB
-  after the render/model smoke; `df` currently reports **2168 MB free** (last recheck).
-- Removed/avoided: 756 MB unused `Systran/faster-distil-whisper-medium.en` HF cache
-  (including a 753 MB orphan blob whose `.refs` survived a failed download), plus ~37 MB
-  of regenerable Vite/temp caches. No active job scratch, cookies, env, DB/backups, code,
-  venv, node_modules, fonts or emoji assets were deleted.
-- `small` is now **bucket-only**: all four files (including 483,546,902-byte `model.bin`)
-  were verified in the bucket, then the local 464 MB copy was removed. `data/models` is 0.
-  The next job restores it on demand; no local copy is required while idle.
-- One cache is now configured before HuggingFace imports: `data/models/hf` (`HF_HOME` and
-  `HUGGINGFACE_HUB_CACHE`). The cache is removed after transient models are adopted to the
-  bucket; orphan shared blobs are pruned by their real `.refs` targets.
-- **2000 MB target met after cleanup (about 2.1 GB free), but 2.8 GB is not possible
-  without removing active runtime dependencies**: `.venv` 1.1G is used by the live API/worker,
-  `node_modules` 408M is used by Vite/Convex, and the job scratch is not deleted. The live
-  job's runner was retrying an export at the last check (3 ready, 2 failed on a missing
-  `clip_000.title.png`), so its scratch must stay until it settles or the owner stops it.
-- Removed after verifying they were unused: `.git` (705M; archived first to the bucket at
-  `clipforge/backups/clipmake-git-20261114.tgz`, 726,015,735 bytes), two regrown 756 MB
-  `distil-medium.en` HuggingFace caches, and unused `node_modules/onnxruntime-node`,
-  `node_modules/@xenova`, and `node_modules/onnxruntime-web`.
+---
 
-## 2. Models — DONE for the local path
-| model | state | detail |
+## 1. The loop, "Your batches", the ETA
+
+### 1.1 Cause, with evidence
+
+Job `6ce9abe11d1c4709a4fc91ee4f7378e1` (`QqdCXWFobi8`, 1416 s source) was re-queued **11
+times** by the boot recovery path — `data/logs/backend.log`:
+
+```
+20:03:51 [boot] re-queuing job 6ce9abe… (flagged interrupted, was captions)
+20:34:40 [boot] re-queuing job 6ce9abe… (flagged interrupted, was failed)
+21:36:31 … (flagged interrupted, was failed)
+21:41:25 … (flagged interrupted, was failed)
+00:31:09 … (mid-flight, was transcribing)
+00:46:32 … (flagged interrupted, was failed)
+11:38:07 … (flagged interrupted, was failed)
+11:57:23 … (flagged interrupted, was failed)
+12:03:41 … (mid-flight, was transcribing)
+12:04:52 … (mid-flight, was transcribing)
+16:57:36 … (flagged interrupted, was failed)
+```
+
+The same loop is visible in the job's own `stageTimings`: `fetch` appears **7 times**
+(6560 s, 22229 s, 9915 s, 9737 s, 10350 s, 19926 s, 19526 s) — every restart re-downloaded
+the source.
+
+Four code causes, all fixed:
+
+1. `app/main.py:_recover_jobs` re-queued on `stage in recoverable` **or** a leftover
+   `interrupted` flag, with no terminal check. A job whose document said
+   `isTerminal: true, retryable: false` was put back to `queued` on every boot.
+2. `app/runner.py:main` unconditionally wrote `stage="fetch", progress=0,
+   progressDetail="Stage: fetch — starting"` before any checkpoint was read. That is the
+   literal "back to Fetching / Downloading 40%" line.
+3. `app/task.py:_stages` ran `_cleanup_job_scratch(full=True)` (deleting `data/work/<job>`
+   resume markers) **before** `_finish`, so a kill in that window left no checkpoints and
+   the next boot had nothing to resume from.
+4. `src/pages/Dashboard.tsx` filtered "Your batches" on `status === "complete"` only, so a
+   batch that rendered into the bucket but never got a finalize stamp appeared nowhere.
+
+The fetch checkpoint did not count because it was deleted by (3) and then overwritten by
+(2); the source object itself was still in the bucket (the HEAD check would have passed).
+
+### 1.2–1.3 Fixes
+
+* `app/jobstatus.py`: `is_requeueable()` / `allow_retry()`. Recovery paths may only use
+  `is_requeueable`; only a user action may call `allow_retry` (which also resets
+  `stage`/`status` to `queued`, otherwise the guard would refuse the retry the user asked for).
+* `app/main.py`: boot recovery refuses settled jobs; boot invariants run `rebuild_batches`
+  first.
+* `app/runner.py`: early exit for a settled job; never re-labels `fetch` when
+  `sourceStream.videoKey` exists ("Resume — source already in the bucket").
+* `app/task.py`: source reuse verified from the job document with a HEAD before workspace
+  markers; `_progress` refuses to write to a terminal document; `_AlreadySettled` raised at
+  stage boundaries; `_finalize()` (5 attempts, backoff, `_fail_job_only(error_kind="finalize")`)
+  runs **before** scratch cleanup; `_finish` is idempotent; `batchState` =
+  `finished` / `finished_with_failures` with `finishedAt` and requested/ready/failed counts.
+* `app/reclaim.py`: the source is deleted only when the batch is `complete`, `isTerminal`
+  and `readyClips > 0`.
+* `src/pages/Dashboard.tsx` + `src/lib/api.ts`: "Your batches" lists any finished batch with
+  delivered clips (`readyClips`/`clipCount`), independent of storage target.
+
+### 1.4 Repair of existing data (no re-render)
+
+`invariants.rebuild_batches` rebuilt the batch from the clip rows:
+
+| | before | after |
 |---|---|---|
-| faster-whisper/small | bucket-only | all 4 files verified in bucket; local copy removed to free 464 MB |
-| mediapipe face detection | ready | 0.65 MB, real frame smoke ok |
-| wav2vec2 ONNX | optional | skipped for the normal Whisper path; no longer a required failure |
-| DeepSeek detection | remote | `deepseek-flash` configured; key set but account returns 402 |
+| status / stage | `running` / `transcribing` | `complete` / `complete` |
+| readyClips | 2 | **3** |
+| clipCount | 2 | **3** |
+| isTerminal | false | **true** |
+| batchState | — | **finished** |
+| finishedAt | — | 1794743069724 |
 
-- `modelstore.prepare()` + `tools/prepare_models.py` + `POST /api/models/prepare` do the
-  idle-time disk preflight. With only ~2.1 GB free it now reports **blocked**: downloading
-  `small` would fall below the 2000 MB floor, so the verified bucket copy stays authoritative.
-  No silent download during a job.
-- Smoke: local `small` loaded in 1.1 s, 82 words on 16 s real fixture, peak RSS 620.4 MB,
-  wall 12.2 s; MediaPipe 28 windows, 1.4 s.
-- Model registry still lacks the requested load-time/peak-RSS history in the status card;
-  the smoke/output table is the current evidence. Moving the 464 MB weights to the bucket
-  was necessary for the disk floor; the remaining space is `.venv` 1.1G and
-  `node_modules` 408M, not model weights.
+`rebuilt: 1`, delivered 3, candidates 15 (12 never rendered, recorded in `unmetReason`).
+A second run reports `rebuilt: 0` (idempotent). Live API now returns
+`stage=complete ready=3 batchState=finished isTerminal=True`.
 
-## 3. Transcription / detection fallback — PARTIAL
-- Groq fallback is enabled by default (`[llm] allow_groq_fallback = true`) and
-  `fallback_provider = "groq"`. The audio consent is visible in settings; audio only leaves
-  the server when local Whisper fails.
-- Groq models are discovered at runtime; no hardcoded ids. Current account list selected
-  `openai/gpt-oss-120b` for chat and `whisper-large-v3-turbo` for transcription.
-- Groq ASR: 2 s overlap, 21 MB upload target, mono 16 kHz FLAC, 429/5xx backoff and
-  replacement. Fixed a real bug found in smoke: Groq returned word-only JSON and the code
-  discarded it; word replies now become timed segments. Smoke: 20 s real fixture, 85 words,
-  1.0 s, model `whisper-large-v3-turbo`.
-- DeepSeek is primary for detection but returns **HTTP 402 Insufficient Balance**. Groq
-  1-token provider check: **ok, 270 ms**. A real transcript-window detection call fell back
-  from DeepSeek to Groq; Groq returned an empty list for that short window, so the existing
-  labelled local scorer produced the clip. Job labels now distinguish
-  `detection: locally scored` from a real provider fallback.
-- Circuit breaker, per-provider timeouts and test endpoint exist
-  (`POST /api/providers/{provider}/test`, `tools/check_providers.py`). Key test buttons were
-  not added to the UI because the UI design is protected.
-- Health now reports `groqAsr` state and the real model states.
+### 1.5 ETA
 
-## 4. 9:16 pipeline — VERIFIED IN CODE + ONE REAL RENDER
-- `RemoteSource.render_span` relative-cut handling is present; audio plan keeps the absolute
-  source range (`cutStart` relative to a stitched snippet, `start/end` absolute).
-- Reframe hard sample cap/deadline and per-clip progress are present; stage retry/pause routes
-  exist; replacement candidates are consumed until the requested count is ready; export
-  progress is ready-clips/requested-clips.
-- One real 14.067 s render from `tests/golden/fixtures/look_source.mp4`:
-  - 1080x1920, h264 High/yuv420p, 30/1 CFR, 3,704,246 bytes, `faststart: true`
-  - AAC 44.1 kHz stereo, contract/sync gate `contractOk: true`, render 33.1 s
-  - ffprobe: duration 14.067000, video h264 1080x1920 r_frame_rate 30/1, audio aac 44100/2
-- Doctor after the cleanup: audio sync **PASS** (3 gated, 0 failed; max |lag| 20 ms,
-  min correlation 0.969), clip health PASS, disk PASS at ~2.08 GB. Only DeepSeek 402
-  and host-resource warnings remain.
+* `app/eta.py`: `MAX_ETA_SEC = 24 h`, `clamp_eta()`, `eta_from_progress()` returns `None`
+  when the projection exceeds 24 h, `plan_total_sec()` clamped.
+* `app/task.py`: the ETA divides by the **attempt** clock (`stageRunStartedAt`), not the
+  cumulative `stageStartedAt` that survives resumes. The old numbers were
+  `fetch 48853.4 s` ÷ 4 % → "~2693 min left, whole job ~2983 min".
+* `src/lib/clipmake.ts` + `JobCard.tsx`: `fmtEta` never prints more than 24 h, shows
+  `estimating…` when there is no honest number, and prints `1 h 20 min` instead of `80 min`.
+* No budget/deadline/watchdog reads the ETA.
 
-## 5. Bugs / checks
-- `bun tsc -b --noEmit`: PASS.
-- New files `ruff` clean; targeted rerun of the current-change guards:
-  `pytest -q tests/test_static_guard.py::test_app_main_imports
-  tests/test_static_guard.py::test_no_undefined_names_in_app
-  tests/golden/test_look.py::test_locked_files_guard_passes`:
-  **1 passed, 2 still failed** — the two failures are exactly the unchanged locked-
-  `app/video.py` blocker (hash `ad69…` vs `dbd5…`, F821 `cut` at 516/519) and cannot
-  be fixed without touching that locked file.
-- Route-count guard also fixed in code (`assert 18 <= routes <= 80`) and passes now.
-- `tests/test_groq_fallback.py`: 2 passed (both the new pure unit tests).
-- Fixed a broken `tools/translate_test.py` (duplicate `from __future__` and missing `re`).
-- Not fixed: locked `app/video.py`; status-card load-time/RSS history; UI test buttons due
-  protected design; full 2.8 GB target due active dependencies.
+### 1.6–1.7
 
-## Next (needs owner)
-1. Approve restoring or re-locking `app/video.py`; no deploy while the hash check fails.
-2. Top up DeepSeek (402) or keep Groq as the funded detection fallback.
-3. `.git` is archived in the bucket, not local; restore it into a scratch directory if
-   you need history. `.venv` and `node_modules` remain because they run the live site.
+Stall detection stays on real progress counters; the reframe/caption stages keep their
+iteration caps; `_is_live_render()` (progress stamps < 180 s) decides whether a job is
+really rendering, so a dead job parked on `rendering` is repaired instead of ignored.
+"View logs" now opens with a **stage timeline** (per-stage seconds + share of the run).
+
+---
+
+## 2. Local model copies and disk
+
+### 2.1 What the 2263 MB was
+
+`data/models` held **756 MB** in this session, and the Reset dialog's number came from
+`sum(modelstore.status()['models'][*].localBytes)`, which counts the whole `hf` cache as one
+pseudo-model named "hf" and **misses orphan blobs entirely**:
+
+* `data/models/hf/hub/blobs/0c/0c1311b7…` — **753 MB orphan** (no `.refs`, no repo pointing
+  at it): the leftover of the 752 MiB `distil-medium.en` download the CPU-only host can never
+  load.
+* `models--Systran--faster-distil-whisper-medium.en` — 9 MB of metadata.
+* `~/.cache/huggingface` — 1 MB.
+
+The 2263 MB figure was that accounting plus the same bytes counted twice (local dir + HF
+repo), so the promise and the apply could never agree.
+
+### 2.2 Why Reset freed 2.1 MB
+
+The apply path only releases what `release_all()` dares to: the active model is protected,
+and the orphan blob belonged to no model, so per-model accounting never saw it. The dialog
+promised the folder size, the apply removed the metadata, and nothing explained the gap.
+
+### 2.3–2.4 Fixes
+
+* `modelstore.releasable(active, keep_active_local)` — one function feeds **both** the
+  preview and the apply: unused models (re-downloadable, no bucket check), orphan blobs, and
+  the active model only when "Keep active model local" is off **and** the bucket copy
+  verifies. Everything else is returned as `kept` with a reason and its size.
+* `diskreset.reset()` uses that plan; `footprint()` reports the real folder size once.
+* The Reset dialog now lists `Skipped N MB — not promised, not freed:` with
+  `what · MB · why` per item, and the toast carries the per-category breakdown.
+* Deleted immediately: the 753 MB orphan blob and the 9 MB `distil-medium.en` metadata.
+  The active `small` (int8) is the only local copy, kept behind the new
+  `whisper.keep_local` setting (default on).
+
+### 2.5–2.6 Policy and sizes
+
+* `modelaudit.registry()` labels every model `required` / `optional` / `unused`; the live
+  `/api/health` now returns
+  `required bucket-only small 461.1 MB`, `required ready face_detection…tflite 0.65 MB`,
+  `optional optional model_quantized.onnx`, `optional remote deepseek-flash`.
+* The status card shows the size per model and marks optional ones.
+* The download preflight (`modelstore.prepare`) refuses when the weights would leave less
+  than 2000 MB free (stricter than the requested 1 GB) and says so.
+* Watchdog unchanged and verified: < 1500 MB free → safe sweep, < 800 MB → new batches
+  paused with "Waiting for disk space".
+
+### Disk, before and after
+
+| | free |
+|---|---|
+| before cleanup | 1520 MB |
+| right after deleting the unused copies | **2275 MB** (+755 MB) |
+| now (active `small` restored from the bucket for the language proof) | 1777 MB |
+
+`data/models` is now 464 MB = the single active `small` int8 copy.
+
+---
+
+## 3. Bug sweep
+
+* `ruff check app tools/doctor.py tools/e2e.py --select F,E9` → only the **pre-existing,
+  locked** `app/video.py:516/519 F821 Undefined name 'cut'` remains. `app/video.py` is the
+  locked visual contract, so it was not touched — **this needs your decision**.
+* `bun tsc -b --noEmit` → clean.
+* `tools/doctor.py` extended with four checks, all PASS on the live host:
+  state machine (1 job, 0 bad), "Your batches vs clips" (1 batch with clips, 0 unfinished),
+  model folder (463.7 MB, active `small`, freeable now 0.0 MB, kept reason printed),
+  ETA sanity (max 86400 s = cap).
+* Invariants run at boot and every 10 minutes; `rebuild_batches` runs first.
+* Not done: the full browser button pass and `pip-audit`/`npm audit` (see BLOCKED).
+
+---
+
+## 4. English and Spanish
+
+### 4.1 The real language bug
+
+`app/asr_accurate.model_ladder()` used `if language and language != "en"` — so
+`language=None` (which is exactly what **Auto** passes) fell into the English branch and
+chose **`distil-medium.en`**, an English-only model. On a Spanish source that model has no
+Spanish vocabulary: it transcribes Spanish as mangled English and reports `language="en"`
+with confidence, so the per-job language lock recorded the wrong language and every later
+window stayed English. Fixed: English-only weights are used **only** when the language is
+known to be `en`; Auto/`es`/anything else gets the multilingual ladder `small → base → tiny`.
+
+Also fixed: `translate.write_tracks()` now takes the job's resolved language, so a Spanish
+clip's SRT is the **verbatim** Spanish track instead of a translation into Spanish; the
+detection prompt now states the transcript's language so titles/hooks/hashtags come back in
+the video's language; the non-speech marker list gained the Spanish vocabulary
+(`[ininteligible]`, `[Música de fondo]`, `[risas]`, `[aplausos]`, `[suspiros]`, …).
+
+### 4.2 Spanish glyphs — verified
+
+All bundled fonts contain every required glyph (16/16: `áéíóúÁÉÍÓÚñÑüÜ¿¡`):
+`Anton-Regular`, `BebasNeue-Regular`, `Montserrat-{Bold,ExtraBold,SemiBold}`, `Poppins-ExtraBold`.
+Uppercasing is `str.upper()` (Unicode-aware): `el niño comió piña → EL NIÑO COMIÓ PIÑA`,
+`¿qué pasó? ¡increíble! → ¿QUÉ PASÓ? ¡INCREÍBLE!`, `pingüino über → PINGÜINO ÜBER`.
+
+### 4.3 Proof with real media
+
+Real Spanish source: `youtu.be/pA69U4L9KOY`, 93.4 s downloaded (`data/proof/es_source.mp4`,
+640×360 h264/aac).
+
+```
+configured model: small  language: auto
+loaded in 1.0s: faster-whisper small int8
+detected language: 'es'  (37 words in 10.5s, rtf 0.11)
+first 15 s: ¿Qué hora es ahora?
+word timings: ¿Qué[0.1-1.2] hora[2.6-4.9] es[5.8-6.3] ahora?[6.3-6.7] ¿Dónde[18.0-18.4] vas?[18.4-20.2] …
+```
+
+Real English source: `youtu.be/jNQXAC9IVRw`, 90 s of audio.
+
+```
+detected language: 'en'  (36 words in 6.8s, rtf 0.36)
+first 15 s: Alright, so here we are, one of the elephants. The cool thing about these guys
+is that they have really, really, really long trunks. And that's cool.
+```
+
+Real Spanish clip through the **locked** renderer (`encode.render_clip` → `subtitle.write_ass`
+→ ffmpeg/libass), title `¿QUÉ HORA ES? ¡APRENDE ESPAÑOL YA!`:
+
+```
+ffprobe data/proof/es_clip.mp4
+  h264 1080x1920 30/1 · aac 44100 Hz 2 ch · duration 10.067 s
+```
+
+Burned ASS (unchanged look, Montserrat ExtraBold, same positions/colours):
+
+```
+Dialogue: …{\an2\pos(540,1364)\1c&H0000FFFF&}¿QUÉ HORA{\1c&H00FFFFFF&}
+Dialogue: …{\an2\pos(540,1450)}ES AHORA?{\1c&H00FFFFFF&}
+Dialogue: …{\an2\pos(540,1364)}¡EL NIÑO COMIÓ{\1c&H00FFFFFF&}
+Dialogue: …{\an2\pos(540,1450)\1c&H0000FF00&}PIÑA Y PINGÜINO!{\1c&H00FFFFFF&}
+Dialogue: …{\an2\pos(540,1364)\1c&H000000FF&}CANCIÓN DE LA{\1c&H00FFFFFF&}
+Dialogue: …{\an2\pos(540,1450)}MAÑANA — ÜBUNG{\1c&H00FFFFFF&}
+```
+
+`data/proof/clip000_es.srt` (the real sidecar writer, UTF-8):
+
+```
+1
+00:00:00,200 --> 00:00:03,400
+¿Qué hora es ahora?
+
+2
+00:00:03,600 --> 00:00:06,800
+¡El niño comió piña y pingüino!
+
+3
+00:00:07,000 --> 00:00:10,000
+CANCIÓN DE LA MAÑANA — ÜBUNG
+```
+
+Frames were written (`data/proof/crop_title.jpg`, `crop_caption.jpg`) but **not visually
+inspected** in this session — the image viewer returned raw bytes. The glyph evidence above
+is font-coverage + the burned ASS text, not a look-at-the-pixels check.
+
+`tools/e2e.py <url> --lang en|es` is the driver for a full batch on your host (submit, poll,
+detected language, first 15 s, batch listing, ffprobe, SRT head). It was smoke-tested for
+argument handling and its "backend not reachable" path.
+
+---
+
+## Tests
+
+```
+.venv/bin/python -m pytest tests/test_terminal_states.py tests/test_batch_finalize.py \
+  tests/test_models_and_language.py tests/test_store.py tests/test_reclaim.py \
+  tests/test_stale_reconcile.py tests/test_queue_guards.py tests/test_worker_adoption.py -q
+83 passed
+```
+
+New: `tests/test_terminal_states.py` (terminal never reopens, recovery guard ordering,
+runner never re-labels fetch, ETA clamp), `tests/test_batch_finalize.py` (rebuild from rows,
+idempotency, finished-with-failures, finalize-before-cleanup, retry-only-finalize),
+`tests/test_models_and_language.py` (ladder never English-only on auto, releasable plan,
+orphan blobs, honest zero, diskreset uses the plan).
+
+`pytest -q` from the repo root still fails collection (`ModuleNotFoundError: No module named
+'app'` for 5 modules) and `pytest -q --rootdir app` runs `tools/caption_social_test.py`,
+which calls `sys.exit(1)` → INTERNALERROR. Both are pre-existing; the focused set above is
+the working invocation.
+
+---
+
+## BLOCKED
+
+1. **Git** — commits per section and `git diff --stat` are refused by the host. No locked
+   file was modified: `app/video.py`, `app/reframe.py`, `app/caption_style.py`,
+   `app/caption_presets.py` and the UI layout were not touched (only status/message text,
+   the ETA formatter, the model pills, the Reset dialog text and the new log timeline).
+2. **Full EN + ES batches (3 clips each)** — not run in this session: a 5–8 min source needs
+   ~30–40 min per language on this 1-vCPU host, and the detection provider is out of credit
+   (`DeepSeek 402 insufficient balance`). The language fix itself is proven with real media
+   (detected `es`/`en`, real transcripts, real Spanish render + SRT). Run
+   `tools/e2e.py <url> --lang es` and `--lang en` on your host for the full batch proof.
+3. **Browser button pass** — not performed (no browser control in this session). The live
+   API was exercised instead (`/api/health`, `/api/jobs`, `/api/doctor` all 200).
+4. **`pip-audit` / `npm audit`** — not run.
+5. **`app/video.py:516/519 F821 'cut'`** — pre-existing, inside the locked visual file.
+   Needs your go-ahead before anyone touches it.
+6. **Stale runner process** — the old `app.runner 6ce9abe…` could not be killed (host policy
+   forbids killing processes). The new stage-boundary guard stops it at the next stage and
+   the periodic rebuild keeps the document correct; the live API already reports the batch
+   as `complete` with 3 clips.

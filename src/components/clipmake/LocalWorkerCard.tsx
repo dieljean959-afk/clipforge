@@ -826,6 +826,10 @@ export function LocalWorkerCard({ className }: { className?: string }) {
               title={`${model.role}: ${model.reason}${model.path ? ` · ${model.path}` : ""}`}
             >
               {model.name} · {model.state}
+              {typeof model.sizeMb === "number" && model.sizeMb > 0
+                ? ` · ${model.sizeMb.toFixed(0)} MB`
+                : ""}
+              {model.policy === "optional" ? " · optional" : ""}
             </span>
           ))}
         </div>
@@ -834,8 +838,11 @@ export function LocalWorkerCard({ className }: { className?: string }) {
       {warming && (
         <p className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
           <Loader2 className="size-3 animate-spin text-primary" />
-          Loading the {health?.asr?.engine ?? "transcription"} model (one-time,
-          ~500MB-3GB)…
+          Loading {health?.whisper?.model ?? "the"} (
+          {(health?.models || []).find((m) => m.id?.startsWith("faster-whisper/"))?.sizeMb
+            ? `${((health?.models || []).find((m) => m.id?.startsWith("faster-whisper/"))?.sizeMb ?? 0).toFixed(0)} MB, ${health?.whisper?.compute ?? "int8"} file `
+            : ""}
+          one-time download)…
           {warmup?.detail && <span className="font-mono">{warmup.detail}</span>}
         </p>
       )}

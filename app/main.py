@@ -38,6 +38,7 @@ from app import (
     clipcount,
     config,
     diskreset,
+    jobstatus,
     llm,
     modelstore,
     objectstore,
@@ -392,10 +393,16 @@ def _boot_phases(b: Boot) -> None:
     def _invariants() -> dict:
         from app import invariants
 
+        # Rebuild FIRST: a batch whose clips are all in the bucket but whose
+        # record was never finalised has nothing for check_and_repair to count
+        # (the projection names no clips), so it would stay invisible in "Your
+        # batches" forever. This is a bookkeeping write only — no re-render.
+        rebuilt = invariants.rebuild_batches(store, apply=True)
         report = invariants.check_and_repair(store, settings.app.paths, log=logger.info)
         return {
             "detail": (
-                f"{report['checked']} job(s) checked, {report['repaired']} repaired"
+                f"{report['checked']} job(s) checked, {report['repaired']} repaired, "
+                f"{rebuilt['rebuilt']} batch(es) rebuilt from clip rows"
             )
         }
 
@@ -485,6 +492,19 @@ def _recover_jobs() -> tuple[int, int]:
         elif InProcessWorker.has_signal_failure(job):
             reason = "recorded as failed, but the cause was an external kill"
         if reason is None:
+            continue
+        # THE LOOP GUARD. A settled batch is never re-queued by recovery, no
+        # matter what a leftover `interrupted` flag says. See the real incident:
+        # a job that had already been finalised with clips in the bucket was put
+        # back to `queued` on every boot ("[boot] re-queuing job ... (flagged
+        # interrupted, was failed)"), which restarted it at Fetching — a fresh
+        # download and a fresh ETA — on every host restart, forever.
+        if not jobstatus.is_requeueable(job):
+            logger.info(
+                f"[boot] job {job['_id']} is settled ({jobstatus.status_of(job)}, "
+                f"isTerminal={job.get('isTerminal')}, retryable={job.get('retryable')}) "
+                f"— recovery leaves it alone ({reason})"
+            )
             continue
         dead_end = worker_mod.unrecoverable_reason(store, job)
         if dead_end is not None:
