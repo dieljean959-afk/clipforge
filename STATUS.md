@@ -351,3 +351,24 @@ and `/api/auth/me` shows signup open again.
   Playwright cache used for the browser pass. Free disk: **1477 MB**, active model kept local.
 * Final counts: **94 tests passed**, `tsc -b --noEmit` clean, `tools/check_locked.py`
   *LOCKED CONTRACT OK — 12 files match*, `tools/doctor.py` all PASS.
+
+## The 464 MB `small` copy now lives in the bucket (owner request)
+
+* `config.toml` → `[whisper] keep_local = false`. The permanent copy is the bucket's;
+  the model is restored for the stage that loads it and released again afterwards, so
+  the disk no longer carries a warm 464 MB copy between batches.
+* `data/models` went **464 MB → 1 MB** and free disk **1477 → 1979 MB** (via the app's
+  own `/api/storage/reset`, backup `data/backups/disk-reset-20261115-195724.tgz`);
+  `/api/health` reports `small · bucket-only · restored from the bucket per batch`, and the
+  `release_all()` that did this verifies the bucket copy before deleting anything.
+* Proof the bucket copy is real: a 19 s batch (`3e5afdec`) restored `small` from the
+  bucket, transcribed, and finished `stage=complete`, `batchState finished`, 1/1 clip
+  (*Elephants' Crazy Long Trunks*); at the end the job log shows `1105 MB of model weight
+  released from the disk`.
+* **New bug found by that run:** the subtitle gap-retry ladder asked for `base` and
+  `tiny` on a clip with three silent gaps and downloaded them — 421 MB + 221 MB — then
+  deleted them. `app/asr.py` now refuses to fetch anything that is not the configured
+  model (`_refuse_silent_download`), so a retry can reuse weights but never download new
+  ones; the ladder logs the refusal and retries with the same model. Test:
+  `test_a_retry_cannot_download_a_model_that_is_not_configured`.
+* Final counts after this change: **95 tests passed**, `tsc` clean, locked contract 12/12.

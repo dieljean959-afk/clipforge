@@ -16,9 +16,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app import modelstore
 from app.asr_accurate import model_ladder
-
 
 # --------------------------------------------------------------------------- #
 # ladder: never English-only unless the language is known to be English
@@ -125,3 +126,29 @@ def test_release_refuses_the_active_model_when_keep_local(
     assert result["ok"] is False
     assert "active model" in result["reason"]
     assert modelstore.local_dir("small").is_dir(), "the kept copy must survive"
+
+
+def test_a_retry_cannot_download_a_model_that_is_not_configured(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The gap-retry ladder pulled base (421 MB) and tiny (221 MB) on one
+    19-second clip. A retry may reuse weights, never fetch new ones."""
+    from types import SimpleNamespace
+
+    from app import asr, config
+
+    monkeypatch.setattr(modelstore, "_root", lambda: tmp_path / "models")
+    monkeypatch.setattr(
+        config, "load_config",
+        lambda **kw: SimpleNamespace(whisper=SimpleNamespace(model="small")),
+    )
+    with pytest.raises(asr.AsrError, match="refusing to download 'base'"):
+        asr._refuse_silent_download("base")
+    # The configured model is always allowed: it is what a job exists to load.
+    asr._refuse_silent_download("small")
+    # A copy already on disk may be reused, even when it is not the configured one.
+    local = modelstore.local_dir("base")
+    local.mkdir(parents=True)
+    for name in ("model.bin", "config.json"):
+        (local / name).write_bytes(b"x")
+    asr._refuse_silent_download("base")

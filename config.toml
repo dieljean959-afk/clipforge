@@ -17,6 +17,11 @@ data_dir = "data"
 # download is ever attempted. A GPU worker overrides this with
 # CLIPFORGE_WHISPER_MODEL=large-v3, which wins over this file.
 model = "small"
+# Owner request: the permanent copy lives in the bucket, not on this 2 GiB
+# sandbox. The model is restored from the bucket for the stage that needs it
+# and released again afterwards, which frees the 464 MB `small` copy
+# between batches. Set to true to keep a warm local copy instead.
+keep_local = false
 
 # Transcription backend. "auto" prefers WhisperX (github.com/m-bain/whisperX —
 # batched CTranslate2 decoding + wav2vec2 forced alignment for accurate

@@ -30,9 +30,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from app import objectstore
-
-from app import hostlimits
+from app import hostlimits, objectstore
 
 ENGINE_WHISPERX = "whisperx"
 ENGINE_FASTER_WHISPER = "faster-whisper"
@@ -502,6 +500,39 @@ _ENGINE_CACHE: dict[tuple, LoadedEngine] = {}
 _ENGINE_LOCK = threading.Lock()
 
 
+def _refuse_silent_download(model: str) -> None:
+    """Only the configured model may be fetched; everything else must be local.
+
+    The subtitle gap-retry ladder asks for `base` and `tiny` when a chunk comes
+    back empty. `asr.load` used to honour that by downloading them: a 19-second
+    clip that hit three silent gaps pulled **642 MB** of weights (base 421 MB,
+    tiny 221 MB), filled the disk between two watchdog sweeps and then deleted
+    them again — the exact "silent extra model download" the host budget
+    forbids. A retry may reuse a model already on disk, never fetch a new one.
+
+    A no-op for the configured model and for any model whose weights are
+    present, including a hostlimits downshift that the owner prepared earlier.
+    """
+    from app import modelstore  # noqa: PLC0415
+    from app.config import load_config  # noqa: PLC0415
+
+    try:
+        configured = str(load_config(quiet=True).whisper.model or "").strip()
+    except Exception:  # noqa: BLE001 - never block a load on a config read
+        return
+    short = str(model or "").rsplit("/", 1)[-1]
+    if not configured or short == configured.rsplit("/", 1)[-1]:
+        return
+    local = modelstore.local_dir(short)
+    if (local / "model.bin").is_file() and (local / "config.json").is_file():
+        return
+    raise AsrError(
+        f"refusing to download '{short}': only the configured model "
+        f"'{configured}' may be fetched; a retry has to reuse weights that are "
+        f"already on disk"
+    )
+
+
 def load(settings: Any, on_log: Callable[[str], None] | None = None) -> LoadedEngine:
     """Load (and therefore download) the configured model. Cached per config.
 
@@ -515,6 +546,7 @@ def load(settings: Any, on_log: Callable[[str], None] | None = None) -> LoadedEn
     with _ENGINE_LOCK:
         if key in _ENGINE_CACHE:
             return _ENGINE_CACHE[key]
+        _refuse_silent_download(model_name)
         if on_log:
             on_log(f"Engine: {engine} | {detail}")
             if note:
