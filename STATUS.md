@@ -306,3 +306,35 @@ removed, `data/models/hf` (752 MB unused, twice) deleted.
    different framing model.
 5. **Dev-only bun advisories** (16) — fixes are majors that break eslint's glob chain or the
    `@vly-ai/integrations` SDK; runtime deps are clean.
+
+
+---
+
+## Login was impossible — root cause and fix (19:2x)
+
+The auth layer landed while this work was running (`app/auth.py`, the session middleware in
+`app/main.py`, `ProtectedDashboard` in `src/main.tsx`). Its first-run bootstrap had already
+created an owner that is not a person: **`fir***@clipmake.local`**, name "Owner", created
+19:18, with zero sessions. Because `signup_open()` is "no user exists", that placeholder
+**hid the "Create account" tab**, and the user's real address was never registered — so
+`POST /api/auth/signin` answered 401 for every attempt.
+
+And the client turned that into the wrong sentence: `postAuth()` mapped **every** 401 to
+"Session invalid or expired.", discarding the backend's `{"detail": "Wrong email or password."}`.
+A typo looked like a dead session.
+
+Fixed:
+
+* `data/auth/state.json` backed up to `data/backups/auth-state-*.json`, then the `.local`
+  placeholder owner and its sessions were removed → `/api/auth/me` now reports
+  `{"user": null, "signupOpen": true}`.
+* `src/lib/auth.ts` reads the JSON body once and surfaces `detail` / `error` for 401s too, so a
+  bad password says *Wrong email or password.* and an expired session still says *Session
+  invalid or expired.*
+* `/dashboard` stays behind `RequireAuth` (`ProtectedDashboard`), matching the now-closed API:
+  anonymous `GET /api/jobs` and `/api/clips` → **401**.
+
+Verified: `tests/test_auth.py` 6 passed (anonymous 401, first signup sets HttpOnly cookie,
+second signup 403, wrong password 401, signin/signout cycle, automation token), `tsc` clean,
+live `/api/auth/signin` with a wrong password returns `401 {"detail":"Wrong email or password."}`
+and `/api/auth/me` shows signup open again.

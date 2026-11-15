@@ -105,19 +105,28 @@ async function postAuth(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  // Read the body once: the backend says "Wrong email or password." on a bad
+  // sign-in and the auth middleware says "Sign in required." on an expired
+  // session. Mapping every 401 to "Session invalid or expired." hid the real
+  // reason and made a typo look like a broken session.
+  let detail = "";
+  try {
+    const json = (await res.json()) as {
+      detail?: string;
+      error?: string;
+      errorMessage?: string;
+    };
+    if (typeof json.detail === "string") detail = json.detail;
+    else if (typeof json.errorMessage === "string") detail = json.errorMessage;
+    else if (typeof json.error === "string") detail = json.error;
+  } catch {
+    // no JSON body — fall back to the status
+  }
   if (res.status === 401) {
-    throw new Error("Session invalid or expired.");
+    throw new Error(detail || "Session invalid or expired.");
   }
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const json = (await res.json()) as { detail?: string; errorMessage?: string };
-      if (typeof json.detail === "string") detail = json.detail;
-      if (typeof json.errorMessage === "string") detail = json.errorMessage;
-    } catch {
-      // keep status text
-    }
-    throw new Error(detail);
+    throw new Error(detail || `HTTP ${res.status}`);
   }
 }
 
