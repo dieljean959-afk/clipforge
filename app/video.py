@@ -435,6 +435,36 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
     seek_offset: float | None = None
     probe_meta: dict[str, Any] | None = None
     cut_start = float(clip.get("start") or 0.0)
+
+    # The cut must be resolved BEFORE the bucket-source branch: that branch
+    # calls src.render_span(cut, audio_plan), and `cut` used to be assigned 30
+    # lines further down, so any retry whose source had been offloaded died
+    # with F821 NameError instead of re-rendering the clip. Same lookup, same
+    # crop, same fallback — only moved.
+    from app.stages import StageWorkspace
+
+    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
+    cuts = ws.read_json("reframe", "cuts.json") or []
+    cut: dict[str, Any] | None = None
+    for candidate in cuts:
+        if int(candidate.get("order", -1)) == order:
+            cut = candidate
+            break
+    if cut is None:
+        # No checkpoint: rebuild the cut from the clip document. start/end and
+        # the caption track are enough; the crop falls back to the frame centre.
+        cut = {
+            "order": order,
+            "start": float(clip.get("start") or 0.0),
+            "end": float(clip.get("end") or 0.0),
+            "title": clip.get("title"),
+        }
+        crop_box = _crop_from_command(str(clip.get("ffmpegCommand") or ""))
+        if crop_box:
+            cut["cropBox"] = crop_box
+        if not cut["end"] > cut["start"]:
+            raise HTTPException(400, "this clip has no usable start/end to re-render")
+
     if src is None:
         stream_meta = (job.get("sourceStream") or {}) if isinstance(job.get("sourceStream"), dict) else {}
         if not stream_meta.get("videoKey"):
@@ -519,30 +549,6 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
                 cut, audio_plan
             )
         probe_meta = src.probe
-
-    from app.stages import StageWorkspace
-
-    ws = StageWorkspace(settings.app.paths.data_dir, job_id)
-    cuts = ws.read_json("reframe", "cuts.json") or []
-    cut = None
-    for candidate in cuts:
-        if int(candidate.get("order", -1)) == order:
-            cut = candidate
-            break
-    if cut is None:
-        # No checkpoint: rebuild the cut from the clip document. start/end and
-        # the caption track are enough; the crop falls back to the frame centre.
-        cut = {
-            "order": order,
-            "start": float(clip.get("start") or 0.0),
-            "end": float(clip.get("end") or 0.0),
-            "title": clip.get("title"),
-        }
-        crop_box = _crop_from_command(str(clip.get("ffmpegCommand") or ""))
-        if crop_box:
-            cut["cropBox"] = crop_box
-        if not cut["end"] > cut["start"]:
-            raise HTTPException(400, "this clip has no usable start/end to re-render")
 
     from app import subtitle as _subtitle
 

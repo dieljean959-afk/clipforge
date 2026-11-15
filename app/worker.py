@@ -519,8 +519,15 @@ class InProcessWorker:
 
     def retry(self, job_id: str) -> int:
         job = self.store.get_job(job_id)
-        if job is None:
+        if not job:
             raise KeyError(job_id)
+        # The ONE place a terminal job is allowed to reopen. Without this the
+        # retry wrote stage="queued" but left isTerminal=True/finishedAt set,
+        # so the runner's settled-job guard exited immediately and the card sat
+        # on "queued" forever — a retry that could never start.
+        from app import jobstatus  # noqa: PLC0415
+
+        jobstatus.allow_retry(job)
 
         # If a user retries while the same job is still being supervised, stop
         # the old process before queueing the new attempt. Otherwise two
@@ -544,6 +551,13 @@ class InProcessWorker:
             "progressDetail": "Re-queued — a fresh server worker will pick it up.",
             "error": None,
             "errorDetail": None,
+            "errorKind": None,
+            "errorAction": None,
+            "failedStage": None,
+            "isTerminal": False,
+            "retryable": True,
+            "interrupted": True,
+            "finishedAt": None,
             # A retry after a pause must actually start. Leaving the old
             # pauseRequested flag set made the fresh child stop at its first
             # checkpoint and fail again with "paused".
@@ -1156,7 +1170,11 @@ class InProcessWorker:
         minutes, and claiming "paused" instantly would be a lie.
         """
         job = self.store.get_job(job_id)
-        if job is None:
+        # get_job() returns {} for a missing id (its documented contract), so
+        # `is None` never fired: Pause on a stranger's id answered
+        # 200 {"state": "pausing"} and Resume enqueued an empty document. A
+        # missing job must be a 404, not a phantom success.
+        if not job:
             raise KeyError(job_id)
         if job.get("stage") in {"complete", "failed"}:
             raise ValueError(f"job is {job.get('stage')} — nothing to pause")
@@ -1206,7 +1224,7 @@ class InProcessWorker:
         at the first unfinished chunk or clip.
         """
         job = self.store.get_job(job_id)
-        if job is None:
+        if not job:
             raise KeyError(job_id)
         job.update({
             "stage": "queued",

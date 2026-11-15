@@ -204,3 +204,37 @@ def test_rebuild_does_not_read_a_stale_twin_twice(tmp_path: Path) -> None:
     docs = store.list_clip_docs_any_authority("job1")
     assert len(docs) == 1
     assert docs[0]["_id"] == "new"
+
+
+def test_repair_never_kills_a_running_job(tmp_path: Path) -> None:
+    """A live batch with pending clips must stay running.
+
+    The periodic repair used to stamp stage="failed", isTerminal=True on any job
+    whose clips were not all rendered — including one actively working. The
+    recovery path then (correctly) refused to re-queue it, so the invariant
+    killed a healthy batch.
+    """
+    store = _store(tmp_path)
+    _job(store, stage="captions", lastProgressAt=int(time.time() * 1000))
+    _clip(store, "c0", 0)
+    _clip(store, "c1", 1, renderState="queued", videoKey=None, mediaRemote=None)
+    counts = {"done": 1, "failed": 0, "pending": 1, "total": 2}
+    invariants.repair_job(store, store.get_job("job1"), counts, reason="test")
+    job = store.get_job("job1")
+    assert job["stage"] == "captions"
+    assert job.get("isTerminal") in (False, None)
+    assert job["readyClips"] == 1
+    assert "worker is alive" in str(job.get("progressDetail"))
+
+
+def test_repair_still_marks_a_dead_job_with_pending_clips(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _job(store, stage="captions", lastProgressAt=int(time.time() * 1000) - 6 * 3600 * 1000)
+    _clip(store, "c0", 0)
+    _clip(store, "c1", 1, renderState="queued", videoKey=None, mediaRemote=None)
+    counts = {"done": 1, "failed": 0, "pending": 1, "total": 2}
+    invariants.repair_job(store, store.get_job("job1"), counts, reason="test")
+    job = store.get_job("job1")
+    assert job["stage"] == "failed"
+    assert job["isTerminal"] is True
+    assert job["errorAction"] == "resume"

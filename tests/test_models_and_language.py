@@ -95,3 +95,28 @@ def test_diskreset_uses_the_releasable_plan() -> None:
     assert "modelstore.releasable(" in src
     # The old preview summed status()['localBytes'], which is the 2263 MB bug.
     assert "localBytes" not in src
+
+
+def test_release_refuses_the_active_model_when_keep_local(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The 464 MB re-download bug: a bucket-restored copy had no persist marker,
+    so the next job start's release_all() deleted it."""
+    root = tmp_path / "models"
+    monkeypatch.setattr(modelstore, "_root", lambda: root)
+    monkeypatch.setattr(modelstore, "_hf_cache_root", lambda: tmp_path / "none")
+    _touch(modelstore.local_dir("small") / "model.bin", 1)
+    monkeypatch.setattr(modelstore, "active_model_name", lambda: ("small", ""))
+
+    from types import SimpleNamespace
+
+    from app import config
+
+    monkeypatch.setattr(
+        config, "load_config",
+        lambda **kw: SimpleNamespace(whisper=SimpleNamespace(keep_local=True)),
+    )
+    result = modelstore.release("small")
+    assert result["ok"] is False
+    assert "active model" in result["reason"]
+    assert modelstore.local_dir("small").is_dir(), "the kept copy must survive"

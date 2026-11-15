@@ -127,3 +127,15 @@ def test_task_uses_attempt_clock_not_the_display_clock() -> None:
     # The measured division must use the attempt clock.
     i = src.index("elapsed = max(0.0, (now_ms - run_start) / 1000)")
     assert "eta.estimate" in src[i:i + 400]
+
+
+def test_retry_clears_terminal_stamps_before_queueing() -> None:
+    """A retry that left isTerminal=True could never start: the runner's
+    settled-job guard exits immediately and the card sits on \"queued\"."""
+    src = _load_source("app/worker.py")
+    i = src.index("def retry(self, job_id: str) -> int:")
+    window = src[i:i + 3000]
+    assert "jobstatus.allow_retry(job)" in window
+    assert '"isTerminal": False' in window
+    assert '"finishedAt": None' in window
+    assert "if not job:" in window

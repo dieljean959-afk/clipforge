@@ -322,6 +322,19 @@ def release(name: str, log: Callable[[str], None] | None = None) -> dict[str, An
         pass
     if name in keep:
         return {"ok": False, "reason": "kept for reuse (prepared model)"}
+    # THE ACTIVE MODEL IS NOT TRANSIENT. A copy restored from the bucket for a
+    # run (resolve()) never wrote the persist marker, so the next job start's
+    # release_all() deleted it — a silent 464 MB re-download on every batch and
+    # a direct contradiction of "Keep active model local". The setting is the
+    # authority here, not the marker.
+    try:
+        active, _note = active_model_name()
+        from app.config import load_config  # noqa: PLC0415
+
+        if name == active and bool(load_config(quiet=True).whisper.keep_local):
+            return {"ok": False, "reason": "active model kept local"}
+    except Exception as exc:  # noqa: BLE001 - never block a release decision
+        logger.debug(f"[models] keep-local check skipped for {name}: {exc}")
     frozen = {"ok": False, "reason": "bucket has no full copy"}
     with _lock:
         try:

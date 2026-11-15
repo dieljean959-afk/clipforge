@@ -246,7 +246,13 @@ def build_cues(
             c["text"], uppercase=preset.uppercase,
             max_line=0 if stack else (preset.max_chars_per_line or 18),
         )
-    return cues
+    # Spanish non-speech markers ("[ininteligible]", "[Música de fondo]") are
+    # not dialogue and must not be burned in. The locked caption module only
+    # knows the English vocabulary, so the Spanish pass lives here (see
+    # app/caption_lang.py); it deletes markers only and never rewrites words.
+    from app import caption_lang  # noqa: PLC0415
+
+    return caption_lang.clean_cues(cues)
 
 
 def write_tracks(
@@ -279,6 +285,9 @@ def write_tracks(
         log(f"[captions] write_tracks clip {clip_index} with {len(cues)} source cues")
     if not cues:
         return []
+    from app import caption_lang  # noqa: PLC0415
+
+    cues = caption_lang.clean_cues(cues)
     tracks: list[dict[str, Any]] = []
     source_lang = getattr(settings, "translate", None)
     if source_lang is not None:

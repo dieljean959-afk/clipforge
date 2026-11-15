@@ -2903,7 +2903,7 @@ def verify_job_duration(job_id: str) -> dict:
     """
     from app import source_stream
 
-    if store.get_job(job_id) is None:
+    if not store.get_job(job_id):
         raise HTTPException(404, "job not found")
     try:
         return source_stream.reconcile_source_duration(store, job_id)

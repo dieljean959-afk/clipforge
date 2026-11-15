@@ -82,6 +82,21 @@ def _clip_state(clip: dict[str, Any]) -> str:
 LIVE_RENDER_SEC = 180.0
 
 
+def _is_live_job(job: dict[str, Any]) -> bool:
+    """Is a worker still making progress on this job, at any stage?
+
+    Progress timestamps only: the stage string is a claim. Used by the periodic
+    repair so it can never convert a running batch into a terminal failure.
+    """
+    now = time.time() * 1000
+    for key in ("lastProgressAt", "heartbeatAt", "unitsChangedAt", "stageStartedAt"):
+        stamp = job.get(key)
+        if isinstance(stamp, (int, float)) and stamp > 0:
+            if (now - float(stamp)) < LIVE_RENDER_SEC * 1000:
+                return True
+    return False
+
+
 def _is_live_render(job: dict[str, Any]) -> bool:
     """Is a process actually working on this job right now?
 
@@ -303,7 +318,17 @@ def repair_job(
     job["readyClips"] = done
     job["failedClips"] = failed
     job["renderFailures"] = failed
-    if pending:
+    if pending and _is_live_job(job):
+        # A RUNNING job is not a failed one. The periodic repair used to stamp
+        # stage="failed", isTerminal=True on any job whose clips were not all
+        # rendered yet — including one actively working — and the recovery path
+        # (correctly) refuses to re-queue a terminal job, so a healthy batch was
+        # killed by its own invariant. Only the counts/projection belong here.
+        job["progressDetail"] = (
+            f"{label}; {pending} clip{'s' if pending != 1 else ''} still rendering — "
+            "the worker is alive, nothing to repair."
+        )
+    elif pending:
         # Not finished: leave a real, resumable checkpoint instead of a green
         # batch with invisible pending candidates. 99 is deliberate — the
         # progress bar must not claim 100 while work remains.
