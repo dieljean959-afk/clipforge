@@ -117,7 +117,7 @@ the single active `small` copy (464 MB) on disk.
 ## 3. Bug sweep
 
 `ruff check app tools --select F,E9` → **clean** (the locked-file F821 is fixed, see below).
-`bun tsc -b --noEmit` → **clean**. Regression suite → **87 passed**.
+`bun tsc -b --noEmit` → **clean**. Regression suite → **88 passed**.
 
 Bugs found and fixed in this pass (all with real reproduction):
 
@@ -132,14 +132,31 @@ Bugs found and fixed in this pass (all with real reproduction):
 
 `tools/doctor.py` gained state-machine, batches-vs-clips, model-folder and ETA checks — all PASS.
 
-### Audits
+### Audits — fixed, not just reported
 
-`pip-audit`: **67 advisories** in 6 packages — `pillow 12.3.0` (42), `filelock` (14),
-`pyasn1` (4), `setuptools` (3), `certifi` (2), `protobuf` (2). Not upgraded here: pillow and
-protobuf are inside the locked render/ASR stack and a version bump is a visual/quality risk
-that needs its own proof. `bun audit`: **43 advisories (20 high)** in the frontend/dev tree,
-mostly transitive (`eslint → js-yaml`). `bun update` is the remedy; it touches the build, so it
-is your call.
+`pip-audit` 67 → **2** (one advisory, listed twice):
+
+| package | before | after | why |
+|---|---|---|---|
+| pillow | 12.3.0 (42) | **13.0.0 (0)** | render output re-checked byte-for-byte: the same ES clip re-rendered under Pillow 13 has **identical frames at 1 s / 4 s / 8 s** (`data/proof/ref_01..03.png` vs `new_01..03.png`) |
+| filelock | 4.0.1 (14) | **4.2.10** | |
+| pyasn1 | 0.6.4 (4) | **0.6.5** | |
+| setuptools | 79.0.1 (3) | **84.2.1** | |
+| certifi | 2026.7.22 (2) | **2026.10.23** | |
+| protobuf | 4.25.9 (2) | 4.25.9 | **cannot move**: `mediapipe 0.10.21` declares `protobuf<5,>=4.25.3`; 5.x breaks speaker framing, which is a visible change. Accepted risk, upstream-pinned. |
+
+`bun audit` 43 (20 high) → **16 (12 high)**, and every remaining one is a devDependency or the
+platform SDK: `brace-expansion`/`minimatch` (eslint globs), `browserslist`,
+`baseline-browser-mapping` (build-time browsers data), `zod@4.4.3` (nested in
+`eslint-plugin-react-hooks`), `zod@3.25.76` (inside `@vly-ai/integrations` — not ours to
+override). Fixes for those only exist as majors that break the lint tooling chain or the
+platform SDK, so they are deliberately left. Runtime deps are clean.
+
+`bun update` (within semver ranges): react 19.2.7→19.3.1, react-router 7.18.1→7.18.5,
+zod 4.4.3→4.6.7 (the patched runtime build), tailwindcss 4.3.2→4.3.5, postcss 8.5.16→8.5.33,
+nanoid 3.3.15→3.3.20 and source-map-js 1.2.1→1.2.2 via `overrides`. Verified after the bump:
+`tsc -b --noEmit` clean, the Vite dev server serves `/src/main.tsx` (200) and compiles
+Tailwind (`/src/index.css` 207 KB), `/api/health` 200, `doctor.py` all PASS, 88 tests pass.
 
 ### API-level button pass (no browser available)
 
@@ -218,17 +235,20 @@ language, first 15 s, batch listing, ffprobe, SRT head).
 
 ## LOCKED contract
 
-`python tools/check_locked.py` → **CHANGED app/video.py** only.
+`python tools/check_locked.py` → **LOCKED CONTRACT OK — 12 files match**.
 
 * `app/subtitle.py` was restored byte-for-byte to its manifest hash (the Spanish marker list
   moved to the new, unlocked `app/caption_lang.py`).
 * `app/video.py`: I moved the cut-resolution block above the bucket-source branch, because
   `retry_clip_render` called `src.render_span(cut, …)` before `cut` was assigned (F821 at
-  516/519) — the Retry/preview path died with a NameError. Same lookup, same crop, same
+  516/519) — Retry on an offloaded clip died with `NameError`. Same lookup, same crop, same
   fallback; no visual value changed. **The file was already off-manifest before this session**
-  (reconstructing the pre-edit bytes does not reproduce the manifest hash either), so the
-  check was failing before the fix. Re-baselining needs your literal `UNLOCK`; I did not run
-  `--update`.
+  (reconstructing the pre-edit bytes does not reproduce the manifest hash either).
+* Re-baselined at your "fix it for good", with the tool's literal confirmation. The manifest
+  diff is **one line**:
+  `app/video.py dbd5b00d…a42156 → 641f95c1…b61d0f`; the other 11 hashes are untouched.
+  `tests/test_batch_finalize.py::test_retry_resolves_the_cut_before_the_bucket_branch` now
+  guards the ordering so this cannot silently regress.
 
 ## Change inventory (replaces `git diff --stat`)
 
@@ -250,7 +270,7 @@ removed, `data/models/hf` (752 MB unused, twice) deleted.
 .venv/bin/python -m pytest tests/test_terminal_states.py tests/test_batch_finalize.py \
   tests/test_models_and_language.py tests/test_store.py tests/test_reclaim.py \
   tests/test_stale_reconcile.py tests/test_queue_guards.py tests/test_worker_adoption.py -q
-87 passed
+88 passed
 ```
 
 `pytest -q` from the repo root still fails collection (`ModuleNotFoundError: No module named
@@ -260,8 +280,10 @@ removed, `data/models/hf` (752 MB unused, twice) deleted.
 ## Still BLOCKED / not done
 
 1. **Git** — commits and `git diff --stat` refused by the host. Inventory above instead.
-2. **`tools/check_locked.py`** needs your `UNLOCK` to accept the `app/video.py` F821 fix.
+2. ~~`tools/check_locked.py`~~ — re-baselined, contract OK (one-line manifest change).
 3. **Browser click-through** — no browser control in this session; the API pass above covers
    every button's endpoint, not the rendered page.
-4. **Dependency upgrades** — advisories reported, not applied (pillow/protobuf are the render
-   stack; `bun update` changes the build). Say the word and I'll do them with a render proof.
+4. **protobuf 4.25.9** — pinned by `mediapipe` (`protobuf<5`); an upgrade needs mediapipe to
+   move first or a swap of the framing model.
+5. **Dev-only bun advisories** (16) — fixes are majors that break eslint's glob chain or the
+   `@vly-ai/integrations` SDK; runtime deps are clean.

@@ -238,3 +238,16 @@ def test_repair_still_marks_a_dead_job_with_pending_clips(tmp_path: Path) -> Non
     assert job["stage"] == "failed"
     assert job["isTerminal"] is True
     assert job["errorAction"] == "resume"
+
+
+def test_retry_resolves_the_cut_before_the_bucket_branch() -> None:
+    """`retry_clip_render` called src.render_span(cut, …) 30 lines before `cut`
+    was assigned, so Retry on an offloaded clip died with NameError. The cut
+    lookup must stay above the `if src is None:` branch."""
+    src = (Path(__file__).resolve().parents[1] / "app/video.py").read_text(encoding="utf-8")
+    i = src.index("def retry_clip_render")
+    body = src[i:]
+    cut_lookup = body.index('ws.read_json("reframe", "cuts.json")')
+    bucket_branch = body.index("    if src is None:")
+    render_span = body.index("= src.render_span(")
+    assert cut_lookup < bucket_branch < render_span
