@@ -165,11 +165,47 @@ def _restore(name: str, log: Callable[[str], None] | None) -> bool:
     return ok
 
 
-def resolve(name: str, log: Callable[[str], None] | None = None) -> str:
+def _allow_fetch(name: str) -> bool:
+    """May this model be pulled from the bucket, or must it already be local?
+
+    Every loader funnels through `resolve()`, including the child processes that
+    test whether a model fits this host (`app/asr_child.py`, `app/asr_quality.py`).
+    Those bypassed the guard in `asr.load` and pulled `base` (142 MB) out of the
+    bucket at 20:11 with no job running — the same silent download, just through
+    a different door. The policy belongs here: only the configured model may be
+    fetched implicitly. A caller that really means it passes `allow_fetch=True`
+    (the explicit `/api/models/prepare` download).
+
+    When the config cannot be read the answer is `True`: a missing config is not
+    a reason to strand a decode, and the disk budget is enforced elsewhere.
+    """
+    short = str(name or "").rsplit("/", 1)[-1]
+    try:
+        from app.config import load_config  # noqa: PLC0415
+
+        configured = str(load_config(quiet=True).whisper.model or "").strip()
+    except Exception:  # noqa: BLE001 - never block a load on a config read
+        return True
+    if not configured or short == configured.rsplit("/", 1)[-1]:
+        return True
+    return ready(short)
+
+
+def resolve(
+    name: str,
+    log: Callable[[str], None] | None = None,
+    *,
+    allow_fetch: bool = False,
+) -> str:
     """A local model path for `name`, else `name` itself (HuggingFace fallback)."""
     name = str(name or "small").strip() or "small"
     if ready(name):
         return str(local_dir(name))
+    if not allow_fetch and not _allow_fetch(name):
+        raise RuntimeError(
+            f"refusing to fetch '{name}': only the configured Whisper model may "
+            f"be downloaded implicitly; an already-local copy is required here"
+        )
     try:
         if _restore(name, log):
             # Keep the bucket copy authoritative: whatever the download produced
@@ -695,7 +731,9 @@ def prepare(
             ),
         }
     started = time.time()
-    path = resolve(wanted, log)
+    # Explicit download: the caller named the model, so the implicit-fetch guard
+    # in resolve() does not apply here.
+    path = resolve(wanted, log, allow_fetch=True)
     ok = ready(wanted)
     verified, detail = verify(wanted) if ok else (False, "not loadable")
     if ok and verified:

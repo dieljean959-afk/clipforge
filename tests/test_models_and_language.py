@@ -152,3 +152,28 @@ def test_a_retry_cannot_download_a_model_that_is_not_configured(
     for name in ("model.bin", "config.json"):
         (local / name).write_bytes(b"x")
     asr._refuse_silent_download("base")
+
+
+def test_resolve_refuses_an_implicit_fetch_of_an_unconfigured_model(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The child loaders (asr_child/asr_quality) call resolve() directly and
+    pulled base out of the bucket with no job running. Every fetch path now goes
+    through the same policy: configured model, or an existing local copy."""
+    from types import SimpleNamespace
+
+    from app import config
+
+    monkeypatch.setattr(modelstore, "_root", lambda: tmp_path / "models")
+    monkeypatch.setattr(
+        config, "load_config",
+        lambda **kw: SimpleNamespace(whisper=SimpleNamespace(model="small")),
+    )
+    with pytest.raises(RuntimeError, match="refusing to fetch 'base'"):
+        modelstore.resolve("base")
+    assert modelstore._allow_fetch("small") is True
+    local = modelstore.local_dir("base")
+    local.mkdir(parents=True)
+    for name in ("model.bin", "config.json"):
+        (local / name).write_bytes(b"x")
+    assert modelstore._allow_fetch("base") is True

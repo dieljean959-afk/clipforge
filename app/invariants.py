@@ -576,9 +576,15 @@ def check_and_repair(
             if not broken:
                 continue
             jid = str(job.get("_id") or "")
-            # Never touch a batch a worker is actively rendering: it will write
-            # its own consistent state when the current clip lands.
-            if str(job.get("stage") or "") in ("rendering", "export", "exporting") and not job.get("isTerminal"):
+            # Never touch a batch a worker is actively working on: it writes its
+            # own consistent state when the current clip lands. The old version
+            # named only three stages ("rendering", "export", "exporting"), so a
+            # live job at the plan stages ("grabbing", "transcribing", "finding")
+            # was still repaired — and a job whose earlier clips were done got
+            # `isTerminal=True`, which downstream consumers read as "finished"
+            # while the worker kept rendering. Liveness is the timestamp, never
+            # the stage string.
+            if not job.get("isTerminal") and _is_live_job(job):
                 continue
             repair_job(store, job, counts, reason=", ".join(broken))
             repaired += 1

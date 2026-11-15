@@ -372,3 +372,30 @@ and `/api/auth/me` shows signup open again.
   ones; the ladder logs the refusal and retries with the same model. Test:
   `test_a_retry_cannot_download_a_model_that_is_not_configured`.
 * Final counts after this change: **95 tests passed**, `tsc` clean, locked contract 12/12.
+
+## Bug sweep (third pass)
+
+Running the *whole* suite (44 files) instead of the focused list exposed three real problems:
+
+1. **`app/invariants.py` terminalized live jobs.** The repair skip named only
+   `rendering`/`export`/`exporting`, so a live job at the plan stages (`grabbing`,
+   `transcribing`, `finding`) could be repaired — and a job with earlier clips already done
+   got `isTerminal=True`, which reads as "finished" while the worker kept rendering. The skip
+   is now liveness (`_is_live_job`, 180 s of progress stamps), never a stage string.
+2. **The child ASR loaders bypassed the no-silent-download guard.** `app/asr_child.py` and
+   `app/asr_quality.py` call `modelstore.resolve()` directly; that is how `base` (142 MB)
+   reappeared at 20:11 with no job running. The policy moved into `resolve()` itself: only the
+   configured model may be fetched implicitly (`allow_fetch=True` is the explicit override
+   used by `/api/models/prepare`). New test:
+   `test_resolve_refuses_an_implicit_fetch_of_an_unconfigured_model`.
+3. **`/api/health` could not be called with a missing request.** Making `request` optional for
+   direct callers produced `FastAPIError: Invalid args for response field`, i.e. the server
+   would not boot — caught by `test_app_main_imports` before it shipped. Reverted; the tests
+   now build a real `starlette` request (anonymous and token-bearing).
+
+Also repaired: 7 route tests that had silently started asserting against 401 (they now send
+`X-ClipForge-Token` like every local tool), and the boot-recovery test that pinned the old
+stage vocabulary instead of `jobstatus.ACTIVE_STAGES`.
+
+Final: **447 tests pass** (whole suite), `tsc` clean, locked contract 12/12, models bucket-only,
+free disk **1982 MB**.

@@ -158,8 +158,13 @@ def test_boot_survives_a_midflight_job(tmp_path: Path) -> None:
     # or it failed with a reason.
     assert decision["stage"] != "exporting", decision
     assert decision.get("interrupted") in (True, False), decision
-    claimed = decision["stage"] in {"fetch", "transcribe", "detect", "reframe",
-                                    "render", "queued", "running"}
+    # The vocabulary lives in jobstatus: the pipeline writes the plan stages
+    # ("grabbing", "transcribing", "finding", "rendering"), and this test used
+    # to pin a stale copy of the old names, so a correctly recovered job read
+    # as "unclaimed".
+    from app import jobstatus
+
+    claimed = decision["stage"] in (jobstatus.ACTIVE_STAGES | {"queued", "running"})
     if decision["stage"] == "failed":
         assert decision.get("error"), "a failed resume must carry a reason"
     else:

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 
@@ -16,6 +15,42 @@ from app import boot as bootmod
 from app import diskwatch, exits, invariants
 from app.config import load_config
 from app.store import LocalStore
+
+
+def _health_request(*, token: bool = True):
+    """A GET /api/health request for calling the route directly.
+
+    Anonymous callers only get the slim liveness body, so the dashboard
+    contract checks authenticate the way local tooling does: with the token.
+    """
+    from starlette.requests import Request
+
+    from app import auth
+
+    headers = []
+    if token:
+        headers.append((b"x-clipforge-token", auth.automation_token().encode()))
+    return Request({
+        "type": "http", "method": "GET", "path": "/api/health",
+        "headers": headers, "query_string": b"", "scheme": "http",
+        "server": ("testserver", 80), "client": ("testclient", 50000),
+    })
+
+
+def _client():
+    """A TestClient that passes the session gate the way local tools do.
+
+    The API is closed to anonymous callers since the auth layer landed, so
+    these route tests must present the automation token; otherwise every one of
+    them asserts against a 401 and hides the behaviour it was written to pin.
+    """
+    from fastapi.testclient import TestClient
+
+    from app import auth, main
+
+    client = TestClient(main.app)
+    client.headers.update({"x-clipforge-token": auth.automation_token()})
+    return client
 
 
 @pytest.fixture()
@@ -181,8 +216,8 @@ def test_partial_success_label_is_honest():
 def test_invariants_restore_clip_docs_from_the_projection(env):
     """A re-detect deleted the documents; the job projection is the last copy."""
     settings, store = env
-    job = _job(store, stage="complete", progress=100,
-               clips=[{"_id": "a" * 32, "order": 0, "renderState": "done",
+    _job(store, stage="complete", progress=100,
+         clips=[{"_id": "a" * 32, "order": 0, "renderState": "done",
                        "videoPath": "/tmp/a.mp4", "jobId": None}],
                clipIds=["a" * 32])
     assert store.get_clip_doc("a" * 32) is None
@@ -271,7 +306,7 @@ def test_health_request_path_does_no_network_or_subprocess(monkeypatch):
         AssertionError("health() called the bucket")))
 
     t0 = time.perf_counter()
-    payload = main.health()
+    payload = main.health(_health_request())
     took_ms = (time.perf_counter() - t0) * 1000
     assert payload["ok"] is True
     assert took_ms < 100, f"health() took {took_ms:.0f} ms"
@@ -337,7 +372,7 @@ def test_health_returns_the_dashboard_contract(monkeypatch):
     answering a liveness stub while the card read `health.worker.online`."""
     from app import main
 
-    payload = main.health()
+    payload = main.health(_health_request())
     # Required by HealthDto: a missing `worker` is a client-side crash.
     assert isinstance(payload["worker"], dict)
     assert "online" in payload["worker"]
@@ -357,7 +392,7 @@ def test_health_never_raises_when_the_worker_is_gone(monkeypatch):
         raise RuntimeError("worker RPC down")
 
     monkeypatch.setattr(main.worker, "status", boom)
-    payload = main.health()
+    payload = main.health(_health_request())
     assert payload["worker"]["online"] is False
     assert "worker" in payload["degraded"]
 
@@ -401,7 +436,6 @@ def test_finish_writes_one_terminal_document(env, monkeypatch):
 
 def test_upload_route_rejects_an_unknown_container(env, monkeypatch):
     """An extension-less file used to be stored as `.mp4` and failed in ffmpeg."""
-    from fastapi.testclient import TestClient
 
     from app import main
 
@@ -410,7 +444,7 @@ def test_upload_route_rejects_an_unknown_container(env, monkeypatch):
     # at this test's tmp store before exercising the route.
     monkeypatch.setattr(main, "settings", settings)
     monkeypatch.setattr(main, "store", store)
-    client = TestClient(main.app)
+    client = _client()
     res = client.post(
         "/api/jobs/upload",
         files={"file": ("hostname", b"abc", "application/octet-stream")},
@@ -420,7 +454,6 @@ def test_upload_route_rejects_an_unknown_container(env, monkeypatch):
 
 
 def test_upload_route_stores_the_file_where_the_pipeline_looks(env, monkeypatch):
-    from fastapi.testclient import TestClient
 
     from app import main
 
@@ -428,7 +461,7 @@ def test_upload_route_stores_the_file_where_the_pipeline_looks(env, monkeypatch)
     monkeypatch.setattr(main, "settings", settings)
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(main.worker, "enqueue", lambda job_id: 1)
-    client = TestClient(main.app)
+    client = _client()
     res = client.post(
         "/api/jobs/upload",
         files={"file": ("tiny.mp4", b"\x00\x00\x00\x18ftypmp42", "video/mp4")},
@@ -465,11 +498,9 @@ def test_create_job_rejects_a_missing_source():
     `create_job`): the guarantee is that no document can be written for a
     source that is the empty string.
     """
-    from fastapi.testclient import TestClient
 
-    from app import main
 
-    client = TestClient(main.app)
+    client = _client()
     res = client.post(
         "/api/jobs",
         json={"sourceType": "url", "source": "", "language": "auto"},
@@ -489,6 +520,7 @@ def test_create_job_duplicates_are_idempotent(env, monkeypatch):
     from fastapi.testclient import TestClient
 
     import app.main as main_mod
+    from app import auth
 
     settings, store = env
 
@@ -501,6 +533,7 @@ def test_create_job_duplicates_are_idempotent(env, monkeypatch):
     monkeypatch.setattr(main_mod, "worker", NoWorker())
 
     client = TestClient(main_mod.app)
+    client.headers.update({"x-clipforge-token": auth.automation_token()})
     first = client.post(
         "/api/jobs",
         json={"sourceType": "url", "source": "https://youtu.be/abc?si=1"},
