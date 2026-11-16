@@ -1273,9 +1273,22 @@ class CreateJobIn(BaseModel):
 def _active_job_for(body: "CreateJobIn") -> dict | None:
     """The non-terminal job already running this exact source + settings."""
     want_source = source_ident(body.source)
+
+    def _effective(value, default):
+        """Compare what the job will actually use, not whether a field was sent.
+
+        Preset/language/emoji have real defaults; min/max/maxClips do not.
+        Normalizing only the former keeps "same effective job" dedupe without
+        treating a selected count or window as a wildcard.
+        """
+        return default if value is None or value == "" else value
+
     want = (
-        body.minClipSec, body.maxClipSec, body.maxClips, body.language,
-        body.captionPreset, body.emojiEnabled, body.emojiDensity,
+        body.minClipSec, body.maxClipSec, body.maxClips,
+        _effective(body.language, "auto"),
+        _effective(body.captionPreset, "bold_stack"),
+        _effective(body.emojiEnabled, True),
+        _effective(body.emojiDensity, "medium"),
     )
     terminal = {"complete", "failed", "cancelled", "deleting"}
     for other in store.list_jobs():
@@ -1288,10 +1301,16 @@ def _active_job_for(body: "CreateJobIn") -> dict | None:
         opts = other.get("options") or {}
         have = (
             opts.get("minClipSec"), opts.get("maxClipSec"), opts.get("maxClips"),
-            other.get("language"), other.get("captionPreset"),
-            other.get("emojiEnabled"), other.get("emojiDensity"),
+            _effective(other.get("language"), "auto"),
+            _effective(other.get("captionPreset"), "bold_stack"),
+            _effective(other.get("emojiEnabled"), True),
+            _effective(other.get("emojiDensity"), "medium"),
         )
-        if all(w is None or h is None or str(w) == str(h) for w, h in zip(want, have)):
+        # Exact settings, not "either side is unset": a new 10-clip request
+        # must not be answered with an older Auto run of the same URL. The old
+        # wildcard also folded a changed language/min/max into the running job,
+        # so the selected count silently became whatever that job asked for.
+        if all(str(w) == str(h) for w, h in zip(want, have)):
             return other
     return None
 

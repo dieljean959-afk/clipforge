@@ -231,6 +231,14 @@ class _HoleFiller:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def _clean_wordless_cache():
+    """The negative-decode cache is process-wide by design; isolate tests."""
+    asr_accurate._WORDLESS_CACHE.clear()
+    yield
+    asr_accurate._WORDLESS_CACHE.clear()
+
+
 def test_uncovered_speech_is_re_transcribed():
     regions = [speech_vad.Region(10.0, 20.0)]
     words = [{"start": 9.0, "end": 10.2, "word": "hi", "conf": 0.9}]
@@ -335,3 +343,27 @@ def test_coverage_report_passes_a_fully_captioned_clip():
     assert report["passed"] is True
     assert report["coveredFraction"] == 1.0
     assert math.isclose(report["lastSpeechSec"] - report["lastCaptionSec"], 0.0)
+
+
+def test_a_wordless_span_is_decoded_once_across_clips(tmp_path):
+    """The same non-speech span must not be re-decoded for every clip.
+
+    `cover_speech` runs once per clip on the same source audio. Without the
+    cache, every clip re-ran the whole model ladder on a wordless span; the
+    53.3-55.1 s hole in the observed job was decoded dozens of times.
+    """
+    regions = [speech_vad.Region(10.0, 20.0)]
+    words = [{"start": 9.0, "end": 10.2, "word": "hi", "conf": 0.9}]
+    decoder = _HoleFiller(work=False)
+    wav = tmp_path / "speech.wav"
+
+    asr_accurate.cover_speech(
+        words, regions, wav=wav, span=(0.0, 30.0), language="en", decoder=decoder,
+    )
+    first = len(decoder.calls)
+    assert first > 0
+
+    asr_accurate.cover_speech(
+        words, regions, wav=wav, span=(0.0, 30.0), language="en", decoder=decoder,
+    )
+    assert len(decoder.calls) == first, "a known-wordless span was decoded again"

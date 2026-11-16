@@ -15,7 +15,6 @@ whole batch) without telling anyone why:
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -301,3 +300,47 @@ def test_billing_and_oversize_are_reported_differently():
         "Request too large ... tokens per minute (TPM): Limit 8000"
     ).startswith("cannot accept prompts this large")
     assert llm_mod._unusable_reason("502 Bad Gateway") == ""
+
+
+def test_an_explicit_count_can_use_shorter_windows_to_fit():
+    """30 clips from a 6-minute source is 6 s each, not "too short".
+
+    The old fill floor was the 15 s default, so a 300 s source could never
+    reach 20 separate clips even though the request fits with ~7 s windows.
+    An explicitly selected count is a quota; `min_floor=5` is what lets the
+    local filler reach it without overlapping clips.
+    """
+    words = _transcript(300)
+    cfg = GeminiConfig(
+        model="test", min_clip_sec=15, max_clip_sec=60,
+        max_clips=20, max_retries=1,
+    )
+    selected = [{"start": 20.0, "end": 50.0, "score": 88.0}]
+    filled, _ = llm_mod._fill_to_target(
+        selected, list(selected), words, 300.0, cfg, min_floor=5.0,
+    )
+    chosen = [*selected, *filled]
+
+    assert len(chosen) == 20, "the requested count must fit with shorter windows"
+    for i, a in enumerate(chosen):
+        for b in chosen[i + 1:]:
+            assert not (
+                a["start"] < b["end"] - llm_mod.OVERLAP_TOLERANCE_SEC
+                and b["start"] < a["end"] - llm_mod.OVERLAP_TOLERANCE_SEC
+            ), "shorter windows still must not overlap"
+
+
+def test_the_thirty_clip_request_is_reachable():
+    """The top of the 5/10/15/20/25/30 picker must not silently cap short."""
+    words = _transcript(600)
+    cfg = GeminiConfig(
+        model="test", min_clip_sec=15, max_clip_sec=60,
+        max_clips=30, max_retries=1,
+    )
+    filled, _ = llm_mod._fill_to_target(
+        [], [], words, 600.0, cfg, min_floor=5.0,
+    )
+
+    assert len(filled) == 30
+    for prev, nxt in zip(filled, filled[1:]):
+        assert float(nxt["start"]) >= float(prev["end"]) - llm_mod.OVERLAP_TOLERANCE_SEC

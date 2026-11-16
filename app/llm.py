@@ -1971,15 +1971,26 @@ def _clashes(cand: dict[str, Any], chosen: list[dict[str, Any]]) -> bool:
     )
 
 
-def _fitted_length(duration_sec: float, target: int, cfg: GeminiConfig) -> float:
+def _fitted_length(
+    duration_sec: float,
+    target: int,
+    cfg: GeminiConfig,
+    *,
+    floor: float | None = None,
+) -> float:
     """Clip length that lets `target` clips fit in `duration_sec`.
 
     Uses half the fair share so gaps and already-chosen moments do not starve
     the fill, and never drops below the user's minimum clip length. Long
     sources still get the usual midpoint length because it caps the result.
+
+    `floor` lets an EXPLICIT count use shorter windows than the 15 s default:
+    "30 clips" from a 6-minute source is 6 s per clip, and refusing to go below
+    15 s there is what returned 12 clips to someone who asked for 30. A
+    minClipSec the user actually set still wins (the caller passes no floor).
     """
-    lo = float(cfg.min_clip_sec or 15)
-    hi = float(cfg.max_clip_sec or 60)
+    lo = float(floor if floor is not None else (cfg.min_clip_sec or 15))
+    hi = max(lo, float(cfg.max_clip_sec or 60))
     fair = (max(1.0, duration_sec) * 0.5) / max(1, int(target))
     return max(lo, min((lo + hi) / 2.0, fair))
 
@@ -1990,6 +2001,8 @@ def _fill_to_target(
     words: list[dict],
     duration_sec: float,
     cfg: GeminiConfig,
+    *,
+    min_floor: float | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Top a short selection up to the count the user asked for.
 
@@ -2040,7 +2053,7 @@ def _fill_to_target(
         # Window length has to FIT the request. A fixed mid-window (37.5 s)
         # cannot produce eight separate clips from a five-minute source even
         # though eight are possible, because the windows themselves collide.
-        length = _fitted_length(duration_sec, target, cfg)
+        length = _fitted_length(duration_sec, target, cfg, floor=min_floor)
         local = heuristic_candidates(
             words,
             duration_sec,
@@ -2144,6 +2157,9 @@ def detect_clips(
         cfg = replace(cfg, max_clip_sec=max_clip_sec)
     if max_clips is not None:
         cfg = replace(cfg, max_clips=max_clips)
+    # An explicit count may need shorter clips than the default minimum to fit
+    # in a short source. A minClipSec the caller actually set still wins.
+    fit_floor = 5.0 if exact_count and min_clip_sec is None else None
     # Carry the effective config into the value the caller can log without
     # reaching into settings again. This is what the detection-job log lines
     # and the job-card "AI-detected via ..." explanation should reflect.
@@ -2513,7 +2529,10 @@ def detect_clips(
             # Same fitting as the fill path: "10 clips" from a 6-minute source
             # needs shorter windows than the default midpoint, or the local
             # ranker runs out of non-overlapping slots short of the request.
-            fit = _fitted_length(float(duration_sec or 0.0), int(cfg.max_clips or 1), cfg)
+            fit = _fitted_length(
+                float(duration_sec or 0.0), int(cfg.max_clips or 1), cfg,
+                floor=fit_floor,
+            )
             local_cfg = replace(
                 cfg,
                 min_clip_sec=int(round(fit)),
@@ -2565,7 +2584,8 @@ def detect_clips(
     fill_stats = {"below": 0, "heuristic": 0}
     if exact_count and len(top) < max(1, int(cfg.max_clips or 1)):
         filled, fill_stats = _fill_to_target(
-            top, candidates, words, float(duration_sec or 0.0), cfg
+            top, candidates, words, float(duration_sec or 0.0), cfg,
+            min_floor=fit_floor,
         )
         if filled:
             added = len(filled)

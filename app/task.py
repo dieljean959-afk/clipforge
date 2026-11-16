@@ -2258,6 +2258,30 @@ class Pipeline:
             clip_start = float(cut.get("start") or 0.0)
             clip_end = float(cut.get("end") or 0.0)
             clip_span = (clip_start, clip_end)
+            # Resume per clip: both files are keyed to this exact clipId, so a
+            # retry after a host restart must not pay for every caption cue /
+            # emoji call again. The clip document is the durable home for the
+            # cues; backfill it if an older attempt fell between the two writes.
+            cached_cues = ws.read_json("captions", f"cues_{i:03d}.json") or {}
+            cached_emoji = ws.read_json("captions", f"emoji_{i:03d}.json")
+            if (
+                cached_cues
+                and str(cached_cues.get("clipId") or "") == clip_id
+                and cached_emoji is not None
+            ):
+                existing = self.store.get_clip(clip_id) or {} if clip_id else {}
+                if clip_id and not existing.get("captionCues"):
+                    self.store.write_clip(
+                        clip_id,
+                        {"captionCues": cached_cues.get("cues") or []},
+                        job_id=job_id,
+                    )
+                self._log(
+                    job_id,
+                    f"resume: captions for clip {i + 1} already cached "
+                    f"({len(cached_cues.get('cues') or [])} cue(s))",
+                )
+                continue
             # Speech for THIS clip's judgement. It shrinks when the re-decode
             # ladder proves a voiced blip carries no words at all (a laugh, a
             # clap, music), so a clip is never flagged for “missing captions”
@@ -2501,21 +2525,39 @@ class Pipeline:
         ready_count = 0
         used_ids: set[str] = set()
         gate_previous: list[dict[str, Any]] = []
-        for prior in self.store.list_clip_docs(job_id):
-            if prior.get("renderState") == "done":
-                ready_count += 1
-                used_ids.add(str(prior.get("_id")))
-                sync = prior.get("audioSync") or {}
-                if sync.get("fingerprint"):
-                    gate_previous.append(
-                        {"clipId": prior.get("_id"), "fingerprint": sync["fingerprint"]}
-                    )
         # Resolved ONCE for the whole export loop, and fingerprinted: a clip
         # whose stored styleId still matches may be reused, anything else must
         # re-encode. Without the id, "Re-render captions" skipped every clip
         # whose file already existed and served the stale render.
         cap_settings, resolved = self._caption_settings(job)
         style_id = str(resolved["hash"])
+        cut_ids = {str(c.get("clipId")) for c in cuts if c.get("clipId")}
+        for prior in self.store.list_clip_docs(job_id):
+            if prior.get("renderState") != "done":
+                continue
+            if str(prior.get("_id")) not in cut_ids:
+                continue
+            # Only a clip that can actually be REUSED counts toward the request.
+            # A done clip at an older caption style is re-rendered below; counting
+            # it here as well made the loop stop one clip early (and the batch
+            # came back one short of the count the user selected).
+            video_path = Path(str(prior.get("videoPath") or ""))
+            reusable = (
+                str(prior.get("styleId") or "") == style_id
+                and (
+                    bool(prior.get("mediaRemote"))
+                    or (str(prior.get("videoPath") or "") and video_path.exists())
+                )
+            )
+            if not reusable:
+                continue
+            ready_count += 1
+            used_ids.add(str(prior.get("_id")))
+            sync = prior.get("audioSync") or {}
+            if sync.get("fingerprint"):
+                gate_previous.append(
+                    {"clipId": prior.get("_id"), "fingerprint": sync["fingerprint"]}
+                )
 
         for i, cut in enumerate(cuts):
             if ready_count >= requested_count:
@@ -2571,6 +2613,9 @@ class Pipeline:
             meta: dict[str, Any] | None = None
             timings: dict[str, float] = {}
             temp_span: Path | None = None
+            # A joined two-section span has a ~1-frame boundary offset; keep
+            # the strict 40 ms gate for normal clips but allow 100 ms here.
+            gate_tolerance = None
             with self._heartbeat(job_id, f"render clip {i + 1}"):
                 try:
                     # The context-aware emoji chosen in the captions stage (an
@@ -2599,7 +2644,16 @@ class Pipeline:
                                     "tags": durable.get("emojiTags") or [],
                                 }
                     # LOCKED_SPEC §2: the white bar's text, per clip, from the
-                    # clip's own content, in the video's language.
+                    # clip's own content, in the video's language. A retry must
+                    # reuse the title it already paid an LLM for; only a new or
+                    # placeholder title needs another call.
+                    prior_title = str((existing_doc or {}).get("title") or "").strip()
+                    if (
+                        prior_title
+                        and prior_title.lower() not in {"clip", "untitled"}
+                        and not cut.get("title")
+                    ):
+                        cut["title"] = prior_title
                     clip_title, title_source = self._clip_title(job, cut, clip_cues)
                     # Presigned URLs are minted PER CLIP and expire in 15
                     # minutes: one long-lived URL would start returning 403 in
@@ -2622,6 +2676,7 @@ class Pipeline:
                             # join just those two objects (stream copy, no
                             # re-encode) instead of failing a good candidate.
                             temp_span = dest / f".span_{i:03d}.mp4"
+                            gate_tolerance = 100.0
                             render_src, seek_offset = src.span_file(
                                 float(cut.get("start") or 0.0),
                                 float(cut.get("end") or 0.0),
@@ -2687,6 +2742,7 @@ class Pipeline:
                         cache_dir=gate_cache / f"clip_{i:03d}",
                         previous=gate_previous,
                         source_start_time=float(getattr(src, "audio_start_time", 0.0) or 0.0),
+                        tolerance_ms=gate_tolerance,
                     )
                     timings["gateMs"] = round((time.perf_counter() - _gate_t0) * 1000.0, 1)
                     if not gate_result.get("passed") and not (gate_result.get("placement") or {}).get("ok"):
@@ -2737,6 +2793,7 @@ class Pipeline:
                             source_start_time=float(
                                 getattr(src, "audio_start_time", 0.0) or 0.0
                             ),
+                            tolerance_ms=gate_tolerance,
                         )
                     if "safeRenderMs" in timings:
                         timings["safeGateMs"] = round(
@@ -2832,6 +2889,10 @@ class Pipeline:
                         "contractOk": meta.get("contractOk"),
                         "contractChecks": meta.get("contractChecks"),
                         "renderState": "done",
+                        # A retry that succeeds must not leave the previous
+                        # attempt's failure text on a playable card.
+                        "mediaError": None,
+                        "failedAt": None,
                         # What the clip actually got, so the dashboard can show
                         # each emoji with its reason, and say whether a model
                         # chose it or the keyword fallback did.

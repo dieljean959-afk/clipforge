@@ -1184,6 +1184,14 @@ class _RegionDecoder:
             self.proc = None
 
 
+#: Spans this audio already proved wordless across the whole model ladder.
+#: `cover_speech` runs once PER CLIP on the same source wav; without this a
+#: music/noise span the models cannot transcribe was re-decoded by every model
+#: for every clip. On the observed 17-minute job the same 53.3-55.1 s span was
+#: decoded dozens of times, which is minutes of captions time for no words.
+_WORDLESS_CACHE: set[tuple[str, float, float]] = set()
+
+
 def cover_speech(
     words: list[dict],
     regions: list[speech_vad.Region],
@@ -1231,10 +1239,19 @@ def cover_speech(
         added = 0
         empty: list[tuple[float, float]] = []
         for a, b in holes:
+            cache_key = (str(wav), round(float(a), 3), round(float(b), 3))
+            if cache_key in _WORDLESS_CACHE:
+                # Same audio, same models, already refused: retrying it is pure
+                # captions latency. It still counts as a hole for coverage.
+                empty.append((a, b))
+                continue
             logger.warning(f"[cover] no words at {a:.1f}-{b:.1f}s — re-transcribing that region")
             got = worker.decode(a, b)
             if not got:
                 empty.append((a, b))
+                if len(_WORDLESS_CACHE) > 512:
+                    _WORDLESS_CACHE.clear()
+                _WORDLESS_CACHE.add(cache_key)
                 continue
             # Keep a word when it OVERLAPS the hole (plus 0.25 s of context):
             # a 0.7 s hole is decoded with padding, so its first and last word

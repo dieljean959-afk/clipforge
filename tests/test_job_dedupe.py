@@ -33,7 +33,7 @@ def _body(**kw):
 def _job(**kw):
     job = {
         "_id": "job1", "sourceType": "url", "source": "https://www.youtube.com/watch?v=627Fvn2fEjU",
-        "stage": "transcribing", "options": {"minClipSec": 20, "maxClipSec": 60, "maxClips": 15},
+        "stage": "transcribing", "options": {"minClipSec": None, "maxClipSec": None, "maxClips": 15},
         "language": "es", "captionPreset": "bold_stack", "emojiEnabled": True,
         "emojiDensity": "medium",
     }
@@ -66,3 +66,24 @@ def test_different_video_is_a_different_batch(monkeypatch):
         SimpleNamespace(list_jobs=lambda: [_job(source="https://youtu.be/zzzzzzzzzzz")]),
     )
     assert main._active_job_for(_body()) is None
+
+
+def test_a_new_clip_count_does_not_reuse_an_auto_job(monkeypatch):
+    """A running Auto batch must not swallow a new explicit count.
+
+    Observed path: the same URL was submitted again with 10 clips while an Auto
+    job was still running. `None` was treated as a wildcard, so the new request
+    returned the old job and the user got the Auto count (often 5-8) instead of
+    the 10 they selected.
+    """
+    job = _job()
+    job["options"]["maxClips"] = None
+    monkeypatch.setattr(main, "store", SimpleNamespace(list_jobs=lambda: [job]))
+    assert main._active_job_for(_body(maxClips=10)) is None
+
+
+def test_a_changed_window_is_a_different_batch(monkeypatch):
+    job = _job()
+    job["options"].update({"minClipSec": 20, "maxClipSec": 60})
+    monkeypatch.setattr(main, "store", SimpleNamespace(list_jobs=lambda: [job]))
+    assert main._active_job_for(_body(minClipSec=15, maxClipSec=45)) is None

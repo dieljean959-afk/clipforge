@@ -491,7 +491,7 @@ class LocalStore:
 
     def list_clips_for_list(self, job_id: str | None = None) -> list[dict[str, Any]]:
         """Return clips for the clip list endpoint, with share state attached.
-        
+
         Called by /api/clips. Returns lightweight clip metadata suitable for
         the dashboard clip list.
         """
@@ -573,6 +573,7 @@ class LocalStore:
 
         now_ms = int(time.time() * 1000)
         clip_ids: list[str] = []
+        docs: list[dict[str, Any]] = []
         for i, c in enumerate(candidates):
             clip_id = c.get("_id") or self.new_job_id()
             # Write the minted id BACK onto the candidate object. Downstream
@@ -624,6 +625,7 @@ class LocalStore:
             tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
             tmp.replace(clip_doc_path)
             clip_ids.append(clip_id)
+            docs.append(doc)
 
         # lightweight summary blob used by the job card
         summary = {
@@ -663,8 +665,23 @@ class LocalStore:
         job = self.get_job(job_id)
         if job:
             job["candidatesDetected"] = len(candidates)
-            job["clipTarget"] = len(clip_ids) or max(1, int((job.get("durationSec") or 0) / 30))
+            # `clipTarget` is what the user asked for; detection's surplus
+            # candidates are `candidateTarget`. Overwriting the request with
+            # 14 when the user asked for 10 made the job card promise a count
+            # the export was never going to deliver.
+            job["candidateTarget"] = len(clip_ids)
+            requested = int(job.get("requestedClipTarget") or 0)
+            if requested:
+                job["clipTarget"] = requested
+            elif not job.get("clipTarget"):
+                job["clipTarget"] = len(clip_ids) or max(
+                    1, int((job.get("durationSec") or 0) / 30)
+                )
             job["clipIds"] = clip_ids
+            # The projection is what the repair pass restores deleted docs
+            # from. Leaving the previous detection's records here resurrected
+            # every old clip document after this pass deleted it.
+            job["clips"] = docs
             job["detectedSource"] = detected_source
             self.write_job(job)
         return summary
@@ -912,7 +929,21 @@ class LocalStore:
         job = self.get_job(job_id)
         if job:
             job["clipIds"] = ids
-            job["clipTarget"] = len(ids)
+            # Keep the requested count; the cut list can be longer (detection
+            # surplus) or shorter, and neither changes what the user asked for.
+            requested = int(job.get("requestedClipTarget") or 0)
+            if requested:
+                job["clipTarget"] = requested
+            elif not job.get("clipTarget"):
+                job["clipTarget"] = len(ids)
+            current: list[dict[str, Any]] = []
+            for cid in ids:
+                doc = self.get_clip(cid)
+                if doc:
+                    current.append(doc)
+            # Same reason as create_clips: a stale projection resurrects the
+            # documents this sync just deleted.
+            job["clips"] = current
             self.write_job(job)
         return ids
 
@@ -1049,7 +1080,7 @@ class LocalStore:
 
     def find_source_file(self, job_id: str) -> Path | None:
         """Find the source video file for a job.
-        
+
         Checks both the new uploads dir and the legacy downloads dir
         (for jobs that were processed before the uploads refactor).
         """

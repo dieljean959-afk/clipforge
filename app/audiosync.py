@@ -91,6 +91,7 @@ def placement(
     plan_start: float,
     source_start_time: float = 0.0,
     max_clip_sec: float | None = None,
+    tolerance_ms: float = PLACEMENT_TOLERANCE_MS,
 ) -> dict[str, Any]:
     """Cross-correlate the rendered audio with the REAL source around the plan.
 
@@ -150,12 +151,12 @@ def placement(
     corr_value = float(corr[best] / denom) if denom > 1e-9 else 0.0
     expected = int(round((plan_start - window_start) * (SR / ENVELOPE_HOP)))
     lag_ms = round((best - expected) * (ENVELOPE_HOP / SR) * 1000.0, 1)
-    ok = abs(lag_ms) <= PLACEMENT_TOLERANCE_MS and corr_value >= PLACEMENT_MIN_CORR
+    ok = abs(lag_ms) <= tolerance_ms and corr_value >= PLACEMENT_MIN_CORR
     return {
         "ok": bool(ok),
         "lagMs": lag_ms,
         "correlation": round(corr_value, 4),
-        "toleranceMs": PLACEMENT_TOLERANCE_MS,
+        "toleranceMs": tolerance_ms,
         "threshold": PLACEMENT_MIN_CORR,
         "sourceWindowStartSec": round(window_start, 3),
         "clipSeconds": round(b.size * ENVELOPE_HOP / SR, 3),
@@ -163,7 +164,7 @@ def placement(
             "audio placement is inside the sync gate"
             if ok
             else (
-                f"audio lag {lag_ms:.0f} ms is outside ±{PLACEMENT_TOLERANCE_MS} ms"
+                f"audio lag {lag_ms:.0f} ms is outside ±{tolerance_ms:.0f} ms"
                 if abs(lag_ms) > PLACEMENT_TOLERANCE_MS
                 else f"correlation {corr_value:.3f} is below {PLACEMENT_MIN_CORR}"
             )
@@ -423,6 +424,7 @@ def gate_clip(
     cache_dir: Path,
     previous: list[dict[str, Any]] | None = None,
     source_start_time: float = 0.0,
+    tolerance_ms: float | None = None,
 ) -> dict[str, Any]:
     """Run every independent check on one finished clip.
 
@@ -437,6 +439,9 @@ def gate_clip(
         plan_start=plan_start,
         source_start_time=source_start_time,
         max_clip_sec=duration,
+        tolerance_ms=(
+            PLACEMENT_TOLERANCE_MS if tolerance_ms is None else float(tolerance_ms)
+        ),
     )
     fp = fingerprints(clip_path)
     dup = duplicate_of(fp, previous or [])
