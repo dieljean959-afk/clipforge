@@ -113,7 +113,12 @@ def _keeps_resume_state(store: Any, job_id: str) -> bool:
         return True
     if not isinstance(job, dict) or job.get("deleting"):
         return False
-    return str(job.get("status") or "") in {"failed", "paused"}
+    return (
+        str(job.get("status") or "") in {"failed", "paused"}
+        # A "complete" batch with failed clips is repaired one clip at a time;
+        # that path reads the cached cuts and cues from this folder.
+        or int(job.get("failedClips") or 0) > 0
+    )
 
 
 def _protected(path: Path) -> bool:

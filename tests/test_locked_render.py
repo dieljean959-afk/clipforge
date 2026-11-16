@@ -263,3 +263,33 @@ def test_only_one_caption_style_exists():
                       "viral", "Animated ·", "clean_white", "bold_yellow"):
         assert forbidden not in dialog, f"style picker still offers {forbidden!r}"
         assert forbidden not in form, f"style picker still offers {forbidden!r}"
+
+
+def test_a_joined_span_renders_on_the_full_source_timeline(source, base_settings, tmp_path):
+    """A two-section span is a 150 s WINDOW, not a 150 s source.
+
+    The affected 17-minute job passes absolute cut times (748–764 s) with a
+    section-relative seek and a joined local file. Probing that file made
+    clamp_span cap the clip at 150 s, producing a 2-frame silent MP4 and a
+    false audio-gate failure. The full-source probe must win.
+    """
+    from app import encode, video
+
+    dest = tmp_path / "span.mp4"
+    cut = {
+        "start": 50.0,
+        "end": 52.0,
+        "order": 0,
+        "cropBox": {"x": 0, "y": 0, "w": SRC_W, "h": SRC_H},
+        "framingSegments": [{"start": 50.0, "end": 52.0, "mode": "fit"}],
+    }
+    encode.render_clip(
+        source, cut, dest, base_settings,
+        cues=[], preset_key="bold_stack", title="span",
+        probe_meta={"duration": 100.0, "width": SRC_W, "height": SRC_H, "fps": 30.0},
+        start_offset=1.0,
+    )
+
+    probed = video.probe(dest)
+    assert 1.8 <= float(probed["duration"]) <= 2.3, probed
+    assert probed.get("hasAudio") is True, probed

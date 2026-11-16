@@ -35,8 +35,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from app import hosting
-from app import hostlimits
+from app import hosting, hostlimits
 from app.config import Settings, ffmpeg_bin
 
 # --------------------------------------------------------------------------- #
@@ -761,8 +760,13 @@ def render_clip(
             )
 
     # Probing a presigned URL costs a round trip per clip; the fetch stage
-    # already probed this exact stream, so reuse its geometry.
-    if remote and probe_meta and int(probe_meta.get("width") or 0) > 0:
+    # already probed this exact stream, so reuse its geometry. This also
+    # applies to a LOCAL joined span: the file is only the two sections that
+    # cover the clip, while `cut.start`/`end` stay on the full-source timeline.
+    # Probing the 150 s window there made clamp_span treat the absolute 748 s
+    # start as past the end, yielding a 2-frame silent clip (and an audio-gate
+    # failure). The caller passes the source probe and a section-relative seek.
+    if probe_meta and int(probe_meta.get("width") or 0) > 0:
         probe = {"duration": 0.0, "fps": 30.0, **probe_meta}
     else:
         probe = _video.probe(src)

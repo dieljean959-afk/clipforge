@@ -260,7 +260,10 @@ def offload_job(store: Any, paths: Any, job_id: str) -> None:
                 # again still work, and a later re-render re-fetches from the
                 # URL (telling the user first) when it is gone.
                 job = store.get_job(job_id) or {}
-                if job.get("status") == "complete":
+                # A partial batch is still repairable with "Retry clip". The
+                # source is the only way to do that without downloading the
+                # whole video again, so keep it while any clip is failed.
+                if job.get("status") == "complete" and not int(job.get("failedClips") or 0):
                     dropped = delete_source_objects(job_id)
                     if dropped:
                         logger.info(
@@ -706,10 +709,14 @@ def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
                     # again. Finished batches have their local copies dropped
                     # only after a verified push, and purging owns the rest.
                     continue
-                elif job.get("status") in {"failed", "paused"}:
-                    # Resume state: transcript chunks, detection cuts and the
-                    # stage markers a Retry runs from. The run's own cleanup
-                    # already removed the large media from here.
+                elif (
+                    job.get("status") in {"failed", "paused"}
+                    or int(job.get("failedClips") or 0) > 0
+                    or int(job.get("pendingClips") or 0) > 0
+                ):
+                    # Resume/repair state: transcript chunks, detection cuts and
+                    # the stage markers a Retry (or a per-clip Retry) runs from.
+                    # The run's own cleanup already removed the large media.
                     continue
                 else:
                     finished = job.get("status") in RECLAIMABLE_STAGES

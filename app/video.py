@@ -21,13 +21,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from fastapi import HTTPException
 from loguru import logger
 
 from app import encode, hostlimits
 from app import subtitle as subtitle_svc
 from app.config import Settings, ffmpeg_bin, ffprobe_bin, load_config
-
-from fastapi import HTTPException
 
 
 class RenderError(Exception):
@@ -429,6 +428,7 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
 
     src: Any = db.find_source_file(job_id)
     render_src: Any = src
+    temp_span: Path | None = None
     render_audio: str | None = None
     audio_plan: dict[str, Any] | None = None
     seek_offset: float | None = None
@@ -507,7 +507,17 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
                 cut_start, float(clip.get("end") or cut_start)
             )
         except source_stream.StreamError as exc:
-            raise HTTPException(400, redact_urls(str(exc))) from None
+            # Same fallback as the batch export: a clip that starts in one 75 s
+            # object and ends in the next is valid. Join those two objects for
+            # this one render instead of refusing the Retry.
+            span_path = settings.app.paths.outputs_dir / job_id / f".span_retry_{order:03d}.mp4"
+            try:
+                render_src, seek_offset = src.span_file(
+                    cut_start, float(clip.get("end") or cut_start), span_path
+                )
+            except source_stream.StreamError:
+                raise HTTPException(400, redact_urls(str(exc))) from None
+            temp_span = span_path
         render_audio = src.audio_url()
         audio_plan = src.audio_plan(
             cut_start, float(clip.get("end") or cut_start), order=order
@@ -556,27 +566,31 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
     dest = settings.app.paths.outputs_dir / job_id / f"clip_{order:03d}.mp4"
     db.write_clip(clip_id, {"renderState": "running", "mediaError": None}, job_id=job_id)
     try:
-        meta = encode.render_clip(
-            render_src,
-            cut,
-            dest,
-            settings,
-            cues=cues,
-            # `clip.preset` is the ENCODER preset (veryfast), not the caption
-            # style. Using it here made Retry write the default caption look on
-            # a bold-stack job. The job owns the caption preset.
-            preset_key=str(job.get("captionPreset") or settings.subtitle.preset),
-            emoji_selection=selected,
-            title=clip.get("title"),
-            on_log=lambda line: db.append_job_log(job_id, line),
-            audio_src=render_audio,
-            probe_meta=probe_meta,
-            start_offset=seek_offset,
-            audio_seek=cut_start,
-            audio_start_time=float(getattr(src, "audio_start_time", 0.0) or 0.0),
-            audio_plan=audio_plan,
-            audio_source_key=getattr(src, "audio_key", None),
-        )
+        try:
+            meta = encode.render_clip(
+                render_src,
+                cut,
+                dest,
+                settings,
+                cues=cues,
+                # `clip.preset` is the ENCODER preset (veryfast), not the caption
+                # style. Using it here made Retry write the default caption look on
+                # a bold-stack job. The job owns the caption preset.
+                preset_key=str(job.get("captionPreset") or settings.subtitle.preset),
+                emoji_selection=selected,
+                title=clip.get("title"),
+                on_log=lambda line: db.append_job_log(job_id, line),
+                audio_src=render_audio,
+                probe_meta=probe_meta,
+                start_offset=seek_offset,
+                audio_seek=cut_start,
+                audio_start_time=float(getattr(src, "audio_start_time", 0.0) or 0.0),
+                audio_plan=audio_plan,
+                audio_source_key=getattr(src, "audio_key", None),
+            )
+        finally:
+            if temp_span is not None:
+                temp_span.unlink(missing_ok=True)
     except RenderError as exc:
         db.write_clip(
             clip_id,
@@ -686,7 +700,8 @@ def retry_clip_render(clip_id: str, *, force: bool = False) -> dict:
     # Push it to the bucket so the repaired clip survives a sandbox recycle, and
     # reconcile the batch summary (14 done + 1 failed → 15 ready).
     try:
-        from app import reclaim as _reclaim, objectstore as _objectstore
+        from app import objectstore as _objectstore
+        from app import reclaim as _reclaim
 
         pushed = _reclaim.push_clip_and_thumb(job_id, dest, thumb_path)
         if pushed.get("ok"):

@@ -579,3 +579,44 @@ def test_a_cleared_failure_reason_is_recovered_from_the_job_log(env):
     assert got["status"] == "failed"
     assert got["error"] == reason
     assert got["failedStage"] == "captions"
+
+
+def test_retry_clears_the_previous_terminal_verdict(env, monkeypatch):
+    """A live retry must not look terminal to the invariant pass.
+
+    Observed: a retry resumed export, but `isTerminal` was still true from the
+    failed attempt. The periodic repair then relabelled the running batch
+    `failed` while its ffmpeg child was still rendering (and left the source
+    deletion path armed).
+    """
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+
+    settings, store = env
+    job = _job(store, stage="failed", error="old failure", isTerminal=True,
+               finishedAt=1, completedAt=1)
+    _clip(store, job["_id"], 0, state="failed", video=False)
+
+    class FakeWorker:
+        def retry_from_cache(self, job_id):
+            return 0
+
+        def retry(self, job_id):
+            return 0
+
+    monkeypatch.setattr(main_mod, "settings", settings)
+    monkeypatch.setattr(main_mod, "store", store)
+    monkeypatch.setattr(main_mod, "worker", FakeWorker())
+    monkeypatch.setattr(main_mod.worker_mod, "unrecoverable_reason", lambda *a, **k: None)
+
+    res = TestClient(main_mod.app).post(f"/api/jobs/{job['_id']}/retry")
+    assert res.status_code == 200, res.text
+
+    got = store.get_job(job["_id"])
+    assert got["isTerminal"] is False
+    assert got["status"] == "queued"
+    assert got["finishedAt"] is None
+    assert got["completedAt"] is None

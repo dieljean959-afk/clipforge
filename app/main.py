@@ -2864,6 +2864,20 @@ def retry_job(job_id: str) -> dict:
                     "interrupted": False, "interruptReason": None})
         store.write_job(job)
         raise HTTPException(400, dead_end)
+    # A retry is live work, not the previous terminal verdict. Leaving
+    # `isTerminal` true let the invariant pass treat the running attempt as a
+    # dead batch and relabel it `failed` while its renderer was still writing.
+    job.update({
+        "isTerminal": False,
+        "status": "queued",
+        "finishedAt": None,
+        "completedAt": None,
+        "failedStage": None,
+        "interrupted": False,
+        "interruptReason": None,
+        "pauseRequested": False,
+    })
+    store.write_job(job)
     try:
         depth = worker.retry_from_cache(job_id)
     except KeyError:

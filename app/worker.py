@@ -530,10 +530,17 @@ class InProcessWorker:
 
         job.update({
             "stage": "queued",
+            "status": "queued",
+            "isTerminal": False,
+            "failedStage": None,
+            "interrupted": False,
+            "interruptReason": None,
+            "pauseRequested": False,
             "progress": 0,
             "progressDetail": "Re-queued — a fresh server worker will pick it up.",
             "error": None,
             "errorDetail": None,
+            "finishedAt": None,
             "completedAt": None,
             "stageEtaSec": None,
             "totalEtaSec": None,
