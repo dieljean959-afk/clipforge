@@ -686,6 +686,7 @@ def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
         Path(paths.data_dir) / "uploads",
         Path(paths.data_dir) / "downloads",
     ]
+    outputs_root = Path(paths.outputs_dir)
     for root in roots:
         if not root.is_dir():
             continue
@@ -694,9 +695,26 @@ def sweep_startup(store: Any, paths: Any) -> dict[str, Any]:
                 if not child.is_dir():
                     continue
                 job = jobs.get(child.name)
-                finished = job is None or job.get("status") in RECLAIMABLE_STAGES
-                if not finished:
+                if job is None:
+                    # A folder no batch owns is debris. Safe to remove.
+                    pass
+                elif root == outputs_root:
+                    # Rendered clips are the deliverable. A FAILED batch can
+                    # still own playable MP4s whose bucket push failed, and
+                    # `mediaRemote` is false exactly then. Deleting the folder
+                    # made those clips unplayable with no way to produce them
+                    # again. Finished batches have their local copies dropped
+                    # only after a verified push, and purging owns the rest.
                     continue
+                elif job.get("status") in {"failed", "paused"}:
+                    # Resume state: transcript chunks, detection cuts and the
+                    # stage markers a Retry runs from. The run's own cleanup
+                    # already removed the large media from here.
+                    continue
+                else:
+                    finished = job.get("status") in RECLAIMABLE_STAGES
+                    if not finished:
+                        continue
                 size = sum(p.stat().st_size for p in child.rglob("*") if p.is_file())
                 shutil.rmtree(child, ignore_errors=True)
                 out["dirsRemoved"] += 1

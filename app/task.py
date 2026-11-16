@@ -38,10 +38,10 @@ from app import (
     diskwatch,
     download,
     encode,
-    reframe,
     eta,
     llm,
     modelstore,
+    reframe,
     source_stream,
     subtitle,
     translate,
@@ -1256,6 +1256,36 @@ class Pipeline:
                 self._progress(job_id, "grabbing", 100, "Reusing the downloaded video")
                 return src
 
+        # The stage marker lives in `data/work/<job>/` and disk sweeps remove
+        # that folder for finished batches. The CAPTURE itself does not live
+        # there: `sourceStream` on the job document names every object that was
+        # already streamed into the bucket. Without this fallback a retry after
+        # a cleanup re-captured a 17-minute source in 22 sections (2.6 hours on
+        # the observed job) even though all 470 MB were still in the bucket.
+        # Verify the objects first, then adopt the capture instead of redoing it.
+        recorded = job.get("sourceStream") if isinstance(job.get("sourceStream"), dict) else {}
+        if recorded.get("videoKey") and recorded.get("audioKey"):
+            probe = recorded.get("probe") if isinstance(recorded.get("probe"), dict) else {}
+            reuse_meta = {
+                **recorded,
+                "remote": True,
+                **{k: probe[k] for k in ("duration", "width", "height", "fps") if probe.get(k) is not None},
+            }
+            remote = self._remote_from_meta(job_id, reuse_meta)
+            if remote is not None and self._remote_source_intact(remote, job_id):
+                held = len(remote.sections) or 1
+                self._log(
+                    job_id,
+                    f"resume: reusing the captured source in the bucket ({held} object(s), "
+                    "stage marker was swept) — nothing is downloaded again",
+                )
+                self._progress(job_id, "grabbing", 100, "Source reused from the bucket")
+                ws.write_json("fetch", "meta.json", {**remote.describe(), **probe})
+                ws.mark_done(
+                    "fetch", artifacts=["fetch/meta.json"], path=remote.video_key, **probe,
+                )
+                return remote
+
         dest_dir = self.settings.app.paths.downloads_dir / job_id
         self._progress(job_id, "grabbing", 0, "Clippy is grabbing the video...")
         # Legacy/partial job documents can carry source=None (seen in a real
@@ -1474,7 +1504,10 @@ class Pipeline:
 
         keys = [src.video_key, src.audio_key]
         if src.sections:
-            keys += [str(s.get("key") or "") for s in (src.sections[0], src.sections[-1])]
+            # Every recorded object, not just the ends: a middle piece can be
+            # evicted by a bucket cleanup, and adopting a capture with a hole
+            # turns one bad object into a failed clip (or a bad clip) later.
+            keys += [str(s.get("key") or "") for s in src.sections]
         for key in keys:
             if not key:
                 return False
@@ -2537,6 +2570,7 @@ class Pipeline:
             gate_result: dict[str, Any] | None = None
             meta: dict[str, Any] | None = None
             timings: dict[str, float] = {}
+            temp_span: Path | None = None
             with self._heartbeat(job_id, f"render clip {i + 1}"):
                 try:
                     # The context-aware emoji chosen in the captions stage (an
@@ -2577,10 +2611,27 @@ class Pipeline:
                     seek_offset: float | None = None
                     probe_meta: dict[str, Any] | None = None
                     if isinstance(src, source_stream.RemoteSource):
-                        render_src, seek_offset = src.url_for_span(
-                            float(cut.get("start") or 0.0),
-                            float(cut.get("end") or 0.0),
-                        )
+                        try:
+                            render_src, seek_offset = src.url_for_span(
+                                float(cut.get("start") or 0.0),
+                                float(cut.get("end") or 0.0),
+                            )
+                        except source_stream.StreamError as span_exc:
+                            # A detected moment can straddle a 75 s boundary by a
+                            # second or two. Both halves are already captured;
+                            # join just those two objects (stream copy, no
+                            # re-encode) instead of failing a good candidate.
+                            temp_span = dest / f".span_{i:03d}.mp4"
+                            render_src, seek_offset = src.span_file(
+                                float(cut.get("start") or 0.0),
+                                float(cut.get("end") or 0.0),
+                                temp_span,
+                            )
+                            self._log(
+                                job_id,
+                                f"clip {i + 1}: {span_exc} — joined the two "
+                                "source sections for this render",
+                            )
                         render_audio = src.audio_url()
                         audio_plan = src.audio_plan(
                             float(cut.get("start") or 0.0),
@@ -2700,6 +2751,9 @@ class Pipeline:
                         raise sync_error
                     meta["audioSync"] = gate_result
                 except Exception as exc:
+                    if temp_span is not None:
+                        temp_span.unlink(missing_ok=True)
+                        temp_span = None
                     detail = str(exc)[:500]
                     ladder = getattr(exc, "attempts", None) or (
                         meta.get("attempts") if isinstance(meta, dict) else None
@@ -2856,10 +2910,16 @@ class Pipeline:
                 job_id, clip_id, dest / f"clip_{i:03d}.mp4", thumb_path, meta,
             )
             timings["uploadMs"] = round((time.perf_counter() - _upload_t0) * 1000.0, 1)
+            if temp_span is not None:
+                temp_span.unlink(missing_ok=True)
+                temp_span = None
+            # `update_clip` addresses the clip by its own id; it does not take
+            # a job_id. Passing one made EVERY export die right after the media
+            # was stored (TypeError), so a rendered, uploaded clip was left on
+            # a failed batch and never reached "Your batches".
             self.store.update_clip(
                 clip_id,
                 lambda c: c.update({"timings": timings}),
-                job_id=job_id,
             )
             # The title plate PNG and the encoder's temp file belong to THIS
             # clip only; leaving them would accumulate one small file per clip.

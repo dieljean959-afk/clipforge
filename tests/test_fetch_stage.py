@@ -200,3 +200,79 @@ def test_a_local_download_is_still_reused_from_disk(env, monkeypatch):
     src = Pipeline(settings, store)._stage_fetch(job, ws)
 
     assert src == local
+
+
+def test_a_swept_workspace_adopts_the_capture_recorded_on_the_job(env, monkeypatch):
+    """A cleanup must not turn a retry into a second 2.6-hour re-capture.
+
+    The stage marker lives under `data/work/<job>`, which a disk sweep removes.
+    The capture itself is recorded on the job (`sourceStream`), and every
+    object is still in the bucket — so the fetch stage must adopt it instead of
+    asking yt-dlp for the same 22 sections again.
+    """
+    settings, store, job, ws = env
+    from app import objectstore, source_stream
+
+    job["sourceStream"] = {
+        "videoKey": "clipforge/uploads/job_fetch_test/sections/sec_000.mp4",
+        "audioKey": "clipforge/uploads/job_fetch_test/audio.m4a",
+        "method": "sections",
+        "format": "(sections)",
+        "audioFormat": "ba",
+        "bytes": 470_000_000,
+        "sections": [
+            {"key": "clipforge/uploads/job_fetch_test/sections/sec_000.mp4",
+             "start": 0.0, "end": 75.0},
+            {"key": "clipforge/uploads/job_fetch_test/sections/sec_008.mp4",
+             "start": 600.0, "end": 675.0},
+        ],
+        "probe": {"duration": 675.0, "width": 1280, "height": 720, "fps": 60.0},
+        "audioStartTime": 0.0,
+    }
+    store.write_job(job)
+    assert not ws.is_done("fetch"), "the marker must genuinely be gone"
+
+    monkeypatch.setattr(objectstore, "configured", lambda *a, **k: True)
+    monkeypatch.setattr(objectstore, "head", lambda key, *a, **k: {"size": 999})
+
+    def boom(*a, **k):
+        raise AssertionError("the source was captured again after its marker was swept")
+
+    monkeypatch.setattr(source_stream, "capture", boom)
+
+    src = Pipeline(settings, store)._stage_fetch(job, ws)
+
+    assert isinstance(src, source_stream.RemoteSource)
+    assert len(src.sections) == 2
+    assert src.probe["duration"] == 675.0
+    assert ws.is_done("fetch"), "the adopted capture must be recorded for the next retry"
+    meta = ws.read_json("fetch", "meta.json") or {}
+    assert meta.get("videoKey") == job["sourceStream"]["videoKey"]
+
+
+def test_a_capture_with_a_missing_middle_section_is_not_adopted(env, monkeypatch):
+    """Adopting a source with one evicted piece fails a clip later.
+
+    The check used to HEAD only the first and last section. A middle object
+    can be gone after a bucket cleanup, so verify every recorded key before
+    promising the resume will not download again.
+    """
+    settings, store, job, _ws = env
+    from app import objectstore, source_stream
+
+    sections = [
+        {"key": f"clipforge/uploads/{job['_id']}/sections/sec_{i:03d}.mp4",
+         "start": i * 75.0, "end": (i + 1) * 75.0}
+        for i in range(3)
+    ]
+
+    def head(key, *a, **k):
+        return {"size": 0 if key.endswith("sec_001.mp4") else 100}
+
+    monkeypatch.setattr(objectstore, "head", head)
+    src = source_stream.RemoteSource(
+        job["_id"], video_key=sections[0]["key"], audio_key="audio.m4a",
+        method="sections", sections=sections,
+    )
+
+    assert Pipeline(settings, store)._remote_source_intact(src, job["_id"]) is False

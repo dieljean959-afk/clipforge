@@ -1910,9 +1910,16 @@ class InProcessWorker:
         doc = self.store.get_job(job_id) or job
         if doc is not None:
             msg = "Worker could not start this job — " + " | ".join(problems)
+            # The job did not die in `fetch`: this refusal happens BEFORE a
+            # runner exists, often on a resume that was past fetch already.
+            # Stamping "fetch" sent the reader to the wrong stage.
+            current = str(doc.get("stage") or "")
+            died_in = None if current in {
+                "", "queued", "waiting-upload", "complete", "failed", "paused", "deleting",
+            } else current
             doc.update({
                 "stage": "failed",
-                "failedStage": "fetch",
+                "failedStage": died_in,
                 "error": msg,
                 "errorDetail": msg,
                 "interrupted": False,

@@ -7,7 +7,6 @@ runtime, the fonts/emoji assets, and any file a running batch holds.
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from app import disksweep
@@ -26,6 +25,9 @@ class _Store:
 
     def list_jobs(self) -> list[dict]:
         return self._jobs
+
+    def get_job(self, job_id: str):
+        return next((j for j in self._jobs if j.get("_id") == job_id), None)
 
 
 def _app_root(tmp_path: Path) -> _Paths:
@@ -115,3 +117,42 @@ def test_nightly_runs_once_per_period(tmp_path):
     assert disksweep.nightly(_Store(), paths)["ok"] is True
     second = disksweep.nightly(_Store(), paths)
     assert second.get("skipped") == "not due"
+
+
+def test_a_failed_batch_keeps_the_checkpoints_retry_resumes_from(tmp_path):
+    """Failed is not live, but it is RESUMABLE.
+
+    The sweep used to delete `work/<job>` for every non-live batch. That folder
+    holds the transcript chunks, detection cuts, caption cues and the stage
+    markers, so "Retry resumes from the last finished stage" became false and a
+    retry paid for transcription and detection again.
+    """
+    paths = _app_root(tmp_path)
+    work = paths.data_dir / "work" / "failed1"
+    work.mkdir(parents=True)
+    (work / "transcribe").mkdir()
+    (work / "transcribe" / "words.json").write_text('{"words": []}', encoding="utf-8")
+
+    disksweep.sweep(
+        _Store([{"_id": "failed1", "status": "failed"}]),
+        paths,
+        include_models=False,
+    )
+
+    assert work.exists(), "a failed batch lost the checkpoints its Retry needs"
+    assert (work / "transcribe" / "words.json").exists()
+
+
+def test_a_completed_batch_still_gives_back_its_scratch(tmp_path):
+    paths = _app_root(tmp_path)
+    work = paths.data_dir / "work" / "done1"
+    work.mkdir(parents=True)
+    (work / "words.json").write_text("{}", encoding="utf-8")
+
+    disksweep.sweep(
+        _Store([{"_id": "done1", "status": "complete"}]),
+        paths,
+        include_models=False,
+    )
+
+    assert not work.exists(), "a finished batch has no resume state worth keeping"

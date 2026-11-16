@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 
@@ -142,7 +141,7 @@ def test_partial_success_label_is_honest():
 def test_invariants_restore_clip_docs_from_the_projection(env):
     """A re-detect deleted the documents; the job projection is the last copy."""
     settings, store = env
-    job = _job(store, stage="complete", progress=100,
+    _job(store, stage="complete", progress=100,
                clips=[{"_id": "a" * 32, "order": 0, "renderState": "done",
                        "videoPath": "/tmp/a.mp4", "jobId": None}],
                clipIds=["a" * 32])
@@ -477,3 +476,106 @@ def test_create_job_duplicates_are_idempotent(env, monkeypatch):
     assert second.json()["deduped"] is True
     assert second.json()["jobId"] == first_id
     assert len(store.list_jobs()) == 1
+
+
+def test_a_failed_batch_with_no_clips_keeps_its_real_reason(env):
+    """A projection repair must not erase why the job actually failed.
+
+    Observed: preflight refused to start job 0c864162 because only 335 MB of
+    disk were free, wrote that exact sentence, and the next invariant pass
+    (repairing a stale clip projection) cleared `error` and `failedStage`. The
+    card then read the generic "This job failed" with no cause at all.
+    """
+    settings, store = env
+    reason = (
+        "Worker could not start this job — only 335 MB of disk free — a render "
+        "needs about 400 MB. Delete finished batches (Clean up) or free space on "
+        "the server, then Retry."
+    )
+    job = _job(
+        store,
+        stage="failed",
+        error=reason,
+        errorDetail=reason,
+        failedStage="captions",
+        isTerminal=False,
+    )
+    _clip(store, job["_id"], 0, state="pending", video=False)
+
+    report = invariants.check_and_repair(store, settings.app.paths)
+    assert report["repaired"] == 1
+
+    got = store.get_job(job["_id"])
+    assert got["status"] == "failed"
+    assert got["error"] == reason, "the real failure reason was wiped by a repair"
+    assert got["failedStage"] == "captions", "the stage it died in was cleared"
+
+
+def test_an_export_that_stopped_with_pending_clips_is_not_complete(env):
+    """One rendered clip does not make an aborted export a finished batch.
+
+    Observed on job 65eb603b: clip 1 uploaded, clip 2 failed at a section
+    boundary, and the export then raised TypeError on clips 3-4. The repair
+    pass saw one `done` clip and relabelled the batch `complete`, so a partial
+    batch appeared as finished and the remaining clips were unreachable.
+    """
+    settings, store = env
+    job = _job(store, stage="failed", error="export stopped", isTerminal=True)
+    _clip(store, job["_id"], 0, state="done")
+    _clip(store, job["_id"], 1, state="failed", video=False)
+    _clip(store, job["_id"], 2, state="pending", video=False)
+    _clip(store, job["_id"], 3, state="pending", video=False)
+
+    invariants.check_and_repair(store, settings.app.paths)
+
+    got = store.get_job(job["_id"])
+    assert got["status"] == "failed", "an incomplete batch was presented as finished"
+    assert got["clipCount"] == 1
+    assert "2 clips never rendered" in got["error"]
+    assert got["progressDetail"].endswith("Retry to render the rest.")
+
+
+def test_a_complete_label_with_pending_clip_docs_is_reopened(env):
+    settings, store = env
+    job = _job(store, stage="complete", clipCount=1, progress=100, isTerminal=True)
+    _clip(store, job["_id"], 0, state="done")
+    _clip(store, job["_id"], 1, state="pending", video=False)
+
+    report = invariants.check_and_repair(store, settings.app.paths)
+
+    assert report["repaired"] == 1
+    got = store.get_job(job["_id"])
+    assert got["status"] == "failed"
+    assert "1 still pending" in got["progressDetail"]
+
+
+def test_a_cleared_failure_reason_is_recovered_from_the_job_log(env):
+    """The worker's own sentence is still in `logs`, so surface it again.
+
+    job 0c864162's error and failedStage were cleared by an older repair. The
+    card said only "This job failed"; the disk-preflight reason written by the
+    worker survived in the job log.
+    """
+    settings, store = env
+    reason = (
+        "Worker could not start this job — only 335 MB of disk free — a render "
+        "needs about 400 MB. Delete finished batches (Clean up) or free space on "
+        "the server, then Retry."
+    )
+    job = _job(
+        store,
+        stage="failed",
+        error=None,
+        errorDetail=None,
+        failedStage=None,
+        interruptStage="captions",
+        logs=["[runner] starting", f"FAILED: {reason}", "SIGNAL SIGTERM"],
+    )
+    _clip(store, job["_id"], 0, state="pending", video=False)
+
+    invariants.check_and_repair(store, settings.app.paths)
+
+    got = store.get_job(job["_id"])
+    assert got["status"] == "failed"
+    assert got["error"] == reason
+    assert got["failedStage"] == "captions"

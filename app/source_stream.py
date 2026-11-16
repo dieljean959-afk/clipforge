@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -132,8 +133,18 @@ def _read_part(stream: Any, size: int) -> bytes:
 def _upload_pipe(
     stream: Any, key: str, content_type: str, *,
     on_bytes: Callable[[int], None] | None = None,
+    max_bytes: int | None = None,
 ) -> int:
-    """Multipart-upload a readable pipe. Returns the byte count sent."""
+    """Multipart-upload a readable pipe. Returns the byte count sent.
+
+    ``max_bytes`` stops a transfer that cannot possibly succeed. Filebase's
+    free plan refuses MULTIPART video above 25 MB, so piping a 17-minute
+    source into one used to download the WHOLE video (470 MB, ~10 min here)
+    before the API rejected it at completion — and only then did the caller
+    fall back to sections. Stopping at the cap turns that into a few seconds
+    and the same correct fallback. A single PUT has no such limit, which is
+    why sections (each a file upload) are the working path.
+    """
     from app import objectstore
 
     cfg = objectstore.config_from_env()
@@ -157,6 +168,11 @@ def _upload_pipe(
                 break
             number += 1
             total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise StreamError(
+                    f"the bucket plan rejects multipart video over 25MB "
+                    f"({key} passed {mb(max_bytes)} MB) — using 75 s sections"
+                )
             if total > MAX_STREAM_BYTES:
                 raise StreamError(
                     f"stream exceeded {mb(MAX_STREAM_BYTES)} MB — refusing to "
@@ -254,6 +270,9 @@ def _stream_one(
     try:
         sent = _upload_pipe(
             proc.stdout, key, "video/mp4" if key.endswith(".mp4") else "audio/mp4",
+            # Video only: the plan's multipart limit is what forces sections.
+            # Audio is small enough to fit and must not be abandoned at 24 MB.
+            max_bytes=MAX_VIDEO_OBJECT_BYTES if key.endswith(".mp4") else None,
         )
         code = proc.wait(timeout=120)
         if code != 0:
@@ -646,6 +665,73 @@ class RemoteSource:
         # non-sectioned source render from the first frame while the separate
         # audio object was (also) seeked from 0.
         return objectstore.presign(self.video_key, expires=900) or "", max(0.0, float(start_sec))
+
+    def span_file(
+        self, start_sec: float, end_sec: float, dest: Path
+    ) -> tuple[Path, float]:
+        """Materialise a clip that straddles a section boundary, locally.
+
+        Sectioning keeps the capture cheap, but detection works on the source
+        timeline and can pick a moment that starts in one 75 s object and ends
+        in the next. That used to fail the clip outright ("no single object
+        covers it") even though both halves were already in the bucket. Join
+        just those two objects with a stream copy (no re-encode, so the frames
+        are the same ones the single-object path would render), then let the
+        normal renderer seek into the joined file. Returns the local path and
+        the seek offset; the caller deletes the temporary file.
+        """
+        from app import objectstore
+
+        if not self.sections:
+            raise StreamError("this source has no sections to join")
+        index = next(
+            (n for n, sec in enumerate(self.sections)
+             if float(sec["start"]) <= start_sec < float(sec["end"])),
+            None,
+        )
+        if index is None or index + 1 >= len(self.sections):
+            raise StreamError(
+                f"clip {start_sec:.2f}–{end_sec:.2f}s starts outside the captured sections"
+            )
+        first, second = self.sections[index], self.sections[index + 1]
+        if float(end_sec) > float(second["end"]) + 0.05:
+            raise StreamError(
+                f"clip {start_sec:.2f}–{end_sec:.2f}s spans more than two source sections"
+            )
+        urls = [objectstore.presign(str(s["key"]), expires=900) for s in (first, second)]
+        if not all(urls):
+            raise StreamError("could not sign the two source sections for joining")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, listing_name = tempfile.mkstemp(
+            prefix=f".join-{self.job_id[:8]}-", suffix=".txt", dir=str(dest.parent)
+        )
+        os.close(fd)
+        listing = Path(listing_name)
+        try:
+            listing.write_text(
+                "".join(f"file '{url}'\n" for url in urls), encoding="utf-8"
+            )
+            cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-f", "concat", "-safe", "0",
+                "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+                "-i", str(listing),
+                "-c", "copy", "-fflags", "+genpts", "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart", str(dest),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+                raise StreamError(
+                    "joining two source sections failed: "
+                    + (proc.stderr or "ffmpeg produced no file").strip()[-250:]
+                )
+        finally:
+            listing.unlink(missing_ok=True)
+        logger.info(
+            "[stream] joined sections %d+%d for the straddling span %.1f–%.1fs",
+            index, index + 1, start_sec, end_sec,
+        )
+        return dest, max(0.0, start_sec - float(first["start"]))
 
     def _actual_section_end(self, sec: dict[str, Any]) -> float:
         """Planned end, or the real container end when it carries extra frames."""

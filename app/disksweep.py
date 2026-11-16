@@ -93,6 +93,29 @@ def _live_job_ids(store: Any) -> set[str]:
     return live
 
 
+def _keeps_resume_state(store: Any, job_id: str) -> bool:
+    """Does this batch still exist in a state a Retry can resume from?
+
+    Failed and paused batches are NOT live, but their `work/<job>` folder holds
+    the transcript chunks, detection cuts, caption cues and the stage markers a
+    retry resumes from. Deleting it made "Retry resumes from the last finished
+    stage" false and paid for transcription and (paid) detection again. The
+    folder is tiny after the run's own cleanup (media is already gone); a
+    batch that truly never comes back is removed by retention, which deletes
+    the job document, and the next sweep removes the folder as an orphan.
+    """
+    getter = getattr(store, "get_job", None)
+    if not callable(getter):
+        return False
+    try:
+        job = getter(job_id)
+    except Exception:  # noqa: BLE001 - an unreadable job is not a reason to delete
+        return True
+    if not isinstance(job, dict) or job.get("deleting"):
+        return False
+    return str(job.get("status") or "") in {"failed", "paused"}
+
+
 def _protected(path: Path) -> bool:
     if path.name in _PROTECTED_NAMES:
         return True
@@ -164,7 +187,7 @@ def sweep(
         for child in work.iterdir():
             if not child.is_dir():
                 continue
-            if child.name in live:
+            if child.name in live or _keeps_resume_state(store, child.name):
                 continue
             _rm(child, dry_run=dry_run, freed=freed)
     record("orphaned stage scratch", freed, "no batch owns this folder")

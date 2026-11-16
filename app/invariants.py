@@ -180,7 +180,13 @@ def _needs_repair(
     if counts["done"] and int(job.get("clipCount") or 0) < counts["done"]:
         broken.append("clipCount-below-rendered")
     stage = str(job.get("stage") or "")
-    if counts["done"] and stage in ("failed", "grabbing", "", "fetch", "fetching"):
+    # Rendered clips + PENDING ones is an interrupted export, not a finished
+    # batch: leaving it `failed` is the honest, retryable state.
+    if (
+        counts["done"]
+        and counts.get("pending", 0) == 0
+        and stage in ("failed", "grabbing", "", "fetch", "fetching")
+    ):
         broken.append("failed-or-unstarted-stage-with-rendered-clips")
     if counts["done"] and not job.get("isTerminal"):
         broken.append("non-terminal-with-rendered-clips")
@@ -192,11 +198,42 @@ def _needs_repair(
     # after the failed clip is repaired the batch is simply complete.
     if job.get("warning") and counts["failed"] == 0:
         broken.append("stale-partial-success-warning")
+    # A finished export drops every replacement candidate and leaves only the
+    # clips it attempted. Pending documents on a `complete` batch therefore
+    # mean the stage aborted mid-loop, not that the batch is done.
+    if stage == "complete" and counts.get("pending", 0) > 0:
+        broken.append("complete-with-pending-clips")
     # A terminal batch without a finish stamp reads as "still running" to every
     # consumer that sorts or times batches by when they ended.
     if stage in ("complete", "failed", "cancelled") and not job.get("finishedAt"):
         broken.append("terminal-without-finishedAt")
+    # A failed batch with no rendered output and no reason is not a verdict the
+    # user can act on. Run the repair so it recovers the worker's LAST FAILED
+    # line (or writes an honest stage fallback).
+    if (
+        stage == "failed"
+        and counts["done"] == 0
+        and counts["failed"] == 0
+        and not job.get("error")
+    ):
+        broken.append("failed-without-a-reason")
     return broken
+
+
+def _last_failure_line(job: dict[str, Any]) -> str:
+    """The real reason a run died, recovered from its own log.
+
+    Older repair passes cleared `error` on zero-output failures, so the one
+    sentence the worker wrote ("only 335 MB of disk free…") survived only in
+    `logs`. Surface it again instead of leaving the card with a generic
+    "This job failed" and no cause.
+    """
+    for entry in reversed(job.get("logs") or []):
+        line = str(entry or "").strip()
+        for prefix in ("[runner] FAILED:", "FAILED:"):
+            if line.startswith(prefix):
+                return line[len(prefix):].strip()[:500]
+    return ""
 
 
 def repair_job(
@@ -217,8 +254,13 @@ def repair_job(
     jid = str(job.get("_id") or "")
     clips = _clips_for(store, job)
     label = partial_success_label(counts)
-    done, failed = counts["done"], counts["failed"]
+    done, failed, pending = counts["done"], counts["failed"], counts["pending"]
     total = counts["total"]
+    # A stage that died mid-export leaves untouched clips. Those must not be
+    # counted as a finished batch just because one clip made it: job
+    # 65eb603b rendered clip 1, then every export raised TypeError and the
+    # repair pass relabelled the batch "complete" with two clips still pending.
+    settled = total > 0 and pending == 0
 
     # Keep the projected list in the same order as the documents.
     ordered = sorted(clips, key=lambda c: (int(c.get("order") or 0), str(c.get("_id"))))
@@ -226,23 +268,65 @@ def repair_job(
     job["clipCount"] = done
     if total:
         job["clipTarget"] = max(int(job.get("clipTarget") or 0), total)
-    job["progress"] = 100
+    job["progress"] = 100 if settled else round(100.0 * (done + failed) / total)
     job["progressDetail"] = label + "."
+    if pending:
+        job["progressDetail"] = (
+            f"{label}, {pending} still pending — Retry to render the rest."
+        )
     job["isTerminal"] = True
-    job["stage"] = "complete" if done else ("failed" if failed else str(job.get("stage") or "complete"))
+    if done and settled:
+        job["stage"] = "complete"
+    elif done or failed:
+        job["stage"] = "failed"
+    else:
+        job["stage"] = str(job.get("stage") or "complete")
     job["status"] = job["stage"]
     job["completedAt"] = job.get("completedAt") or now
     job["finishedAt"] = job.get("finishedAt") or job["completedAt"]
     job["interrupted"] = False
     job["errorKind"] = None
-    job["failedStage"] = None
-    if failed and done:
+    # Only a verdict with usable output behind it makes the stage meaningless.
+    # A failed batch with ZERO rendered clips must keep its `failedStage`: it is
+    # the only field that says where the run died.
+    if done or failed:
+        job["failedStage"] = None
+    if pending and (done or failed):
+        job["error"] = (
+            f"{label}, but {pending} clip{'s' if pending != 1 else ''} never "
+            "rendered because the export stopped. Retry to finish the batch."
+        )
+        job["errorDetail"] = job.get("errorDetail") or job["error"]
+        job.pop("warning", None)
+    elif failed and done:
         job["error"] = None
         job["warning"] = label + " — the failed clip can be retried from the batch."
         job["errorDetail"] = None
     elif failed and not done:
         job["error"] = label
-    else:
+    elif done:
+        job["error"] = None
+        job["errorDetail"] = None
+        job.pop("warning", None)
+    elif str(job.get("stage") or "") == "failed":
+        # Kept retryable with a cause, even when every clip is still pending.
+        if not job.get("error"):
+            stage_name = str(
+                job.get("failedStage") or job.get("interruptStage") or "the job"
+            )
+            job["error"] = _last_failure_line(job) or (
+                f"This batch stopped during {stage_name} before any clip was "
+                "ready. Retry to continue from the saved source."
+            )
+            job["errorDetail"] = job.get("errorDetail") or job["error"]
+        if not job.get("failedStage") and job.get("interruptStage"):
+            job["failedStage"] = job.get("interruptStage")
+        job.pop("warning", None)
+    elif str(job.get("stage") or "") != "failed":
+        # Zero finished clips and zero failed clips: this is a projection-only
+        # repair, not a verdict. Clearing the reason here is what turned the
+        # real "only 335 MB of disk free — a render needs about 400 MB" on job
+        # 0c864162 into the generic "This job failed" on its card.
         job["error"] = None
         job["errorDetail"] = None
         job.pop("warning", None)

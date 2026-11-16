@@ -331,3 +331,73 @@ def test_a_known_duration_beats_an_empty_probe(monkeypatch):
 
     assert source_stream._section_count(0.0) == source_stream.UNKNOWN_DURATION_SECTIONS
     assert source_stream._section_count(1237.0) == 17
+
+
+def test_the_multipart_attempt_stops_at_the_plan_cap(monkeypatch):
+    """Do not download a whole video for an upload that cannot succeed.
+
+    Filebase's free plan refuses multipart video above 25 MB. The old code
+    streamed the entire source (470 MB on the observed 17-minute job) and only
+    learned that at completion, then downloaded it again as 22 sections. The
+    cap must abort on the first part over the limit so the fallback is quick.
+    """
+    from types import SimpleNamespace
+
+    fake = FakeBucket()
+    monkeypatch.setattr(
+        objectstore, "config_from_env",
+        lambda *a, **k: SimpleNamespace(enabled=True, bucket="b"),
+    )
+    monkeypatch.setattr(objectstore, "client", lambda *a, **k: fake)
+
+    stream = io.BytesIO(b"x" * (10 * source_stream.PART_BYTES))
+    with pytest.raises(source_stream.StreamError) as caught:
+        source_stream._upload_pipe(
+            stream, "clipforge/uploads/j/video.mp4", "video/mp4",
+            max_bytes=source_stream.MAX_VIDEO_OBJECT_BYTES,
+        )
+
+    assert "25MB" in str(caught.value)
+    uploaded = sum(len(body) for body in next(iter(fake.parts.values())).values())
+    assert uploaded <= source_stream.MAX_VIDEO_OBJECT_BYTES + source_stream.PART_BYTES
+    assert fake.aborted == ["clipforge/uploads/j/video.mp4"]
+
+
+def test_a_clip_straddling_a_section_boundary_is_joined_not_failed(tmp_path, monkeypatch):
+    """A moment 1 s before a section end and 1 s after is a valid clip.
+
+    Detection works on the source timeline, so this happens on every long
+    source. The two objects are already in the bucket; failing the candidate
+    threw away a good clip. Join them with a stream copy and seek into it.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is required to join real sections")
+    sections = []
+    for i in range(2):
+        part = tmp_path / f"sec{i}.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1.5:r=10",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(part),
+            ],
+            check=True, capture_output=True,
+        )
+        sections.append({"key": str(part), "start": i * 1.5, "end": (i + 1) * 1.5})
+
+    monkeypatch.setattr(objectstore, "presign", lambda key, expires=900: key)
+    src = source_stream.RemoteSource(
+        "job1", video_key="v", audio_key="a", method="sections", sections=sections,
+    )
+
+    joined, offset = src.span_file(1.0, 2.6, tmp_path / "joined.mp4")
+
+    assert joined.exists() and joined.stat().st_size > 0
+    assert offset == pytest.approx(1.0)
+    from app import video
+
+    assert float(video.probe(joined)["duration"]) >= 2.9
+    assert list(tmp_path.glob(".join-*.txt")) == [], "the concat list must be cleaned up"
