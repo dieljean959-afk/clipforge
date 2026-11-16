@@ -164,6 +164,19 @@ def _projection_stale(job: dict[str, Any], clips: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _explicit_short(job: dict[str, Any], done: int) -> bool:
+    """An explicit quota that did not deliver every requested clip.
+
+    Auto counts are ceilings, so finishing below them is allowed. Explicit
+    counts are quotas, and a short delivery must stay failed/retryable rather
+    than be repaired back to `complete`.
+    """
+    if not (job.get("options") or {}).get("maxClips"):
+        return False
+    requested = int(job.get("requestedClipTarget") or job.get("requestedClips") or 0)
+    return bool(requested and done < requested)
+
+
 def _needs_repair(
     job: dict[str, Any], counts: dict[str, int], clips: list[dict[str, Any]] | None = None,
 ) -> list[str]:
@@ -186,6 +199,7 @@ def _needs_repair(
         counts["done"]
         and counts.get("pending", 0) == 0
         and stage in ("failed", "grabbing", "", "fetch", "fetching")
+        and not _explicit_short(job, counts["done"])
     ):
         broken.append("failed-or-unstarted-stage-with-rendered-clips")
     if counts["done"] and not job.get("isTerminal"):
@@ -260,7 +274,10 @@ def repair_job(
     # counted as a finished batch just because one clip made it: job
     # 65eb603b rendered clip 1, then every export raised TypeError and the
     # repair pass relabelled the batch "complete" with two clips still pending.
-    settled = total > 0 and pending == 0
+    # An explicit quota that ran out of candidates is the same lie in a
+    # different shape: it stays failed until every requested clip exists.
+    short = _explicit_short(job, done)
+    settled = total > 0 and pending == 0 and not short
 
     # Keep the projected list in the same order as the documents.
     ordered = sorted(clips, key=lambda c: (int(c.get("order") or 0), str(c.get("_id"))))
@@ -291,7 +308,14 @@ def repair_job(
     # the only field that says where the run died.
     if done or failed:
         job["failedStage"] = None
-    if pending and (done or failed):
+    if short:
+        job["error"] = job.get("error") or (
+            f"Only {done} of {int(job.get('requestedClipTarget') or job.get('requestedClips') or 0)} "
+            "requested clips were ready. Retry to finish the batch."
+        )
+        job["errorDetail"] = job.get("errorDetail") or job["error"]
+        job.pop("warning", None)
+    elif pending and (done or failed):
         job["error"] = (
             f"{label}, but {pending} clip{'s' if pending != 1 else ''} never "
             "rendered because the export stopped. Retry to finish the batch."

@@ -3146,6 +3146,27 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 - completion must still complete
             logger.warning(f"[job {job_id}] clip tally skipped: {exc}")
             detail = "All clips ready"
+        # An explicit count is a quota. When the candidate list is exhausted
+        # (or every replacement failed), the honest verdict is failed/short,
+        # never `complete` with 8 of 10 clips. Auto counts are ceilings, so
+        # they keep the normal completion path.
+        explicit_count = bool((job.get("options") or {}).get("maxClips"))
+        requested = int(
+            job.get("requestedClipTarget") or job.get("requestedClips") or counts["done"]
+        )
+        short = bool(explicit_count and requested > counts["done"])
+        if short:
+            detail = f"{counts['done']} of {requested} clips ready"
+            if counts["failed"]:
+                detail += f", {counts['failed']} failed"
+            detail += " — Retry to render the rest."
+        stage = "complete" if not short else "failed"
+        short_error = None
+        if short:
+            short_error = str(
+                job.get("unmetReason")
+                or f"Only {counts['done']} of {requested} requested clips were ready."
+            )[:700]
         # Every fresh deliverable gets a public page token at completion, so the
         # card can share immediately instead of waiting for a Copy tap. The
         # public route still enforces expiry/revocation on every request.
@@ -3164,15 +3185,18 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 - sharing must not block completion
             logger.warning(f"[job {job_id}] share token mint skipped: {exc}")
         job.update({
-            "stage": "complete",
-            "status": "complete",
-            "progress": 100.0,
+            "stage": stage,
+            "status": stage,
+            "progress": (
+                100.0 if not short else round(100.0 * counts["done"] / max(1, requested), 1)
+            ),
             "progressDetail": detail,
-            "completedAt": now_ms,
+            "completedAt": now_ms if not short else job.get("completedAt"),
+            "failedAt": now_ms if short else None,
             "finishedAt": now_ms,
             "isTerminal": True,
             "clipCount": counts["done"],
-            "requestedClips": int(job.get("requestedClips") or job.get("requestedClipTarget") or counts["done"]),
+            "requestedClips": requested,
             "readyClips": counts["done"],
             "failedClips": counts["failed"],
             "renderFailures": counts["failed"],
@@ -3186,12 +3210,16 @@ class Pipeline:
             # finished batch back in the queue on the next restart.
             "interrupted": False,
             "interruptReason": None,
-            "error": None,
-            "errorDetail": None,
+            "error": short_error,
+            "errorDetail": short_error,
         })
         self.store.write_job(job)
-        self.store.append_job_log(job_id, f"COMPLETE in {elapsed_sec:.1f}s")
-        logger.info(f"[job {job_id}] COMPLETE in {elapsed_sec:.1f}s")
+        if short:
+            self.store.append_job_log(job_id, f"STOPPED SHORT in {elapsed_sec:.1f}s — {detail}")
+            logger.warning(f"[job {job_id}] STOPPED SHORT in {elapsed_sec:.1f}s — {detail}")
+        else:
+            self.store.append_job_log(job_id, f"COMPLETE in {elapsed_sec:.1f}s")
+            logger.info(f"[job {job_id}] COMPLETE in {elapsed_sec:.1f}s")
         # The batch is done, so its media is dead weight: push it to the bucket
         # and drop the local copies now. Deferring this to the watchdog is what
         # left a finished 445 MB source sitting on a 4 GB disk until the next

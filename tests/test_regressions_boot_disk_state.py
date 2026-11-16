@@ -359,6 +359,47 @@ def test_finish_writes_one_terminal_document(env, monkeypatch):
     assert doc["progressDetail"] == "All clips ready"
 
 
+def test_an_explicit_quota_cannot_finish_short(env):
+    """10/20/30 is a quota: a short delivery must stay failed, not complete."""
+    from app import invariants, task
+
+    settings, store = env
+    job = _job(
+        store,
+        stage="exporting",
+        options={"maxClips": 3, "minClipSec": None, "maxClipSec": None},
+        requestedClipTarget=3,
+        requestedClips=3,
+        unmetReason="only 2 candidate moment(s) were available for 3 requested",
+    )
+    _clip(store, job["_id"], 0)
+    _clip(store, job["_id"], 1)
+
+    class FakeRunner:
+        _stage_status: dict = {}
+
+        def __init__(self):
+            self.store = store
+            self.settings = settings
+
+        def _log(self, *a, **k):
+            return None
+
+    task.Pipeline._finish(FakeRunner(), job["_id"], 12.0)  # type: ignore[arg-type]
+    doc = store.get_job(job["_id"])
+
+    assert doc["stage"] == "failed"
+    assert doc["status"] == "failed"
+    assert doc["isTerminal"] is True
+    assert doc["clipCount"] == 2
+    assert "2 of 3" in doc["progressDetail"]
+    assert "candidate moment" in (doc["error"] or "")
+
+    invariants.check_and_repair(store, settings.app.paths)
+    again = store.get_job(job["_id"])
+    assert again["stage"] == "failed", "the repair pass must not promote a short quota"
+
+
 def test_upload_route_rejects_an_unknown_container(env, monkeypatch):
     """An extension-less file used to be stored as `.mp4` and failed in ffmpeg."""
     from fastapi.testclient import TestClient
@@ -589,8 +630,6 @@ def test_retry_clears_the_previous_terminal_verdict(env, monkeypatch):
     `failed` while its ffmpeg child was still rendering (and left the source
     deletion path armed).
     """
-    from types import SimpleNamespace
-
     from fastapi.testclient import TestClient
 
     import app.main as main_mod
