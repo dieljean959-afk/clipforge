@@ -49,6 +49,13 @@ Do not expose the app publicly yet: this checkout has **no authentication**
 (see `RELOCATION_BRIEF.md` §12). Internal/private access only until auth is
 added.
 
+If this is a cloud-workspace preview and every route returns
+`401 ClipForge API is tailnet-only`, the preview proxy connects from a
+non-loopback address. For preview only, set `TAILSCALE_ONLY=false`, restart
+through the managed process, and do not press Publish. Re-enable it before any
+shared deployment. See `migration/DESTINATION_AGENT_PROMPT.md` for the exact
+one-paste finish steps.
+
 ## 2. Install and boot
 
 On the destination:

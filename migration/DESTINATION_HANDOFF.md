@@ -79,6 +79,17 @@ use it.
 
 Use one of these:
 
+### Cloud-workspace preview
+
+If this is running in a Freebuff/cloud workspace, the preview proxy connects
+from a non-loopback address. With `TAILSCALE_ONLY=true` every route—including
+the dashboard—returns `401 ClipForge API is tailnet-only`. For preview access
+only, set `TAILSCALE_ONLY=false` in the workspace's Keys/API keys panel (or the
+runtime env file), restart through the managed process, and keep the existing
+bind. Do not press **Publish** and do not expose port 8000 directly: the app has
+no login, so the preview link is effectively an admin link. Re-enable
+`TAILSCALE_ONLY=true` when previewing is finished.
+
 **A. Tailscale only (recommended, built in):**
 
 ```bash
@@ -87,8 +98,9 @@ sudo tailscale up
 sudo tailscale serve --bg 8000
 ```
 
-Keep `TAILSCALE_ONLY=true` and bind uvicorn to `127.0.0.1` (see Step 7).
-Tailnet devices reach the app; the public internet gets 401.
+For Tailscale access, keep `TAILSCALE_ONLY=true` and bind uvicorn to
+`127.0.0.1` (see Step 7). Tailnet devices reach the app; the public internet
+gets 401.
 
 **B. SSH tunnel only:**
 
