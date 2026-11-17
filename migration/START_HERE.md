@@ -11,10 +11,12 @@ It deliberately excludes secrets, job data, media, model caches,
 ## Read in this order
 
 1. `MIGRATION_PROMPT.md` — paste this into the destination coding agent.
-2. `README.md` — setup and feature documentation.
-3. `RELOCATION_BRIEF.md` — hosting/security requirements.
-4. `deploy/RUNBOOK.md` and `deploy/clipforge.service` — always-on VM setup.
-5. `LOCKED_SPEC.md` — caption/layout behavior that must not change.
+2. `DESTINATION_HANDOFF.md` — exact env vars, safe no-login access, boot and
+   health checks.
+3. `README.md` — setup and feature documentation.
+4. `RELOCATION_BRIEF.md` — hosting/security requirements.
+5. `deploy/RUNBOOK.md` and `deploy/clipforge.service` — always-on VM setup.
+6. `LOCKED_SPEC.md` — caption/layout behavior that must not change.
 
 ## What this actually is
 
