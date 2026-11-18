@@ -919,6 +919,7 @@ class InProcessWorker:
         # `FAILED: The worker exited cleanly (code 0)`. The child's own
         # completion line is the proof of work; a 0 exit plus that line is a
         # success, whatever the document looked like a millisecond earlier.
+        logged_verdict = self.terminal_verdict_from_logs((job or {}).get("logs"))
         if stage not in {"complete", "failed", "paused"} and self.completed_despite_exit_code(rc, job.get("logs")):
             done_ms = int(time.time() * 1000)
 
@@ -938,6 +939,17 @@ class InProcessWorker:
             logger.warning(
                 f"[worker] job {job_id} exited 0 after COMPLETE — kept as complete "
                 f"even though the document still showed '{stage}'"
+            )
+            return
+        # The pipeline writes its own verdict as its last log line. A progress
+        # writer can move the document back to a running stage after `_finish`;
+        # in that case the exit handler must not replace the pipeline's
+        # "STOPPED SHORT" or failure with a generic "exited cleanly" crash.
+        # Only a 0 exit plus an actual completion line is a success.
+        if stage not in {"complete", "failed", "paused"} and logged_verdict in {"stopped_short", "failed"}:
+            logger.warning(
+                f"[worker] job {job_id} exited {rc} after its own {logged_verdict} "
+                f"verdict — keeping that verdict instead of writing a crash"
             )
             return
         if self._stalled_job == job_id or job_id in self._stalled_jobs:
@@ -1040,6 +1052,24 @@ class InProcessWorker:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def terminal_verdict_from_logs(logs: Any) -> str:
+        """The pipeline's newest terminal verdict, or "" if it has none.
+
+        Return one of ``complete``, ``stopped_short`` or ``failed``. The LAST
+        verdict wins: an interrupted retry can carry a stale failure from an
+        earlier attempt, and treating the first one found would resurrect it.
+        """
+        for line in reversed(list(logs or [])[-80:]):
+            text = str(line)
+            if "STOPPED SHORT in" in text:
+                return "stopped_short"
+            if "COMPLETE in" in text or "All clips ready" in text:
+                return "complete"
+            if re.search(r"\bFAILED(?: at [A-Za-z]+)?: ", text):
+                return "failed"
+        return ""
+
+    @staticmethod
     def completed_despite_exit_code(rc: int | None, logs: Any) -> bool:
         """Did this child finish the batch even though the doc looks unfinished?
 
@@ -1048,15 +1078,9 @@ class InProcessWorker:
         the supervisor's read after the exit can see the previous stage. Exit 0
         plus the child's own completion line is proof of work; treating it as
         "exited before the job was done" turned a finished 13-clip batch into a
-        failure.
+        failure. A `STOPPED SHORT` line is a failed verdict, never a success.
         """
-        if rc != 0:
-            return False
-        for line in list(logs or [])[-40:]:
-            text = str(line)
-            if "COMPLETE in" in text or "All clips ready" in text:
-                return True
-        return False
+        return rc == 0 and InProcessWorker.terminal_verdict_from_logs(logs) == "complete"
 
     @staticmethod
     def has_signal_failure(job: dict[str, Any]) -> bool:

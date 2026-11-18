@@ -18,7 +18,6 @@ import pytest
 
 from app.worker import InProcessWorker, death_signal
 
-
 # --- both conventions mean the same thing --------------------------------
 
 
@@ -172,3 +171,26 @@ def test_a_killed_child_is_not_rescued_by_an_old_completion_line():
 
 def test_the_all_clips_ready_detail_also_counts():
     assert InProcessWorker.completed_despite_exit_code(0, ["All clips ready"])
+
+
+def test_stopped_short_is_a_verdict_but_not_a_success():
+    logs = ["Rendering clip 4 of 4", "STOPPED SHORT in 12.0s — 4 of 5 clips ready"]
+    assert InProcessWorker.terminal_verdict_from_logs(logs) == "stopped_short"
+    assert not InProcessWorker.completed_despite_exit_code(0, logs)
+
+
+def test_the_newest_terminal_log_line_wins():
+    assert InProcessWorker.terminal_verdict_from_logs([
+        "FAILED at exporting: an older attempt",
+        "STOPPED SHORT in 12.0s — 4 of 5 clips ready",
+    ]) == "stopped_short"
+    assert InProcessWorker.terminal_verdict_from_logs([
+        "COMPLETE in 90.0s",
+        "FAILED at exporting: a later crash",
+    ]) == "failed"
+
+
+def test_a_failed_at_line_is_a_terminal_verdict():
+    logs = ["FAILED at grabbing: This site asked this server to sign in"]
+    assert InProcessWorker.terminal_verdict_from_logs(logs) == "failed"
+    assert not InProcessWorker.completed_despite_exit_code(0, logs)

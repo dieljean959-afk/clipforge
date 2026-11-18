@@ -359,6 +359,54 @@ def test_finish_writes_one_terminal_document(env, monkeypatch):
     assert doc["progressDetail"] == "All clips ready"
 
 
+def test_a_late_progress_tick_cannot_overwrite_a_short_verdict(env):
+    """The last clip's tick used to replace "4 of 5" and fake a crash."""
+    from app import task
+
+    settings, store = env
+    job = _job(
+        store,
+        stage="exporting",
+        options={"maxClips": 5, "minClipSec": None, "maxClipSec": None},
+        requestedClipTarget=5,
+        requestedClips=5,
+    )
+    for i in range(4):
+        _clip(store, job["_id"], i)
+
+    class FakeRunner:
+        _stage_status: dict = {}
+
+        def __init__(self):
+            self.store = store
+            self.settings = settings
+
+        def _log(self, *a, **k):
+            return None
+
+    runner = FakeRunner()
+    task.Pipeline._finish(runner, job["_id"], 12.0)  # type: ignore[arg-type]
+    doc = store.get_job(job["_id"])
+    assert doc["stage"] == "failed" and doc["isTerminal"] is True
+    assert "4 of 5" in doc["progressDetail"]
+
+    # The child's final render tick arrives after the verdict. It must be a
+    # no-op, not turn the job back into a running one.
+    task.Pipeline._apply_progress(
+        runner, job["_id"], doc, "exporting", 1.0,
+        "Rendering clip 4 of 4", int(time.time() * 1000), 1.0,
+    )  # type: ignore[arg-type]
+    after = store.get_job(job["_id"])
+    assert after["stage"] == "failed"
+    assert after["status"] == "failed"
+    assert "4 of 5" in after["progressDetail"]
+    assert after["isTerminal"] is True
+
+    # A second finish must not recompute or overwrite the same verdict.
+    task.Pipeline._finish(runner, job["_id"], 99.0)  # type: ignore[arg-type]
+    assert store.get_job(job["_id"])["progressDetail"] == after["progressDetail"]
+
+
 def test_an_explicit_quota_cannot_finish_short(env):
     """10/20/30 is a quota: a short delivery must stay failed, not complete."""
     from app import invariants, task

@@ -605,6 +605,22 @@ class Pipeline:
         prior_eta_sec: float | None = None,
     ) -> None:
         """Mutate `job` with this tick's progress/ETA (caller holds the lock)."""
+        # A late tick from the last clip must not overwrite a verdict that
+        # `_finish` already wrote. Observed on an explicit 5-clip job: the
+        # "4 of 5 clips ready" failure was replaced by "Rendering clip 4 of 4",
+        # which made the exit handler see a running job and append a crash.
+        # `isTerminal`/`finishedAt` cover the race even if another writer moved
+        # the stage back to a running name; the stage check covers older docs.
+        if (
+            job.get("isTerminal")
+            or job.get("finishedAt")
+            or str(job.get("stage") or "") in {"complete", "failed", "paused", "cancelled"}
+        ):
+            logger.debug(
+                f"[job {job_id}] ignored progress after terminal verdict "
+                f"({job.get('stage')}): {detail}"
+            )
+            return
         # `status` was written once at creation (`queued`) and never updated, so
         # a job that was transcribing still said "status: queued" in its own
         # document. Every view that trusted it (or derived a stage from it) then
@@ -3118,6 +3134,10 @@ class Pipeline:
     def _finish(self, job_id: str, elapsed_sec: float) -> None:
         job = self.store.get_job(job_id)
         if job is None:
+            return
+        # A verdict is written once. A second call (or a retry that still has
+        # the old terminal flags) must not recompute and overwrite it.
+        if job.get("isTerminal") or job.get("finishedAt"):
             return
         now_ms = int(time.time() * 1000)
         # A terminal verdict must be written ONCE, here: the document used to be

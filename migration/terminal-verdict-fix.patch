@@ -1,0 +1,201 @@
+--- a/app/task.py
++++ b/app/task.py
+@@ -605,6 +605,22 @@
+         prior_eta_sec: float | None = None,
+     ) -> None:
+         """Mutate `job` with this tick's progress/ETA (caller holds the lock)."""
++        # A late tick from the last clip must not overwrite a verdict that
++        # `_finish` already wrote. Observed on an explicit 5-clip job: the
++        # "4 of 5 clips ready" failure was replaced by "Rendering clip 4 of 4",
++        # which made the exit handler see a running job and append a crash.
++        # `isTerminal`/`finishedAt` cover the race even if another writer moved
++        # the stage back to a running name; the stage check covers older docs.
++        if (
++            job.get("isTerminal")
++            or job.get("finishedAt")
++            or str(job.get("stage") or "") in {"complete", "failed", "paused", "cancelled"}
++        ):
++            logger.debug(
++                f"[job {job_id}] ignored progress after terminal verdict "
++                f"({job.get('stage')}): {detail}"
++            )
++            return
+         # `status` was written once at creation (`queued`) and never updated, so
+         # a job that was transcribing still said "status: queued" in its own
+         # document. Every view that trusted it (or derived a stage from it) then
+@@ -3119,6 +3135,10 @@
+         job = self.store.get_job(job_id)
+         if job is None:
+             return
++        # A verdict is written once. A second call (or a retry that still has
++        # the old terminal flags) must not recompute and overwrite it.
++        if job.get("isTerminal") or job.get("finishedAt"):
++            return
+         now_ms = int(time.time() * 1000)
+         # A terminal verdict must be written ONCE, here: the document used to be
+         # saved as stage=complete with isTerminal=False and finishedAt=None, so
+--- a/app/worker.py
++++ b/app/worker.py
+@@ -919,6 +919,7 @@
+         # `FAILED: The worker exited cleanly (code 0)`. The child's own
+         # completion line is the proof of work; a 0 exit plus that line is a
+         # success, whatever the document looked like a millisecond earlier.
++        logged_verdict = self.terminal_verdict_from_logs((job or {}).get("logs"))
+         if stage not in {"complete", "failed", "paused"} and self.completed_despite_exit_code(rc, job.get("logs")):
+             done_ms = int(time.time() * 1000)
+ 
+@@ -940,6 +941,17 @@
+                 f"even though the document still showed '{stage}'"
+             )
+             return
++        # The pipeline writes its own verdict as its last log line. A progress
++        # writer can move the document back to a running stage after `_finish`;
++        # in that case the exit handler must not replace the pipeline's
++        # "STOPPED SHORT" or failure with a generic "exited cleanly" crash.
++        # Only a 0 exit plus an actual completion line is a success.
++        if stage not in {"complete", "failed", "paused"} and logged_verdict in {"stopped_short", "failed"}:
++            logger.warning(
++                f"[worker] job {job_id} exited {rc} after its own {logged_verdict} "
++                f"verdict — keeping that verdict instead of writing a crash"
++            )
++            return
+         if self._stalled_job == job_id or job_id in self._stalled_jobs:
+             # watchdog already failed it with a specific reason
+             return
+@@ -1040,6 +1052,24 @@
+     # ------------------------------------------------------------------
+ 
+     @staticmethod
++    def terminal_verdict_from_logs(logs: Any) -> str:
++        """The pipeline's newest terminal verdict, or "" if it has none.
++
++        Return one of ``complete``, ``stopped_short`` or ``failed``. The LAST
++        verdict wins: an interrupted retry can carry a stale failure from an
++        earlier attempt, and treating the first one found would resurrect it.
++        """
++        for line in reversed(list(logs or [])[-80:]):
++            text = str(line)
++            if "STOPPED SHORT in" in text:
++                return "stopped_short"
++            if "COMPLETE in" in text or "All clips ready" in text:
++                return "complete"
++            if re.search(r"\bFAILED(?: at [A-Za-z]+)?: ", text):
++                return "failed"
++        return ""
++
++    @staticmethod
+     def completed_despite_exit_code(rc: int | None, logs: Any) -> bool:
+         """Did this child finish the batch even though the doc looks unfinished?
+ 
+@@ -1048,15 +1078,9 @@
+         the supervisor's read after the exit can see the previous stage. Exit 0
+         plus the child's own completion line is proof of work; treating it as
+         "exited before the job was done" turned a finished 13-clip batch into a
+-        failure.
++        failure. A `STOPPED SHORT` line is a failed verdict, never a success.
+         """
+-        if rc != 0:
+-            return False
+-        for line in list(logs or [])[-40:]:
+-            text = str(line)
+-            if "COMPLETE in" in text or "All clips ready" in text:
+-                return True
+-        return False
++        return rc == 0 and InProcessWorker.terminal_verdict_from_logs(logs) == "complete"
+ 
+     @staticmethod
+     def has_signal_failure(job: dict[str, Any]) -> bool:
+--- a/tests/test_worker_interrupts.py
++++ b/tests/test_worker_interrupts.py
+@@ -18,7 +18,6 @@
+ 
+ from app.worker import InProcessWorker, death_signal
+ 
+-
+ # --- both conventions mean the same thing --------------------------------
+ 
+ 
+@@ -172,3 +171,26 @@
+ 
+ def test_the_all_clips_ready_detail_also_counts():
+     assert InProcessWorker.completed_despite_exit_code(0, ["All clips ready"])
++
++
++def test_stopped_short_is_a_verdict_but_not_a_success():
++    logs = ["Rendering clip 4 of 4", "STOPPED SHORT in 12.0s — 4 of 5 clips ready"]
++    assert InProcessWorker.terminal_verdict_from_logs(logs) == "stopped_short"
++    assert not InProcessWorker.completed_despite_exit_code(0, logs)
++
++
++def test_the_newest_terminal_log_line_wins():
++    assert InProcessWorker.terminal_verdict_from_logs([
++        "FAILED at exporting: an older attempt",
++        "STOPPED SHORT in 12.0s — 4 of 5 clips ready",
++    ]) == "stopped_short"
++    assert InProcessWorker.terminal_verdict_from_logs([
++        "COMPLETE in 90.0s",
++        "FAILED at exporting: a later crash",
++    ]) == "failed"
++
++
++def test_a_failed_at_line_is_a_terminal_verdict():
++    logs = ["FAILED at grabbing: This site asked this server to sign in"]
++    assert InProcessWorker.terminal_verdict_from_logs(logs) == "failed"
++    assert not InProcessWorker.completed_despite_exit_code(0, logs)
+--- a/tests/test_regressions_boot_disk_state.py
++++ b/tests/test_regressions_boot_disk_state.py
+@@ -359,6 +359,54 @@
+     assert doc["progressDetail"] == "All clips ready"
+ 
+ 
++def test_a_late_progress_tick_cannot_overwrite_a_short_verdict(env):
++    """The last clip's tick used to replace "4 of 5" and fake a crash."""
++    from app import task
++
++    settings, store = env
++    job = _job(
++        store,
++        stage="exporting",
++        options={"maxClips": 5, "minClipSec": None, "maxClipSec": None},
++        requestedClipTarget=5,
++        requestedClips=5,
++    )
++    for i in range(4):
++        _clip(store, job["_id"], i)
++
++    class FakeRunner:
++        _stage_status: dict = {}
++
++        def __init__(self):
++            self.store = store
++            self.settings = settings
++
++        def _log(self, *a, **k):
++            return None
++
++    runner = FakeRunner()
++    task.Pipeline._finish(runner, job["_id"], 12.0)  # type: ignore[arg-type]
++    doc = store.get_job(job["_id"])
++    assert doc["stage"] == "failed" and doc["isTerminal"] is True
++    assert "4 of 5" in doc["progressDetail"]
++
++    # The child's final render tick arrives after the verdict. It must be a
++    # no-op, not turn the job back into a running one.
++    task.Pipeline._apply_progress(
++        runner, job["_id"], doc, "exporting", 1.0,
++        "Rendering clip 4 of 4", int(time.time() * 1000), 1.0,
++    )  # type: ignore[arg-type]
++    after = store.get_job(job["_id"])
++    assert after["stage"] == "failed"
++    assert after["status"] == "failed"
++    assert "4 of 5" in after["progressDetail"]
++    assert after["isTerminal"] is True
++
++    # A second finish must not recompute or overwrite the same verdict.
++    task.Pipeline._finish(runner, job["_id"], 99.0)  # type: ignore[arg-type]
++    assert store.get_job(job["_id"])["progressDetail"] == after["progressDetail"]
++
++
+ def test_an_explicit_quota_cannot_finish_short(env):
+     """10/20/30 is a quota: a short delivery must stay failed, not complete."""
+     from app import invariants, task

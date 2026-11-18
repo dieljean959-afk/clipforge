@@ -20,6 +20,20 @@ It deliberately excludes secrets, job data, media, model caches,
 6. `deploy/RUNBOOK.md` and `deploy/clipforge.service` — always-on VM setup.
 7. `LOCKED_SPEC.md` — caption/layout behavior that must not change.
 
+## If the destination lost its workspace
+
+Import `clipforge-full-site-v3.zip`: it contains the terminal-verdict fix for
+the 4-of-5 short job. If only the older v2 archive is available, extract it and
+apply the included patch before running anything:
+
+```bash
+cd clipforge
+patch -p1 < migration/terminal-verdict-fix.patch
+```
+
+The patch touches `app/task.py`, `app/worker.py`, and their two regression test
+files. It applies cleanly to the v2 archive; the focused tests pass afterward.
+
 ## What this actually is
 
 - Backend: Python 3.11, FastAPI, uvicorn.
@@ -65,7 +79,7 @@ curl -fsS http://127.0.0.1:8000/api/status
 .venv/bin/python tools/doctor.py
 ```
 
-Baseline in this workspace: **418 tests passed**, TypeScript clean.
+Baseline in this workspace: **422 tests passed**, TypeScript clean.
 
 Then run one real URL job with an explicit count; confirm the requested number
 of `done` clips, playable `/api/clips/{id}/video`, and no `mediaError`.
@@ -113,6 +127,9 @@ convex/              generated client only, not a backend
 - Clip projection preserves the requested count and does not resurrect deleted
   clip documents (`app/store.py`).
 - Successful renders clear stale `mediaError`/`failedAt`.
+- A late progress tick cannot overwrite a terminal verdict. The worker honors
+  the pipeline's `STOPPED SHORT in` / `FAILED at` log line instead of replacing
+  a short 4-of-5 result with a generic crash (`app/task.py`, `app/worker.py`).
 
 ## Locked files — do not edit
 

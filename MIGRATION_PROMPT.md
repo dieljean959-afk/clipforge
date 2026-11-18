@@ -122,6 +122,12 @@ Do not revert or “simplify” these while relocating:
    overwrite the requested count with the candidate count.
 5. **Stale errors:** a successful render clears `mediaError`/`failedAt`; do not
    leave a red error on a ready clip.
+6. **Terminal verdict wins:** a late "Rendering clip N of N" progress tick must
+   not overwrite a verdict already written by `_finish` (this made a 4-of-5
+   short batch look like a crash). `_apply_progress` ignores ticks after
+   `isTerminal`/`finishedAt`, and the worker treats the pipeline's own
+   `STOPPED SHORT in` / `FAILED at` log line as a verdict instead of appending a
+   generic crash.
 6. **Unchanged look:** caption style/rendering are locked. Do not modify:
    `app/caption_presets.py`, `app/caption_style.py`, `app/subtitle.py`,
    `app/titlebar.py`, `app/memguard.py`,
@@ -138,7 +144,7 @@ bun tsc -b --noEmit
 .venv/bin/ruff check app/task.py app/invariants.py app/audiosync.py app/store.py tests/test_regressions_boot_disk_state.py
 ```
 
-Expected current baseline: **418 passed**; TypeScript OK; focused ruff clean.
+Expected current baseline: **422 passed**; TypeScript OK; focused ruff clean.
 The repository-wide `ruff check app tools tests` has pre-existing lint noise in
 standalone drill scripts; do not treat that as a migration failure or use it to
 justify unrelated rewrites.
