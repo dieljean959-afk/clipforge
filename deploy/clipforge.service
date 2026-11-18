@@ -18,7 +18,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=clipforge
+Group=clipforge
 WorkingDirectory=/opt/clipforge
+EnvironmentFile=-/etc/clipforge/env
 Environment=CLIPFORGE_DATA_DIR=/var/lib/clipforge
 ExecStart=/opt/clipforge/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure

@@ -36,6 +36,9 @@ from loguru import logger
 RENDERED_STATES = frozenset({"done", "complete", "rendered", "uploaded"})
 #: renderState values that mean "this clip will not render without a retry".
 FAILED_STATES = frozenset({"failed", "error"})
+#: States that still describe work the export has not attempted. Only these are
+#: surplus candidates once an explicit quota has already been met.
+PENDING_STATES = frozenset({"pending", "queued", "waiting"})
 
 _REPAIR_LOCK = threading.Lock()
 _LAST_RUN: dict[str, Any] = {"at": 0.0, "report": None}
@@ -164,6 +167,19 @@ def _projection_stale(job: dict[str, Any], clips: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _requested_target(job: dict[str, Any]) -> int:
+    """The explicit quota for this job, or 0 when the count was only a ceiling."""
+    if not (job.get("options") or {}).get("maxClips"):
+        return 0
+    return int(job.get("requestedClipTarget") or job.get("requestedClips") or 0)
+
+
+def _quota_met(job: dict[str, Any], counts: dict[str, int]) -> bool:
+    """True when the user's explicit clip count has already been delivered."""
+    requested = _requested_target(job)
+    return bool(requested and counts["done"] >= requested)
+
+
 def _explicit_short(job: dict[str, Any], done: int) -> bool:
     """An explicit quota that did not deliver every requested clip.
 
@@ -171,10 +187,52 @@ def _explicit_short(job: dict[str, Any], done: int) -> bool:
     counts are quotas, and a short delivery must stay failed/retryable rather
     than be repaired back to `complete`.
     """
-    if not (job.get("options") or {}).get("maxClips"):
-        return False
-    requested = int(job.get("requestedClipTarget") or job.get("requestedClips") or 0)
+    requested = _requested_target(job)
     return bool(requested and done < requested)
+
+
+def prune_surplus_candidates(
+    store: Any,
+    job: dict[str, Any],
+    clips: list[dict[str, Any]],
+    counts: dict[str, int],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Drop unused replacement candidates after an explicit quota is met.
+
+    Detection deliberately returns more candidates than requested so a failed
+    render has a next moment to try. Those extra candidates are not unfinished
+    work: once ``done`` reaches the requested count, the batch is complete and
+    the pending extras must not be counted as "never rendered". Keeping them
+    also made the repair pass reopen a delivered batch as failed, which is the
+    observed 15-of-15 job that showed "5 clips never rendered".
+    """
+    requested = _requested_target(job)
+    if not requested or counts["done"] < requested or not counts.get("pending"):
+        return clips, counts
+    keep: list[dict[str, Any]] = []
+    drop_ids: list[str] = []
+    for clip in clips:
+        cid = str(clip.get("_id") or "")
+        if _clip_state(clip) in PENDING_STATES:
+            if cid:
+                drop_ids.append(cid)
+            continue
+        keep.append(clip)
+    if not drop_ids:
+        return clips, counts
+    keep_ids = [str(c.get("_id")) for c in keep if c.get("_id")]
+    try:
+        sync = getattr(store, "sync_clip_docs", None)
+        if sync is not None:
+            sync(str(job.get("_id") or ""), [{"clipId": cid} for cid in keep_ids])
+    except Exception as exc:  # noqa: BLE001 - pruning must not block the verdict
+        logger.warning(f"[invariants] could not prune surplus candidates: {exc}")
+    job["clipIds"] = keep_ids
+    logger.info(
+        f"[invariants] job {job.get('_id')} met its quota of {requested}; "
+        f"dropped {len(drop_ids)} unused candidate(s)"
+    )
+    return keep, _counts(keep)
 
 
 def _needs_repair(
@@ -193,6 +251,11 @@ def _needs_repair(
     if counts["done"] and int(job.get("clipCount") or 0) < counts["done"]:
         broken.append("clipCount-below-rendered")
     stage = str(job.get("stage") or "")
+    quota_met = _quota_met(job, counts)
+    # Replacement candidates beyond a met quota are not unfinished work. Flag
+    # them so the repair pass trims them instead of reporting a false shortfall.
+    if quota_met and counts.get("pending", 0) > 0:
+        broken.append("surplus-pending-candidates")
     # Rendered clips + PENDING ones is an interrupted export, not a finished
     # batch: leaving it `failed` is the honest, retryable state.
     if (
@@ -215,7 +278,7 @@ def _needs_repair(
     # A finished export drops every replacement candidate and leaves only the
     # clips it attempted. Pending documents on a `complete` batch therefore
     # mean the stage aborted mid-loop, not that the batch is done.
-    if stage == "complete" and counts.get("pending", 0) > 0:
+    if stage == "complete" and counts.get("pending", 0) > 0 and not quota_met:
         broken.append("complete-with-pending-clips")
     # A terminal batch without a finish stamp reads as "still running" to every
     # consumer that sorts or times batches by when they ended.
@@ -267,9 +330,14 @@ def repair_job(
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     jid = str(job.get("_id") or "")
     clips = _clips_for(store, job)
+    counts = _counts(clips)
+    # An explicit quota that already has every requested clip is complete,
+    # regardless of how many replacement candidates detection supplied.
+    clips, counts = prune_surplus_candidates(store, job, clips, counts)
     label = partial_success_label(counts)
     done, failed, pending = counts["done"], counts["failed"], counts["pending"]
     total = counts["total"]
+    requested = _requested_target(job)
     # A stage that died mid-export leaves untouched clips. Those must not be
     # counted as a finished batch just because one clip made it: job
     # 65eb603b rendered clip 1, then every export raised TypeError and the
@@ -283,7 +351,9 @@ def repair_job(
     ordered = sorted(clips, key=lambda c: (int(c.get("order") or 0), str(c.get("_id"))))
     job["clips"] = ordered
     job["clipCount"] = done
-    if total:
+    if requested:
+        job["clipTarget"] = requested
+    elif total:
         job["clipTarget"] = max(int(job.get("clipTarget") or 0), total)
     job["progress"] = 100 if settled else round(100.0 * (done + failed) / total)
     job["progressDetail"] = label + "."

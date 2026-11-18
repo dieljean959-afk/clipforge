@@ -6,6 +6,9 @@ URL, deploy the backend to a host you control. Everything in this file is
 **server-side and therefore BLOCKED from this sandbox** — run it on the target
 host.
 
+For a concrete Oracle Cloud Always Free VM walkthrough (including the
+one-command bootstrap), see [`deploy/oracle/README.md`](oracle/README.md).
+
 ## 1. Host shape
 
 | resource | minimum | why |
@@ -30,8 +33,9 @@ sudo apt-get install -y ffmpeg      # ffprobe comes with it
 
 Secrets go in `/etc/clipforge/env` (`chmod 600`, owner root), **never** in the
 repo: `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, and the S3 credentials
-(`CLIPFORGE_S3_*`). The API only ever reports "key present" — it never logs a
-value.
+(`CLIPFORGE_S3_*`). The unit loads that file with `EnvironmentFile=` and runs
+as the `clipforge` user. The API only ever reports "key present" — it never
+logs a value.
 
 ## 3. Supervise
 

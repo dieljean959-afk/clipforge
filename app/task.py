@@ -3146,6 +3146,12 @@ class Pipeline:
         # that never stopped running.
         counts = {"done": 0, "failed": 0, "pending": 0, "total": 0}
         clips: list[dict[str, Any]] = list(job.get("clips") or [])
+        # An explicit count is a quota. When the candidate list is exhausted
+        # (or every replacement failed), the honest verdict is failed/short,
+        # never `complete` with 8 of 10 clips. Auto counts are ceilings, so
+        # they keep the normal completion path.
+        explicit_count = bool((job.get("options") or {}).get("maxClips"))
+        requested = int(job.get("requestedClipTarget") or job.get("requestedClips") or 0)
         try:
             from app import invariants
 
@@ -3158,6 +3164,20 @@ class Pipeline:
                 key = "done" if state == "done" else ("failed" if state == "failed" else "pending")
                 counts[key] += 1
             counts["total"] = len(clips)
+            if not requested:
+                requested = counts["done"]
+            # Detection supplies extra candidates so a failed render has a
+            # replacement. Once the requested clips are ready those extras are
+            # not unfinished work; drop them before writing the verdict. Without
+            # this, a 15-of-15 batch was saved complete and then reopened as
+            # failed because five unused candidates were still pending.
+            if explicit_count and requested and counts["done"] >= requested and counts["pending"]:
+                clips, counts = invariants.prune_surplus_candidates(
+                    self.store, job, clips, counts
+                )
+                fresh = self.store.get_job(job_id)
+                if fresh is not None:
+                    job = fresh
             detail = (
                 invariants.partial_success_label(counts)
                 if counts["failed"]
@@ -3166,14 +3186,8 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 - completion must still complete
             logger.warning(f"[job {job_id}] clip tally skipped: {exc}")
             detail = "All clips ready"
-        # An explicit count is a quota. When the candidate list is exhausted
-        # (or every replacement failed), the honest verdict is failed/short,
-        # never `complete` with 8 of 10 clips. Auto counts are ceilings, so
-        # they keep the normal completion path.
-        explicit_count = bool((job.get("options") or {}).get("maxClips"))
-        requested = int(
-            job.get("requestedClipTarget") or job.get("requestedClips") or counts["done"]
-        )
+            if not requested:
+                requested = counts["done"]
         short = bool(explicit_count and requested > counts["done"])
         if short:
             detail = f"{counts['done']} of {requested} clips ready"

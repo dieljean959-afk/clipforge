@@ -407,6 +407,96 @@ def test_a_late_progress_tick_cannot_overwrite_a_short_verdict(env):
     assert store.get_job(job["_id"])["progressDetail"] == after["progressDetail"]
 
 
+def test_surplus_candidates_do_not_reopen_a_met_quota(env):
+    """A 15-of-15 batch is complete even if detection supplied 5 extras.
+
+    Observed on job ab944180: 15 clips were ready and 1 attempt failed, but
+    invariants turned the batch into "5 clips never rendered" because the
+    unused replacement candidates were still pending. The explicit quota was
+    already met, so those candidates are surplus, not unfinished work.
+    """
+    settings, store = env
+    job = _job(
+        store,
+        stage="complete",
+        clipCount=15,
+        progress=100,
+        isTerminal=True,
+        completedAt=1,
+        finishedAt=1,
+        options={"maxClips": 15, "minClipSec": None, "maxClipSec": None},
+        requestedClipTarget=15,
+        requestedClips=15,
+    )
+    for i in range(15):
+        _clip(store, job["_id"], i)
+    _clip(store, job["_id"], 15, state="failed", video=False)
+    pending = [
+        _clip(store, job["_id"], i, state="pending", video=False)
+        for i in range(16, 21)
+    ]
+
+    report = invariants.check_and_repair(store, settings.app.paths)
+
+    assert report["repaired"] == 1
+    got = store.get_job(job["_id"])
+    assert got["stage"] == "complete"
+    assert got["status"] == "complete"
+    assert got["progress"] == 100
+    assert got["clipCount"] == 15
+    assert got["clipTarget"] == 15
+    assert got["progressDetail"] == "15 clips ready, 1 failed."
+    assert got["error"] is None
+    assert "15 clips ready, 1 failed" in (got.get("warning") or "")
+    assert len(got["clips"]) == 16, "only the delivered and attempted clips remain"
+    assert all(c.get("renderState") != "pending" for c in got["clips"])
+    assert all(store.get_clip_doc(cid) is None for cid in pending)
+
+
+def test_finish_drops_surplus_candidates_when_the_quota_is_met(env):
+    """The completion path itself must not preserve unused candidates."""
+    from app import task
+
+    settings, store = env
+    job = _job(
+        store,
+        stage="exporting",
+        options={"maxClips": 2, "minClipSec": None, "maxClipSec": None},
+        requestedClipTarget=2,
+        requestedClips=2,
+    )
+    _clip(store, job["_id"], 0)
+    _clip(store, job["_id"], 1)
+    _clip(store, job["_id"], 2, state="failed", video=False)
+    pending = [
+        _clip(store, job["_id"], i, state="pending", video=False)
+        for i in range(3, 5)
+    ]
+
+    class FakeRunner:
+        _stage_status: dict = {}
+
+        def __init__(self):
+            self.store = store
+            self.settings = settings
+
+        def _log(self, *a, **k):
+            return None
+
+    task.Pipeline._finish(FakeRunner(), job["_id"], 12.0)  # type: ignore[arg-type]
+    doc = store.get_job(job["_id"])
+
+    assert doc["stage"] == "complete"
+    assert doc["clipCount"] == 2
+    assert doc["progress"] == 100
+    assert doc["progressDetail"] == "2 clips ready, 1 failed"
+    assert doc["error"] is None
+    assert doc["failedClips"] == 1
+    assert len(doc["clips"]) == 3
+    assert all(c.get("renderState") != "pending" for c in doc["clips"])
+    assert all(store.get_clip_doc(cid) is None for cid in pending)
+
+
 def test_an_explicit_quota_cannot_finish_short(env):
     """10/20/30 is a quota: a short delivery must stay failed, not complete."""
     from app import invariants, task
