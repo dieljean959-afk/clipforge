@@ -92,7 +92,7 @@ function HeroPhone({ className }: { className?: string }) {
         transition={{ duration: 0.7, ease: "easeOut" }}
         className="relative w-44 overflow-hidden rounded-[1.6rem] border-2 border-primary/40 bg-black neon-glow sm:w-52"
       >
-        <div className="flex aspect-9/16 flex-col justify-between bg-gradient-to-br from-[#123318] via-[#0b1d10] to-black p-3">
+        <div className="flex aspect-9/16 flex-col justify-between bg-gradient-to-br from-[#171d19] via-[#101412] to-black p-3">
           <div className="flex justify-between text-[8px] font-mono text-white/50">
             <span>9:16 · 1080×1920</span>
             <span className="text-primary">1080p max</span>

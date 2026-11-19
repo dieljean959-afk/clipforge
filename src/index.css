@@ -44,83 +44,89 @@
   --animate-neon-pulse: neon-pulse 2.4s ease-in-out infinite;
 }
 
-/* CHANGE VALUES FOR THEME — ClipForge: dark studio palette, neon green #39FF14 accent */
+/* ClipForge: graphite app shell with a mint-green accent, matching the
+   neutral dark UI used across the mobile app. */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.145 0.012 150);
-  --foreground: oklch(0.97 0.008 150);
-  --card: oklch(0.19 0.014 150);
-  --card-foreground: oklch(0.97 0.008 150);
-  --popover: oklch(0.17 0.014 150);
-  --popover-foreground: oklch(0.97 0.008 150);
-  --primary: oklch(0.9 0.28 141);
-  --primary-foreground: oklch(0.14 0.03 141);
-  --secondary: oklch(0.24 0.016 150);
-  --secondary-foreground: oklch(0.97 0.008 150);
-  --muted: oklch(0.23 0.014 150);
-  --muted-foreground: oklch(0.72 0.015 150);
-  --accent: oklch(0.27 0.024 150);
-  --accent-foreground: oklch(0.97 0.008 150);
+  --radius: 0.75rem;
+  --background: oklch(0.145 0.004 255);
+  --foreground: oklch(0.93 0.004 255);
+  --card: oklch(0.19 0.006 255);
+  --card-foreground: oklch(0.93 0.004 255);
+  --popover: oklch(0.175 0.006 255);
+  --popover-foreground: oklch(0.93 0.004 255);
+  --primary: oklch(0.78 0.15 156);
+  --primary-foreground: oklch(0.16 0.03 156);
+  --secondary: oklch(0.235 0.006 255);
+  --secondary-foreground: oklch(0.93 0.004 255);
+  --muted: oklch(0.235 0.006 255);
+  --muted-foreground: oklch(0.68 0.008 255);
+  --accent: oklch(0.26 0.008 255);
+  --accent-foreground: oklch(0.93 0.004 255);
   --destructive: oklch(0.63 0.24 25);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 14%);
-  --ring: oklch(0.83 0.24 141);
-  --chart-1: oklch(0.9 0.28 141);
-  --chart-2: oklch(0.7 0.15 160);
-  --chart-3: oklch(0.6 0.12 190);
-  --chart-4: oklch(0.8 0.18 100);
-  --chart-5: oklch(0.65 0.2 40);
-  --sidebar: oklch(0.17 0.014 150);
-  --sidebar-foreground: oklch(0.97 0.008 150);
-  --sidebar-primary: oklch(0.9 0.28 141);
-  --sidebar-primary-foreground: oklch(0.14 0.03 141);
-  --sidebar-accent: oklch(0.24 0.018 150);
-  --sidebar-accent-foreground: oklch(0.97 0.008 150);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.83 0.24 141);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.78 0.15 156);
+  --chart-1: oklch(0.78 0.15 156);
+  --chart-2: oklch(0.72 0.12 165);
+  --chart-3: oklch(0.66 0.12 225);
+  --chart-4: oklch(0.78 0.14 100);
+  --chart-5: oklch(0.66 0.18 40);
+  --sidebar: oklch(0.17 0.006 255);
+  --sidebar-foreground: oklch(0.93 0.004 255);
+  --sidebar-primary: oklch(0.78 0.15 156);
+  --sidebar-primary-foreground: oklch(0.16 0.03 156);
+  --sidebar-accent: oklch(0.235 0.008 255);
+  --sidebar-accent-foreground: oklch(0.93 0.004 255);
+  --sidebar-border: oklch(1 0 0 / 11%);
+  --sidebar-ring: oklch(0.78 0.15 156);
 }
 
-/* Dark mode uses the same ClipForge palette (the app is dark-first) */
+/* Dark mode uses the same graphite palette (the app is dark-first). */
 .dark {
-  --background: oklch(0.145 0.012 150);
-  --foreground: oklch(0.97 0.008 150);
-  --card: oklch(0.19 0.014 150);
-  --card-foreground: oklch(0.97 0.008 150);
-  --popover: oklch(0.17 0.014 150);
-  --popover-foreground: oklch(0.97 0.008 150);
-  --primary: oklch(0.9 0.28 141);
-  --primary-foreground: oklch(0.14 0.03 141);
-  --secondary: oklch(0.24 0.016 150);
-  --secondary-foreground: oklch(0.97 0.008 150);
-  --muted: oklch(0.23 0.014 150);
-  --muted-foreground: oklch(0.72 0.015 150);
-  --accent: oklch(0.27 0.024 150);
-  --accent-foreground: oklch(0.97 0.008 150);
+  --background: oklch(0.145 0.004 255);
+  --foreground: oklch(0.93 0.004 255);
+  --card: oklch(0.19 0.006 255);
+  --card-foreground: oklch(0.93 0.004 255);
+  --popover: oklch(0.175 0.006 255);
+  --popover-foreground: oklch(0.93 0.004 255);
+  --primary: oklch(0.78 0.15 156);
+  --primary-foreground: oklch(0.16 0.03 156);
+  --secondary: oklch(0.235 0.006 255);
+  --secondary-foreground: oklch(0.93 0.004 255);
+  --muted: oklch(0.235 0.006 255);
+  --muted-foreground: oklch(0.68 0.008 255);
+  --accent: oklch(0.26 0.008 255);
+  --accent-foreground: oklch(0.93 0.004 255);
   --destructive: oklch(0.63 0.24 25);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 14%);
-  --ring: oklch(0.83 0.24 141);
-  --chart-1: oklch(0.9 0.28 141);
-  --chart-2: oklch(0.7 0.15 160);
-  --chart-3: oklch(0.6 0.12 190);
-  --chart-4: oklch(0.8 0.18 100);
-  --chart-5: oklch(0.65 0.2 40);
-  --sidebar: oklch(0.17 0.014 150);
-  --sidebar-foreground: oklch(0.97 0.008 150);
-  --sidebar-primary: oklch(0.9 0.28 141);
-  --sidebar-primary-foreground: oklch(0.14 0.03 141);
-  --sidebar-accent: oklch(0.24 0.018 150);
-  --sidebar-accent-foreground: oklch(0.97 0.008 150);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.83 0.24 141);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.78 0.15 156);
+  --chart-1: oklch(0.78 0.15 156);
+  --chart-2: oklch(0.72 0.12 165);
+  --chart-3: oklch(0.66 0.12 225);
+  --chart-4: oklch(0.78 0.14 100);
+  --chart-5: oklch(0.66 0.18 40);
+  --sidebar: oklch(0.17 0.006 255);
+  --sidebar-foreground: oklch(0.93 0.004 255);
+  --sidebar-primary: oklch(0.78 0.15 156);
+  --sidebar-primary-foreground: oklch(0.16 0.03 156);
+  --sidebar-accent: oklch(0.235 0.008 255);
+  --sidebar-accent-foreground: oklch(0.93 0.004 255);
+  --sidebar-border: oklch(1 0 0 / 11%);
+  --sidebar-ring: oklch(0.78 0.15 156);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 4.5rem;
+  }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
   button:not([disabled]),
   [role="button"]:not([disabled]) {
@@ -129,29 +135,26 @@
 }
 
 @layer utilities {
-  /* Neon text glow for headings and accent labels */
+  /* Restrained green accent — the app shell is graphite, not neon. */
   .neon-text {
-    text-shadow:
-      0 0 8px oklch(0.9 0.28 141 / 0.55),
-      0 0 24px oklch(0.9 0.28 141 / 0.25);
+    text-shadow: 0 0 18px oklch(0.78 0.15 156 / 0.22);
   }
 
-  /* Neon box glow for cards, buttons, active states */
   .neon-glow {
     box-shadow:
-      0 0 12px oklch(0.9 0.28 141 / 0.28),
-      0 0 32px oklch(0.9 0.28 141 / 0.12);
+      0 0 0 1px oklch(0.78 0.15 156 / 0.16),
+      0 10px 34px oklch(0 0 0 / 0.32);
   }
 
   .neon-glow-sm {
-    box-shadow: 0 0 8px oklch(0.9 0.28 141 / 0.3);
+    box-shadow: 0 0 0 1px oklch(0.78 0.15 156 / 0.12);
   }
 
   /* Subtle 9:16 grid backdrop used on landing + dashboard sections */
   .bg-grid {
     background-image:
-      linear-gradient(oklch(1 0 0 / 4%) 1px, transparent 1px),
-      linear-gradient(90deg, oklch(1 0 0 / 4%) 1px, transparent 1px);
+      linear-gradient(oklch(1 0 0 / 3%) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(1 0 0 / 3%) 1px, transparent 1px);
     background-size: 44px 44px;
   }
 

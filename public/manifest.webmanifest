@@ -4,8 +4,8 @@
   "description": "Turn one long video into ten viral 9:16 clips.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0B120C",
-  "theme_color": "#39FF14",
+  "background_color": "#0D0F12",
+  "theme_color": "#0D0F12",
   "icons": [
     {
       "src": "/logo.svg",

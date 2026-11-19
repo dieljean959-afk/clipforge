@@ -11,15 +11,15 @@ export function LogoMark({ className }: { className?: string }) {
       className={cn("size-8", className)}
       aria-hidden="true"
     >
-      <rect width="64" height="64" rx="15" fill="#0B120C" />
-      <circle cx="32" cy="17" r="8" fill="#0B120C" />
-      <circle cx="32" cy="17" r="3" fill="#39FF14" />
+      <rect width="64" height="64" rx="15" fill="#0D0F12" />
+      <circle cx="32" cy="17" r="8" fill="#0D0F12" />
+      <circle cx="32" cy="17" r="3" fill="#5EE08A" />
       <line
         x1="26"
         y1="17"
         x2="12"
         y2="46"
-        stroke="#39FF14"
+        stroke="#5EE08A"
         strokeWidth="9"
         strokeLinecap="round"
       />
@@ -28,14 +28,14 @@ export function LogoMark({ className }: { className?: string }) {
         y1="17"
         x2="52"
         y2="46"
-        stroke="#39FF14"
+        stroke="#5EE08A"
         strokeWidth="9"
         strokeLinecap="round"
       />
-      <circle cx="25" cy="7" r="5" fill="#39FF14" />
-      <circle cx="39" cy="7" r="5" fill="#39FF14" />
-      <circle cx="32" cy="48" r="8" fill="#0B120C" />
-      <circle cx="32" cy="48" r="3" fill="#39FF14" />
+      <circle cx="25" cy="7" r="5" fill="#5EE08A" />
+      <circle cx="39" cy="7" r="5" fill="#5EE08A" />
+      <circle cx="32" cy="48" r="8" fill="#0D0F12" />
+      <circle cx="32" cy="48" r="3" fill="#5EE08A" />
     </svg>
   );
 }

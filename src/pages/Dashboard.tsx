@@ -16,6 +16,7 @@ import { NewJobForm } from "@/components/clipmake/NewJobForm";
 import { JobCard } from "@/components/clipmake/JobCard";
 import { ClipCard, ScoreBadge } from "@/components/clipmake/ClipCard";
 import { ShareReadinessSummary } from "@/components/clipmake/ShareButton";
+import { MobileTabBar } from "@/components/clipmake/MobileTabBar";
 import { ClipPreview } from "@/components/clipmake/ClipPreview";
 import { ExportDialog } from "@/components/clipmake/ExportDialog";
 import { ConfirmDeleteJob } from "@/components/clipmake/ConfirmDeleteJob";
@@ -248,7 +249,7 @@ export default function Dashboard() {
   };
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
+    <main id="dashboard" className="min-h-screen bg-background pb-24 text-foreground md:pb-8">
       {/* top bar */}
       <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4">
@@ -339,7 +340,7 @@ export default function Dashboard() {
             </p>
             <RightsNotice className="mt-5 max-w-lg" compact />
           </div>
-          <div className="min-w-0 rounded-xl border border-primary/30 bg-card p-5 neon-glow-sm">
+          <div id="new-batch" className="min-w-0 scroll-mt-24 rounded-2xl border border-border bg-card p-5">
             <h2 className="flex items-center gap-2 font-bold tracking-tight">
               <Sparkles className="size-4 text-primary" />
               New batch
@@ -482,7 +483,7 @@ export default function Dashboard() {
         )}
 
         {/* completed jobs */}
-        <section className="mt-10">
+        <section id="batches" className="mt-10 scroll-mt-24">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <h2 className="text-lg font-bold tracking-tight">Your batches</h2>
@@ -665,7 +666,7 @@ export default function Dashboard() {
               )}
 
               {/* clip grid */}
-              <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              <div id="clips" className="mt-4 grid scroll-mt-24 grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
                 {clips.map((clip) => (
                   <ClipCard
                     key={clip._id}
@@ -790,6 +791,8 @@ export default function Dashboard() {
           )}
         </DialogContent>
       </Dialog>
+
+      <MobileTabBar />
     </main>
   );
 }
