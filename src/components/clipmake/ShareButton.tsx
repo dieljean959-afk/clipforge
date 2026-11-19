@@ -237,9 +237,6 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
     const publicUrl = token
       ? `${window.location.origin}/s/${token}`
       : clipShareUrl(clip._id, clip.shareId);
-    const fileUrl = token
-      ? `${window.location.origin}/s/${token}.mp4`
-      : publicUrl;
     const file = readyRef.current ? cache.get(clip._id, fileName) : null;
 
     // Some apps drop the text field when a file is attached, so the caption is
@@ -268,62 +265,60 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       return;
     }
 
-    // File not cached yet: fetch it now with high priority and share the
-    // actual MP4 once it arrives. The user asked to send the video, not the
-    // link — so we burn a focused fetch inside the activation window rather
-    // than handing them a link they then have to post manually.
-    if (publicUrl) {
-      let settled = false;
-      const controller = new AbortController();
+    // The bytes are in IndexedDB but may have been evicted from the in-memory
+    // budget (48 MB is deliberately small for a phone). Read them back — a
+    // local read is fast enough to stay inside the activation window — and
+    // send the real MP4. This is the path that used to re-download the file,
+    // hit the 4.5 s ceiling, and show "File download took too long" without
+    // actually sharing anything.
+    if (readyRef.current && cache.canShareFile()) {
       void (async () => {
         try {
-          const res = await fetch(fileUrl, {
-            signal: controller.signal,
-            cache: "force-cache",
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const blob = await res.blob();
-          if (!blob || blob.size === 0) throw new Error("empty response");
-          if (settled) return;
-          settled = true;
-          const file = new File([blob], fileName, { type: "video/mp4" });
-          void nav
-            .share({ files: [file], text: caption, title: clip.title })
-            .catch((err: unknown) => {
-              if (!isAbort(err)) {
-                toast.error("Could not share the video file.", {
-                  description: "Use the MP4 button instead.",
-                });
-              }
-            })
-            .finally(() => setBusy(false));
+          await cache.hydrate(clip._id, fileName);
+          const stored = cache.get(clip._id, fileName);
+          if (stored) {
+            await nav.share({ files: [stored], text: caption, title: clip.title });
+            return;
+          }
         } catch (err) {
-          if (settled) return;
-          settled = true;
-          // Fetch failed or timed out: fall back to the link, which always
-          // works and still lets the user post to social media.
-          void nav
-            .share({ text: caption, url: publicUrl, title: clip.title })
-            .catch((err: unknown) => {
-              if (!isAbort(err)) {
-                toast.error("Could not open the share sheet.", {
-                  description: "Use the MP4 button, or copy the caption.",
-                });
-              }
-            })
-            .finally(() => setBusy(false));
+          if (isAbort(err)) return;
+        } finally {
+          setBusy(false);
+        }
+        if (!publicUrl) {
+          toast.error("Could not prepare this clip to share.", {
+            description: "Use the MP4 button instead.",
+          });
+          return;
+        }
+        try {
+          await nav.share({ text: caption, url: publicUrl, title: clip.title });
+        } catch (err) {
+          if (!isAbort(err)) {
+            toast.error("Could not open the share sheet.", {
+              description: "Use the MP4 button, or copy the caption.",
+            });
+          }
         }
       })();
-      // Give the fetch a hard ceiling inside the activation window. After this
-      // the link path is the only thing left that can still respond.
-      window.setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          controller.abort();
-          setBusy(false);
-          toast.info("File download took too long — sharing the link instead.");
-        }
-      }, 4500);
+      return;
+    }
+
+    // No file is cached on this device yet. Fetching inside the tap now would
+    // spend the transient activation window and end in the old timeout toast.
+    // Share the public clip page immediately instead: it plays the same clip,
+    // and the MP4 button is still one tap away.
+    if (publicUrl) {
+      void nav
+        .share({ text: caption, url: publicUrl, title: clip.title })
+        .catch((err: unknown) => {
+          if (!isAbort(err)) {
+            toast.error("Could not open the share sheet.", {
+              description: "Use the MP4 button, or copy the caption.",
+            });
+          }
+        })
+        .finally(() => setBusy(false));
       return;
     }
 
@@ -338,7 +333,7 @@ export function ShareButton({ clip, rendered }: { clip: ClipDto; rendered: boole
       )
       .finally(() => setBusy(false));
     // --- end of the synchronous window --------------------------------------
-  }, [clip._id, clip.title, clip.hookText, clip.hashtags, fileName, token, shareUrl]);
+  }, [clip._id, clip.title, clip.hookText, clip.hashtags, fileName, token]);
 
   const pct = cache.progressOf(clip._id);
   const showRing = entry.inFlight && !entry.ready;

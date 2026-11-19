@@ -33,10 +33,10 @@ group:
 
 ## 2. Upload the project
 
-From your computer, where you downloaded `clipforge-full-site-v4.zip`:
+From your computer, where you downloaded `clipforge-full-site-v5.zip`:
 
 ```bash
-scp -i /path/to/ssh-key clipforge-full-site-v4.zip ubuntu@<PUBLIC_IP>:/tmp/
+scp -i /path/to/ssh-key clipforge-full-site-v5.zip ubuntu@<PUBLIC_IP>:/tmp/
 ssh -i /path/to/ssh-key ubuntu@<PUBLIC_IP>
 ```
 
@@ -45,7 +45,7 @@ On the VM:
 ```bash
 sudo apt-get update
 sudo apt-get install -y unzip
-sudo unzip -q /tmp/clipforge-full-site-v4.zip -d /opt
+sudo unzip -q /tmp/clipforge-full-site-v5.zip -d /opt
 sudo chown -R ubuntu:ubuntu /opt/clipforge
 cd /opt/clipforge
 ```
