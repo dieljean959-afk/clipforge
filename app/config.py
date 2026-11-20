@@ -1330,6 +1330,13 @@ class HostedConfig:
     #: the disk only ever holds the batch in flight, and this is the number that
     #: keeps a 22-minute source from starving a render on a 4 GB sandbox.
     scratch_cap_mb: int = 1536
+    #: Cap on the audio-only copy pulled to disk for transcription. The audio
+    #: object is deleted the moment the decoder finishes, so this is a guard
+    #: against a pathological file, NOT a working-set budget: an 81-minute
+    #: source is ~57 MB of m4a, and the old hardcoded 40 MB refused it after a
+    #: long fetch had already been paid for. Default 512 MB covers ~12 hours of
+    #: source audio before it ever trips.
+    audio_cap_mb: int = 512
     # Remote worker dispatch: when set (e.g. http://100.x.y.z:8765), the API
     # sends jobs to the user's home machine over Tailscale instead of running
     # the pipeline locally in the sandbox.
@@ -1893,6 +1900,9 @@ def load_config(root: Path = ROOT, quiet: bool = False) -> Settings:
         ),
         scratch_cap_mb=max(256, _env_int(
             "CLIPFORGE_SCRATCH_CAP_MB", h.get("scratch_cap_mb", 1536)
+        )),
+        audio_cap_mb=max(64, _env_int(
+            "CLIPFORGE_AUDIO_CAP_MB", h.get("audio_cap_mb", 512)
         )),
         worker_url=(os.getenv("WORKER_URL") or h.get("worker_url", "") or "").strip().rstrip("/"),
         worker_token=(os.getenv("WORKER_TOKEN") or h.get("worker_token", "") or "").strip(),

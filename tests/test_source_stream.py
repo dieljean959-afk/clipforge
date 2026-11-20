@@ -401,3 +401,37 @@ def test_a_clip_straddling_a_section_boundary_is_joined_not_failed(tmp_path, mon
 
     assert float(video.probe(joined)["duration"]) >= 2.9
     assert list(tmp_path.glob(".join-*.txt")) == [], "the concat list must be cleaned up"
+
+
+def test_long_source_audio_passes_the_audio_cap(tmp_path, monkeypatch):
+    """An 81-minute source is ~57 MB of m4a; the old 40 MB cap refused it.
+
+    The audio copy is deleted the moment the decoder finishes, so `[hosted]
+    audio_cap_mb` (512 MB by default) is the guard, and a long-but-normal
+    source must reach the presign step instead of failing on size.
+    """
+    from app.config import HostedConfig
+
+    assert HostedConfig().audio_cap_mb >= 512
+
+    src = source_stream.RemoteSource(
+        "job-audio-cap", video_key="v/video.mp4", audio_key="v/audio.m4a",
+    )
+    size = int(57.4 * 1024 * 1024)
+    monkeypatch.setattr(objectstore, "head", lambda key, cfg=None: {"size": size})
+    monkeypatch.setattr(
+        source_stream.RemoteSource, "audio_url", lambda self, *, expires=900: "",
+    )
+    cap = HostedConfig().audio_cap_mb * 1024 * 1024
+    with pytest.raises(source_stream.StreamError) as exc:
+        source_stream.download_audio_local(src, tmp_path / "audio.m4a", cap_bytes=cap)
+    # It got past the size gate and failed only because the bucket is fake.
+    assert "local cap" not in str(exc.value)
+    assert "presign" in str(exc.value)
+
+    # The guard still exists: a cap below the object is refused up front.
+    with pytest.raises(source_stream.StreamError) as exc:
+        source_stream.download_audio_local(
+            src, tmp_path / "audio.m4a", cap_bytes=40 * 1024 * 1024,
+        )
+    assert "local cap for transcription" in str(exc.value)

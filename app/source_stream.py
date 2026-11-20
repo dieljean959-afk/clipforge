@@ -862,10 +862,13 @@ def capture(
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
             if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
                 raise StreamError(f"audio capture failed for every format: {audio_err}")
-            if out.stat().st_size > 40 * 1024 * 1024:
+            audio_cap = int(
+                getattr(getattr(settings, "hosted", None), "audio_cap_mb", 512) or 512
+            ) * 1024 * 1024
+            if out.stat().st_size > audio_cap:
                 raise StreamError(
-                    f"the audio track is {mb(out.stat().st_size)} MB, over the 40 MB "
-                    "cap for transcription"
+                    f"the audio track is {mb(out.stat().st_size)} MB, over the "
+                    f"{mb(audio_cap)} MB cap for transcription"
                 )
             if not _o.upload_file(out, audio_key):
                 raise StreamError("could not store the audio track", bucket_down=True)

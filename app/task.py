@@ -1792,10 +1792,17 @@ class Pipeline:
         audio_local: Path | None = None
         if isinstance(src, source_stream.RemoteSource):
             with self._disk_stage("transcribe-audio"):
+                # The audio copy lives on disk only while the decoder runs.
+                # The cap is a safety valve, not a working-set budget: it is
+                # `[hosted] audio_cap_mb` (512 MB by default), so an 81-minute
+                # source (~57 MB of m4a) transcribes instead of failing after
+                # the whole fetch was already paid for.
                 audio_local = source_stream.download_audio_local(
                     src,
                     ws.stage_dir("transcribe") / "audio.m4a",
-                    cap_bytes=40 * 1024 * 1024,
+                    cap_bytes=int(
+                        getattr(self.settings.hosted, "audio_cap_mb", 512) or 512
+                    ) * 1024 * 1024,
                 )
             asr_input = audio_local
             self._log(
