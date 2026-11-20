@@ -187,13 +187,59 @@ def _pip_missing() -> bool:
         return True
 
 
-def probe_url(url: str) -> dict[str, Any] | None:
-    """Lightweight yt-dlp metadata probe; None when the URL is unusable."""
+def _probe_options(settings: Settings | None) -> dict[str, Any]:
+    """Options for a metadata probe that match the real fetcher.
+
+    The probe used to run with only `quiet`/`skip_download`: no JavaScript
+    runtime, no cookies. YouTube's n-challenge then failed, yt-dlp returned
+    storyboard images instead of video, and the probe came back empty. The
+    capture code treated that as an unknown-length source and planned 96
+    seventy-five-second sections instead of the real 65, making a URL fetch
+    look stuck for most of an hour. A probe must use the same runtime and
+    auth as the download it is sizing.
+    """
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+    }
+    runtime = next((name for name in ("deno", "node") if shutil.which(name)), None)
+    if runtime:
+        opts["js_runtimes"] = {runtime: {}}
+        opts["remote_components"] = {"ejs:github"}
+    if settings is not None:
+        download = settings.download
+        if getattr(download, "cookies_from_browser", None):
+            opts["cookiesfrombrowser"] = (download.cookies_from_browser,)
+        cookies_file = getattr(download, "cookies_file", "") or ""
+        if cookies_file and Path(cookies_file).expanduser().is_file():
+            opts["cookiefile"] = str(Path(cookies_file).expanduser())
+    return opts
+
+
+def probe_url(
+    url: str, settings: Settings | None = None
+) -> dict[str, Any] | None:
+    """Lightweight yt-dlp metadata probe; None when the URL is unusable.
+
+    Pass the active settings so the probe sees the configured cookies, exactly
+    like `download_url` and the streaming capture do.
+    """
     try:
         import yt_dlp
     except Exception:
         return None
-    opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "skip_download": True}
+    if settings is None:
+        # Reconcile/CLI callers may not have settings in hand. Loading them is
+        # cheap and keeps the probe consistent with the worker's fetch path.
+        try:
+            from app.config import load_config
+
+            settings = load_config(quiet=True)
+        except Exception:
+            settings = None
+    opts = _probe_options(settings)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -235,6 +281,13 @@ def download_url(
     # not work" for the whole class. Final fallback is a single progressive
     # file (`b`), which is always muxed and always playable.
     format_prefs = [
+        # Prefer a 30 fps H.264 stream. The 720p60 variant of a long video is
+        # often nearly twice the bytes of the 720p30 one, and the renderer
+        # outputs 30 fps anyway. On the bucket plan that extra bitrate is what
+        # pushes each 75 s section over the 25 MB single-PUT cap and forces a
+        # CPU re-encode in the fetch stage.
+        f"bv*[vcodec^=avc1][height<={max_h}][fps<=30]+ba"
+        f"/bv*[vcodec^=h264][height<={max_h}][fps<=30]+ba",
         f"bv*[vcodec^=avc1][height<={max_h}]+ba/bv*[vcodec^=h264][height<={max_h}]+ba",
         f"bv*[height<={max_h}]+ba/b[height<={max_h}]",
         f"b[height<={max_h}]/b",

@@ -71,6 +71,43 @@ def test_old_jar_is_stale_before_youtube_rejects_it(tmp_path):
     assert "days old" in (old["problem"] or "")
 
 
+def test_metadata_probe_uses_the_same_runtime_and_cookies(tmp_path, monkeypatch):
+    """A probe without these returned only storyboards, so fetch planned 96 sections."""
+    import types
+
+    from app import download
+
+    cookies = _jar(tmp_path / "cookies.txt", expiry=2_000_000_000)
+    base = load_config(quiet=True)
+    settings = replace(base, download=replace(base.download, cookies_file=str(cookies)))
+    monkeypatch.setattr(download.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+
+    seen: dict = {}
+
+    class _ProbeYDL:
+        def __init__(self, opts):
+            seen.update(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download=False):  # noqa: ARG002
+            return {"title": "t", "duration": 4869, "uploader": "u"}
+
+    mod = types.ModuleType("yt_dlp")
+    mod.YoutubeDL = _ProbeYDL
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp", mod)
+
+    got = download.probe_url("https://youtu.be/example", settings)
+    assert got == {"title": "t", "duration": 4869, "uploader": "u"}
+    assert seen["js_runtimes"] == {"node": {}}
+    assert seen["remote_components"] == {"ejs:github"}
+    assert seen["cookiefile"] == str(cookies)
+
+
 def test_youtu_be_short_links_count_as_youtube():
     from app.download import is_youtube_url
 

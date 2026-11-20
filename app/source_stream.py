@@ -61,6 +61,10 @@ MAX_VIDEO_OBJECT_BYTES = 24 * 1024 * 1024
 MAX_STREAM_BYTES = 3 * 1024**3
 
 VIDEO_FORMATS = (
+    # 30 fps first: 720p60 is often twice the bytes, the render is 30 fps, and
+    # the extra bitrate makes every 75 s section exceed the bucket plan's
+    # 25 MB single-PUT cap (forcing a slow re-encode before upload).
+    "bv*[height<=720][vcodec^=avc1][fps<=30]",
     "bv*[height<=720][vcodec^=avc1]",
     "bv*[height<=720]",
     "bv*",
@@ -818,7 +822,7 @@ def capture(
     try:
         from app import download as _dl
 
-        meta = _dl.probe_url(url) or {}
+        meta = _dl.probe_url(url, settings) or {}
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[stream] probe_url failed ({exc}); continuing blind")
     # `probe_url` is a network call to the provider and can come back empty
