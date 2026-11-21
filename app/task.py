@@ -2281,6 +2281,16 @@ class Pipeline:
             clip_start = float(cut.get("start") or 0.0)
             clip_end = float(cut.get("end") or 0.0)
             clip_span = (clip_start, clip_end)
+            # Say what is actually happening BEFORE the work starts. Without
+            # this, the first clip's coverage repair (which can run for
+            # minutes) left the job document on the previous stage, so the
+            # dashboard showed "Clip boundaries already computed" / "Framing
+            # 9:16 ~2 min" while the captioner was already several minutes in.
+            self._progress(
+                job_id, "captions", i / len(cuts),
+                f"Captioning clip {i + 1} of {len(cuts)}",
+                unit_label="clips", units_done=i, units_total=len(cuts),
+            )
             # Resume per clip: both files are keyed to this exact clipId, so a
             # retry after a host restart must not pay for every caption cue /
             # emoji call again. The clip document is the durable home for the

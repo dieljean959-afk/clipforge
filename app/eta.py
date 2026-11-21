@@ -234,6 +234,14 @@ _STAGE_ALIASES = {
     "reframing": "reframe",
     "rendering": "render",
     "exporting": "render",
+    # `captions` and `export` are real job stages that live INSIDE the render
+    # loop (see STAGE_ORDER's comment). They were missing here, so the alias
+    # table's "fetch" default claimed the job was still downloading: on a
+    # resumed job the plan started at "Downloading" with the whole-resume
+    # elapsed time as its live estimate (1,802,118 s on the 81-minute batch)
+    # and the dashboard showed an ETA that had nothing to do with the work.
+    "captions": "render",
+    "export": "render",
 }
 
 
