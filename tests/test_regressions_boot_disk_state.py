@@ -797,3 +797,93 @@ def test_retry_clears_the_previous_terminal_verdict(env, monkeypatch):
     assert got["status"] == "queued"
     assert got["finishedAt"] is None
     assert got["completedAt"] is None
+
+
+# --------------------------------------------------------------------------- #
+# a 20-clip request rendered 28 clips
+# --------------------------------------------------------------------------- #
+
+def test_requested_clip_count_caps_the_batch(env, monkeypatch):
+    """The render stage cut every candidate instead of the requested count.
+
+    Observed on the 81-minute source: the job carried
+    ``requestedClipTarget: 20`` and ``options.maxClips: 20``, but reframe wrote
+    28 cuts because the stage fed `candidateTarget` (20 requested + 8 headroom)
+    back in as the batch size. That is 40% more encode time, disk and share
+    work than the user asked for, on a host that then refused the render for
+    lack of space.
+    """
+    from app import reframe, task
+    from app.stages import StageWorkspace
+
+    settings, store = env
+    job = _job(
+        store,
+        stage="reframing",
+        requestedClipTarget=20,
+        clipTarget=20,
+        candidateTarget=28,
+        options={"maxClips": 20, "minClipSec": None, "maxClipSec": None},
+        durationSec=600.0,
+    )
+    candidates = [
+        {"start": float(i * 20), "end": float(i * 20 + 15), "order": i, "score": 90.0 - i}
+        for i in range(28)
+    ]
+    seen: dict[str, int] = {}
+
+    def fake_find_cuts(_src, _transcript, clips, _settings, **_kw):
+        seen["n"] = len(clips)
+        return [
+            {"clipId": store.new_job_id(), "start": c["start"], "end": c["end"],
+             "order": i}
+            for i, c in enumerate(clips)
+        ]
+
+    monkeypatch.setattr(reframe, "find_cuts", fake_find_cuts)
+
+    class Runner:
+        _stage_status: dict = {}
+
+        def __init__(self):
+            self.store = store
+            self.settings = settings
+
+        def _log(self, *a, **k):
+            return None
+
+        def _progress(self, *a, **k):
+            return None
+
+        def _check_disk_space(self, *a, **k):
+            return None
+
+        def _current_rtf(self):
+            return 0.4
+
+        def _patch_job(self, job_id, **fields):
+            doc = store.get_job(job_id) or {}
+            doc.update(fields)
+            store.write_job(doc)
+            return doc
+
+        def _heartbeat(self, *a, **k):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+        _write_cuts = task.Pipeline._write_cuts
+
+    (settings.app.paths.data_dir / "clips").mkdir(parents=True, exist_ok=True)
+    ws = StageWorkspace(settings.app.paths.data_dir, job["_id"])
+    task.Pipeline._stage_render(
+        Runner(), job, __import__("pathlib").Path("/nonexistent.mp4"),
+        object(), candidates, ws,
+    )
+
+    assert seen["n"] == 20, "the requested 20 clips, not all 28 candidates"
+    cuts = ws.read_json("reframe", "cuts.json") or []
+    assert len(cuts) == 20
+    doc = store.get_job(job["_id"])
+    assert doc["clipTarget"] == 20
+    assert doc["candidateTarget"] == 28, "candidates are still reported honestly"

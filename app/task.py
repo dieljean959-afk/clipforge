@@ -2131,20 +2131,26 @@ class Pipeline:
 
         self._check_disk_space(job_id, float(job.get("durationSec") or 0.0))
 
-        requested_target = int(
+        requested_target = max(1, int(
             job.get("requestedClipTarget") or job.get("clipTarget")
             or self.settings.gemini.max_clips
-        )
+        ))
+        # `candidateTarget` is how many CANDIDATES detection was asked for — the
+        # requested count plus headroom, so a render failure has a replacement
+        # moment. It is not the batch size. Feeding it back in here cut and
+        # rendered 12 extra clips on a job that explicitly asked for 20, which
+        # is 40% more encode time and disk on a host whose render stage was
+        # already being refused for space. Deliver at most the requested count.
         clips = clipcount.reasonable_clips(
             candidates,
-            max_clips=job.get("candidateTarget") or len(candidates),
+            max_clips=requested_target,
             fallback=self.settings.gemini.max_clips,
         )
         job = self._patch_job(
             job_id,
             clipTarget=requested_target,
             requestedClipTarget=requested_target,
-            candidateTarget=len(clips),
+            candidateTarget=len(candidates),
         )
 
         # Clamp every cut into the source duration before reframe sees it, so a
